@@ -1,0 +1,9 @@
+{
+  "accountId": "hive-unknown-products-home",
+  "devices": [
+    { "cloudId": "hub-1", "kind": "hub", "name": "Hive hub", "online": true },
+    { "cloudId": "receiver-1", "kind": "receiver", "name": "Hive receiver", "online": true },
+    { "cloudId": "unknown-1", "kind": "unknown_product", "name": "Unknown product", "online": true },
+    { "cloudId": "zone-1", "kind": "boiler", "name": "Boiler", "online": true }
+  ]
+}

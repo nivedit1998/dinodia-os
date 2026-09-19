@@ -1,0 +1,20 @@
+{
+  "ieee_address": "fixture-radiator-001",
+  "friendly_name": "bedroom-radiator",
+  "model_id": "TRV-FIXTURE",
+  "supported": true,
+  "interview_completed": true,
+  "definition": {
+    "vendor": "Fixture",
+    "model": "Radiator thermostat",
+    "exposes": [
+      { "type": "climate", "endpoint": 1, "features": [
+        { "type": "enum", "property": "system_mode", "access": 7, "values": ["off", "heat", "auto"] },
+        { "type": "numeric", "property": "occupied_heating_setpoint", "access": 7, "value_min": 5, "value_max": 35, "value_step": 0.5, "unit": "°C" },
+        { "type": "numeric", "property": "local_temperature", "access": 1, "unit": "°C" },
+        { "type": "numeric", "property": "battery", "access": 1, "unit": "%" },
+        { "type": "binary", "property": "window_open", "access": 1 }
+      ] }
+    ]
+  }
+}

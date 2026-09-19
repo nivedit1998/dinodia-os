@@ -1,0 +1,15 @@
+{
+  "devices": [{
+    "name": "enterprises/test-project/devices/thermostat-2",
+    "type": "sdm.devices.types.THERMOSTAT",
+    "parentRelations": [{ "displayName": "Upstairs" }],
+    "traits": {
+      "sdm.devices.traits.Info": { "deviceModel": "Thermostat" },
+      "sdm.devices.traits.Connectivity": { "status": "ONLINE" },
+      "sdm.devices.traits.Temperature": { "ambientTemperatureCelsius": 19.8 },
+      "sdm.devices.traits.ThermostatMode": { "mode": "OFF", "availableModes": ["OFF", "HEAT"] },
+      "sdm.devices.traits.ThermostatTemperatureSetpoint": { "heatCelsius": 20.5 },
+      "sdm.devices.traits.ThermostatHvac": { "status": "OFF" }
+    }
+  }]
+}

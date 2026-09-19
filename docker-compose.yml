@@ -1,0 +1,133 @@
+services:
+  dinodia:
+    build: .
+    container_name: dinodia-os
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.5
+    ports:
+      - "8123:8123"
+      - "8099:8099"
+    env_file:
+      - .env
+    environment:
+      DINODIA_DATA_DIR: /data
+      DINODIA_HA_PORT: 8123
+      DINODIA_HUB_AGENT_PORT: 8099
+      MQTT_URL: mqtt://mosquitto:1883
+      MATTER_SERVER_URL: ${MATTER_SERVER_URL:-ws://host.docker.internal:5580/ws}
+      OTBR_URL: ${OTBR_URL:-http://host.docker.internal:8081}
+      CLOUDFLARE_PUBLIC_HOSTNAME: ${CLOUDFLARE_PUBLIC_HOSTNAME:-}
+      DINODIA_HIVE_ENABLED: ${DINODIA_HIVE_ENABLED:-true}
+      DINODIA_HIVE_PYTHON_PATH: /app/.venv-hive/bin/python
+      DINODIA_HIVE_WORKER_PATH: /app/src/integrations/hive/python/hive_worker.py
+      DINODIA_HIVE_POLL_INTERVAL_MS: ${DINODIA_HIVE_POLL_INTERVAL_MS:-120000}
+      DINODIA_HIVE_OPERATION_TIMEOUT_MS: ${DINODIA_HIVE_OPERATION_TIMEOUT_MS:-12000}
+      DINODIA_HIVE_SETUP_TTL_MS: ${DINODIA_HIVE_SETUP_TTL_MS:-600000}
+      DINODIA_HIVE_CLIENT_NAME: ${DINODIA_HIVE_CLIENT_NAME:-Dinodia OS}
+      DINODIA_HIVE_ALLOW_INSECURE_SETUP: ${DINODIA_HIVE_ALLOW_INSECURE_SETUP:-false}
+      DINODIA_GOOGLE_NEST_ENABLED: ${DINODIA_GOOGLE_NEST_ENABLED:-true}
+      DINODIA_GOOGLE_NEST_RELEASE_CHANNEL: ${DINODIA_GOOGLE_NEST_RELEASE_CHANNEL:-sandbox_beta}
+      DINODIA_GOOGLE_NEST_POLL_INTERVAL_MS: ${DINODIA_GOOGLE_NEST_POLL_INTERVAL_MS:-60000}
+      DINODIA_GOOGLE_NEST_OPERATION_TIMEOUT_MS: ${DINODIA_GOOGLE_NEST_OPERATION_TIMEOUT_MS:-12000}
+      DINODIA_GOOGLE_NEST_SETUP_TTL_MS: ${DINODIA_GOOGLE_NEST_SETUP_TTL_MS:-600000}
+      DINODIA_GOOGLE_NEST_REFRESH_SKEW_MS: ${DINODIA_GOOGLE_NEST_REFRESH_SKEW_MS:-300000}
+      DINODIA_GOOGLE_NEST_MAX_DEVICES: ${DINODIA_GOOGLE_NEST_MAX_DEVICES:-100}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${DINODIA_DATA_DIR:-./data}:/data
+      # Lets the setup dashboard list stable USB adapter names inside Docker.
+      - /dev/serial/by-id:/dev/serial/by-id:ro
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "scripts/healthcheck.js"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  mosquitto:
+    image: eclipse-mosquitto@sha256:212f89e1eaeb2c322d6441b64396e3346026674db8fa9c27beac293405c32b3c # 2.0.22
+    container_name: dinodia-mosquitto
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.25
+    ports:
+      - "127.0.0.1:1883:1883"
+    volumes:
+      - ./docker/mosquitto/config:/mosquitto/config:ro
+      - ${DINODIA_DATA_DIR:-./data}/mosquitto:/mosquitto/data
+      - ${DINODIA_DATA_DIR:-./data}/mosquitto-log:/mosquitto/log
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -p 1883 -t '$$SYS/broker/version' -C 1 -W 3 >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  zigbee2mqtt:
+    profiles: ["zigbee"]
+    image: koenkk/zigbee2mqtt@sha256:4fb4db4d49a217bed6d0204f454ce809febc565bbe051b85c556ee2bcef73d8c # 2.13.0
+    container_name: dinodia-zigbee2mqtt
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.25
+    volumes:
+      - ${DINODIA_DATA_DIR:-./data}/zigbee2mqtt:/app/data
+      # The selected stable /dev/serial/by-id path is written into the shared
+      # Zigbee2MQTT configuration by the Dinodia dashboard.
+      - /dev:/dev
+      - /run/udev:/run/udev:ro
+    environment:
+      TZ: ${TZ:-Europe/London}
+      ZIGBEE2MQTT_CONFIG_MQTT_SERVER: mqtt://mosquitto:1883
+      ZIGBEE2MQTT_CONFIG_FRONTEND_PORT: 8080
+    ports:
+      - "127.0.0.1:8080:8080"
+    privileged: true
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+
+  matter-server:
+    profiles: ["matter"]
+    image: ghcr.io/matter-js/matterjs-server@sha256:1935c641893cf25f0337dd1aa02af9ae0fa22fb50fe7fa274b4519adb2bb028b # 0.7.1
+    container_name: dinodia-matter-server
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.25
+    network_mode: host
+    environment:
+      STORAGE_PATH: /data
+      LISTEN_ADDRESS: 0.0.0.0
+      PORT: 5580
+      PRIMARY_INTERFACE: ${PRIMARY_INTERFACE:-eth0}
+      PRODUCTION_MODE: "true"
+      LOG_LEVEL: ${MATTER_LOG_LEVEL:-info}
+    volumes:
+      - ${DINODIA_DATA_DIR:-./data}/matter:/data
+
+  otbr:
+    profiles: ["thread"]
+    image: openthread/border-router@sha256:ca9a530c87adff91c67b9c16a4c941485f53855c5624c22eaea9f71401a933f5 # latest verified 2026-09-01
+    container_name: dinodia-otbr
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.25
+    network_mode: host
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - "${THREAD_RCP_DEVICE:-/dev/serial/by-id/REPLACE_THREAD_RCP}:/dev/ttyACM0"
+      - "/dev/net/tun:/dev/net/tun"
+    volumes:
+      - ./data/otbr:/data
+    environment:
+      OT_RCP_DEVICE: ${OT_RCP_DEVICE:-spinel+hdlc+uart:///dev/ttyACM0?uart-baudrate=460800}
+      OT_INFRA_IF: ${OT_INFRA_IF:-eth0}
+      OT_THREAD_IF: ${OT_THREAD_IF:-wpan0}
+      # Zigbee2MQTT already uses localhost:8080 on the Pi.
+      OT_WEB_LISTEN_PORT: ${OT_WEB_LISTEN_PORT:-8082}
+      OT_LOG_LEVEL: ${OT_LOG_LEVEL:-7}

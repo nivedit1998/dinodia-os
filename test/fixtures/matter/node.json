@@ -1,0 +1,15 @@
+{
+  "node_id": 12,
+  "fabric_id": 1,
+  "product_name": "Fixture Matter Light",
+  "commissioned": true,
+  "endpoints": {
+    "1": {
+      "device_types": [{ "id": 256 }],
+      "clusters": {
+        "6": { "attributes": { "0": { "name": "on_off", "value": false } } },
+        "8": { "attributes": { "0": { "name": "current_level", "value": 128, "min": 0, "max": 254 } } }
+      }
+    }
+  }
+}

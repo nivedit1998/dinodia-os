@@ -1,0 +1,8 @@
+{
+  "accountId": "hive-heating-water-home",
+  "hotWaterDeviceCount": 1,
+  "devices": [
+    { "cloudId": "zone-1", "kind": "heating", "haName": "Main heating", "online": true, "state": { "mode": "SCHEDULE", "currentTemperature": 20, "targetTemperature": 21 } },
+    { "cloudId": "water-1", "kind": "hot_water", "name": "Hot water", "online": true }
+  ]
+}

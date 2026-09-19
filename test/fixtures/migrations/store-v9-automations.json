@@ -1,0 +1,21 @@
+{
+  "version": 9,
+  "identity": { "instanceId": "fixture-home" },
+  "automations": {
+    "legacy-state-rule": {
+      "id": "legacy-state-rule",
+      "name": "Legacy state rule",
+      "enabled": true,
+      "trigger": { "deviceId": "lamp", "field": "power", "equals": "ON" },
+      "actions": [{ "deviceId": "lamp", "command": { "state": { "power": "OFF" } } }]
+    },
+    "native-shaped-rule": {
+      "schemaVersion": 1,
+      "id": "native-shaped-rule",
+      "name": "Native shaped rule",
+      "homeId": "fixture-home",
+      "trigger": { "type": "schedule", "payload": { "minuteOfDay": 600, "weekdays": [1, 2, 3, 4, 5, 6, 7], "timeZoneIdentifier": "Europe/London" } },
+      "actions": [{ "deviceId": "lamp", "controlId": "lamp:surface::power", "targetValue": { "type": "boolean", "boolean": true } }]
+    }
+  }
+}

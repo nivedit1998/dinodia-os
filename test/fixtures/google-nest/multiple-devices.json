@@ -1,0 +1,18 @@
+{
+  "devices": [
+    {
+      "name": "enterprises/test-project/devices/a",
+      "type": "sdm.devices.types.THERMOSTAT",
+      "parentRelations": [{ "displayName": "Room" }],
+      "traits": { "sdm.devices.traits.Info": {}, "sdm.devices.traits.Connectivity": { "status": "ONLINE" }, "sdm.devices.traits.Temperature": { "ambientTemperatureCelsius": 20 }, "sdm.devices.traits.ThermostatMode": { "mode": "HEAT", "availableModes": ["OFF", "HEAT"] }, "sdm.devices.traits.ThermostatTemperatureSetpoint": { "heatCelsius": 21 } }
+    },
+    {
+      "name": "enterprises/test-project/devices/b",
+      "type": "sdm.devices.types.THERMOSTAT",
+      "parentRelations": [{ "displayName": "Room" }],
+      "traits": { "sdm.devices.traits.Info": {}, "sdm.devices.traits.Connectivity": { "status": "ONLINE" }, "sdm.devices.traits.Temperature": { "ambientTemperatureCelsius": 19 }, "sdm.devices.traits.ThermostatMode": { "mode": "OFF", "availableModes": ["OFF", "HEAT"] }, "sdm.devices.traits.ThermostatTemperatureSetpoint": { "heatCelsius": 20 } }
+    },
+    { "name": "enterprises/test-project/devices/camera", "type": "sdm.devices.types.CAMERA", "traits": { "sdm.devices.traits.CameraLiveStream": { "videoCodec": "H264" } } },
+    { "name": "enterprises/test-project/devices/display", "type": "sdm.devices.types.DISPLAY", "traits": {} }
+  ]
+}

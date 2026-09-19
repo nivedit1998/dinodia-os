@@ -1,0 +1,17 @@
+{
+  "accountId": "hive-account-duplicate-zones",
+  "devices": [
+    {
+      "cloudId": "zone-1",
+      "kind": "heating",
+      "haName": "Room",
+      "state": { "mode": "OFF", "online": true, "temperature": 19 }
+    },
+    {
+      "cloudId": "zone-2",
+      "kind": "heating",
+      "haName": "Room",
+      "state": { "mode": "AUTO", "online": true, "temperature": 19 }
+    }
+  ]
+}

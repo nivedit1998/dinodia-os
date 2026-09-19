@@ -1,0 +1,45 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs/promises");
+const os = require("node:os");
+const path = require("node:path");
+const crypto = require("node:crypto");
+const { Store } = require("../src/store");
+const { SecretVault } = require("../src/secretVault");
+const { PlatformPairing, sign } = require("../src/platformPairing");
+
+test("platform pairing signs requests, stores only token hashes, and acknowledges publication", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-pairing-"));
+  const store = new Store(path.join(directory, "dinodia.json"));
+  await store.saveIdentity({ serial: "hub-test" });
+  const vault = new SecretVault({ dataDir: directory });
+  const calls = [];
+  let tokenStateCalls = 0;
+  const fetchImpl = async (url, options) => {
+    const body = JSON.parse(options.body);
+    calls.push({ url, body });
+    assert.equal(body.serial, "hub-test");
+    const secret = url.includes("/pair") ? "bootstrap" : "sync";
+    assert.equal(body.sig, sign(secret, body.serial, body.ts, body.nonce));
+    if (url.endsWith("/pair")) return { ok: true, async json() { return { syncSecret: "sync", latestVersion: 2, publishedVersion: 0, hubTokenHashes: [crypto.createHash("sha256").update("hub-token").digest("hex")] }; } };
+    tokenStateCalls += 1;
+    return { ok: true, async json() { return { latestVersion: 2, publishedVersion: tokenStateCalls > 1 ? 2 : 1, hubTokenHashes: [crypto.createHash("sha256").update("hub-token").digest("hex")], acceptedActivityIncidentIds: (body.activityIncidents?.incidents || []).map((incident) => incident.id) }; } };
+  };
+  const pairing = new PlatformPairing({ store, vault, apiUrl: "https://platform.test", serial: "hub-test", intervalMs: 60000, getActivityIncidents: () => ({ schemaVersion: 1, capturedAt: new Date().toISOString(), incidents: store.listPendingIncidentEnvelopes(50).map((entry) => entry.envelope) }), onSyncResult: async (result) => store.acknowledgeIncidentEnvelopes(result.acceptedActivityIncidentIds || []), fetchImpl });
+  await pairing.configure({ bootstrapSecret: "bootstrap" });
+  const paired = await pairing.pair();
+  assert.equal(paired.latestVersion, 2);
+  assert.equal(vault.get("platform.syncSecret"), "sync");
+  assert.equal(store.getPlatform().acceptedTokenHashes.length, 1);
+  await store.queueIncidentEnvelope({ id: "offline-1:1", incidentId: "offline-1", revision: 1, kind: "device_offline", state: "open", severity: "critical", summary: "Device offline", firstObservedAt: new Date().toISOString(), lastObservedAt: new Date().toISOString() });
+  await pairing.syncNow();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const tokenState = calls.find((call) => call.url.endsWith('/token-state'));
+  assert.equal(tokenState.body.hubRuntime.kind, 'dinodia_os');
+  assert.equal(tokenState.body.hubRuntime.capabilities.managedAreaProvisioningV1, true);
+  assert.equal(tokenState.body.activityIncidents.incidents[0].incidentId, "offline-1");
+  assert.equal(store.listPendingIncidentEnvelopes().length, 0);
+  assert.equal(tokenStateCalls >= 2, true);
+  assert.equal(store.getPlatform().publishedVersion, 2);
+  assert.equal(calls.every((call) => !Object.keys(call.body).some((key) => /token/i.test(key) && key !== "agentSeenVersion")), true);
+});

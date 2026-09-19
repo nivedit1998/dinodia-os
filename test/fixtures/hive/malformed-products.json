@@ -1,0 +1,11 @@
+{
+  "accountId": "hive-account-products",
+  "devices": [
+    null,
+    { "cloudId": "no-kind", "name": "Mystery product", "online": true },
+    { "cloudId": "hub-1", "kind": "hub", "name": "Hive hub", "online": true },
+    { "cloudId": "water-1", "kind": "hot-water", "name": "Hot water", "online": true },
+    { "cloudId": "zone-no-state", "kind": "boiler", "name": "Boiler", "online": "false" },
+    { "cloudId": "zone-no-state", "kind": "boiler", "name": "Duplicate boiler", "online": true }
+  ]
+}

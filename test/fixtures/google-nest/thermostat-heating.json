@@ -1,0 +1,19 @@
+{
+  "devices": [
+    {
+      "name": "enterprises/test-project/devices/thermostat-1",
+      "type": "sdm.devices.types.THERMOSTAT",
+      "parentRelations": [{ "displayName": "Living Room" }],
+      "traits": {
+        "sdm.devices.traits.Info": { "customName": "Living Room Nest", "deviceModel": "Display-3.1" },
+        "sdm.devices.traits.Connectivity": { "status": "ONLINE" },
+        "sdm.devices.traits.Temperature": { "ambientTemperatureCelsius": 20.3 },
+        "sdm.devices.traits.Humidity": { "ambientHumidityPercent": 46 },
+        "sdm.devices.traits.ThermostatMode": { "mode": "HEAT", "availableModes": ["OFF", "HEAT"] },
+        "sdm.devices.traits.ThermostatTemperatureSetpoint": { "heatCelsius": 21.0 },
+        "sdm.devices.traits.ThermostatHvac": { "status": "HEATING" },
+        "sdm.devices.traits.ThermostatEco": { "mode": "OFF" }
+      }
+    }
+  ]
+}

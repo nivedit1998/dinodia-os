@@ -1,0 +1,19 @@
+{
+  "version": 4,
+  "areas": {
+    "bedroom": { "id": "bedroom", "name": "Bedroom" },
+    "hall": { "id": "hall", "name": "Hall" }
+  },
+  "devices": {
+    "legacy-switch": {
+      "id": "legacy-switch",
+      "name": "Legacy switch",
+      "protocol": "zigbee",
+      "metadata": { "ieee_address": "fixture-legacy-001", "friendly_name": "legacy-switch" },
+      "entities": {
+        "legacy-switch:one": { "id": "legacy-switch:one", "areaId": "bedroom", "labelIds": ["light"] },
+        "legacy-switch:two": { "id": "legacy-switch:two", "areaId": "hall", "labelIds": ["light"] }
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "accountId": "hive-multizone-home",
+  "devices": [
+    { "cloudId": "zone-living", "kind": "thermostat", "haName": "Living room", "hiveType": "thermostat", "parentId": "receiver-1", "online": true, "state": { "mode": "SCHEDULE", "currentTemperature": 19, "targetTemperature": 21, "action": false } },
+    { "cloudId": "zone-living-duplicate-name", "kind": "thermostat", "haName": "Living room", "hiveType": "thermostat", "parentId": "receiver-1", "online": true, "state": { "mode": "MANUAL", "currentTemperature": 18, "targetTemperature": 20, "action": true } },
+    { "cloudId": "receiver-1", "kind": "receiver", "name": "Hive receiver", "online": true },
+    { "cloudId": "hub-1", "kind": "hub", "name": "Hive hub", "online": true }
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "accountId": "hive-account-home-3",
+  "hotWaterDeviceCount": 1,
+  "devices": [
+    {
+      "cloudId": "zone-downstairs",
+      "kind": "heating",
+      "hiveName": "Downstairs",
+      "hiveType": "heating",
+      "model": "V4",
+      "online": true,
+      "state": {
+        "mode": "SCHEDULE",
+        "currentTemperature": 19.5,
+        "targetTemperature": 21,
+        "action": false,
+        "boost": false,
+        "minTemperature": 5,
+        "maxTemperature": 32
+      }
+    },
+    {
+      "cloudId": "zone-upstairs",
+      "kind": "thermostat",
+      "haName": "Upstairs",
+      "hiveType": "thermostat",
+      "model": "V4",
+      "online": "true",
+      "state": {
+        "mode": "MANUAL",
+        "current_temperature": 18,
+        "target_temperature": 20.5,
+        "heating": "heating",
+        "min_temp": 5,
+        "max_temp": 32
+      }
+    },
+    {
+      "cloudId": "receiver-home-3",
+      "kind": "receiver",
+      "name": "Boiler receiver",
+      "online": true
+    },
+    {
+      "cloudId": "hot-water-home-3",
+      "kind": "hot_water",
+      "name": "Hot water",
+      "online": true
+    },
+    {
+      "cloudId": "smart-light-home-3",
+      "kind": "light",
+      "name": "Garden light",
+      "online": true
+    }
+  ]
+}

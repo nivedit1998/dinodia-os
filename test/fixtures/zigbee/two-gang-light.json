@@ -1,0 +1,17 @@
+{
+  "ieee_address": "fixture-two-gang-001",
+  "friendly_name": "hall-two-gang",
+  "model_id": "TS0012-FIXTURE",
+  "supported": true,
+  "interview_completed": true,
+  "definition": {
+    "vendor": "Fixture",
+    "model": "Two gang light",
+    "exposes": [
+      { "type": "switch", "endpoint": "l1", "features": [{ "type": "binary", "property": "state_l1", "access": 7 }] },
+      { "type": "switch", "endpoint": "l2", "features": [{ "type": "binary", "property": "state_l2", "access": 7 }] },
+      { "type": "numeric", "property": "voltage", "access": 1, "unit": "V" },
+      { "type": "numeric", "property": "linkquality", "access": 1 }
+    ]
+  }
+}

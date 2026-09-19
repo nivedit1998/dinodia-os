@@ -1,0 +1,6 @@
+{
+  "devices": [
+    { "name": "enterprises/test-project/devices/no-mode", "type": "sdm.devices.types.THERMOSTAT", "traits": { "sdm.devices.traits.Info": { "customName": "No mode" }, "sdm.devices.traits.ThermostatMode": { "mode": "FUTURE_MODE", "availableModes": ["FUTURE_MODE"] } } },
+    { "name": "enterprises/test-project/devices/malformed", "type": "sdm.devices.types.THERMOSTAT", "traits": { "sdm.devices.traits.Info": null, "sdm.devices.traits.ThermostatMode": { "availableModes": "HEAT" } } }
+  ]
+}

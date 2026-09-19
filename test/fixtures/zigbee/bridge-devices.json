@@ -1,0 +1,19 @@
+[
+  {
+    "ieee_address": "0x00124b0024aa0001",
+    "friendly_name": "hall-three-gang",
+    "model_id": "TS0013",
+    "supported": true,
+    "interview_completed": true,
+    "definition": {
+      "vendor": "Fixture",
+      "model": "Three gang switch",
+      "description": "Endpoint-aware fixture",
+      "exposes": [
+        { "type": "switch", "name": "switch_l1", "property": "state_l1", "access": 7, "endpoint": 1 },
+        { "type": "switch", "name": "switch_l2", "property": "state_l2", "access": 7, "endpoint": 2 },
+        { "type": "numeric", "name": "voltage", "property": "voltage", "access": 1, "unit": "V" }
+      ]
+    }
+  }
+]

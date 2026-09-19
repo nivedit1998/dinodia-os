@@ -1,0 +1,10 @@
+{
+  "topic": "dinodia-ha/switch/hall-three-gang_l1/config",
+  "payload": {
+    "unique_id": "hall-three-gang_l1",
+    "state_topic": "zigbee2mqtt/hall-three-gang",
+    "command_topic": "zigbee2mqtt/hall-three-gang/set",
+    "device_class": "switch",
+    "device": { "identifiers": ["0x00124b0024aa0001"] }
+  }
+}

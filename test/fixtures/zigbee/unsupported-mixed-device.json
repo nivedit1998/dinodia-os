@@ -1,0 +1,15 @@
+{
+  "ieee_address": "fixture-unsupported-001",
+  "friendly_name": "unknown-mixed-device",
+  "model_id": "UNKNOWN-FIXTURE",
+  "supported": false,
+  "interview_completed": true,
+  "definition": {
+    "vendor": "Fixture",
+    "model": "Unknown",
+    "exposes": [
+      { "type": "numeric", "property": "voltage", "access": 1 },
+      { "type": "text", "property": "manufacturer_payload", "access": 2 }
+    ]
+  }
+}

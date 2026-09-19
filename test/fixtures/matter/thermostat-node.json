@@ -1,0 +1,20 @@
+{
+  "node_id": 101,
+  "fabric_id": "fixture-fabric",
+  "product_name": "Fixture Matter Thermostat",
+  "commissioned": true,
+  "endpoints": {
+    "1": {
+      "device_types": [{ "id": 769 }],
+      "clusters": {
+        "513": { "attributes": {
+          "0": 2100,
+          "17": { "value": 2000, "writable": true },
+          "18": { "value": 1950, "writable": true },
+          "28": { "value": "heat", "type": "SystemModeEnum", "writable": true },
+          "41": "heat"
+        } }
+      }
+    }
+  }
+}

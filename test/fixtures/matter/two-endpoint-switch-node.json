@@ -1,0 +1,10 @@
+{
+  "node_id": 102,
+  "fabric_id": "fixture-fabric",
+  "product_name": "Fixture Matter two endpoint switch",
+  "commissioned": true,
+  "endpoints": {
+    "1": { "device_types": [{ "id": 256 }], "clusters": { "6": { "attributes": { "0": true } } } },
+    "2": { "device_types": [{ "id": 256 }], "clusters": { "6": { "attributes": { "0": false } } } }
+  }
+}

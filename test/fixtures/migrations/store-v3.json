@@ -1,0 +1,16 @@
+{
+  "version": 3,
+  "identity": { "serial": "din-home-003", "hostname": "DIN-HOME-003" },
+  "areas": { "kitchen": { "id": "kitchen", "name": "Kitchen" } },
+  "labels": { "legacy": { "id": "legacy", "name": "Legacy" } },
+  "devices": {
+    "hall-three-gang": {
+      "id": "hall-three-gang",
+      "name": "Hall switch",
+      "protocol": "zigbee",
+      "metadata": { "ieee_address": "0x00124b0024aa0001", "friendly_name": "hall-three-gang" },
+      "areaId": "kitchen",
+      "entities": { "hall-three-gang:state_l1": { "id": "hall-three-gang:state_l1", "stateKey": "state_l1", "state": "OFF" } }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "devices": [{
+    "name": "enterprises/test-project/devices/thermostat-eco",
+    "type": "sdm.devices.types.THERMOSTAT",
+    "traits": {
+      "sdm.devices.traits.Info": { "customName": "Eco Room" },
+      "sdm.devices.traits.Connectivity": { "status": "ONLINE" },
+      "sdm.devices.traits.Temperature": { "ambientTemperatureCelsius": 18 },
+      "sdm.devices.traits.ThermostatMode": { "mode": "HEAT", "availableModes": ["OFF", "HEAT"] },
+      "sdm.devices.traits.ThermostatTemperatureSetpoint": { "heatCelsius": 16 },
+      "sdm.devices.traits.ThermostatEco": { "mode": "MANUAL_ECO" }
+    }
+  }]
+}

@@ -1,0 +1,7 @@
+{
+  "devices": [{
+    "name": "enterprises/test-project/devices/offline",
+    "type": "sdm.devices.types.THERMOSTAT",
+    "traits": { "sdm.devices.traits.Info": { "customName": "Offline thermostat" }, "sdm.devices.traits.Connectivity": { "status": "OFFLINE" }, "sdm.devices.traits.ThermostatMode": { "mode": "HEAT", "availableModes": ["OFF", "HEAT"] }, "sdm.devices.traits.ThermostatTemperatureSetpoint": { "heatCelsius": 20 } }
+  }]
+}

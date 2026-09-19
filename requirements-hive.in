@@ -1,0 +1,2 @@
+# Keep this pin aligned with the Home Assistant Hive integration after review.
+pyhive-integration==1.0.9

@@ -1,0 +1,33 @@
+{
+  "name": "dinodia-os",
+  "version": "0.5.0",
+  "private": true,
+  "description": "A small, dependable smart-home hub for Raspberry Pi 4.",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test",
+    "test:hive-python": "python3 -m unittest discover -s test/python -p 'test_*.py'",
+    "test:google-nest": "node --test test/google-nest-*.test.js",
+    "check:hive-lock": "bash scripts/check-hive-lock.sh",
+    "check": "find src scripts test public -name '*.js' -print0 | xargs -0 -n1 node --check",
+    "generate:matter-catalog": "node scripts/generate-matter-catalog.mjs",
+    "check:generated": "node scripts/check-generated.mjs",
+    "backup": "node scripts/backup.js",
+    "healthcheck": "node scripts/healthcheck.js",
+    "restore": "node scripts/restore.js"
+  },
+  "dependencies": {
+    "mqtt": "^5.10.4",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@matter/model": "0.17.9",
+    "@matter/types": "0.17.9"
+  }
+}
