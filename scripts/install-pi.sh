@@ -4,7 +4,10 @@ set -euo pipefail
 APP_SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL_DIR="${DINODIA_INSTALL_DIR:-/opt/dinodia-os}"
 DATA_DIR="${DINODIA_DATA_DIR:-/var/lib/dinodia-os}"
+IDENTITY_DIR="${DINODIA_IDENTITY_DIR:-/etc/dinodia-os/identity}"
+IDENTITY_SOCKET="${DINODIA_IDENTITY_SOCKET:-/run/dinodia-identityd.sock}"
 SERVICE_FILE="/etc/systemd/system/dinodia-os.service"
+IDENTITY_SERVICE_FILE="/etc/systemd/system/dinodia-identityd.service"
 INSTALL_USER="${SUDO_USER:-${USER:-dinodia}}"
 
 if [[ "$(id -u)" -ne 0 ]]; then
@@ -43,6 +46,7 @@ if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) e
 fi
 
 mkdir -p "$INSTALL_DIR" "$DATA_DIR"
+install_gid="$(id -g "$INSTALL_USER")"
 cp -R "$APP_SOURCE/src" "$APP_SOURCE/public" "$APP_SOURCE/scripts" "$APP_SOURCE/docker" "$APP_SOURCE/systemd" "$APP_SOURCE/docs" "$APP_SOURCE/Dockerfile" "$APP_SOURCE/docker-compose.yml" "$APP_SOURCE/package.json" "$APP_SOURCE/package-lock.json" "$APP_SOURCE/.env.example" "$APP_SOURCE/requirements-hive.in" "$APP_SOURCE/requirements-hive.lock" "$APP_SOURCE/THIRD_PARTY_NOTICES.md" "$INSTALL_DIR/"
 chown -R "$INSTALL_USER":"$INSTALL_USER" "$INSTALL_DIR" "$DATA_DIR"
 cd "$INSTALL_DIR"
@@ -58,10 +62,6 @@ chmod 0555 "$INSTALL_DIR/src/integrations/hive/python"/*.py
 
 if [[ ! -f "$INSTALL_DIR/.env" ]]; then
   cp "$APP_SOURCE/.env.example" "$INSTALL_DIR/.env"
-  token="$(openssl rand -hex 32)"
-  ha_token="$(openssl rand -hex 32)"
-  sed -i "s/^DINODIA_ADMIN_TOKEN=.*/DINODIA_ADMIN_TOKEN=$token/" "$INSTALL_DIR/.env"
-  sed -i "s/^DINODIA_HA_TOKEN=.*/DINODIA_HA_TOKEN=$ha_token/" "$INSTALL_DIR/.env"
   sed -i "s#^DINODIA_DATA_DIR=.*#DINODIA_DATA_DIR=$DATA_DIR#" "$INSTALL_DIR/.env"
   # The native service is the compatibility core; leave container-only
   # protocol endpoints disabled until the operator manages them separately.
@@ -70,7 +70,7 @@ if [[ ! -f "$INSTALL_DIR/.env" ]]; then
   sed -i 's#^OTBR_URL=.*#OTBR_URL=#' "$INSTALL_DIR/.env"
   chown "$INSTALL_USER":"$INSTALL_USER" "$INSTALL_DIR/.env"
   chmod 600 "$INSTALL_DIR/.env"
-  echo "Created $INSTALL_DIR/.env with a generated admin token. Save it securely."
+  echo "Created $INSTALL_DIR/.env. Production access is session-based; no reusable dashboard or HA password is generated."
 fi
 
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
@@ -90,10 +90,25 @@ sed \
   -e "s#@INSTALL_USER@#$INSTALL_USER#g" \
   -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" \
   -e "s#@DATA_DIR@#$DATA_DIR#g" \
+  -e "s#@IDENTITY_DIR@#$IDENTITY_DIR#g" \
+  -e "s#@IDENTITY_SOCKET@#$IDENTITY_SOCKET#g" \
+  -e "s#@INSTALL_GID@#$install_gid#g" \
   -e "s#@NODE_BIN@#$(command -v node)#g" \
   "$APP_SOURCE/systemd/dinodia-os.service" > "$service_tmp"
 install -o root -g root -m 0644 "$service_tmp" "$SERVICE_FILE"
 rm -f "$service_tmp"
+
+identity_service_tmp="$(mktemp /tmp/dinodia-identityd.service.XXXXXX)"
+sed \
+  -e "s#@IDENTITY_DIR@#$IDENTITY_DIR#g" \
+  -e "s#@IDENTITY_SOCKET@#$IDENTITY_SOCKET#g" \
+  -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" \
+  -e "s#@INSTALL_GID@#$install_gid#g" \
+  -e "s#@NODE_BIN@#$(command -v node)#g" \
+  "$APP_SOURCE/systemd/dinodia-identityd.service" > "$identity_service_tmp"
+install -o root -g root -m 0644 "$identity_service_tmp" "$IDENTITY_SERVICE_FILE"
+rm -f "$identity_service_tmp"
+install -d -o root -g root -m 0700 "$IDENTITY_DIR"
 
 if ! command -v cloudflared >/dev/null 2>&1; then
   echo "Installing cloudflared for the first-run Cloudflare setup..."
@@ -107,6 +122,13 @@ if ! command -v cloudflared >/dev/null 2>&1; then
 fi
 echo "cloudflared: $(cloudflared --version | head -1)"
 systemctl daemon-reload
+if [[ ! -f "$IDENTITY_DIR/identity.json" ]]; then
+  echo "No manufacturing identity is installed. Run: sudo node $INSTALL_DIR/scripts/initialize-identity.js <DINODIA-SERIAL>"
+  echo "The Dinodia OS runtime is intentionally not started until trusted identity imaging is complete."
+  systemctl disable --now dinodia-os >/dev/null 2>&1 || true
+  exit 1
+fi
+systemctl enable --now dinodia-identityd
 systemctl enable --now dinodia-os
 echo "Dinodia OS dashboard + Home Assistant compatibility: http://$(hostname -I | awk '{print $1}'):8123"
 echo "Dinodia local Hub Agent: http://$(hostname -I | awk '{print $1}'):8099"

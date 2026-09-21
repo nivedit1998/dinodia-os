@@ -63,6 +63,9 @@ class SecretVault {
 
   async set(name, value) {
     const key = String(name);
+    if (process.env.NODE_ENV === "production" && /(?:platform\.)?(?:identity|encryption)(?:Private|private)|manufacturing.*private/i.test(key)) {
+      throw new Error("Manufacturing private keys must be handled by dinodia-identityd");
+    }
     if (value === undefined || value === null || value === "") delete this.records[key];
     else this.records[key] = this.encrypt(value, key);
     const serialized = JSON.stringify(this.records, null, 2);

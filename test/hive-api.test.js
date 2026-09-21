@@ -4,6 +4,7 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { createHub, hiveCredentialTransportAllowed } = require("../src/server");
+const { createOperatorSessionToken } = require("../src/auth/operatorSession");
 
 function mockIntegration() {
   return { start() {}, close() {}, status() { return { configured: false, connected: false, lastError: null }; }, async command() {}, async refresh() { return []; } };
@@ -38,7 +39,7 @@ async function request(base, route, options = {}) {
 test("Hive credential endpoints require secure remote production transport and never return credentials", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-hive-api-"));
   const hub = createHub({
-    config: { nodeEnv: "production", adminToken: "test-token", cloudflarePublicHostname: "hub.example.com", dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    config: { nodeEnv: "production", hubId: "hive-api-test", operatorPublicKey: (globalThis.__hiveOperatorKeys = require("node:crypto").generateKeyPairSync("ed25519")).publicKey.export({ type: "spki", format: "pem" }).toString(), cloudflarePublicHostname: "hub.example.com", dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
     mqttBridge: mockIntegration(),
     matterBridge: mockIntegration(),
     cloudflareTunnel: mockCloudflare(),
@@ -47,19 +48,20 @@ test("Hive credential endpoints require secure remote production transport and n
   });
   await new Promise((resolve) => hub.server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${hub.server.address().port}`;
+  const auth = { authorization: `Bearer ${createOperatorSessionToken({ sub: "employee-hive", hubId: "hive-api-test", scope: ["os:admin"], recentAuthAt: Date.now() }, globalThis.__hiveOperatorKeys.privateKey)}` };
   const route = "/_dinodia/admin/api/integrations/hive/connect";
   assert.equal(hiveCredentialTransportAllowed({ headers: { host: "wrong.example.com", origin: "http://wrong.example.com" }, socket: { remoteAddress: "192.168.1.10" } }, { nodeEnv: "production", configuredHostname: "hub.example.com" }), false);
   assert.equal(hiveCredentialTransportAllowed({ headers: { host: "hub.example.com", origin: "https://hub.example.com" }, socket: { remoteAddress: "192.168.1.10" } }, { nodeEnv: "production", configuredHostname: "hub.example.com" }), false);
   assert.equal(hiveCredentialTransportAllowed({ headers: { host: "hub.example.com", "x-forwarded-proto": "https" }, socket: { remoteAddress: "192.168.1.10" } }, { nodeEnv: "production", configuredHostname: "hub.example.com" }), true);
 
-  const secure = await request(base, route, { method: "POST", headers: { host: "hub.example.com", origin: "https://hub.example.com", "x-forwarded-proto": "https" }, body: JSON.stringify({ username: "owner@example.com", password: "secret" }) });
+  const secure = await request(base, route, { method: "POST", headers: { ...auth, host: "hub.example.com", origin: "https://hub.example.com", "x-forwarded-proto": "https" }, body: JSON.stringify({ username: "owner@example.com", password: "secret" }) });
   assert.equal(secure.response.status, 200);
   assert.equal(JSON.stringify(secure.body).includes("secret"), false);
-  const status = await request(base, "/_dinodia/admin/api/integrations/hive");
+  const status = await request(base, "/_dinodia/admin/api/integrations/hive", { headers: auth });
   assert.equal(status.body.configured, true);
   assert.equal(status.body.maskedUsername, "o***@example.com");
   assert.equal(JSON.stringify(status.body).includes("owner@example.com"), false);
-  const disconnected = await request(base, "/_dinodia/admin/api/integrations/hive/account", { method: "DELETE", body: JSON.stringify({}) });
+  const disconnected = await request(base, "/_dinodia/admin/api/integrations/hive/account", { method: "DELETE", headers: auth, body: JSON.stringify({}) });
   assert.equal(disconnected.response.status, 200);
   assert.equal(disconnected.body.ok, true);
   await hub.stop();

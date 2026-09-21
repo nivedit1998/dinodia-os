@@ -4,6 +4,7 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { createHub } = require("../src/server");
+const { createOperatorSessionToken } = require("../src/auth/operatorSession");
 
 function apiResponse(body, status = 200) { return { ok: status >= 200 && status < 300, status, headers: { get: () => null }, text: async () => JSON.stringify(body) }; }
 function mockIntegration() { return { start() {}, close() {}, status() { return { configured: false, connected: false }; }, async command() {}, async refresh() {} }; }
@@ -13,10 +14,13 @@ async function request(base, route, options = {}) { const response = await fetch
 
 test("Google Nest API remains optional, authenticated, and callback is narrow", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-google-nest-api-"));
-  const hub = createHub({ config: { nodeEnv: "production", adminToken: "test-token", cloudflarePublicHostname: "hub.example.com", dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" }, mqttBridge: mockIntegration(), matterBridge: mockIntegration(), googleNestBridge: mockGoogleNest(), cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: true, connected: true, hostname: "hub.example.com" }; } }, platformSync: { start() {}, stop() {}, status() { return { configured: false }; } } });
+  const keys = require("node:crypto").generateKeyPairSync("ed25519");
+  const hubId = "google-nest-api-test";
+  const hub = createHub({ config: { nodeEnv: "production", hubId, operatorPublicKey: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), cloudflarePublicHostname: "hub.example.com", dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" }, mqttBridge: mockIntegration(), matterBridge: mockIntegration(), googleNestBridge: mockGoogleNest(), cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: true, connected: true, hostname: "hub.example.com" }; } }, platformSync: { start() {}, stop() {}, status() { return { configured: false }; } } });
+  const auth = { authorization: `Bearer ${createOperatorSessionToken({ sub: "employee-google", hubId, scope: ["os:admin"], recentAuthAt: Date.now() }, keys.privateKey)}` };
   await new Promise((resolve) => hub.server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${hub.server.address().port}`;
-  const status = await request(base, "/_dinodia/admin/api/integrations/google-nest");
+  const status = await request(base, "/_dinodia/admin/api/integrations/google-nest", { headers: auth });
   assert.equal(status.response.status, 200);
   assert.equal(status.body.configured, false);
   assert.equal(status.body.callbackUri, "https://hub.example.com/_dinodia/oauth/google-nest/callback");
@@ -24,7 +28,7 @@ test("Google Nest API remains optional, authenticated, and callback is narrow", 
   assert.equal(unauthenticated.status, 400);
   assert.equal(unauthenticated.headers.get("cache-control"), "no-store");
   assert.equal(unauthenticated.headers.get("x-frame-options"), "DENY");
-  const missing = await request(base, "/_dinodia/admin/api/integrations/google-nest/connect", { method: "POST", headers: { host: "hub.example.com", origin: "https://hub.example.com", "x-forwarded-proto": "https" }, body: "{}" });
+  const missing = await request(base, "/_dinodia/admin/api/integrations/google-nest/connect", { method: "POST", headers: { ...auth, host: "hub.example.com", origin: "https://hub.example.com", "x-forwarded-proto": "https" }, body: "{}" });
   assert.equal(missing.response.status, 503);
   assert.equal(JSON.stringify(missing.body).includes("client-secret"), false);
   await hub.stop();
@@ -32,14 +36,17 @@ test("Google Nest API remains optional, authenticated, and callback is narrow", 
 
 test("Google Nest operator credentials can be saved from the secure dashboard without exposing the secret", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-google-nest-config-api-"));
-  const hub = createHub({ config: { nodeEnv: "production", adminToken: "test-token", cloudflarePublicHostname: "hub.example.com", dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" }, mqttBridge: mockIntegration(), matterBridge: mockIntegration(), cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: true, connected: true, hostname: "hub.example.com" }; } }, platformSync: { start() {}, stop() {}, status() { return { configured: false }; } } });
+  const keys = require("node:crypto").generateKeyPairSync("ed25519");
+  const hubId = "google-nest-config-test";
+  const hub = createHub({ config: { nodeEnv: "production", hubId, operatorPublicKey: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), cloudflarePublicHostname: "hub.example.com", dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" }, mqttBridge: mockIntegration(), matterBridge: mockIntegration(), cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: true, connected: true, hostname: "hub.example.com" }; } }, platformSync: { start() {}, stop() {}, status() { return { configured: false }; } } });
+  const auth = { authorization: `Bearer ${createOperatorSessionToken({ sub: "employee-google", hubId, scope: ["os:admin"], recentAuthAt: Date.now() }, keys.privateKey)}` };
   await new Promise((resolve) => hub.server.listen(0, "127.0.0.1", resolve));
   const base = "http://127.0.0.1:" + hub.server.address().port;
   const secret = "google-client-secret-value";
-  const insecure = await request(base, "/_dinodia/admin/api/integrations/google-nest/configure", { method: "POST", headers: { host: "wrong.example.com", "x-forwarded-proto": "https" }, body: JSON.stringify({ deviceAccessProjectId: "123e4567-e89b-12d3-a456-426614174000", oauthClientId: "1234567890-abc.apps.googleusercontent.com", oauthClientSecret: secret }) });
+  const insecure = await request(base, "/_dinodia/admin/api/integrations/google-nest/configure", { method: "POST", headers: { ...auth, host: "wrong.example.com", "x-forwarded-proto": "https" }, body: JSON.stringify({ deviceAccessProjectId: "123e4567-e89b-12d3-a456-426614174000", oauthClientId: "1234567890-abc.apps.googleusercontent.com", oauthClientSecret: secret }) });
   assert.equal(insecure.response.status, 400);
   assert.equal(insecure.body.errorCode, "secure_cloudflare_required");
-  const configured = await request(base, "/_dinodia/admin/api/integrations/google-nest/configure", { method: "POST", headers: { host: "hub.example.com", origin: "https://hub.example.com", "x-forwarded-proto": "https" }, body: JSON.stringify({ deviceAccessProjectId: "123e4567-e89b-12d3-a456-426614174000", oauthClientId: "1234567890-abc.apps.googleusercontent.com", oauthClientSecret: secret }) });
+  const configured = await request(base, "/_dinodia/admin/api/integrations/google-nest/configure", { method: "POST", headers: { ...auth, host: "hub.example.com", origin: "https://hub.example.com", "x-forwarded-proto": "https" }, body: JSON.stringify({ deviceAccessProjectId: "123e4567-e89b-12d3-a456-426614174000", oauthClientId: "1234567890-abc.apps.googleusercontent.com", oauthClientSecret: secret }) });
   assert.equal(configured.response.status, 200);
   assert.equal(configured.body.operatorConfigured, true);
   assert.equal(configured.body.configured, false);
@@ -61,12 +68,15 @@ test("Google Nest secure connect and callback discover a thermostat without retu
     if (String(url).endsWith("/token")) return apiResponse({ access_token: "access-token-secret", refresh_token: "refresh-token-secret", expires_in: 3600, token_type: "Bearer", scope: "https://www.googleapis.com/auth/sdm.service" });
     return apiResponse(fixture);
   };
-  const hub = createHub({ config: { nodeEnv: "production", adminToken: "test-token", cloudflarePublicHostname: "hub.example.com", dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" }, googleNestFetchImpl: fetchImpl, mqttBridge: mockIntegration(), matterBridge: mockIntegration(), cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: true, connected: true, hostname: "hub.example.com" }; } }, platformSync: { start() {}, stop() {}, status() { return { configured: false }; } } });
+  const keys = require("node:crypto").generateKeyPairSync("ed25519");
+  const hubId = "google-nest-flow-test";
+  const hub = createHub({ config: { nodeEnv: "production", hubId, operatorPublicKey: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), cloudflarePublicHostname: "hub.example.com", dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" }, googleNestFetchImpl: fetchImpl, mqttBridge: mockIntegration(), matterBridge: mockIntegration(), cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: true, connected: true, hostname: "hub.example.com" }; } }, platformSync: { start() {}, stop() {}, status() { return { configured: false }; } } });
+  const auth = { authorization: `Bearer ${createOperatorSessionToken({ sub: "employee-google", hubId, scope: ["os:admin"], recentAuthAt: Date.now() }, keys.privateKey)}` };
   await new Promise((resolve) => hub.server.listen(0, "127.0.0.1", resolve));
   const base = "http://127.0.0.1:" + hub.server.address().port;
   const callbackHost = "hub.example.com";
   await hub.vault.set("integration:google-nest:developer:v1", JSON.stringify({ deviceAccessProjectId: "project-1", oauthClientId: "client-1", oauthClientSecret: "client-secret", registeredRedirectUri: "https://" + callbackHost + "/_dinodia/oauth/google-nest/callback", releaseChannel: "sandbox_beta" }));
-  const connect = await request(base, "/_dinodia/admin/api/integrations/google-nest/connect", { method: "POST", headers: { host: callbackHost, origin: "https://" + callbackHost, "x-forwarded-proto": "https" }, body: "{}" });
+  const connect = await request(base, "/_dinodia/admin/api/integrations/google-nest/connect", { method: "POST", headers: { ...auth, host: callbackHost, origin: "https://" + callbackHost, "x-forwarded-proto": "https" }, body: "{}" });
   assert.equal(connect.response.status, 200);
   assert.equal(connect.body.status, "authorization_pending");
   const authorization = new URL(connect.body.authorizationUrl);
@@ -81,11 +91,11 @@ test("Google Nest secure connect and callback discover a thermostat without retu
   assert.equal(callback.headers.get("content-security-policy").includes("frame-ancestors 'none'"), true);
   assert.equal(callbackBody.includes("access-token-secret"), false);
   assert.equal(callbackBody.includes("refresh-token-secret"), false);
-  const status = await request(base, "/_dinodia/admin/api/integrations/google-nest");
+  const status = await request(base, "/_dinodia/admin/api/integrations/google-nest", { headers: auth });
   assert.equal(status.body.status, "connected");
   assert.equal(status.body.thermostatDeviceCount, 1);
   assert.equal(hub.store.listDevices()[0].protocol, "google_nest");
-  const devices = await request(base, "/_dinodia/admin/api/devices");
+  const devices = await request(base, "/_dinodia/admin/api/devices", { headers: auth });
   assert.equal(JSON.stringify(devices.body).includes("enterprises/project-1/devices"), false);
   assert.deepEqual(devices.body.devices[0].protocolIdentity, {});
   assert.equal(calls.filter((call) => call.url.endsWith("/token")).length, 1);

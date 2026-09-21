@@ -16,12 +16,14 @@ function isDinodiaCloudHostname(value) {
 }
 
 class CloudflareTunnel {
-  constructor({ store, vault, origin = "http://127.0.0.1:8123", binary = "cloudflared", initialToken = "", initialHostname = "", dataDir = process.cwd(), logger = console } = {}) {
+  constructor({ store, vault, origin = "http://127.0.0.1:8123", binary = "cloudflared", initialToken = "", initialHostname = "", dataDir = process.cwd(), nodeEnv = process.env.NODE_ENV || "development", logger = console } = {}) {
     this.store = store;
     this.vault = vault;
+    this.nodeEnv = String(nodeEnv || "development");
     this.origin = origin;
     this.binary = binary;
-    this.initialToken = String(initialToken || "").trim();
+    this.allowInitialToken = String(nodeEnv) !== "production";
+    this.initialToken = this.allowInitialToken ? String(initialToken || "").trim() : "";
     this.initialHostname = String(initialHostname || "").trim();
     this.dataDir = String(dataDir || process.cwd());
     this.cloudflareHome = path.join(this.dataDir, "cloudflared");
@@ -56,7 +58,7 @@ class CloudflareTunnel {
     const settings = this.settings();
     if (settings.mode === "local" && settings.tunnelId && settings.tunnelName) this.startLocal(settings);
     if (settings.mode === "named" && settings.token) this.startNamed(settings.token, settings.hostname);
-    if (settings.mode === "quick") this.spawnTunnel(["tunnel", "--no-autoupdate", "--url", this.origin]);
+    if (settings.mode === "quick" && this.nodeEnv !== "production") this.spawnTunnel(["tunnel", "--no-autoupdate", "--url", this.origin]);
   }
 
   runtimeEnv() {
@@ -136,6 +138,9 @@ class CloudflareTunnel {
     const config = [`tunnel: ${tunnelId}`, `credentials-file: ${credentialPath}`, "ingress:", `  - hostname: ${hostname}`, `    service: ${this.origin}`, "  - service: http_status:404", ""].join("\n");
     await fsp.writeFile(configPath, config, { mode: 0o600 });
     await this.runCommand(["tunnel", "route", "dns", tunnelName, hostname]);
+    // The account-wide browser certificate is only needed to create the named
+    // tunnel. Never retain it as a long-lived hub secret.
+    await fsp.rm(path.join(this.cloudflareHome, ".cloudflared", "cert.pem"), { force: true });
     if (this.store) await this.store.saveCloudflare({ mode: "local", token: "", hostname, tunnelName, tunnelId, origin: this.origin });
     this.setup = { state: "complete", authUrl: "", tunnelName, hostname, error: null };
     this.startLocal({ tunnelName, tunnelId, hostname });
@@ -190,6 +195,7 @@ class CloudflareTunnel {
   }
 
   async configure({ token, hostname } = {}) {
+    if (this.nodeEnv === "production") throw Object.assign(new Error("Arbitrary Cloudflare tunnel tokens are retired in production"), { code: "cloudflare_token_flow_retired" });
     const cleanToken = String(token || "").trim();
     if (!cleanToken) throw new Error("Cloudflare tunnel token is required");
     const cleanHostname = safeHostname(hostname);
@@ -202,6 +208,7 @@ class CloudflareTunnel {
   }
 
   async startQuick() {
+    if (this.nodeEnv === "production") throw Object.assign(new Error("Quick Cloudflare tunnels are retired in production"), { code: "cloudflare_quick_tunnel_retired" });
     await this.stop();
     if (this.vault) await this.vault.clear("cloudflare.token");
     if (this.store) await this.store.saveCloudflare({ mode: "quick", token: "", hostname: "", origin: this.origin });

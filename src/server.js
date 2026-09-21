@@ -3,8 +3,10 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const os = require("node:os");
+const net = require("node:net");
 const { EventEmitter } = require("node:events");
 const { URL } = require("node:url");
+const QRCode = require("qrcode");
 
 const baseConfig = require("./config");
 const { Store } = require("./store");
@@ -41,6 +43,14 @@ const { AutomationService } = require("./automations/service");
 const { AutomationExecutor } = require("./automations/executor");
 const { AutomationScheduler } = require("./automations/scheduler");
 const { compileTarget, findControl, resolveExecutionRoute } = require("./automations/controlCatalog");
+const { verifyOperatorSessionToken } = require("./auth/operatorSession");
+const { parsePublicKeys, verifyAppAccessToken } = require("./auth/appTokenVerifier");
+const { ProvisioningPairingService } = require("./auth/provisioningPairing");
+const { SetupDiscovery } = require("./setupDiscovery");
+const { RevocationCoordinator } = require("./auth/revocationCoordinator");
+const { OfflineLanAuthorisationStore, digestOfflineCommand } = require("./auth/offlineLanAuthorizer");
+const { StepUpProofVerifier } = require("./auth/stepUpProofVerifier");
+const { IdentityBrokerClient } = require("./auth/identityBroker");
 
 const VERSION = require("../package.json").version;
 
@@ -188,12 +198,141 @@ function dashboardDevice(device) {
 
 function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, googleNestBridge, googleNestFetchImpl, googleNestNow, googleNestUpdateSource, platformSync, cloudflareTunnel, zigbeeService, threadService, serialAdapterLister = listSerialAdapters, serialAdapterProbe = probeSerialAdapter, logger = console } = {}) {
   const runtimeConfig = { ...baseConfig, ...config };
+  // Native production is permanently fail-closed. In particular, do not let
+  // a caller-supplied test/config object, an environment variable, or an old
+  // token field turn the legacy dashboard/HA verifier back on. The explicit
+  // compatibility harness is available only to non-production fixtures.
+  const legacyCompatibilityEnabled = runtimeConfig.nodeEnv === "production"
+    ? false
+    : config.legacyCompatibilityEnabled === undefined
+      ? (Object.prototype.hasOwnProperty.call(config, "adminToken") || Object.prototype.hasOwnProperty.call(config, "haToken") || Object.prototype.hasOwnProperty.call(config, "hubAgentToken")
+        ? Boolean(config.adminToken || config.haToken || config.hubAgentToken)
+        : runtimeConfig.legacyCompatibilityEnabled)
+      : Boolean(config.legacyCompatibilityEnabled);
   const hubStore = store || new Store(runtimeConfig.dataFile);
+  const offlineLanAuthorisations = new OfflineLanAuthorisationStore({ store: hubStore });
   const eventBus = new EventEmitter();
   const vault = new SecretVault({ dataDir: config.dataDir || path.dirname(runtimeConfig.dataFile), logger });
+  const identityBroker = runtimeConfig.nodeEnv === "production" ? new IdentityBrokerClient({ socketPath: runtimeConfig.identitySocketPath }) : null;
   const existingIdentity = hubStore.getIdentity ? hubStore.getIdentity() : {};
   const serial = existingIdentity.serial || runtimeConfig.hubId || `dinodia-${crypto.randomBytes(6).toString("hex")}`;
   if (!existingIdentity.serial && hubStore.saveIdentity) hubStore.saveIdentity({ serial, instanceId: existingIdentity.instanceId || crypto.randomUUID(), hostname: existingIdentity.hostname || "dinodia" }).catch((error) => logger.error(`[identity] ${error.message}`));
+  const revocationCoordinator = new RevocationCoordinator();
+  const provisioningPairing = new ProvisioningPairingService({ serial, ttlMs: runtimeConfig.pairingTtlMs, store: hubStore, vault, logger });
+  const setupDiscovery = new SetupDiscovery({ serial, interfaceName: runtimeConfig.setupInterface, nodeEnv: runtimeConfig.nodeEnv, logger });
+  let operatorPublicKey = null;
+  if (runtimeConfig.operatorPublicKey) {
+    try { operatorPublicKey = crypto.createPublicKey(runtimeConfig.operatorPublicKey); } catch (error) { logger.error(`[auth] operator public key rejected: ${error.message}`); }
+  }
+
+  const appPublicKeys = parsePublicKeys(runtimeConfig.appPublicKeys);
+  const stepUpVerifier = new StepUpProofVerifier({ publicKeys: [...appPublicKeys, ...(operatorPublicKey ? [operatorPublicKey] : [])], store: hubStore });
+  const revokedOperatorJtis = new Set();
+  // The browser must receive only an opaque session handle. The signed OS
+  // bearer is retained in this process and is never placed in HTML, JSON or a
+  // browser cookie. Sessions are intentionally short-lived and are cleared
+  // when the corresponding operator token is revoked.
+  const operatorBrowserSessions = new Map();
+  const supportBrowserSessions = new Map();
+  function issueBrowserOperatorSession(token, expiresAt) {
+    const handle = `osb_${crypto.randomBytes(32).toString("base64url")}`;
+    operatorBrowserSessions.set(handle, { token: String(token), expiresAt: Number(new Date(expiresAt).getTime()), jti: null });
+    return handle;
+  }
+  function browserSessionToken(handle) {
+    const value = operatorBrowserSessions.get(String(handle || ""));
+    if (!value) return null;
+    if (!Number.isFinite(value.expiresAt) || Date.now() >= value.expiresAt) {
+      operatorBrowserSessions.delete(String(handle));
+      return null;
+    }
+    return value.token;
+  }
+  function issueSupportBrowserSession(lease, secure = false) {
+    const handle = `oss_${crypto.randomBytes(32).toString("base64url")}`;
+    supportBrowserSessions.set(handle, { ...lease, expiresAt: Number(new Date(lease.expiresAt).getTime()) });
+    return { handle, secure };
+  }
+  function supportBrowserPrincipal(req) {
+    const prefix = "dinodia_os_support_session=";
+    const entry = String(req.headers.cookie || "").split(";").map((item) => item.trim()).find((item) => item.startsWith(prefix));
+    const handle = entry ? decodeURIComponent(entry.slice(prefix.length)) : "";
+    const lease = supportBrowserSessions.get(handle);
+    if (!lease) return null;
+    if (!Number.isFinite(lease.expiresAt) || Date.now() >= lease.expiresAt) {
+      supportBrowserSessions.delete(handle);
+      return null;
+    }
+    return {
+      principalType: "operator",
+      sub: `support:${lease.sessionId}`,
+      sid: `support:${lease.sessionId}`,
+      jti: `support:${lease.sessionId}`,
+      scope: ["os:support"],
+      supportScope: lease.scope,
+      areaIds: Array.isArray(lease.areaIds) ? lease.areaIds.map(String) : [],
+      targetUserId: lease.targetUserId == null ? null : String(lease.targetUserId),
+      includesTenantDevices: lease.includesTenantDevices === true,
+      expiresAt: Math.floor(lease.expiresAt / 1000),
+      credentialFingerprint: hashTokenValue(handle).slice(0, 32),
+    };
+  }
+  function supportBrowserLease(req) {
+    const prefix = "dinodia_os_support_session=";
+    const entry = String(req.headers.cookie || "").split(";").map((item) => item.trim()).find((item) => item.startsWith(prefix));
+    const handle = entry ? decodeURIComponent(entry.slice(prefix.length)) : "";
+    return { handle, lease: supportBrowserSessions.get(handle) || null };
+  }
+  async function refreshedSupportBrowserPrincipal(req) {
+    const current = supportBrowserLease(req);
+    if (!current.lease) return null;
+    const now = Date.now();
+    if (now >= current.lease.expiresAt) {
+      await revokeSupportLease(current.lease);
+      supportBrowserSessions.delete(current.handle);
+      return null;
+    }
+    if (now - Number(current.lease.lastCheckedAt || 0) < 5000) return supportBrowserPrincipal(req);
+    current.lease.lastCheckedAt = now;
+    try {
+      const status = await pairing.requestWithHubIdentity("/api/hub-agent/support/v2/status", { serial, sessionId: current.lease.sessionId, lease: current.lease.lease });
+      if (!status?.active) {
+        await revokeSupportLease(current.lease);
+        supportBrowserSessions.delete(current.handle);
+        return null;
+      }
+      return supportBrowserPrincipal(req);
+    } catch {
+      return supportBrowserPrincipal(req);
+    }
+  }
+  function clearOperatorBrowserSessions() {
+    for (const [handle, value] of operatorBrowserSessions) {
+      try {
+        const principal = verifyOperatorSessionToken(value.token, { publicKey: operatorPublicKey, hubId: serial, requiredScope: null });
+        if (!principal || revokedOperatorJtis.has(String(principal.jti))) operatorBrowserSessions.delete(handle);
+      } catch { operatorBrowserSessions.delete(handle); }
+    }
+  }
+  for (const jti of Object.keys(hubStore.getSecurity?.().revokedOperatorJtis || {})) revokedOperatorJtis.add(jti);
+  const operatorSessionAuth = (token) => {
+    clearOperatorBrowserSessions();
+    const principal = verifyOperatorSessionToken(token, { publicKey: operatorPublicKey, hubId: serial, requiredScope: null });
+    if (!principal || !principal.scope.some((scope) => ["os:admin", "os:support"].includes(String(scope))) || revokedOperatorJtis.has(String(principal.jti))) return null;
+    return { ...principal, principalType: "operator", credentialFingerprint: hashTokenValue(token).slice(0, 32) };
+  };
+  const appSessionAuth = (token) => {
+    const principal = verifyAppAccessToken(token, {
+      publicKeys: appPublicKeys,
+      hubId: serial,
+      policyRevision: Number(hubStore?.getAuth?.().policyRevision || 0),
+    });
+    if (!principal) return null;
+    const identity = hubStore.getIdentity?.() || {};
+    const platform = hubStore.getPlatform?.() || {};
+    const acceptedLineages = new Set([serial, identity.instanceId, platform.hubInstallId].filter(Boolean).map(String));
+    return acceptedLineages.has(String(principal.hubInstallId)) ? principal : null;
+  };
 
   let automation;
   let nativeAutomationService;
@@ -364,6 +503,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     initialToken: runtimeConfig.cloudflareTunnelToken,
     initialHostname: runtimeConfig.cloudflarePublicHostname,
     dataDir: runtimeConfig.dataDir,
+    nodeEnv: runtimeConfig.nodeEnv,
     logger,
   });
 
@@ -634,11 +774,13 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   pairing = new PlatformPairing({
     store: hubStore,
     vault,
+    identityBroker,
     apiUrl: runtimeConfig.platformApiUrl,
     serial,
     haPort: runtimeConfig.haPort,
     intervalMs: runtimeConfig.platformSyncIntervalMs,
     runtime: {
+      nodeEnv: runtimeConfig.nodeEnv,
       kind: "dinodia_os",
       version: VERSION,
       capabilities: { managedAreaProvisioningV1: true, managedDevicePresentationV1: true, activityIncidentReportingV1: true, alexaNativeProjectionV1: true, alexaNativeDirectiveV1: true },
@@ -650,6 +792,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     getElectricUsageResetAck: () => electric.resetAcknowledgement(),
     getActivityIncidents: () => ({ schemaVersion: 1, capturedAt: new Date().toISOString(), incidents: activity.store.listPendingIncidentEnvelopes(100).map((entry) => entry.envelope).filter((envelope) => envelope?.severity === "critical" && ["open", "resolved"].includes(envelope?.state)) }),
     getAlexaCatalog: () => alexaIntegration?.publicCatalog?.() || null,
+    legacyCompatibilityEnabled,
     onSyncResult: async (result, payload, resetAckAt, electricPayload, electricResetAckAt) => {
       heating.applyPlatformResponse(result);
       if (payload?.devices) heating.acknowledgeUploaded(payload.devices.map((entry) => entry.entityId));
@@ -667,24 +810,24 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     if (event?.registry === "area") pairing.syncNow().catch(() => {});
   });
 
-  const configuredHaToken = String(runtimeConfig.haToken || "");
+  const configuredHaToken = legacyCompatibilityEnabled ? String(runtimeConfig.haToken || "") : "";
   const existingAuth = hubStore.getAuth ? hubStore.getAuth() : {};
   let pendingHaToken = "";
   let pendingHaPassword = "";
   if (configuredHaToken && !existingAuth.haTokenHash) {
     hubStore.saveAuth({ haTokenHash: hashTokenValue(configuredHaToken), issuedAt: new Date().toISOString() }).catch((error) => logger.error(`[auth] ${error.message}`));
   }
-  if (!configuredHaToken && !existingAuth.haTokenHash) {
+  if (legacyCompatibilityEnabled && !configuredHaToken && !existingAuth.haTokenHash) {
     pendingHaToken = `dinodia_${crypto.randomBytes(30).toString("base64url")}`;
     hubStore.saveAuth({ haTokenHash: hashTokenValue(pendingHaToken), issuedAt: new Date().toISOString() }).catch((error) => logger.error(`[auth] ${error.message}`));
   }
-  if (!existingAuth.passwordHash) {
+  if (legacyCompatibilityEnabled && !existingAuth.passwordHash) {
     pendingHaPassword = `Dino-${crypto.randomBytes(12).toString("base64url")}`;
     const salt = crypto.randomBytes(16).toString("hex");
     const digest = crypto.scryptSync(pendingHaPassword, salt, 32).toString("hex");
     hubStore.saveAuth({ passwordHash: `scrypt$${salt}$${digest}`, issuedAt: existingAuth.issuedAt || new Date().toISOString() }).catch((error) => logger.error(`[auth] ${error.message}`));
   }
-  const hubAgentFallbackToken = String(runtimeConfig.hubAgentToken || (runtimeConfig.nodeEnv === "development" ? "dev-hub-token" : ""));
+  const hubAgentFallbackToken = legacyCompatibilityEnabled ? String(runtimeConfig.hubAgentToken || (runtimeConfig.nodeEnv === "development" ? "dev-hub-token" : "")) : "";
   const tokenMatchesHash = (token, expectedHash) => {
     const actual = Buffer.from(hashTokenValue(token));
     const expected = Buffer.from(String(expectedHash || ""));
@@ -696,13 +839,15 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     return hubStore.getPlatform().acceptedTokenHashes.some((hash) => tokenMatchesHash(token, hash));
   };
   const haAuth = (token) => {
+    if (!legacyCompatibilityEnabled) return false;
     if (!token || String(token).length > 256) return false;
     const storedHash = hubStore.getAuth?.().haTokenHash || "";
     // Keep the explicitly configured token usable alongside a persisted token
     // hash. Existing iOS/platform clients may still hold either credential
     // during provisioning and migration.
     const configuredFallback = configuredHaToken && safeEqual(token, configuredHaToken);
-    return Boolean(configuredFallback || (runtimeConfig.nodeEnv === "development" && runtimeConfig.adminToken && safeEqual(token, runtimeConfig.adminToken)) || (pendingHaToken && safeEqual(token, pendingHaToken)) || tokenMatchesHash(token, storedHash));
+    const developmentDashboardFallback = runtimeConfig.nodeEnv === "development" && !configuredHaToken && runtimeConfig.adminToken && safeEqual(token, runtimeConfig.adminToken);
+    return Boolean(configuredFallback || developmentDashboardFallback || (pendingHaToken && safeEqual(token, pendingHaToken)) || tokenMatchesHash(token, storedHash));
   };
   const compatibilityFlows = {
     matter: { configure: async (data) => {
@@ -721,7 +866,33 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     model: haModel,
     store: hubStore,
     auth: haAuth,
-    wsAuth: (token) => haAuth(token) || Boolean(runtimeConfig.adminToken && safeEqual(token, runtimeConfig.adminToken)),
+    // The dashboard websocket is multiplexed through the compatibility
+    // listener, so its explicitly supplied compatibility admin token remains
+    // accepted for dashboard sessions. It is intentionally not accepted by
+    // the HTTP HA compatibility API above.
+    // The compatibility WebSocket broadcasts the complete hub entity model.
+    // It is therefore an operator-only surface in production; app tokens must
+    // use the scoped native HTTP contract so a tenant can never receive a
+    // cross-area or private-device broadcast through this legacy transport.
+    wsAuth: (token) => {
+      const principal = operatorSessionAuth(token);
+      if (principal && principal.scope.includes("os:admin")) return principal;
+      if (!legacyCompatibilityEnabled) return null;
+      const haPrincipal = haAuth(token);
+      if (haPrincipal) return { principalType: "legacy_ha", credentialFingerprint: hashTokenValue(token).slice(0, 32) };
+      if (runtimeConfig.nodeEnv === "development" && runtimeConfig.adminToken && safeEqual(token, runtimeConfig.adminToken)) return { principalType: "legacy_admin", credentialFingerprint: hashTokenValue(token).slice(0, 32) };
+      return null;
+    },
+    onAuthenticated: (socket, principal) => {
+      if (principal?.principalType === "operator") {
+        const untrack = revocationCoordinator.track(socket, {
+          fingerprint: principal.credentialFingerprint,
+          jti: principal.jti,
+          homeId: principal.homeId || null,
+        });
+        socket.once?.("close", untrack);
+      }
+    },
     eventBus,
     onRegistryChange: async (change) => {
       if (change?.source !== "ha_compat" || change.registry !== "area") return;
@@ -861,10 +1032,80 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     return json(res, 404, { error: "Unknown Alexa platform route" });
   }
 
+  function appCanReadDevice(principal, device) {
+    if (!principal || !["app", "offline"].includes(principal.principalType) || !device) return false;
+    const areaIds = new Set((principal.areaIds || []).map(String));
+    const ownerId = String(device.tenantOwnerId || device.metadata?.tenantOwnerId || "");
+    const label = String(device.metadata?.label || device.label || device.definition?.analyticsLabel || "").toLowerCase();
+    const privateDevice = label === "tenant_device" || Boolean(ownerId);
+    if (privateDevice && ownerId !== String(principal.sub).replace(/^user:/, "")) return false;
+    return !device.areaId || areaIds.has(String(device.areaId));
+  }
+
+  function appCanCommandDevice(principal, device, body, entity, serviceId) {
+    if (!appCanReadDevice(principal, device) || principal.householdRole !== "TENANT" || !principal.scope.includes("tenant:device-command")) return false;
+    const controlId = String(body?.controlId || body?.control_id || "");
+    if (entity?.capability?.writable === false) return false;
+    const requestedService = String(serviceId || body?.serviceId || body?.service_id || "").toLowerCase();
+    const bindings = Array.isArray(entity?.capability?.bindings) ? entity.capability.bindings : [];
+    const advertised = bindings.some((binding) => String(binding?.serviceId || "").toLowerCase() === requestedService);
+    if (!advertised) return false;
+    if (!controlId) return true;
+    return String(entity.controlId || entity.capability?.controlId || entity.id) === controlId;
+  }
+
+  function isSupportOperator(principal) {
+    return Boolean(principal?.principalType === "operator" && principal.scope?.includes("os:support"));
+  }
+
+  function supportCanReadDevice(principal, device) {
+    if (!isSupportOperator(principal) || !device) return false;
+    const areaIds = new Set((principal.areaIds || []).map(String));
+    if (areaIds.size > 0 && device.areaId && !areaIds.has(String(device.areaId))) return false;
+    const ownerId = String(device.tenantOwnerId || device.metadata?.tenantOwnerId || "");
+    const label = String(device.metadata?.label || device.label || device.definition?.analyticsLabel || "").toLowerCase();
+    const privateDevice = label === "tenant_device" || Boolean(ownerId);
+    if (!privateDevice) return true;
+    return principal.supportScope === "TENANT_SCOPE" && principal.includesTenantDevices === true && ownerId === String(principal.targetUserId || "");
+  }
+
+  function supportPathAllowed(pathname) {
+    return pathname === "/api/status" || pathname === "/api/areas" || pathname === "/api/devices" || /^\/api\/devices\/[^/]+(?:\/support-bundle|\/capabilities)?$/.test(pathname);
+  }
+
   async function handleApi(req, res, url) {
     const pathname = url.pathname;
-    if (!runtimeConfig.adminToken || !safeEqual(bearerToken(req), runtimeConfig.adminToken)) {
+    const token = bearerToken(req) || browserOperatorToken(req);
+    const operatorPrincipal = await refreshedSupportBrowserPrincipal(req) || operatorSessionAuth(token);
+    const appPrincipal = operatorPrincipal ? null : appSessionAuth(token);
+    let offlinePrincipal = null;
+    let offlineChallenge = null;
+    if (!operatorPrincipal && !appPrincipal) {
+      const challengeHeader = String(req.headers["x-dinodia-offline-challenge"] || "");
+      const signature = String(req.headers["x-dinodia-offline-signature"] || "");
+      const grantId = String(req.headers["x-dinodia-offline-grant"] || "");
+      if (challengeHeader && signature && grantId) {
+        try {
+          const challenge = JSON.parse(Buffer.from(challengeHeader, "base64url").toString("utf8"));
+          offlineChallenge = challenge;
+          offlinePrincipal = await offlineLanAuthorisations.verify({ grantId, challenge, signature });
+        } catch { offlinePrincipal = null; }
+      }
+    }
+    const legacyAuthorized = legacyCompatibilityEnabled && runtimeConfig.adminToken && safeEqual(token, runtimeConfig.adminToken);
+    if (!operatorPrincipal && !appPrincipal && !offlinePrincipal && !legacyAuthorized) {
       return json(res, 401, { error: "Authentication required" });
+    }
+    const scopedPrincipal = appPrincipal || offlinePrincipal;
+    const supportOperator = isSupportOperator(operatorPrincipal);
+    if (supportOperator && (req.method !== "GET" || !supportPathAllowed(pathname))) {
+      return json(res, 403, { error: "Support sessions are read-only and limited to assigned diagnostics", errorCode: "support_scope_denied" });
+    }
+    if (scopedPrincipal && !(
+      (req.method === "GET" && (pathname === "/api/status" || pathname === "/api/devices" || pathname.startsWith("/api/devices/"))) ||
+      (req.method === "POST" && pathname.includes("/entities/") && pathname.endsWith("/service"))
+    )) {
+      return json(res, 403, { error: "This app principal is not permitted to use this OS route", errorCode: "insufficient_scope" });
     }
     if (pathname === "/api/health" && req.method === "GET") {
       const memory = process.memoryUsage();
@@ -881,6 +1122,54 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     const parts = pathname.split("/").filter(Boolean);
     const resource = parts[1];
     const id = parts[2] ? decodeURIComponent(parts[2]) : "";
+
+    if (pathname === "/api/operator/sessions/revoke" && req.method === "POST") {
+      const body = await readBody(req);
+      const jti = String(body.jti || "").trim();
+      if (!jti || jti.length > 256) return json(res, 400, { error: "A session id is required" });
+      revokedOperatorJtis.add(jti);
+      const security = hubStore.getSecurity?.() || {};
+      await hubStore.saveSecurity?.({ revokedOperatorJtis: { ...(security.revokedOperatorJtis || {}), [jti]: new Date().toISOString() } });
+      const closed = revocationCoordinator.revoke({ jti, homeId: body.homeId == null ? null : String(body.homeId), reason: "operator_session_revoked" });
+      return json(res, 200, { ok: true, jti, closedSockets: closed });
+    }
+
+    if (pathname === "/api/offline/authorisations" && req.method === "POST") {
+      if (!operatorPrincipal) return json(res, 403, { error: "Only an authenticated Dinodia operator may enrol offline authority", errorCode: "insufficient_scope" });
+      const body = await readBody(req);
+      try {
+        const grant = await offlineLanAuthorisations.enroll({
+          id: body.id,
+          homeId: body.homeId,
+          hubInstallId: body.hubInstallId,
+          membershipId: body.membershipId,
+          trustedDeviceId: body.trustedDeviceId,
+          userId: body.userId,
+          householdRole: body.householdRole,
+          publicKey: body.publicKey,
+          areaIds: body.areaIds,
+          scope: body.scope,
+          policyRevision: body.policyRevision,
+          issuedAt: body.issuedAt,
+          expiresAt: body.expiresAt,
+        });
+        return json(res, 201, { ok: true, authorisation: { id: grant.id, homeId: grant.homeId, membershipId: grant.membershipId, trustedDeviceId: grant.trustedDeviceId, areaIds: grant.areaIds, scope: grant.scope, issuedAt: grant.issuedAt, expiresAt: grant.expiresAt } });
+      } catch (error) {
+        return json(res, 400, { error: error.message || "Offline authorisation was not accepted", errorCode: "offline_authorisation_invalid" });
+      }
+    }
+    if (pathname.startsWith("/api/offline/authorisations/") && req.method === "DELETE") {
+      if (!operatorPrincipal) return json(res, 403, { error: "Only an authenticated Dinodia operator may revoke offline authority", errorCode: "insufficient_scope" });
+      const id = decodeURIComponent(pathname.slice("/api/offline/authorisations/".length));
+      const revoked = await offlineLanAuthorisations.revoke(id, "cloud_policy_revoked");
+      return json(res, revoked ? 200 : 404, { ok: revoked, id });
+    }
+    if (pathname === "/api/offline/authorisations/revoke-device" && req.method === "POST") {
+      if (!operatorPrincipal) return json(res, 403, { error: "Only an authenticated Dinodia operator may revoke device authority", errorCode: "insufficient_scope" });
+      const body = await readBody(req);
+      const revoked = await offlineLanAuthorisations.revokeDevice(body.trustedDeviceId, "trusted_device_removed");
+      return json(res, 200, { ok: true, revoked });
+    }
 
     if (resource === "status" && req.method === "GET") {
       const integrations = await integrationStatus();
@@ -1049,29 +1338,33 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     if (resource === "readiness" && req.method === "GET") return json(res, 200, await readiness());
     if (resource === "provisioning" && req.method === "GET") {
       const identity = hubStore.getIdentity ? hubStore.getIdentity() : { serial };
+      const credentials = legacyCompatibilityEnabled ? {
+        username: runtimeConfig.haUsername,
+        oneTimeLongLivedToken: pendingHaToken || undefined,
+        oneTimePassword: pendingHaPassword || undefined,
+        displayed: Boolean(hubStore.getAuth?.().displayedAt),
+      } : undefined;
       return json(res, 200, {
         ok: true,
         identity: { serial: identity.serial || serial, instanceId: identity.instanceId || "" },
         setup: hubStore.getSetup ? hubStore.getSetup() : { state: "UNKNOWN" },
         platform: pairing.status(),
+        pairing: provisioningPairing.status(),
         heatingUsage: heating.status(),
         electricUsage: electric.status(),
-        credentials: {
-          username: runtimeConfig.haUsername,
-          oneTimeLongLivedToken: pendingHaToken || undefined,
-          oneTimePassword: pendingHaPassword || undefined,
-          displayed: Boolean(hubStore.getAuth?.().displayedAt),
-        },
-        urls: { haBaseUrl: `http://${privateAddress(req)}:${runtimeConfig.haPort}`, hubAgentUrl: `http://${privateAddress(req)}:${runtimeConfig.hubAgentPort}`, cloudUrl: cloudflare.status().connected ? cloudflare.status().publicUrl || "" : "" },
+        ...(credentials ? { credentials } : {}),
+        urls: { baseUrl: `http://${privateAddress(req)}:${runtimeConfig.haPort}`, hubAgentUrl: `http://${privateAddress(req)}:${runtimeConfig.hubAgentPort}`, cloudUrl: cloudflare.status().connected ? cloudflare.status().publicUrl || "" : "" },
       });
     }
     if (resource === "provisioning" && parts[2] === "credentials" && parts[3] === "ack" && req.method === "POST") {
+      if (!legacyCompatibilityEnabled) return json(res, 410, { error: "Legacy credential acknowledgement is retired", errorCode: "legacy_credential_flow_retired" });
       pendingHaToken = "";
       pendingHaPassword = "";
       if (hubStore.saveAuth) await hubStore.saveAuth({ displayedAt: new Date().toISOString() });
       return json(res, 200, { ok: true });
     }
     if (resource === "provisioning" && parts[2] === "credentials" && parts[3] === "regenerate" && req.method === "POST") {
+      if (!legacyCompatibilityEnabled) return json(res, 410, { error: "Legacy credential regeneration is retired", errorCode: "legacy_credential_flow_retired" });
       const token = `dinodia_${crypto.randomBytes(30).toString("base64url")}`;
       const password = `Dino-${crypto.randomBytes(12).toString("base64url")}`;
       const salt = crypto.randomBytes(16).toString("hex");
@@ -1082,7 +1375,17 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       return json(res, 200, { ok: true, oneTimeLongLivedToken: token, oneTimePassword: password, restartRequired: false });
     }
     if (pathname === "/api/factory-reset" && req.method === "POST") {
-      if (String(req.headers["x-dinodia-local-confirm"] || "") !== "RESET-DINODIA-HUB") return json(res, 409, { error: "Physical/local confirmation is required before factory reset" });
+      if (!operatorPrincipal) return json(res, 403, { error: "An authenticated Dinodia operator is required", errorCode: "insufficient_scope" });
+      const proof = String(req.headers["x-dinodia-step-up-proof"] || "");
+      const approved = await stepUpVerifier.verify(proof, {
+        actorId: operatorPrincipal.sub,
+        homeId: serial,
+        operation: "factory_reset",
+        targetIds: [serial],
+        value: {},
+      });
+      if (!approved) return json(res, 403, { error: "A fresh operation-bound factory-reset confirmation is required", errorCode: "step_up_required" });
+      await activity.record({ type: "factory_reset_requested", detail: "Factory reset was authorised by a Dinodia operator." }).catch(() => {});
       await cloudflare.disconnect();
       pairing.stop();
       await hive.close();
@@ -1093,6 +1396,13 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     }
     if (resource === "provisioning" && parts[2] === "pair" && req.method === "POST") {
       const body = await readBody(req);
+      if (!legacyCompatibilityEnabled) {
+        // A local browser or caller must not self-redeem the presentation. In
+        // production the hub proves the redeemed attempt through its outbound
+        // Platform channel; this retired endpoint exists only to provide an
+        // explicit, non-secret migration error to old clients.
+        return json(res, 410, { error: "Local provisioning redemption is retired; use the outbound hub pairing channel", errorCode: "native_pairing_requires_outbound_channel" });
+      }
       await pairing.configure({ bootstrapSecret: body.bootstrapSecret || body.bootstrap_secret, apiUrl: body.apiUrl });
       const result = await pairing.pair(body.bootstrapSecret || body.bootstrap_secret);
       await pairing.syncNow();
@@ -1100,6 +1410,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       return json(res, 200, { ok: true, paired: true, result: { publishedVersion: result.publishedVersion || 0 }, status: pairing.status() });
     }
     if (resource === "provisioning" && parts[2] === "ha-token" && req.method === "POST") {
+      if (!legacyCompatibilityEnabled) return json(res, 410, { error: "Legacy HA token provisioning is retired", errorCode: "legacy_credential_flow_retired" });
       const body = await readBody(req);
       const token = String(body.token || `dinodia_${crypto.randomBytes(30).toString("base64url")}`).trim();
       if (token.length < 24 || token.length > 256) return json(res, 400, { error: "HA token must be between 24 and 256 characters" });
@@ -1170,7 +1481,12 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       }
       return json(res, deleted ? 204 : 404, {});
     }
-    if (resource === "devices" && req.method === "GET" && !id) return json(res, 200, { devices: hubStore.listDevices().map(dashboardDevice) });
+    if (resource === "devices" && req.method === "GET" && !id) {
+      const devices = hubStore.listDevices()
+        .filter((device) => supportOperator ? supportCanReadDevice(operatorPrincipal, device) : (!scopedPrincipal || appCanReadDevice(scopedPrincipal, device)))
+        .map(dashboardDevice);
+      return json(res, 200, { devices });
+    }
     if (resource === "devices" && req.method === "POST" && !id) {
       const body = await readBody(req);
       if (!body.id) return json(res, 400, { error: "id is required" });
@@ -1336,7 +1652,29 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       const serviceId = String(body.serviceId || body.service_id || "");
       const dot = serviceId.indexOf(".");
       if (dot < 1) return json(res, 400, { error: "serviceId must look like domain.service" });
+      if (scopedPrincipal && !appCanCommandDevice(scopedPrincipal, item.device, body, item.entity, serviceId)) return json(res, 403, { error: "This control is not writable for the selected tenant scope", errorCode: "control_scope_denied" });
+      if (offlinePrincipal) {
+        const requestedControlId = String(body.controlId || body.control_id || item.entity?.controlId || item.entity?.capability?.controlId || item.entity?.id || "");
+        const expectedDigest = digestOfflineCommand({ deviceId: item.device.id, entityId: item.haId, controlId: requestedControlId, serviceId, value: body.data || {} });
+        if (!offlineChallenge || String(offlineChallenge.deviceId) !== String(item.device.id) || String(offlineChallenge.controlId) !== requestedControlId || String(offlineChallenge.valueDigest) !== expectedDigest) {
+          return json(res, 403, { error: "The offline authorization is not bound to this exact device control and value", errorCode: "offline_operation_scope_denied" });
+        }
+      }
       try {
+        const sensitive = Boolean(item.entity?.capability?.sensitive) || /^(lock|alarm|security)$/i.test(String(item.domain || "").split(".")[0]);
+        if (scopedPrincipal && sensitive) {
+          const proof = String(req.headers["x-dinodia-step-up-proof"] || "");
+          const approved = await stepUpVerifier.verify(proof, {
+            actorId: scopedPrincipal.sub,
+            homeId: scopedPrincipal.homeId,
+            membershipId: scopedPrincipal.membershipId,
+            hubInstallId: scopedPrincipal.hubInstallId,
+            operation: serviceId,
+            targetIds: [item.device.id, item.haId],
+            value: body.data || {},
+          });
+          if (!approved) return json(res, 403, { error: "Fresh step-up confirmation is required for this sensitive control", errorCode: "step_up_required" });
+        }
         const result = await haModel.callService(serviceId.slice(0, dot), serviceId.slice(dot + 1), { ...(body.data || {}), entity_id: item.haId });
         return json(res, 200, result);
       } catch (error) {
@@ -1347,6 +1685,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     if (resource === "devices" && id && parts[3] === "support-bundle" && req.method === "GET") {
       const device = hubStore.getDevice(id);
       if (!device) return json(res, 404, { error: "Device not found" });
+      if (supportOperator && !supportCanReadDevice(operatorPrincipal, device)) return json(res, 403, { error: "Device is outside the support scope", errorCode: "support_scope_denied" });
       const metadata = JSON.parse(JSON.stringify(device.metadata || {}));
       for (const key of Object.keys(metadata)) if (/token|secret|credential|password|code|dataset|fabric/i.test(key)) delete metadata[key];
       if (device.protocol === "google_nest") {
@@ -1357,6 +1696,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     }
     if (resource === "devices" && id && req.method === "GET") {
       const device = hubStore.getDevice(id);
+      if (supportOperator && !supportCanReadDevice(operatorPrincipal, device)) return json(res, 403, { error: "Device is outside the support scope", errorCode: "support_scope_denied" });
+      if (scopedPrincipal && !appCanReadDevice(scopedPrincipal, device)) return json(res, 403, { error: "Device is outside the selected membership scope", errorCode: "device_scope_denied" });
       return device ? json(res, 200, dashboardDevice(device)) : json(res, 404, { error: "Device not found" });
     }
     if (resource === "automations" && id === "catalog" && req.method === "GET") {
@@ -1576,10 +1917,16 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     if (resource === "integrations" && parts[2] === "cloudflare" && req.method === "GET") return json(res, 200, cloudflare.status());
     if (resource === "integrations" && parts[2] === "cloudflare" && req.method === "POST") {
       const body = await readBody(req);
+      if (body.action === "quick" && runtimeConfig.nodeEnv === "production") return json(res, 410, { error: "Quick tunnels are disabled in production", errorCode: "quick_tunnel_disabled" });
       if (body.action === "quick") return json(res, 200, await cloudflare.startQuick());
       if (body.action === "disconnect") return json(res, 200, await cloudflare.disconnect());
       if (body.action === "setup") return json(res, 200, await cloudflare.beginSetup({ tunnelName: body.tunnelName, hostname: body.hostname }));
-      if (body.action === "finish") return json(res, 200, await cloudflare.finishSetup());
+      if (body.action === "finish") {
+        const result = await cloudflare.finishSetup();
+        if (result?.publicUrl && pairing?.reportCloudUrl) await pairing.reportCloudUrl(result.publicUrl);
+        return json(res, 200, result);
+      }
+      if (body.action === "connect" && runtimeConfig.nodeEnv === "production") return json(res, 410, { error: "Arbitrary Cloudflare tunnel tokens are retired", errorCode: "cloudflare_token_flow_retired" });
       if (body.action === "connect") return json(res, 200, await cloudflare.configure({ token: body.token, hostname: body.hostname }));
       return json(res, 400, { error: "action must be quick, setup, finish, connect, or disconnect" });
     }
@@ -1643,11 +1990,237 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     res.setHeader("x-frame-options", "DENY");
     res.setHeader("referrer-policy", "no-referrer");
     res.setHeader("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'");
-    res.setHeader("access-control-allow-headers", "content-type, authorization, x-dinodia-token, x-dinodia-local-confirm, idempotency-key, if-match");
+    res.setHeader("access-control-allow-headers", "content-type, authorization, x-dinodia-token, x-dinodia-step-up-proof, x-dinodia-offline-challenge, x-dinodia-offline-signature, x-dinodia-offline-grant, idempotency-key, if-match");
     res.setHeader("access-control-allow-methods", "GET,POST,PUT,DELETE,OPTIONS");
   }
   function googleNestCallbackAllowed(req) {
     return isHiveCredentialTransportAllowed(req, { nodeEnv: runtimeConfig.nodeEnv, allowInsecure: runtimeConfig.nodeEnv !== "production", configuredHostname: runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "" });
+  }
+
+  function localSetupHostAllowed(req) {
+    const host = String(req.headers.host || "").split(":")[0].toLowerCase();
+    const expected = `dinodia-${String(serial).toLowerCase()}.local`;
+    const remote = String(req.socket?.remoteAddress || "").replace(/^::ffff:/, "");
+    const privateRemote = remote === "127.0.0.1" || remote === "::1" || (() => {
+      if (net.isIP(remote) !== 4) return false;
+      const octets = remote.split(".").map(Number);
+      return octets[0] === 10 || (octets[0] === 192 && octets[1] === 168) || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31);
+    })();
+    if (!privateRemote) return false;
+    if (runtimeConfig.setupInterface && req.socket?.localAddress && String(req.socket.localAddress) !== runtimeConfig.setupInterface) return false;
+    if ([expected, "localhost", "127.0.0.1", "::1"].includes(host)) return true;
+    // A private-IP Host is accepted only when the TCP peer itself is private;
+    // an attacker cannot turn a public request into a setup request by merely
+    // changing Host/X-Forwarded-Host.
+    if (net.isIP(host) === 4) {
+      const octets = host.split(".").map(Number);
+      return octets[0] === 10 || (octets[0] === 192 && octets[1] === 168) || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31);
+    }
+    return false;
+  }
+
+  function setupCookie(req, name) {
+    const prefix = `${name}=`;
+    const entry = String(req.headers.cookie || "").split(";").map((item) => item.trim()).find((item) => item.startsWith(prefix));
+    return entry ? decodeURIComponent(entry.slice(prefix.length)) : "";
+  }
+
+  function setupBrowserSessionValid(req) {
+    const browser = setupCookie(req, "dinodia_setup_browser");
+    const attemptId = setupCookie(req, "dinodia_setup_attempt");
+    const browserNonce = setupCookie(req, "dinodia_setup_nonce");
+    const csrfCookie = setupCookie(req, "dinodia_setup_csrf");
+    const csrfHeader = String(req.headers["x-dinodia-setup-csrf"] || "");
+    if (!browser || !attemptId || !browserNonce || !csrfCookie || !csrfHeader || csrfCookie.length !== csrfHeader.length) return false;
+    if (!provisioningPairing.matchesBrowserSession({ attemptId, browserNonce })) return false;
+    return crypto.timingSafeEqual(Buffer.from(csrfCookie), Buffer.from(csrfHeader));
+  }
+
+  async function setupRateLimitAllows(req) {
+    const remote = String(req.socket?.remoteAddress || "unknown");
+    const key = crypto.createHash("sha256").update(`${serial}:${remote}`, "utf8").digest("hex").slice(0, 48);
+    const now = Date.now();
+    const security = hubStore.getSecurity?.() || {};
+    const existing = security.setupRateLimits?.[key] || { startedAt: now, count: 0 };
+    const current = now - Number(existing.startedAt) >= 15 * 60 * 1000 ? { startedAt: now, count: 0 } : existing;
+    if (Number(current.count) >= 10) return false;
+    await hubStore.saveSecurity({ setupRateLimits: { ...(security.setupRateLimits || {}), [key]: { startedAt: current.startedAt, count: Number(current.count) + 1 } } });
+    return true;
+  }
+
+  function setupHeaders(res, cookies = []) {
+    applyDashboardHeaders(res);
+    res.setHeader("cache-control", "no-store, private");
+    res.setHeader("pragma", "no-cache");
+    res.setHeader("referrer-policy", "no-referrer");
+    if (cookies.length) res.setHeader("set-cookie", cookies);
+  }
+
+  async function handleLocalSetupRequest(req, res, url) {
+    if (!localSetupHostAllowed(req)) return json(res, 404, { error: "Setup page is available only on the private provisioning network" });
+    setupHeaders(res);
+    if (!["GET", "POST", "DELETE"].includes(req.method)) return json(res, 405, { error: "Method not allowed" });
+    if (req.method === "POST") {
+      const origin = String(req.headers.origin || "");
+      if (origin !== `http://${req.headers.host}`) return json(res, 403, { error: "Setup request origin is not allowed" });
+      if (!setupBrowserSessionValid(req)) return json(res, 403, { error: "This setup browser session is not valid" });
+      if (!(await setupRateLimitAllows(req))) return json(res, 429, { error: "Too many setup attempts. Wait before trying again." });
+    }
+    if (url.pathname === "/_dinodia/setup/status" && req.method === "GET") {
+      return json(res, 200, {
+        ok: true,
+        locked: true,
+        dataEmptyBeforePairing: true,
+        identity: { serial },
+        pairing: provisioningPairing.status(),
+        platformPaired: Boolean(hubStore.getPlatform?.().paired),
+      });
+    }
+    if (url.pathname === "/_dinodia/setup/pairing" && req.method === "POST") {
+      if (hubStore.getPlatform?.().paired) return json(res, 409, { error: "This hub is already paired", errorCode: "hub_already_paired" });
+      const body = await readBody(req);
+      const attemptId = setupCookie(req, "dinodia_setup_attempt") || crypto.randomUUID();
+      const browserNonce = crypto.randomBytes(24).toString("base64url");
+      const setupBaseUrl = `http://${String(req.headers.host || "").replace(/:\d+$/, "")}:${runtimeConfig.haPort}`;
+      const presentation = provisioningPairing.issue({ attemptId, browserNonce, publicKeyFingerprint: body.publicKeyFingerprint, baseUrl: setupBaseUrl });
+      await provisioningPairing.waitForPersistence();
+      if (runtimeConfig.nodeEnv === "production" || pairing.loadManufacturingIdentity?.()) {
+        try {
+          const registration = await pairing.registerProvisioningAttempt({ pairing: presentation, baseUrl: setupBaseUrl });
+          await hubStore.saveSetup({ pairing: { ...(hubStore.getSetup?.().pairing || {}), platformAttemptId: registration.attemptId, platformPairingId: registration.pairingId } });
+        } catch (error) {
+          provisioningPairing.revoke();
+          return json(res, Number(error.statusCode) || 503, { error: "The hub could not register its factory identity with Dinodia Platform", errorCode: "manufacturing_registration_failed" });
+        }
+      }
+      setupHeaders(res, [
+        `dinodia_setup_attempt=${encodeURIComponent(presentation.attemptId)}; HttpOnly; SameSite=Strict; Path=/_dinodia/setup; Max-Age=900`,
+        `dinodia_setup_nonce=${encodeURIComponent(browserNonce)}; HttpOnly; SameSite=Strict; Path=/_dinodia/setup; Max-Age=900`,
+      ]);
+      const qrSvg = await QRCode.toString(presentation.qrPayload, { type: "svg", margin: 1, errorCorrectionLevel: "M" });
+      return json(res, 201, { ok: true, id: presentation.id, attemptId: presentation.attemptId, expiresAt: presentation.expiresAt, code: presentation.code, qrPayload: presentation.qrPayload, qrSvg });
+    }
+    if (url.pathname === "/_dinodia/setup/pairing" && req.method === "DELETE") {
+      if (!setupBrowserSessionValid(req) || !setupCookie(req, "dinodia_setup_attempt") || !setupCookie(req, "dinodia_setup_nonce")) return json(res, 403, { error: "Setup session is required" });
+      provisioningPairing.revoke();
+      return json(res, 204, {});
+    }
+    if (url.pathname === "/setup" && req.method === "GET") {
+      const browser = setupCookie(req, "dinodia_setup_browser") || crypto.randomBytes(24).toString("base64url");
+      const csrf = setupCookie(req, "dinodia_setup_csrf") || crypto.randomBytes(24).toString("base64url");
+      const filePath = path.resolve(runtimeConfig.staticDir, "setup.html");
+      const markup = await fs.promises.readFile(filePath, "utf8").catch(() => null);
+      if (markup === null) return text(res, 404, "Not found");
+      setupHeaders(res, [
+        `dinodia_setup_browser=${encodeURIComponent(browser)}; HttpOnly; SameSite=Strict; Path=/_dinodia/setup; Max-Age=900`,
+        `dinodia_setup_csrf=${encodeURIComponent(csrf)}; SameSite=Strict; Path=/_dinodia/setup; Max-Age=900`,
+      ]);
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store, private" });
+      return res.end(markup);
+    }
+    return json(res, 404, { error: "Setup route not found" });
+  }
+
+  async function revokeSupportLease(lease) {
+    if (!lease?.sessionId || !lease?.lease) return false;
+    try {
+      await pairing.requestWithHubIdentity("/api/hub-agent/support/v2/revocation", { serial, sessionId: String(lease.sessionId), lease: String(lease.lease) });
+      return true;
+    } catch (error) {
+      logger.warn(`[support] hub revocation acknowledgement pending: ${error.message}`);
+      return false;
+    }
+  }
+
+  async function handleSupportAccessRequest(req, res) {
+    const local = localSetupHostAllowed(req);
+    const remote = isHiveCredentialTransportAllowed(req, { nodeEnv: runtimeConfig.nodeEnv, configuredHostname: runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "", allowLoopback: false });
+    if (!local && !remote) return json(res, 404, { error: "Support access is available only on the private setup network or secure Dinodia Cloud endpoint" });
+    if (req.method !== "POST") return json(res, 405, { error: "Method not allowed" });
+    const expectedProtocol = remote ? "https" : "http";
+    if (String(req.headers.origin || "") !== `${expectedProtocol}://${req.headers.host}`) return json(res, 403, { error: "Support access origin is not allowed" });
+    if (local && !setupBrowserSessionValid(req)) return json(res, 403, { error: "This setup browser session is not valid" });
+    const body = await readBody(req);
+    const action = String(body.action || "").trim().toLowerCase();
+    if (action === "redeem") {
+      const ticketId = String(body.ticketId || "").trim();
+      const code = String(body.code || "").trim();
+      const employeeProof = String(body.employeeProof || "").trim();
+      if (!ticketId || !code || !employeeProof || ticketId.length > 256 || code.length > 512 || employeeProof.length > 512) return json(res, 400, { error: "A support ticket, one-use code and assigned employee proof are required" });
+      let result;
+      try {
+        result = await pairing.requestWithHubIdentity("/api/hub-agent/support/v2/redeem", { serial, ticketId, code, employeeProof });
+      } catch (error) {
+        return json(res, Number(error.statusCode) || 502, { error: "The support code was not accepted", errorCode: error.code || "support_redeem_rejected" });
+      }
+      if (!result?.lease || !result.sessionId || !result.expiresAt) return json(res, 502, { error: "The Platform did not issue a support lease" });
+      const session = { sessionId: String(result.sessionId), lease: String(result.lease), scope: String(result.scope || ""), areaIds: Array.isArray(result.areaIds) ? result.areaIds.map(String) : [], targetUserId: result.targetUserId == null ? null : String(result.targetUserId), includesTenantDevices: result.includesTenantDevices === true, expiresAt: new Date(result.expiresAt).getTime() };
+      const issued = issueSupportBrowserSession(session, remote);
+      const maxAge = Math.max(1, Math.floor((session.expiresAt - Date.now()) / 1000));
+      setTimeout(() => revokeSupportLease(session).finally(() => supportBrowserSessions.delete(issued.handle)), Math.max(1, session.expiresAt - Date.now())).unref?.();
+      setupHeaders(res, [`dinodia_os_support_session=${encodeURIComponent(issued.handle)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${remote ? "; Secure" : ""}`]);
+      return json(res, 200, { ok: true, expiresAt: new Date(session.expiresAt).toISOString(), scope: session.scope, areaCount: session.areaIds.length });
+    }
+    if (action === "revoke") {
+      const prefix = "dinodia_os_support_session=";
+      const entry = String(req.headers.cookie || "").split(";").map((item) => item.trim()).find((item) => item.startsWith(prefix));
+      const handle = entry ? decodeURIComponent(entry.slice(prefix.length)) : "";
+      const session = supportBrowserSessions.get(handle);
+      if (!session) return json(res, 404, { error: "No active support session" });
+      await revokeSupportLease(session);
+      supportBrowserSessions.delete(handle);
+      setupHeaders(res, [`dinodia_os_support_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${remote ? "; Secure" : ""}`]);
+      return json(res, 200, { ok: true, message: "Support access revoked" });
+    }
+    return json(res, 400, { error: "Support access action must be redeem or revoke" });
+  }
+
+  async function handleRemoteSupportPage(req, res) {
+    const remote = isHiveCredentialTransportAllowed(req, { nodeEnv: runtimeConfig.nodeEnv, configuredHostname: runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "", allowLoopback: false });
+    if (!remote) return text(res, 404, "Not found");
+    if (req.method !== "GET") return text(res, 405, "Method not allowed");
+    const filePath = path.resolve(runtimeConfig.staticDir, "setup.html");
+    const markup = await fs.promises.readFile(filePath, "utf8").catch(() => null);
+    if (markup === null) return text(res, 404, "Not found");
+    setupHeaders(res);
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store, private" });
+    return res.end(markup);
+  }
+
+  async function handleOperatorHandoffRequest(req, res) {
+    const local = localSetupHostAllowed(req);
+    const remote = isHiveCredentialTransportAllowed(req, { nodeEnv: runtimeConfig.nodeEnv, configuredHostname: runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "", allowLoopback: false });
+    if (!local && !remote) return json(res, 404, { error: "Operator handoff is available only on the paired local or secure Cloudflare endpoint" });
+    if (req.method !== "POST") return json(res, 405, { error: "Method not allowed" });
+    const expectedProtocol = remote ? "https" : "http";
+    if (String(req.headers.origin || "") !== `${expectedProtocol}://${req.headers.host}`) return json(res, 403, { error: "Operator handoff origin is not allowed" });
+    const body = await readBody(req);
+    const handoff = String(body.handoff || "").trim();
+    if (!handoff || handoff.length > 512) return json(res, 400, { error: "A one-use operator handoff is required" });
+    const requestBody = { handoff, serial };
+    const timestamp = Date.now();
+    const nonce = crypto.randomBytes(24).toString("base64url");
+    let signature;
+    try {
+      const bodyHash = crypto.createHash("sha256").update(JSON.stringify(requestBody), "utf8").digest("hex");
+      signature = await pairing.signPlatformRequest({ method: "POST", path: "/api/hub-agent/operator-session/consume", timestamp, nonce, bodyHash });
+    } catch {
+      return json(res, 503, { error: "This hub signing identity is unavailable", errorCode: "hub_identity_invalid" });
+    }
+    let response;
+    try {
+      response = await fetch(`${runtimeConfig.platformApiUrl.replace(/\/$/, "")}/api/hub-agent/operator-session/consume`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json", "x-dinodia-hub-timestamp": String(timestamp), "x-dinodia-hub-nonce": nonce, "x-dinodia-hub-signature": signature }, body: JSON.stringify(requestBody) });
+    } catch {
+      return json(res, 503, { error: "The Company Portal could not be reached", errorCode: "platform_unavailable" });
+    }
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.token) return json(res, response.status || 502, { error: "This operator handoff was not accepted", errorCode: result.errorCode || "operator_handoff_rejected" });
+    const sessionHandle = issueBrowserOperatorSession(result.token, result.expiresAt);
+    setupHeaders(res, [
+      `dinodia_os_operator_session=${encodeURIComponent(sessionHandle)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=900${remote ? "; Secure" : ""}`,
+      "dinodia_os_operator=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+    ]);
+    return json(res, 200, { ok: true, expiresAt: result.expiresAt, serial });
   }
   function googleNestCallbackPage(kind = "success") {
     const success = kind === "success";
@@ -1682,10 +2255,32 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     res.writeHead(kind === "success" ? 200 : 400, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" });
     res.end(googleNestCallbackPage(kind));
   }
+  function browserOperatorToken(req) {
+    const cookie = String(req.headers.cookie || "")
+      .split(";")
+      .map((item) => item.trim())
+      .find((item) => item.startsWith("dinodia_os_operator_session="));
+    const handle = cookie ? decodeURIComponent(cookie.slice("dinodia_os_operator_session=".length)) : "";
+    return browserSessionToken(handle) || bearerToken(req);
+  }
+
   async function handleDashboardRequest(req, res, url) {
     applyDashboardHeaders(res);
     if (req.method === "OPTIONS") return text(res, 204, "");
     const dashboardUrl = isDashboardAdminPath(url.pathname) ? dashboardApiUrl(url) : url;
+    const browserToken = browserOperatorToken(req);
+    const operator = await refreshedSupportBrowserPrincipal(req) || operatorSessionAuth(browserToken);
+    const app = appSessionAuth(bearerToken(req));
+    const nativeAppApi = isDashboardAdminPath(url.pathname) && (
+      dashboardUrl.pathname === "/api/status" ||
+      dashboardUrl.pathname === "/api/devices" ||
+      dashboardUrl.pathname.startsWith("/api/devices/") ||
+      (req.method === "POST" && dashboardUrl.pathname.startsWith("/api/entities/") && dashboardUrl.pathname.endsWith("/service"))
+    );
+    if (runtimeConfig.nodeEnv === "production" && !operator && !app) {
+      return json(res, 401, { error: "A temporary Dinodia OS operator session is required", errorCode: "operator_session_required" });
+    }
+    if (runtimeConfig.nodeEnv === "production" && app && !operator && !nativeAppApi) return json(res, 403, { error: "This app principal cannot open the Dinodia OS dashboard", errorCode: "insufficient_scope" });
     try {
       if (isDashboardAdminPath(url.pathname)) return await handleApi(req, res, dashboardUrl);
       if (req.method !== "GET") return text(res, 405, "Method not allowed");
@@ -1701,7 +2296,30 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   }
   async function handleUnifiedRequest(req, res) {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+    if (url.pathname === "/_dinodia/cloud-challenge" && req.method === "GET") {
+      const remote = isHiveCredentialTransportAllowed(req, { nodeEnv: runtimeConfig.nodeEnv, configuredHostname: runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "", allowLoopback: false });
+      if (!remote) return json(res, 404, { error: "Not found" });
+      const challenge = String(url.searchParams.get("challenge") || "");
+      if (!/^[A-Za-z0-9_-]{20,128}$/.test(challenge)) return json(res, 400, { error: "A valid challenge is required" });
+      const cloudUrl = `https://${String(req.headers.host || "").toLowerCase()}`.replace(/\/$/, "");
+      const publicIdentity = await pairing.getPublicIdentity();
+      const identityFingerprint = publicIdentity?.publicKeyFingerprint || null;
+      if (!identityFingerprint) return json(res, 503, { error: "Hub signing identity is unavailable" });
+      const responseBody = { version: 1, serial, cloudUrl, challenge, identityFingerprint, identityGeneration: Number(publicIdentity.generation) };
+      let hubSignature;
+      try {
+        hubSignature = await pairing.signCloudChallenge(responseBody);
+      } catch (error) {
+        logger.warn(`[cloud-challenge] signing unavailable: ${error.message}`);
+        return json(res, 503, { error: "Hub signing identity is unavailable" });
+      }
+      return json(res, 200, { ok: true, ...responseBody, hubSignature });
+    }
     if (url.pathname === runtimeConfig.googleNestCallbackPath) return handleGoogleNestCallback(req, res, url);
+    if (url.pathname === "/support-access") return handleRemoteSupportPage(req, res);
+    if (url.pathname === "/_dinodia/setup/support-access") return handleSupportAccessRequest(req, res);
+    if (url.pathname === "/_dinodia/setup/operator-session") return handleOperatorHandoffRequest(req, res);
+    if (url.pathname === "/setup" || url.pathname.startsWith("/_dinodia/setup/")) return handleLocalSetupRequest(req, res, url);
     if (url.pathname.startsWith("/_dinodia/platform/v1/alexa")) return handleNativeAlexaPlatformRequest(req, res, url);
     if (isDashboardAdminPath(url.pathname)) return handleDashboardRequest(req, res, url);
     if (isHaCompatibilityPath(url.pathname)) return haCompat.handleHttp(req, res);
@@ -1711,7 +2329,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   server.on("upgrade", haCompat.handleUpgrade);
 
   async function start() {
-    if (runtimeConfig.nodeEnv === "production" && !runtimeConfig.adminToken) throw new Error("DINODIA_ADMIN_TOKEN is required in production");
+    if (runtimeConfig.nodeEnv === "production" && legacyCompatibilityEnabled) throw new Error("Legacy dashboard authentication cannot be enabled in production");
     mqtt.start();
     matter.start();
     const threadSettings = hubStore.getThread?.();
@@ -1734,6 +2352,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     activityIntegrationTimer = setInterval(() => integrationStatus().catch((error) => logger.error(`[activity] ${error.message}`)), 30000);
     activityIntegrationTimer.unref?.();
     await new Promise((resolve) => server.listen(runtimeConfig.haPort, runtimeConfig.haHost, resolve));
+    setupDiscovery.start(runtimeConfig.haPort);
     await electric.tick(hubStore.listDevices());
     electricTimer = setInterval(() => electric.tick(hubStore.listDevices()).catch((error) => logger.error(`[electric] ${error.message}`)), 5 * 60 * 1000);
     electricTimer.unref?.();
@@ -1746,7 +2365,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     googleNest.start().catch((error) => logger.error(`[google-nest] automatic startup failed: ${error.message}`));
     await heatingDemandController.evaluate({ reason: "startup", execute: false });
     await heatingDemandController.start();
-    if (runtimeConfig.platformBootstrapSecret && !hubStore.getPlatform().paired) {
+    if (legacyCompatibilityEnabled && runtimeConfig.platformBootstrapSecret && !hubStore.getPlatform().paired) {
       pairing.configure({ bootstrapSecret: runtimeConfig.platformBootstrapSecret })
         .then(() => pairing.pair(runtimeConfig.platformBootstrapSecret))
         .then(() => pairing.syncNow())
@@ -1754,7 +2373,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     }
     logger.log(`[dinodia] unified dashboard + HA compatibility on http://${runtimeConfig.haHost}:${runtimeConfig.haPort}`);
     logger.log(`[dinodia] Hub Agent compatibility on http://${runtimeConfig.haHost}:${runtimeConfig.hubAgentPort}`);
-    if (runtimeConfig.nodeEnv !== "production") logger.log("[dinodia] development token: dev-token");
+    if (legacyCompatibilityEnabled && runtimeConfig.nodeEnv !== "production") logger.log("[dinodia] legacy compatibility harness enabled; native production credentials remain disabled");
     return server;
   }
 
@@ -1769,6 +2388,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     await cloudflare.stop();
     heartbeat.stop();
     pairing.stop();
+    setupDiscovery.stop();
     alexaIntegration.stop();
     activity.stop();
     if (activityIntegrationTimer) clearInterval(activityIntegrationTimer);

@@ -102,7 +102,7 @@ function automationEntity(automation) {
   };
 }
 
-function createCompatInterface({ port = 8123, host = "0.0.0.0", model, store, auth, wsAuth = auth, eventBus, mqtt, syncStatus, logger = console, hubAgent = false, flowHandlers = {}, onRemoteEvent, onRegistryChange } = {}) {
+function createCompatInterface({ port = 8123, host = "0.0.0.0", model, store, auth, wsAuth = auth, eventBus, mqtt, syncStatus, logger = console, hubAgent = false, flowHandlers = {}, onRemoteEvent, onRegistryChange, onAuthenticated } = {}) {
   const flows = new Map();
   const subscriptions = new Map();
 
@@ -463,7 +463,7 @@ function createCompatInterface({ port = 8123, host = "0.0.0.0", model, store, au
     res.setHeader("x-dinodia-interface", hubAgent ? "hub-agent" : "home-assistant");
     res.setHeader("x-content-type-options", "nosniff");
     res.setHeader("referrer-policy", "no-referrer");
-    if (req.method === "OPTIONS") return json(res, 204, null, { "access-control-allow-headers": "authorization, content-type, x-dinodia-token, x-dinodia-local-confirm", "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS" });
+    if (req.method === "OPTIONS") return json(res, 204, null, { "access-control-allow-headers": "authorization, content-type, x-dinodia-token, x-dinodia-step-up-proof, x-dinodia-offline-challenge, x-dinodia-offline-signature, x-dinodia-offline-grant", "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS" });
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
     try { return await handleRest(req, res, url); } catch (error) {
       logger.error(`[${hubAgent ? "hub-agent" : "ha"}] ${req.method} ${url.pathname}: ${error.message}`);
@@ -486,12 +486,14 @@ function createCompatInterface({ port = 8123, host = "0.0.0.0", model, store, au
       let message;
       try { message = JSON.parse(raw.toString()); } catch { socket.close(1007, "Invalid JSON"); return; }
       if (!authenticated) {
-        if (message.type !== "auth" || typeof wsAuth !== "function" || !wsAuth(String(message.access_token || ""))) {
+        const principal = message.type === "auth" && typeof wsAuth === "function" ? wsAuth(String(message.access_token || "")) : null;
+        if (!principal) {
           socket.send(JSON.stringify({ type: "auth_invalid", message: "Invalid access token" }));
           return socket.close(1008, "Unauthorized");
         }
         authenticated = true;
         clearTimeout(authTimer);
+        try { onAuthenticated?.(socket, principal); } catch (error) { logger.error(`[auth] websocket session tracking failed: ${error.message}`); }
         socket.send(JSON.stringify({ type: "auth_ok", ha_version: "2026.8-dinodia", user: { id: "dinodia" } }));
         return;
       }

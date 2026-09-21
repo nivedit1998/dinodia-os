@@ -11,11 +11,12 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test",
+    "test": "node --test --test-concurrency=1",
     "test:hive-python": "python3 -m unittest discover -s test/python -p 'test_*.py'",
     "test:google-nest": "node --test test/google-nest-*.test.js",
     "check:hive-lock": "bash scripts/check-hive-lock.sh",
     "check": "find src scripts test public -name '*.js' -print0 | xargs -0 -n1 node --check",
+    "check:native-v2": "node scripts/check-native-v2-boundary.mjs",
     "generate:matter-catalog": "node scripts/generate-matter-catalog.mjs",
     "check:generated": "node scripts/check-generated.mjs",
     "backup": "node scripts/backup.js",
@@ -24,6 +25,7 @@
   },
   "dependencies": {
     "mqtt": "^5.10.4",
+    "qrcode": "^1.5.4",
     "ws": "^8.18.3"
   },
   "devDependencies": {

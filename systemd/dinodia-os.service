@@ -2,6 +2,8 @@
 Description=Dinodia OS smart-home hub
 After=network-online.target docker.service
 Wants=network-online.target docker.service
+Requires=dinodia-identityd.service
+After=dinodia-identityd.service
 
 [Service]
 Type=simple

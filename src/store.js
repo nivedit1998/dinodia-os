@@ -154,8 +154,9 @@ function initialState() {
     version: NATIVE_AUTOMATION_STORE_VERSION,
     updatedAt: new Date().toISOString(),
     identity: { serial: "", instanceId: "", hostname: "dinodia" },
-    setup: { state: "UNINITIALIZED", completed: [], updatedAt: null },
-    auth: { haTokenHash: "", dashboardTokenHash: "", issuedAt: null, displayedAt: null },
+    setup: { state: "UNINITIALIZED", completed: [], updatedAt: null, pairing: null },
+    auth: { haTokenHash: "", dashboardTokenHash: "", issuedAt: null, displayedAt: null, policyRevision: 0 },
+    security: { offlineAuthorisations: {}, usedLanNonces: {}, usedStepUpProofs: {}, revokedOperatorJtis: {} },
     areas: {},
     labels: fixedLabelState(),
     devices: {},
@@ -182,6 +183,8 @@ function initialState() {
       lastPairAt: null,
       lastSyncAt: null,
       lastError: null,
+      operatorCredentialVersion: 0,
+      operatorCredentialReceivedAt: null,
     },
     heatingUsage: { intervals: [], totals: {}, lastResetAt: null },
     electricUsage: { schemaVersion: 1, entities: {}, pending: [], lastResetAt: null },
@@ -301,6 +304,14 @@ function normalizeState(value) {
     identity: { ...base.identity, ...(value.identity && typeof value.identity === "object" ? value.identity : {}) },
     setup: { ...base.setup, ...(value.setup && typeof value.setup === "object" ? value.setup : {}) },
     auth: { ...base.auth, ...(value.auth && typeof value.auth === "object" ? value.auth : {}) },
+    security: {
+      ...base.security,
+      ...(value.security && typeof value.security === "object" ? value.security : {}),
+      offlineAuthorisations: value.security?.offlineAuthorisations && typeof value.security.offlineAuthorisations === "object" ? value.security.offlineAuthorisations : {},
+      usedLanNonces: value.security?.usedLanNonces && typeof value.security.usedLanNonces === "object" ? value.security.usedLanNonces : {},
+      usedStepUpProofs: value.security?.usedStepUpProofs && typeof value.security.usedStepUpProofs === "object" ? value.security.usedStepUpProofs : {},
+      revokedOperatorJtis: value.security?.revokedOperatorJtis && typeof value.security.revokedOperatorJtis === "object" ? value.security.revokedOperatorJtis : {},
+    },
     areas: value.areas && typeof value.areas === "object" ? value.areas : {},
     // Keep the four Dinodia labels available on every hub, including hubs
     // upgraded from an older data file. Any legacy/custom records are kept
@@ -401,12 +412,27 @@ function normalizeIds(value) {
 
 function normalizeSetup(value, fallback = {}) {
   const input = value && typeof value === "object" ? value : {};
+  const pairing = input.pairing && typeof input.pairing === "object" ? {
+    id: String(input.pairing.id || ""),
+    attemptId: String(input.pairing.attemptId || ""),
+    serial: String(input.pairing.serial || ""),
+    publicKeyFingerprint: String(input.pairing.publicKeyFingerprint || ""),
+    baseUrl: String(input.pairing.baseUrl || ""),
+    codeVaultKey: String(input.pairing.codeVaultKey || ""),
+    browserNonceHash: String(input.pairing.browserNonceHash || ""),
+    issuedAt: Number(input.pairing.issuedAt) || 0,
+    expiresAt: Number(input.pairing.expiresAt) || 0,
+    consumedAt: input.pairing.consumedAt ? Number(input.pairing.consumedAt) : null,
+    revokedAt: input.pairing.revokedAt ? Number(input.pairing.revokedAt) : null,
+    failures: Math.max(0, Math.floor(Number(input.pairing.failures) || 0)),
+  } : (fallback.pairing || null);
   return {
     status: String(input.status || fallback.status || "needs_setup"),
     assignmentMode: String(input.assignmentMode || fallback.assignmentMode || "device_inherited_v1"),
     completedAt: input.completedAt || fallback.completedAt || null,
     updatedAt: input.updatedAt || fallback.updatedAt || null,
     reason: Object.prototype.hasOwnProperty.call(input, "reason") ? input.reason : (fallback.reason || "area_and_label_required"),
+    pairing,
   };
 }
 
@@ -1250,6 +1276,19 @@ class Store {
     this.state.auth = { ...(this.state.auth || {}), ...clone(patch) };
     await this.persist();
     return this.getAuth();
+  }
+
+  getSecurity() {
+    return clone(this.state.security || initialState().security);
+  }
+
+  async saveSecurity(patch = {}) {
+    this.state.security = {
+      ...(this.state.security || initialState().security),
+      ...clone(patch),
+    };
+    await this.persist();
+    return this.getSecurity();
   }
 
   getPlatform() {

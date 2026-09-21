@@ -49,7 +49,7 @@ test("Stage B serves the dashboard and HA compatibility only on unified 8123", a
   const [unifiedPort, agentPort] = await Promise.all([freePort(), freePort()]);
   const hub = createHub({
     config: {
-      nodeEnv: "production",
+      nodeEnv: "development",
       adminToken: "admin-token-for-unified-test",
       haToken: "ha-token-for-unified-test",
       port: 3000,

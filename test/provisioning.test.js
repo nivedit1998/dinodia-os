@@ -18,7 +18,7 @@ async function request(base, route, options = {}) {
 }
 function dashboardRoute(route) { return `/_dinodia/admin${route}`; }
 
-test("dashboard provisioning pairs the hub and rotates the 8099 bearer token", async () => {
+test("development compatibility pairing remains isolated from production native access", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-provisioning-"));
   const serial = "hub-provisioning-test";
   const bootstrapSecret = "bootstrap-secret";
@@ -40,7 +40,7 @@ test("dashboard provisioning pairs the hub and rotates the 8099 bearer token", a
   await new Promise((resolve) => platform.listen(0, "127.0.0.1", resolve));
   const platformUrl = `http://127.0.0.1:${platform.address().port}`;
   const hub = createHub({
-    config: { nodeEnv: "production", adminToken: "provisioning-admin", haToken: "configured-ha-token-that-must-not-be-redisplayed", hubId: serial, platformApiUrl: platformUrl, port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    config: { nodeEnv: "development", adminToken: "provisioning-admin", haToken: "configured-ha-token-that-must-not-be-redisplayed", hubId: serial, platformApiUrl: platformUrl, port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
     mqttBridge: mockIntegration(),
     matterBridge: mockIntegration(),
     cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },

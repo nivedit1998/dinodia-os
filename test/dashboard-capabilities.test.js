@@ -66,9 +66,9 @@ test("completed secure access and provisioning replace setup inputs with confirm
   assert.match(html, /id="cloudflare-connected-row" class="setup-complete-row hidden"/);
   assert.match(html, /id="provisioning-complete-row" class="setup-complete-row hidden"/);
   assert.match(app, /\$\("#cloudflare-setup-form"\)\.classList\.toggle\("hidden", connected\)/);
-  assert.match(app, /\$\("#advanced-cloudflare"\)\.classList\.toggle\("hidden", connected\)/);
   assert.match(app, /\$\("#pair-form"\)\.classList\.toggle\("hidden", paired\)/);
-  assert.match(app, /\$\("#regenerate-credentials"\)\.classList\.toggle\("hidden", paired\)/);
+  assert.doesNotMatch(html, /advanced-cloudflare|regenerate-credentials/);
+  assert.doesNotMatch(app, /bootstrapSecret|haUsername|haPassword|oneTimeLongLivedToken/);
 });
 
 test("dashboard controls are generated from capability metadata and call the typed route", () => {

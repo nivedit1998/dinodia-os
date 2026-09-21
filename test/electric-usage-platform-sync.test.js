@@ -29,7 +29,7 @@ test('platform sync sends electric rows and acknowledges only the sent composite
     assert.equal(body.electricUsage.devices[0].entityId, 'light.kitchen');
     return { ok: true, async json() { return { latestVersion: 1, publishedVersion: 1, hubTokenHashes: [crypto.createHash('sha256').update('token').digest('hex')] }; } };
   };
-  const pairing = new PlatformPairing({ store, vault, apiUrl: 'https://platform.test', serial: 'electric-hub', fetchImpl, getElectricUsage: () => tracker.payload(), getElectricUsageResetAck: tracker.resetAcknowledgement, onSyncResult: async (result, heating, heatingReset, electric) => { tracker.applyPlatformResponse(result); tracker.acknowledgeUploaded(electric.devices); } });
+  const pairing = new PlatformPairing({ store, vault, apiUrl: 'https://platform.test', serial: 'electric-hub', legacyCompatibilityEnabled: true, fetchImpl, getElectricUsage: () => tracker.payload(), getElectricUsageResetAck: tracker.resetAcknowledgement, onSyncResult: async (result, heating, heatingReset, electric) => { tracker.applyPlatformResponse(result); tracker.acknowledgeUploaded(electric.devices); } });
   await pairing.configure({ bootstrapSecret: 'bootstrap' });
   await pairing.pair();
   await pairing.syncNow();

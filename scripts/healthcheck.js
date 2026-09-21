@@ -1,17 +1,13 @@
-const adminToken = String(process.env.DINODIA_ADMIN_TOKEN || "").trim();
 const configuredUrls = String(process.env.DINODIA_HEALTHCHECK_URL || "").trim();
 const defaultUrls = [
   "http://127.0.0.1:8123/api/health",
   "http://127.0.0.1:8099/api/health",
-  ...(adminToken ? ["http://127.0.0.1:8123/_dinodia/admin/api/health"] : []),
 ];
 const urls = (configuredUrls || defaultUrls.join(","))
   .split(",").map((value) => value.trim()).filter(Boolean);
 
 Promise.all(urls.map((url) => {
-  const headers = {};
-  if (adminToken && url.includes("/_dinodia/admin/")) headers.authorization = `Bearer ${adminToken}`;
-  return fetch(url, { headers }).then(async (response) => {
+  return fetch(url).then(async (response) => {
   if (!response.ok) throw new Error(`${url} returned HTTP ${response.status}`);
   const body = await response.json();
   if (!body.ok) throw new Error(`${url} returned ok=false`);

@@ -1,0 +1,24 @@
+[Unit]
+Description=Dinodia OS identity broker
+Before=dinodia-os.service
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+Environment=DINODIA_IDENTITY_DIR=@IDENTITY_DIR@
+Environment=DINODIA_IDENTITY_SOCKET=@IDENTITY_SOCKET@
+Environment=DINODIA_IDENTITY_ALLOWED_GID=@INSTALL_GID@
+ExecStart=@NODE_BIN@ @INSTALL_DIR@/src/identityd.js
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/run
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

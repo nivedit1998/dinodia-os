@@ -30,7 +30,7 @@ Run `npm run backup` before an update. The encrypted backup contains the encrypt
 ```bash
 sudo systemctl status dinodia-os --no-pager
 curl -fsS http://127.0.0.1:8123/api/health
-curl -fsS -H "Authorization: Bearer $DINODIA_ADMIN_TOKEN" http://127.0.0.1:8123/_dinodia/admin/api/integrations/hive
+# Dashboard integration status requires an authenticated Company Portal operator session.
 sudo journalctl -u dinodia-os -n 100 --no-pager
 ```
 
@@ -45,7 +45,7 @@ For a temporary Google outage, leave the hub running: cached thermostat cards re
 ```bash
 sudo systemctl status dinodia-os --no-pager
 curl -fsS http://127.0.0.1:8123/api/health
-curl -fsS -H "Authorization: Bearer $DINODIA_ADMIN_TOKEN" http://127.0.0.1:8123/_dinodia/admin/api/integrations/google-nest
+# Dashboard integration status requires an authenticated Company Portal operator session.
 sudo journalctl -u dinodia-os -n 100 --no-pager | rg -i 'google-nest|google nest'
 ```
 

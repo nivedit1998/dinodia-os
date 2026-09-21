@@ -11,8 +11,20 @@ function numberEnv(name, fallback) {
 }
 
 const nodeEnv = stringEnv("NODE_ENV", "development");
+const developmentCompatibility = nodeEnv !== "production";
 const dataDir = path.resolve(stringEnv("DINODIA_DATA_DIR", path.join(process.cwd(), "data")));
-const adminToken = stringEnv("DINODIA_ADMIN_TOKEN", nodeEnv === "production" ? "" : "dev-token");
+// Native production access is session based. The legacy dashboard/HA verifier
+// is intentionally available only when an operator explicitly opts into the
+// local development compatibility harness; it is never enabled by a default
+// token in production.
+const adminToken = developmentCompatibility ? stringEnv("DINODIA_ADMIN_TOKEN", "") : "";
+// Native production never accepts the old dashboard/HA credential family.
+// Development may opt into the compatibility fixture explicitly, but a
+// production process cannot enable it through an environment variable or a
+// supplied admin token.
+const legacyCompatibilityEnabled = nodeEnv === "production"
+  ? false
+  : stringEnv("DINODIA_LEGACY_COMPATIBILITY_ENABLED", "false") === "true";
 const nativeAutomationsMode = ["off", "read_only", "enabled"].includes(stringEnv("DINODIA_NATIVE_AUTOMATIONS_MODE", nodeEnv === "production" ? "read_only" : "enabled"))
   ? stringEnv("DINODIA_NATIVE_AUTOMATIONS_MODE", nodeEnv === "production" ? "read_only" : "enabled")
   : "read_only";
@@ -23,9 +35,20 @@ module.exports = {
   hubAgentPort: numberEnv("DINODIA_HUB_AGENT_PORT", 8099),
   haHost: stringEnv("DINODIA_HA_HOST", "0.0.0.0"),
   dataDir,
+  identityDir: path.resolve(stringEnv("DINODIA_IDENTITY_DIR", "/etc/dinodia-os/identity")),
+  identitySocketPath: stringEnv("DINODIA_IDENTITY_SOCKET", "/run/dinodia-identityd.sock"),
+  identityAllowedGid: Number.isInteger(Number(stringEnv("DINODIA_IDENTITY_ALLOWED_GID", ""))) ? Number(stringEnv("DINODIA_IDENTITY_ALLOWED_GID", "")) : null,
   dataFile: path.join(dataDir, "dinodia.json"),
   backupDir: path.join(dataDir, "backups"),
   adminToken,
+  legacyCompatibilityEnabled,
+  operatorPublicKey: stringEnv("DINODIA_OPERATOR_PUBLIC_KEY", ""),
+  appPublicKeys: stringEnv("DINODIA_APP_PUBLIC_KEYS", ""),
+  setupInterface: stringEnv("DINODIA_SETUP_INTERFACE", ""),
+  setupAllowedHosts: stringEnv("DINODIA_SETUP_ALLOWED_HOSTS", ""),
+  pairingTtlMs: Math.max(60_000, Math.min(numberEnv("DINODIA_PAIRING_TTL_MS", 900_000), 900_000)),
+  operatorSessionTtlMs: Math.max(60_000, Math.min(numberEnv("DINODIA_OPERATOR_SESSION_TTL_MS", 900_000), 900_000)),
+  manufacturingRootPublicKeys: stringEnv("DINODIA_MANUFACTURING_ROOT_PUBLIC_KEYS", ""),
   mqttUrl: stringEnv("MQTT_URL", ""),
   zigbeeBaseTopic: stringEnv("ZIGBEE2MQTT_BASE_TOPIC", "zigbee2mqtt"),
   zigbeeDiscoveryPrefix: stringEnv("ZIGBEE2MQTT_DISCOVERY_PREFIX", "dinodia-ha"),
@@ -47,16 +70,17 @@ module.exports = {
   cloudflaredBinary: stringEnv("CLOUDFLARED_BIN", "cloudflared"),
   platformHeartbeatUrl: stringEnv("DINODIA_PLATFORM_HEARTBEAT_URL", ""),
   platformToken: stringEnv("DINODIA_PLATFORM_TOKEN", ""),
-  platformApiUrl: stringEnv("DINODIA_PLATFORM_API_URL", "https://app.dinodiasmartliving.com"),
-  platformBootstrapSecret: stringEnv("DINODIA_PLATFORM_BOOTSTRAP_SECRET", ""),
+  // Native V2 must be explicitly configured. An old platform URL is never a fallback.
+  platformApiUrl: stringEnv("DINODIA_PLATFORM_API_URL", ""),
+  platformBootstrapSecret: developmentCompatibility ? stringEnv("DINODIA_PLATFORM_BOOTSTRAP_SECRET", "") : "",
   platformSyncIntervalMs: numberEnv("DINODIA_PLATFORM_SYNC_INTERVAL_MS", 120000),
   alexaNativeEnabled: stringEnv("ALEXA_NATIVE_DINODIA_OS_ENABLED", "false") === "true",
   alexaConnectIntentsEnabled: stringEnv("ALEXA_CONNECT_INTENTS_ENABLED", "false") === "true",
   alexaNativeMaxStaleMs: Math.max(60000, Math.min(numberEnv("ALEXA_NATIVE_MAX_STALE_MS", 300000), 3600000)),
   stateChangeUrl: stringEnv("DINODIA_STATE_CHANGE_URL", ""),
   stateChangeSecret: stringEnv("DINODIA_STATE_CHANGE_SECRET", ""),
-  haToken: stringEnv("DINODIA_HA_TOKEN", ""),
-  haUsername: stringEnv("DINODIA_HA_USERNAME", "dinodia"),
+  haToken: developmentCompatibility ? stringEnv("DINODIA_HA_TOKEN", "") : "",
+  haUsername: developmentCompatibility ? stringEnv("DINODIA_HA_USERNAME", "dinodia") : "",
   hubId: stringEnv("DINODIA_HUB_ID", ""),
   heartbeatIntervalMs: numberEnv("DINODIA_HEARTBEAT_INTERVAL_MS", 300000),
   hiveEnabled: stringEnv("DINODIA_HIVE_ENABLED", "true") === "true",

@@ -6,7 +6,7 @@ Dinodia OS is the local-first Raspberry Pi hub that presents a Home Assistant-co
 
 1. Install 64-bit Raspberry Pi OS, enable SSH, and confirm `uname -m` is `aarch64`.
 2. Copy this directory to the Pi and run `sudo bash scripts/install-pi.sh`.
-3. Open the unified dashboard at `http://<pi-ip>:8123`, enter the generated dashboard token, and complete platform provisioning.
+3. Open the installer-only setup address `http://dinodia-<serial>.local/setup` and complete the paired Company Portal provisioning session. Production does not expose a reusable dashboard token.
 4. Complete Cloudflare named-tunnel setup if remote access is required.
 5. In **Radios & networks**, choose the connected supported coordinator from the dropdown. Dinodia writes a stable `/dev/serial/by-id` Zigbee2MQTT configuration. Select the separate OpenThread RCP for Thread.
 6. Start Zigbee pairing or Matter commissioning from **Add devices**. Both protocols end in one device setup card: optional name, required provisioned area, and one fixed label. Dinodia then derives safe household controls from the device capability.
@@ -64,7 +64,7 @@ npm run check
 npm start
 ```
 
-Open `http://127.0.0.1:8123` and use `dev-token` unless you set `DINODIA_ADMIN_TOKEN` in `.env`.
+Open `http://127.0.0.1:8123` for the explicitly configured development compatibility harness. Production has no reusable dashboard password.
 
 The dashboard can create a virtual test switch. This makes the core UI, device commands, persistence and automations testable without any radio hardware.
 
@@ -119,7 +119,7 @@ sudo apt-get update && sudo apt-get install -y cloudflared
 cloudflared --version
 ```
 
-Open `http://<pi-ip>:8123`, paste the generated dashboard token, and use the **Connect Cloudflare** panel. For the normal first-run path, enter the `dinodiasmartliving.com` hostname and a unique tunnel name, click **Start Cloudflare setup**, open the authorization link, authorize the Cloudflare account, then click **Finish tunnel setup**. Dinodia OS creates the local tunnel, publishes the hostname to the unified origin `http://127.0.0.1:8123`, and keeps `cloudflared` running. An existing remote tunnel token is supported under the advanced option. The local Hub Agent port is never the tunnel origin. The public dashboard URL is `https://<hostname>/` without `:8123`.
+Open the installer-only local setup address `http://dinodia-<serial>.local/setup` and complete the paired Company Portal session. Production does not use a pasted dashboard password. Cloudflare setup is available only inside that paired setup session, uses the Platform-reserved Dinodia company hostname, and must complete remote verification before installation can be marked complete. The local Hub Agent port is never the tunnel origin. The public dashboard URL is `https://<hostname>/` without `:8123`.
 
 ## Docker Compose deployment
 
@@ -127,7 +127,6 @@ This is the easiest way to run the app and its local MQTT broker:
 
 ```bash
 cp .env.example .env
-# Set DINODIA_ADMIN_TOKEN to a long random value.
 docker compose up -d --build
 ```
 
@@ -172,7 +171,7 @@ The official OTBR Docker setup uses the production `openthread/border-router` im
 
 ### Cloudflare Tunnel (Docker deployment)
 
-The Dinodia container includes the ARM64-compatible `cloudflared` binary. Create a Cloudflare Tunnel published application route whose service is `http://127.0.0.1:8123`, put its token in `CLOUDFLARE_TUNNEL_TOKEN`, and optionally set `CLOUDFLARE_PUBLIC_HOSTNAME`, then run:
+The Dinodia container includes the ARM64-compatible `cloudflared` binary. Production tunnel creation is performed by the paired setup workflow using the Platform-reserved company-domain credential. Do not paste arbitrary Cloudflare tokens or expose a reusable dashboard credential in `.env`.
 
 ```bash
 docker compose up -d --build
@@ -180,11 +179,11 @@ docker compose up -d --build
 
 The dashboard quick-link and named-tunnel controls run inside the Dinodia container, so there is no second Cloudflare service to coordinate. The token is passed to `cloudflared` through `TUNNEL_TOKEN` and is never placed in the command line.
 
-Do not expose MQTT, Matter Server, or OTBR directly to the internet. Cloudflare should be the only remote entry point, and the Dinodia admin token remains required.
+Do not expose MQTT, Matter Server, or OTBR directly to the internet. Cloudflare should be the only remote entry point, and production access remains session-based through Company Portal.
 
 ## API
 
-Dashboard endpoints use `/_dinodia/admin/api/...` on the unified `8123` origin and require `Authorization: Bearer <DINODIA_ADMIN_TOKEN>`. The HA-compatible `/api/...` surface on `8123` accepts the long-lived token (`DINODIA_HA_TOKEN` or the first-boot token shown once by setup). The Hub Agent listener on `8099` accepts platform-issued rotating hub tokens; development also accepts `dev-hub-token`.
+Dashboard endpoints use `/_dinodia/admin/api/...` on the unified `8123` origin and require a short-lived, workflow-bound Company Portal operator session in production. Native app routes use short-lived scoped app tokens or persisted offline-LAN authorizations. The HA-compatible `/api/...` surface and Hub Agent listener are isolated compatibility surfaces; production does not accept dashboard passwords, HA passwords, bootstrap secrets or development tokens.
 
 The initial setup API is:
 
@@ -200,22 +199,21 @@ The initial setup API is:
 - `POST /_dinodia/admin/api/integrations/hive/refresh`, `POST /_dinodia/admin/api/integrations/hive/reauthenticate`, and `DELETE /_dinodia/admin/api/integrations/hive/account` for lifecycle management
 - `GET/POST /api/integrations/cloudflare` for status, a temporary link, a named tunnel, or disconnect
 - `GET /api/provisioning` for the serial, compatibility URLs, pairing status, and first-boot copy-ready values
-- `POST /api/provisioning/pair` to store the platform bootstrap secret and complete Hub Agent pairing
+- `POST /api/provisioning/pair` is retired in production; provisioning is completed through the paired Company Portal handoff and outbound hub challenge
 - `GET /_dinodia/admin/api/activity` for the authenticated six-column activity ledger; use `deviceId`, `category`, `severity`, and cursor pagination to filter it
 
 The unchanged Home Assistant-compatible surface is available on ports `8123` and `8099`, including `/api/states`, `/api/services/<domain>/<service>`, `/api/template`, `/api/websocket`, registries, ZHA compatibility routes, and config flows.
 
 ```bash
 curl http://127.0.0.1:8123/api/health
-curl -H "Authorization: Bearer $DINODIA_ADMIN_TOKEN" http://127.0.0.1:8123/_dinodia/admin/api/status
-curl -H "Authorization: Bearer $DINODIA_ADMIN_TOKEN" http://127.0.0.1:8123/_dinodia/admin/api/devices
+Use the authenticated Company Portal operator session for dashboard requests; production does not accept `DINODIA_ADMIN_TOKEN`.
 ```
 
 Create a virtual device:
 
 ```bash
 curl -X POST http://127.0.0.1:8123/_dinodia/admin/api/devices \
-  -H "Authorization: Bearer $DINODIA_ADMIN_TOKEN" \
+  -H "Authorization: Bearer <short-lived-operator-session>" \
   -H 'content-type: application/json' \
   -d '{"id":"hall-switch","name":"Hall switch","protocol":"virtual","state":{"power":"OFF"}}'
 ```
@@ -224,7 +222,7 @@ Send a device command:
 
 ```bash
 curl -X POST http://127.0.0.1:8123/_dinodia/admin/api/devices/hall-switch/command \
-  -H "Authorization: Bearer $DINODIA_ADMIN_TOKEN" \
+  -H "Authorization: Bearer <short-lived-operator-session>" \
   -H 'content-type: application/json' \
   -d '{"state":{"power":"ON"}}'
 ```
