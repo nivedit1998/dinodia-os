@@ -54,4 +54,19 @@ if (args[0] === "tunnel" && args[1] === "--no-autoupdate") setInterval(() => {},
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(restarted.status().running, true);
   await restarted.stop();
+
+  // A create/route interruption can leave the exact tunnel and local
+  // credential/configuration present while the durable store is still
+  // disabled. A retry must resume only that exact staged tunnel.
+  stored.mode = "disabled";
+  stored.hostname = "";
+  stored.tunnelName = "";
+  stored.tunnelId = "";
+  const resumed = new CloudflareTunnel({ binary, dataDir: directory, origin: "http://127.0.0.1:8123", store, vault: { get: () => null, set: async () => {}, clear: async () => {} }, logger: { error() {} } });
+  await resumed.beginSetup({ tunnelName: "DIN-HOME-001", hostname: "hub.dinodiasmartliving.com" });
+  for (let attempt = 0; attempt < 100 && resumed.status().setup.state === "authorizing"; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+  await resumed.finishSetup();
+  assert.equal(stored.mode, "local");
+  assert.equal(resumed.status().tunnelId, "test-tunnel-id");
+  await resumed.stop();
 });
