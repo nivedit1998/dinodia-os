@@ -37,7 +37,7 @@ class CloudflareTunnel {
   }
 
   settings() {
-    const stored = this.store ? this.store.getCloudflare() : {};
+    const stored = this.store?.getCloudflare?.() || {};
     const storedMode = stored.mode || "disabled";
     return {
       mode: storedMode === "disabled" && this.initialToken ? "named" : storedMode,
@@ -90,6 +90,7 @@ class CloudflareTunnel {
     await this.ensureCloudflareHome();
     await this.stopLogin();
     if (this.nodeEnv === "production" && !/^[A-Za-z0-9_-]{32,256}$/.test(String(reservationToken))) throw new Error("An installation-specific Cloudflare reservation is required");
+    if (reservationToken && this.vault) await this.vault.set("cloudflare.reservationToken", String(reservationToken));
     this.setup = { state: "authorizing", authUrl: "", tunnelName: cleanName, hostname: cleanHostname, reservationToken: String(reservationToken || ""), error: null };
     const child = spawn(this.binary, ["tunnel", "login"], { cwd: this.cloudflareHome, env: this.runtimeEnv(), stdio: ["ignore", "pipe", "pipe"] });
     this.loginProcess = child;
@@ -161,8 +162,10 @@ class CloudflareTunnel {
 
   async finishSetup() {
     if (this.setup.state === "authorizing" || this.loginProcess) throw new Error("Finish authorization in the Cloudflare browser tab first, then try again");
-    if (this.setup.state !== "authorized") throw new Error(this.setup.error || "Start Cloudflare setup first");
-    const { tunnelName, hostname } = this.setup;
+    const stored = this.settings();
+    const retryExisting = stored.mode === "local" && stored.tunnelId && stored.tunnelName && stored.hostname;
+    if (this.setup.state !== "authorized" && !retryExisting) throw new Error(this.setup.error || "Start Cloudflare setup first");
+    const { tunnelName, hostname } = this.setup.state === "authorized" ? this.setup : stored;
     let tunnelId = await this.findTunnelId(tunnelName);
     if (tunnelId) {
       tunnelId = this.existingTunnelIdForSafeResume({ tunnelName, hostname, listedTunnelId: tunnelId });
@@ -193,9 +196,17 @@ class CloudflareTunnel {
     // The account-wide browser certificate is only needed to create the named
     // tunnel. Never retain it as a long-lived hub secret.
     await fsp.rm(path.join(this.cloudflareHome, ".cloudflared", "cert.pem"), { force: true });
-    if (this.store) await this.store.saveCloudflare({ mode: "local", token: "", hostname, tunnelName, tunnelId, origin: this.origin });
+    if (this.store) await this.store.saveCloudflare({ mode: "local", token: "", hostname, tunnelName, tunnelId, origin: this.origin, platformVerification: { state: "PLATFORM_REPORT_PENDING", error: null, updatedAt: new Date().toISOString() } });
     this.setup = { state: "complete", authUrl: "", tunnelName, hostname, reservationToken: this.setup.reservationToken || "", error: null };
     this.startLocal({ tunnelName, tunnelId, hostname });
+    return this.status();
+  }
+
+  async markPlatformVerification({ state, error = null, ...details } = {}) {
+    const allowed = new Set(["LOCAL_TUNNEL_CONNECTED", "PLATFORM_REPORT_PENDING", "PLATFORM_VERIFIED", "PLATFORM_REPORT_FAILED"]);
+    const nextState = allowed.has(String(state)) ? String(state) : "PLATFORM_REPORT_FAILED";
+    const platformVerification = { state: nextState, error: error ? String(error).slice(0, 240) : null, ...details, updatedAt: new Date().toISOString() };
+    if (this.store) await this.store.saveCloudflare({ platformVerification });
     return this.status();
   }
 
@@ -207,7 +218,7 @@ class CloudflareTunnel {
   }
 
   reservationToken() {
-    return String(this.setup.reservationToken || "");
+    return String(this.setup.reservationToken || this.vault?.get?.("cloudflare.reservationToken") || "");
   }
 
   spawnTunnel(args, env = {}) {
@@ -267,6 +278,7 @@ class CloudflareTunnel {
     if (this.nodeEnv === "production") throw Object.assign(new Error("Quick Cloudflare tunnels are retired in production"), { code: "cloudflare_quick_tunnel_retired" });
     await this.stop();
     if (this.vault) await this.vault.clear("cloudflare.token");
+    if (this.vault) await this.vault.clear("cloudflare.reservationToken");
     if (this.store) await this.store.saveCloudflare({ mode: "quick", token: "", hostname: "", origin: this.origin });
     this.publicUrl = "";
     this.lastError = null;
@@ -305,12 +317,17 @@ class CloudflareTunnel {
   status() {
     const settings = this.settings();
     const hostname = settings.hostname ? safeHostname(settings.hostname) : "";
+    const stored = this.store ? this.store.getCloudflare() : {};
+    const platformVerification = stored.platformVerification && typeof stored.platformVerification === "object" ? { ...stored.platformVerification } : { state: "LOCAL_TUNNEL_CONNECTED", error: null };
+    const secureAccessVerified = platformVerification.state === "PLATFORM_VERIFIED";
     const { reservationToken: _reservationToken, ...safeSetup } = this.setup;
     return {
       configured: settings.mode !== "disabled",
       mode: settings.mode,
       running: Boolean(this.process),
       connected: this.connected,
+      secureAccessVerified,
+      platformVerification,
       hostname,
       tunnelName: settings.tunnelName,
       tunnelId: settings.tunnelId,

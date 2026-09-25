@@ -24,8 +24,17 @@ function assertBrokerInput(operation, input) {
     if (!input.payload || typeof input.payload !== "object" || Array.isArray(input.payload)) throw new Error("identity broker payload is invalid");
     const required = operation === "signProvisioningEnvelope"
       ? ["version", "serial", "identityGeneration", "attemptId", "publicKeyPem", "encryptionPublicKeyPem", "publicKeyFingerprint", "encryptionKeyFingerprint", "baseUrl", "issuedAt", "expiresAt"]
-      : ["serial", "cloudUrl", "challenge", "identityFingerprint", "identityGeneration"];
+      : ["version", "serial", "cloudUrl", "challenge", "tunnelId", "tunnelName", "timestamp", "bodyHash", "identityFingerprint", "identityGeneration"];
     if (required.some((key) => input.payload[key] === undefined || input.payload[key] === null)) throw new Error("identity broker payload is incomplete");
+    if (operation === "signCloudChallenge") {
+      const keys = Object.keys(input.payload);
+      if (keys.length !== required.length || required.some((key) => !keys.includes(key))) throw new Error("identity broker CloudURL fields are invalid");
+      if (input.payload.version !== 1 || typeof input.payload.timestamp !== "number" || !Number.isSafeInteger(input.payload.timestamp) || typeof input.payload.identityGeneration !== "number" || !Number.isInteger(input.payload.identityGeneration) || input.payload.identityGeneration < 1) throw new Error("identity broker CloudURL fields are invalid");
+      for (const key of ["serial", "cloudUrl", "challenge", "tunnelId", "tunnelName", "identityFingerprint", "bodyHash"]) {
+        if (typeof input.payload[key] !== "string" || !input.payload[key].trim()) throw new Error("identity broker CloudURL fields are invalid");
+      }
+      if (!/^[a-f0-9]{64}$/i.test(input.payload.bodyHash)) throw new Error("identity broker CloudURL body hash is invalid");
+    }
     if (JSON.stringify(input.payload).length > 32 * 1024) throw new Error("identity broker payload is too large");
     return;
   }
@@ -44,7 +53,11 @@ function assertBrokerInput(operation, input) {
 }
 
 function canonicalCloudChallenge(input) {
-  return JSON.stringify({ version: 1, serial: String(input.serial), cloudUrl: String(input.cloudUrl), challenge: String(input.challenge), identityFingerprint: String(input.identityFingerprint), identityGeneration: Number(input.identityGeneration) });
+  return JSON.stringify({ version: 1, serial: String(input.serial), cloudUrl: String(input.cloudUrl), challenge: String(input.challenge), tunnelId: String(input.tunnelId), tunnelName: String(input.tunnelName), timestamp: Number(input.timestamp), bodyHash: String(input.bodyHash), identityFingerprint: String(input.identityFingerprint), identityGeneration: Number(input.identityGeneration) });
+}
+
+function canonicalCloudChallengeUnsigned(input) {
+  return JSON.stringify({ version: 1, serial: String(input.serial), cloudUrl: String(input.cloudUrl), challenge: String(input.challenge), tunnelId: String(input.tunnelId), tunnelName: String(input.tunnelName), timestamp: Number(input.timestamp), identityFingerprint: String(input.identityFingerprint), identityGeneration: Number(input.identityGeneration) });
 }
 
 function canonicalProvisioning(input) {
@@ -306,4 +319,4 @@ function createIdentityBrokerServer({ socketPath = "/run/dinodia-identityd.sock"
   return server;
 }
 
-module.exports = { IdentityBrokerClient, initializeIdentity, prepareIdentity, finalizeIdentity, loadIdentity, createIdentityBrokerServer, canonicalCloudChallenge, canonicalProvisioning, canonicalPlatformRequest, stableManufacturingIdentityPayload, encryptPrivateKey, decryptPrivateKey };
+module.exports = { IdentityBrokerClient, initializeIdentity, prepareIdentity, finalizeIdentity, loadIdentity, createIdentityBrokerServer, canonicalCloudChallenge, canonicalCloudChallengeUnsigned, canonicalProvisioning, canonicalPlatformRequest, stableManufacturingIdentityPayload, encryptPrivateKey, decryptPrivateKey };

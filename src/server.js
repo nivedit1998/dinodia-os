@@ -50,7 +50,7 @@ const { SetupDiscovery } = require("./setupDiscovery");
 const { RevocationCoordinator } = require("./auth/revocationCoordinator");
 const { OfflineLanAuthorisationStore, digestOfflineCommand } = require("./auth/offlineLanAuthorizer");
 const { StepUpProofVerifier, descriptorBoundValue, digestOperation } = require("./auth/stepUpProofVerifier");
-const { IdentityBrokerClient } = require("./auth/identityBroker");
+const { IdentityBrokerClient, canonicalCloudChallengeUnsigned } = require("./auth/identityBroker");
 const { supportProofOfPossessionDigest } = require("./auth/supportProofOfPossession");
 
 const VERSION = require("../package.json").version;
@@ -1059,7 +1059,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       ["zigbee2mqtt", !result.zigbee.configured || Boolean(result.zigbee.connected && (result.zigbee.service?.running !== false))],
       ["matter", !result.matter.configured || Boolean(result.matter.connected)],
       ["thread", !result.otbr.configured || Boolean(result.otbr.reachable && result.otbr.service?.running !== false)],
-      ["cloudflare", !cloudflareStatus.configured || Boolean(cloudflareStatus.connected)],
+      ["cloudflare", !cloudflareStatus.configured || Boolean(cloudflareStatus.secureAccessVerified)],
       ["hive", !result.hive.configured || ["connected", "disconnected"].includes(String(result.hive.status || ""))],
       ["google_nest", !result.googleNest.configured || ["connected", "disconnected", "disabled"].includes(String(result.googleNest.status || ""))],
       ["platform", !pairingStatus.configured || !pairingStatus.paired || !pairingStatus.lastError],
@@ -1468,7 +1468,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         heatingUsage: heating.status(),
         electricUsage: electric.status(),
         ...(credentials ? { credentials } : {}),
-        urls: { baseUrl: `http://${privateAddress(req)}:${runtimeConfig.haPort}`, hubAgentUrl: `http://${privateAddress(req)}:${runtimeConfig.hubAgentPort}`, cloudUrl: cloudflare.status().connected ? cloudflare.status().publicUrl || "" : "" },
+        urls: { baseUrl: `http://${privateAddress(req)}:${runtimeConfig.haPort}`, hubAgentUrl: `http://${privateAddress(req)}:${runtimeConfig.hubAgentPort}`, cloudUrl: cloudflare.status().secureAccessVerified ? cloudflare.status().publicUrl || "" : "" },
       });
     }
     if (resource === "provisioning" && parts[2] === "credentials" && parts[3] === "ack" && req.method === "POST") {
@@ -2057,8 +2057,14 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       }
       if (body.action === "finish") {
         const result = await cloudflare.finishSetup();
-        if (result?.publicUrl && pairing?.reportCloudUrl) await pairing.reportCloudUrl(result.publicUrl, { tunnelId: result.tunnelId, tunnelName: result.tunnelName, hostname: result.hostname, reservationToken: cloudflare.reservationToken() });
-        return json(res, 200, result);
+        try {
+          if (!result?.publicUrl || !pairing?.reportCloudUrl) throw new Error("The local Cloudflare tunnel is not ready to report to Platform");
+          const report = await pairing.reportCloudUrl(result.publicUrl, { tunnelId: result.tunnelId, tunnelName: result.tunnelName, hostname: result.hostname, reservationToken: cloudflare.reservationToken() });
+          return json(res, 200, await cloudflare.markPlatformVerification({ state: "PLATFORM_VERIFIED", cloudUrl: result.publicUrl, verificationId: report.verificationId || null }));
+        } catch (error) {
+          await cloudflare.markPlatformVerification({ state: "PLATFORM_REPORT_FAILED", error: error.message || "Platform CloudURL verification failed" }).catch(() => {});
+          throw error;
+        }
       }
       if (body.action === "connect" && runtimeConfig.nodeEnv === "production") return json(res, 410, { error: "Arbitrary Cloudflare tunnel tokens are retired", errorCode: "cloudflare_token_flow_retired" });
       if (body.action === "connect") return json(res, 200, await cloudflare.configure({ token: body.token, hostname: body.hostname }));
@@ -2564,8 +2570,9 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       const publicIdentity = await pairing.getPublicIdentity();
       const identityFingerprint = publicIdentity?.publicKeyFingerprint || null;
       if (!identityFingerprint) return json(res, 503, { error: "Hub signing identity is unavailable" });
-      const responseBody = { version: 1, serial, cloudUrl, challenge, tunnelId, tunnelName, timestamp: Date.now(), identityFingerprint, identityGeneration: Number(publicIdentity.generation) };
-      responseBody.bodyHash = crypto.createHash("sha256").update(JSON.stringify(responseBody), "utf8").digest("hex");
+      const unsignedBody = { version: 1, serial, cloudUrl, challenge, tunnelId, tunnelName, timestamp: Date.now(), identityFingerprint, identityGeneration: Number(publicIdentity.generation) };
+      const bodyHash = crypto.createHash("sha256").update(canonicalCloudChallengeUnsigned(unsignedBody), "utf8").digest("hex");
+      const responseBody = { version: 1, serial, cloudUrl, challenge, tunnelId, tunnelName, timestamp: unsignedBody.timestamp, bodyHash, identityFingerprint, identityGeneration: unsignedBody.identityGeneration };
       let hubSignature;
       try {
         hubSignature = await pairing.signCloudChallenge(responseBody);

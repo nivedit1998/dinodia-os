@@ -1,5 +1,6 @@
 const crypto = require("node:crypto");
 const os = require("node:os");
+const { canonicalCloudChallenge } = require("./auth/identityBroker");
 
 function sign(secret, serial, ts, nonce) {
   return crypto.createHmac("sha256", String(secret)).update(`${serial}.${ts}.${nonce}`).digest("hex");
@@ -168,7 +169,7 @@ class PlatformPairing {
     if (this.identityBroker) return (await this.identityBroker.signCloudChallenge({ payload })).signature;
     const identity = this.loadManufacturingIdentity();
     if (!identity?.privateKey) throw new Error("A factory-enrolled hub signing identity is required");
-    const canonical = JSON.stringify({ version: 1, serial: String(payload.serial), cloudUrl: String(payload.cloudUrl), challenge: String(payload.challenge), tunnelId: String(payload.tunnelId), tunnelName: String(payload.tunnelName), timestamp: Number(payload.timestamp), bodyHash: String(payload.bodyHash), identityFingerprint: String(payload.identityFingerprint), identityGeneration: Number(payload.identityGeneration) });
+    const canonical = canonicalCloudChallenge(payload);
     return crypto.sign(null, Buffer.from(canonical, "utf8"), identity.privateKey).toString("base64url");
   }
 

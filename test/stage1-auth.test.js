@@ -10,7 +10,7 @@ const { StepUpProofRegistry } = require("../src/auth/stepUpProofs");
 const { RevocationCoordinator } = require("../src/auth/revocationCoordinator");
 const { Store } = require("../src/store");
 const { SecretVault } = require("../src/secretVault");
-const { canonicalPlatformRequest, encryptPrivateKey, decryptPrivateKey } = require("../src/auth/identityBroker");
+const { canonicalPlatformRequest, canonicalCloudChallenge, canonicalCloudChallengeUnsigned, encryptPrivateKey, decryptPrivateKey } = require("../src/auth/identityBroker");
 const { supportProofOfPossessionDigest } = require("../src/auth/supportProofOfPossession");
 
 test("operator sessions are signed, hub-bound, session-time-limited, with separate recent-auth enforcement", () => {
@@ -146,6 +146,22 @@ test("identity broker canonical signing is operation-bound and encrypted blobs r
   tampered.ciphertext = `${tampered.ciphertext.slice(0, -2)}AA`;
   assert.throws(() => decryptPrivateKey(JSON.stringify(tampered), wrappingKey, context));
   assert.throws(() => decryptPrivateKey(blob, wrappingKey, { ...context, purpose: "encryption" }), /context mismatch/);
+});
+
+test("CloudURL challenge signing is byte-stable across identityd and in-process paths", () => {
+  const keys = crypto.generateKeyPairSync("ed25519");
+  const payload = { version: 1, serial: "din-home-001", cloudUrl: "https://dinodia-din-home-001.dinodiasmartliving.com", challenge: "challenge-012345678901234567890", tunnelId: "11111111-1111-4111-8111-111111111111", tunnelName: "dinodia-din-home-001", timestamp: 1790000000000, identityFingerprint: "a".repeat(64), identityGeneration: 1 };
+  const unsigned = canonicalCloudChallengeUnsigned(payload);
+  const bodyHash = crypto.createHash("sha256").update(unsigned, "utf8").digest("hex");
+  const complete = { ...payload, bodyHash };
+  const expected = JSON.stringify({ version: 1, serial: payload.serial, cloudUrl: payload.cloudUrl, challenge: payload.challenge, tunnelId: payload.tunnelId, tunnelName: payload.tunnelName, timestamp: payload.timestamp, bodyHash, identityFingerprint: payload.identityFingerprint, identityGeneration: 1 });
+  assert.equal(canonicalCloudChallenge(complete), expected);
+  const signature = crypto.sign(null, Buffer.from(canonicalCloudChallenge(complete), "utf8"), keys.privateKey);
+  assert.equal(crypto.verify(null, Buffer.from(canonicalCloudChallenge(complete), "utf8"), keys.publicKey, signature), true);
+  for (const field of ["serial", "cloudUrl", "challenge", "tunnelId", "tunnelName", "timestamp", "bodyHash", "identityFingerprint", "identityGeneration"]) {
+    const mutated = { ...complete, [field]: field === "timestamp" || field === "identityGeneration" ? Number(complete[field]) + 1 : `${complete[field]}-changed` };
+    assert.equal(crypto.verify(null, Buffer.from(canonicalCloudChallenge(mutated), "utf8"), keys.publicKey, signature), false, field);
+  }
 });
 
 test("identity broker is a root-only, certificate-bearing boundary", () => {
