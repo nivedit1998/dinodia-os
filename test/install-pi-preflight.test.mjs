@@ -68,4 +68,8 @@ test("installer build identity changes when the locked setup runtime changes", a
   await fs.appendFile(setupPath, "\n// build identity regression fixture\n");
   const after = validateCandidate({ sourceDir: candidate, envFile: fixtureData.envFile, identityDir: fixtureData.identityDir });
   assert.notEqual(after.buildId, before.buildId);
+  const cloudflarePath = path.join(candidate, "src", "cloudflareTunnel.js");
+  await fs.appendFile(cloudflarePath, "\n// build identity regression fixture\n");
+  const afterCloudflare = validateCandidate({ sourceDir: candidate, envFile: fixtureData.envFile, identityDir: fixtureData.identityDir });
+  assert.notEqual(afterCloudflare.buildId, after.buildId);
 });
