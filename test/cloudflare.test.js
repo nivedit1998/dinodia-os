@@ -55,6 +55,18 @@ if (args[0] === "tunnel" && args[1] === "--no-autoupdate") setInterval(() => {},
   assert.equal(restarted.status().running, true);
   await restarted.stop();
 
+  // Once paired, the account-wide cert.pem is intentionally removed. A
+  // resumed setup must reuse the durable tunnel ID/config/credential and must
+  // not call account-level list/create/DNS-route commands.
+  await fs.rm(path.join(directory, "cloudflared", ".cloudflared", "cert.pem"), { force: true });
+  const resumedPaired = new CloudflareTunnel({ binary, dataDir: directory, origin: "http://127.0.0.1:8123", store, vault: { get: () => null, set: async () => {}, clear: async () => {} }, logger: { error() {} } });
+  const resumedCommands = [];
+  resumedPaired.runCommand = async (args) => { resumedCommands.push(args); throw new Error(`unexpected resumed command: ${args.join(" ")}`); };
+  resumedPaired.startLocal = () => {};
+  await resumedPaired.finishSetup();
+  assert.deepEqual(resumedCommands, []);
+  assert.equal(resumedPaired.status().tunnelId, "test-tunnel-id");
+
   // A create/route interruption can leave the exact tunnel and local
   // credential/configuration present while the durable store is still
   // disabled. A retry must resume only that exact staged tunnel.

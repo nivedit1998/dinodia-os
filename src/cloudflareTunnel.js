@@ -166,39 +166,53 @@ class CloudflareTunnel {
     const retryExisting = stored.mode === "local" && stored.tunnelId && stored.tunnelName && stored.hostname;
     if (this.setup.state !== "authorized" && !retryExisting) throw new Error(this.setup.error || "Start Cloudflare setup first");
     const { tunnelName, hostname } = this.setup.state === "authorized" ? this.setup : stored;
-    let tunnelId = await this.findTunnelId(tunnelName);
-    if (tunnelId) {
-      tunnelId = this.existingTunnelIdForSafeResume({ tunnelName, hostname, listedTunnelId: tunnelId });
+    let tunnelId = "";
+    if (retryExisting) {
+      // A resumed paired hub deliberately has no account-wide cert.pem. The
+      // durable installation record, local config and tunnel credential are
+      // sufficient to retry the signed Platform report; account-level list,
+      // create and DNS-route commands must never be needed here.
+      tunnelId = String(stored.tunnelId);
+      const local = this.localTunnelConfig();
+      const credentialPath = path.join(this.cloudflareHome, ".cloudflared", `${tunnelId}.json`);
+      if (!local || local.tunnelId !== tunnelId || local.hostname !== hostname || !fs.existsSync(credentialPath)) {
+        throw new Error("The paired Cloudflare tunnel state is incomplete or inconsistent; refusing to resume it");
+      }
     } else {
-      try {
-        await this.runCommand(["tunnel", "create", tunnelName]);
-      } catch (error) {
-        // Cloudflare can make the tunnel visible after the create request has
-        // already returned an error. Recover only when the exact reserved
-        // name and its local credential become visible on retry.
-        const recoveredId = await this.findTunnelId(tunnelName, { attempts: 8 });
-        if (!recoveredId) throw error;
-        tunnelId = this.existingTunnelIdForSafeResume({ tunnelName, hostname, listedTunnelId: recoveredId });
-      }
+      tunnelId = await this.findTunnelId(tunnelName);
       if (tunnelId) {
-        // The create race recovered the authoritative existing tunnel.
+        tunnelId = this.existingTunnelIdForSafeResume({ tunnelName, hostname, listedTunnelId: tunnelId });
       } else {
-        tunnelId = await this.findTunnelId(tunnelName, { attempts: 8 });
+        try {
+          await this.runCommand(["tunnel", "create", tunnelName]);
+        } catch (error) {
+          // Cloudflare can make the tunnel visible after the create request has
+          // already returned an error. Recover only when the exact reserved
+          // name and its local credential become visible on retry.
+          const recoveredId = await this.findTunnelId(tunnelName, { attempts: 8 });
+          if (!recoveredId) throw error;
+          tunnelId = this.existingTunnelIdForSafeResume({ tunnelName, hostname, listedTunnelId: recoveredId });
+        }
+        if (tunnelId) {
+          // The create race recovered the authoritative existing tunnel.
+        } else {
+          tunnelId = await this.findTunnelId(tunnelName, { attempts: 8 });
+        }
+        if (!tunnelId) throw new Error("Cloudflare created the tunnel but its ID could not be found");
       }
-      if (!tunnelId) throw new Error("Cloudflare created the tunnel but its ID could not be found");
     }
     const credentialPath = path.join(this.cloudflareHome, ".cloudflared", `${tunnelId}.json`);
     if (!fs.existsSync(credentialPath)) throw new Error("Cloudflare tunnel credentials were not created");
     const configPath = path.join(this.cloudflareHome, "config.yml");
     const config = [`tunnel: ${tunnelId}`, `credentials-file: ${credentialPath}`, "ingress:", `  - hostname: ${hostname}`, `    service: ${this.origin}`, "  - service: http_status:404", ""].join("\n");
     await fsp.writeFile(configPath, config, { mode: 0o600 });
-    await this.runCommand(["tunnel", "route", "dns", tunnelName, hostname]);
+    if (!retryExisting) await this.runCommand(["tunnel", "route", "dns", tunnelName, hostname]);
     // The account-wide browser certificate is only needed to create the named
     // tunnel. Never retain it as a long-lived hub secret.
     await fsp.rm(path.join(this.cloudflareHome, ".cloudflared", "cert.pem"), { force: true });
     if (this.store) await this.store.saveCloudflare({ mode: "local", token: "", hostname, tunnelName, tunnelId, origin: this.origin, platformVerification: { state: "PLATFORM_REPORT_PENDING", error: null, updatedAt: new Date().toISOString() } });
     this.setup = { state: "complete", authUrl: "", tunnelName, hostname, reservationToken: this.setup.reservationToken || "", error: null };
-    this.startLocal({ tunnelName, tunnelId, hostname });
+    if (!this.process) this.startLocal({ tunnelName, tunnelId, hostname });
     return this.status();
   }
 
