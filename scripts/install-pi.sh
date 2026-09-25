@@ -85,6 +85,13 @@ trap cleanup_failed_install EXIT
 cp -a "${candidate_files[@]/#/$APP_SOURCE/}" "$STAGE_DIR/"
 install -o "$INSTALL_USER" -g "$INSTALL_USER" -m 0600 "$CURRENT_ENV" "$STAGE_DIR/.env"
 
+# The release dependency install intentionally runs as the service user.  The
+# staging directory was created by root, so transfer ownership of only this
+# isolated, not-yet-active candidate before npm/venv writes into it.  The
+# enrolled identity and active installation remain root-controlled until the
+# atomic switch below.
+chown -R "$INSTALL_USER":"$INSTALL_USER" "$STAGE_DIR"
+
 # Put the immutable build identity into the staged environment without
 # printing any existing secret values. A same-directory rename keeps the file
 # valid for systemd and Docker Compose throughout the transition.
