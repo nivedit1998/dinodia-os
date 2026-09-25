@@ -377,7 +377,7 @@ function createCompatInterface({ port = 8123, host = "0.0.0.0", model, store, au
     const result = (value) => socket.send(JSON.stringify({ id, type: "result", success: true, result: value }));
     const failure = (error) => socket.send(JSON.stringify({ id, type: "result", success: false, error: { code: error.code || "invalid_request", message: error.message || "Command failed" } }));
     (async () => {
-      if (typeof authorizeWsMessage === "function" && !await authorizeWsMessage(message, principal, { model, store })) throw Object.assign(new Error("This WebSocket operation is not permitted"), { code: "insufficient_scope" });
+      if (typeof authorizeWsMessage === "function" && !await authorizeWsMessage(message, principal, { model, store, socket })) throw Object.assign(new Error("This WebSocket operation is not permitted"), { code: "insufficient_scope" });
       switch (message.type) {
         case "get_states": return result(listStates(principal));
         case "call_service": {

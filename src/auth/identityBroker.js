@@ -11,7 +11,6 @@ const ALLOWED = new Set([
   "signProvisioningEnvelope",
   "signPlatformRequest",
   "signCloudChallenge",
-  "signStepUpDescriptor",
   "decryptMachineCredentialEnvelope",
 ]);
 
@@ -21,13 +20,11 @@ function assertBrokerInput(operation, input) {
     if (Object.keys(input).length !== 0) throw new Error("identity broker input is invalid");
     return;
   }
-  if (operation === "signProvisioningEnvelope" || operation === "signCloudChallenge" || operation === "signStepUpDescriptor") {
+  if (operation === "signProvisioningEnvelope" || operation === "signCloudChallenge") {
     if (!input.payload || typeof input.payload !== "object" || Array.isArray(input.payload)) throw new Error("identity broker payload is invalid");
     const required = operation === "signProvisioningEnvelope"
       ? ["version", "serial", "identityGeneration", "attemptId", "publicKeyPem", "encryptionPublicKeyPem", "publicKeyFingerprint", "encryptionKeyFingerprint", "baseUrl", "issuedAt", "expiresAt"]
-      : operation === "signCloudChallenge"
-        ? ["serial", "cloudUrl", "challenge", "identityFingerprint", "identityGeneration"]
-        : ["version", "serial", "identityGeneration", "actorId", "customerSessionId", "trustedDeviceId", "homeId", "membershipId", "hubInstallId", "operationKind", "targetIds", "controlId", "descriptorRevision", "descriptorDigest", "operationDigest", "nonce", "issuedAt"];
+      : ["serial", "cloudUrl", "challenge", "identityFingerprint", "identityGeneration"];
     if (required.some((key) => input.payload[key] === undefined || input.payload[key] === null)) throw new Error("identity broker payload is incomplete");
     if (JSON.stringify(input.payload).length > 32 * 1024) throw new Error("identity broker payload is too large");
     return;
@@ -48,28 +45,6 @@ function assertBrokerInput(operation, input) {
 
 function canonicalCloudChallenge(input) {
   return JSON.stringify({ version: 1, serial: String(input.serial), cloudUrl: String(input.cloudUrl), challenge: String(input.challenge), identityFingerprint: String(input.identityFingerprint), identityGeneration: Number(input.identityGeneration) });
-}
-
-function canonicalStepUpDescriptor(input) {
-  return JSON.stringify({
-    version: Number(input.version),
-    serial: String(input.serial),
-    identityGeneration: Number(input.identityGeneration),
-    actorId: String(input.actorId),
-    customerSessionId: String(input.customerSessionId),
-    trustedDeviceId: String(input.trustedDeviceId),
-    homeId: String(input.homeId),
-    membershipId: String(input.membershipId),
-    hubInstallId: String(input.hubInstallId),
-    operationKind: String(input.operationKind),
-    targetIds: Array.isArray(input.targetIds) ? input.targetIds.map(String) : [],
-    controlId: String(input.controlId),
-    descriptorRevision: Number(input.descriptorRevision),
-    descriptorDigest: input.descriptorDigest == null ? null : String(input.descriptorDigest),
-    operationDigest: String(input.operationDigest),
-    nonce: String(input.nonce),
-    issuedAt: Number(input.issuedAt),
-  });
 }
 
 function canonicalProvisioning(input) {
@@ -145,7 +120,6 @@ class IdentityBrokerClient {
   signProvisioningEnvelope(input) { return this.request("signProvisioningEnvelope", input); }
   signPlatformRequest(input) { return this.request("signPlatformRequest", input); }
   signCloudChallenge(input) { return this.request("signCloudChallenge", input); }
-  signStepUpDescriptor(input) { return this.request("signStepUpDescriptor", input); }
   decryptMachineCredentialEnvelope(input) { return this.request("decryptMachineCredentialEnvelope", input); }
 }
 
@@ -299,7 +273,6 @@ function brokerResult(operation, input, identity) {
   if (operation === "signProvisioningEnvelope") return { signature: crypto.sign(null, Buffer.from(canonicalProvisioning(input.payload), "utf8"), identity.signingPrivateKey).toString("base64url") };
   if (operation === "signPlatformRequest") return { signature: crypto.sign(null, Buffer.from(canonicalPlatformRequest(input), "utf8"), identity.signingPrivateKey).toString("base64url") };
   if (operation === "signCloudChallenge") return { signature: crypto.sign(null, Buffer.from(canonicalCloudChallenge(input.payload), "utf8"), identity.signingPrivateKey).toString("base64url") };
-  if (operation === "signStepUpDescriptor") return { signature: crypto.sign(null, Buffer.from(canonicalStepUpDescriptor(input.payload), "utf8"), identity.signingPrivateKey).toString("base64url") };
   if (operation === "decryptMachineCredentialEnvelope") {
     const envelope = input.envelope; if (!envelope || envelope.algorithm !== "x25519-hkdf-sha256/aes-256-gcm" || !new Set(["machine-credential", "operator-session", "operator-handoff", "support-session"]).has(String(input.purpose))) throw new Error("credential envelope is not allowed");
     const sender = crypto.createPublicKey(String(envelope.ephemeralPublicKeyPem || "")); if (sender.asymmetricKeyType !== "x25519") throw new Error("credential sender key is invalid");
@@ -333,4 +306,4 @@ function createIdentityBrokerServer({ socketPath = "/run/dinodia-identityd.sock"
   return server;
 }
 
-module.exports = { IdentityBrokerClient, initializeIdentity, prepareIdentity, finalizeIdentity, loadIdentity, createIdentityBrokerServer, canonicalCloudChallenge, canonicalStepUpDescriptor, canonicalProvisioning, canonicalPlatformRequest, stableManufacturingIdentityPayload, encryptPrivateKey, decryptPrivateKey };
+module.exports = { IdentityBrokerClient, initializeIdentity, prepareIdentity, finalizeIdentity, loadIdentity, createIdentityBrokerServer, canonicalCloudChallenge, canonicalProvisioning, canonicalPlatformRequest, stableManufacturingIdentityPayload, encryptPrivateKey, decryptPrivateKey };

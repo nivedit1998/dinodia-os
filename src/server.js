@@ -51,6 +51,7 @@ const { RevocationCoordinator } = require("./auth/revocationCoordinator");
 const { OfflineLanAuthorisationStore, digestOfflineCommand } = require("./auth/offlineLanAuthorizer");
 const { StepUpProofVerifier, descriptorBoundValue, digestOperation } = require("./auth/stepUpProofVerifier");
 const { IdentityBrokerClient } = require("./auth/identityBroker");
+const { supportProofOfPossessionDigest } = require("./auth/supportProofOfPossession");
 
 const VERSION = require("../package.json").version;
 
@@ -351,7 +352,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     const principal = verifyAppAccessToken(token, {
       publicKeys: appPublicKeys,
       hubId: platform.hubInstallId || serial,
-      policyRevision: Number(hubStore?.getAuth?.().policyRevision || 0),
+      policyRevision: Math.max(Number(platform.policyRevision || 0), Number(hubStore?.getAuth?.().policyRevision || 0)),
     });
     if (!principal) return null;
     const identity = hubStore.getIdentity?.() || {};
@@ -914,7 +915,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       const principal = operatorSessionAuth(token);
       if (principal && principal.scope.includes("os:admin")) return principal;
       const appPrincipal = appSessionAuth(token);
-      if (appPrincipal) return { ...appPrincipal, principalType: "app", credentialFingerprint: hashTokenValue(token).slice(0, 32) };
+      if (appPrincipal) return { ...appPrincipal, principalType: "app", authToken: String(token), credentialFingerprint: hashTokenValue(token).slice(0, 32) };
       if (!legacyCompatibilityEnabled) return null;
       const haPrincipal = haAuth(token);
       if (haPrincipal) return { principalType: "legacy_ha", credentialFingerprint: hashTokenValue(token).slice(0, 32) };
@@ -931,13 +932,26 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         return principal?.principalType === "operator"
           || (runtimeConfig.nodeEnv !== "production" && legacyCompatibilityEnabled && ["legacy_ha", "legacy_admin"].includes(principal?.principalType));
       }
+      // A native app token is short-lived, but a WebSocket can outlive its
+      // original HTTP request. Revalidate the exact signed token against the
+      // current hub policy before every message so a policy/session/trusted
+      // device change cannot leave an already-connected socket authorized.
+      // The raw token exists only in this in-memory socket principal and is
+      // never serialized or returned to the client.
+      if (!principal.authToken || !appSessionAuth(principal.authToken)) {
+        context.socket?.close?.(4401, "Policy changed");
+        return false;
+      }
       if (["get_states", "subscribe_events", "unsubscribe_events", "get_services_for_target"].includes(String(message.type))) return true;
       if (message.type !== "call_service" || principal.householdRole !== "TENANT" || !principal.scope.includes("tenant:device-command")) return false;
       const target = { ...(message.service_data || {}), ...(message.target || {}) };
       const entityId = String(target.entity_id || target.entityId || "");
       const entity = context.model.entities().find((item) => item.haId === entityId || item.entityId === entityId || item.rawId === entityId);
       if (!entity) return false;
-      return appCanCommandDevice(principal, entity.device, target, entity, message.service);
+      const requestedService = message.domain && message.service
+        ? `${String(message.domain).toLowerCase()}.${String(message.service).toLowerCase()}`
+        : message.service;
+      return appCanCommandDevice(principal, entity.device, target, entity, requestedService);
     },
     filterWsStates: (states, principal) => {
       if (principal?.principalType !== "app") return states;
@@ -1128,14 +1142,16 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
 
   function appCanCommandDevice(principal, device, body, entity, serviceId) {
     if (!appCanReadDevice(principal, device) || principal.householdRole !== "TENANT" || !principal.scope.includes("tenant:device-command")) return false;
-    const controlId = String(body?.controlId || body?.control_id || "");
-    if (entity?.capability?.writable === false) return false;
+    const descriptor = entity?.surface || entity?.entity || entity || {};
+    const capability = descriptor.capability || {};
+    const controlId = String(body?.controlId || body?.control_id || descriptor.controlId || capability.controlId || "");
+    if (capability.writable === false) return false;
     const requestedService = String(serviceId || body?.serviceId || body?.service_id || "").toLowerCase();
-    const bindings = Array.isArray(entity?.capability?.bindings) ? entity.capability.bindings : [];
+    const bindings = Array.isArray(capability.bindings) ? capability.bindings : [];
     const advertised = bindings.some((binding) => String(binding?.serviceId || "").toLowerCase() === requestedService);
     if (!advertised) return false;
     if (!controlId) return true;
-    return String(entity.controlId || entity.capability?.controlId || entity.id) === controlId;
+    return String(descriptor.controlId || capability.controlId || descriptor.id) === controlId;
   }
 
   function isSupportOperator(principal) {
@@ -2289,7 +2305,15 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         const proofToken = await pairing.decryptCredentialDelivery({ version: 1, envelope: JSON.parse(proofEnvelope) }, "support-session");
         const proofPrincipal = verifyOperatorSessionToken(proofToken, { publicKey: operatorPublicKey, hubId: serial, requiredScope: "support:redeem", requireRecentAuth: true });
         if (!proofPrincipal) throw Object.assign(new Error("The employee proof is not valid for this hub"), { statusCode: 401, code: "support_proof_invalid" });
-        result = await pairing.requestWithHubIdentity("/api/hub-agent/support/v2/redeem", { serial, ticketId, requestId: proofRequestId, identityGeneration: proofIdentityGeneration, code, employeeProof: proofToken });
+        const employeeProofHash = crypto.createHash("sha256").update(proofToken, "utf8").digest("hex");
+        // Platform stores only the approved code hash.  The hub may receive
+        // the one-use code over this local support surface, but the
+        // proof-of-possession message must never send or persist the
+        // plaintext code and must use the same canonical digest on both
+        // runtimes.
+        const codeHash = crypto.createHash("sha256").update(code, "utf8").digest("hex");
+        const employeeProofOfPossession = supportProofOfPossessionDigest({ employeeProofHash, serial, ticketId, requestId: proofRequestId, codeHash, identityGeneration: proofIdentityGeneration });
+        result = await pairing.requestWithHubIdentity("/api/hub-agent/support/v2/redeem", { serial, ticketId, requestId: proofRequestId, identityGeneration: proofIdentityGeneration, code, employeeProofOfPossession });
       } catch (error) {
         return json(res, Number(error.statusCode) || 502, { error: "The support code was not accepted", errorCode: error.code || "support_redeem_rejected" });
       }
@@ -2372,9 +2396,17 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     const operatorPlatformRequest = async (requestBody) => {
       const timestamp = Date.now();
       const nonce = crypto.randomBytes(24).toString("base64url");
-      const bodyHash = crypto.createHash("sha256").update(JSON.stringify(requestBody), "utf8").digest("hex");
-      const signature = await pairing.signPlatformRequest({ method: "POST", path: "/api/hub-agent/operator-session/consume", timestamp, nonce, bodyHash });
-      return fetch(`${runtimeConfig.platformApiUrl.replace(/\/$/, "")}/api/hub-agent/operator-session/consume`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json", "x-dinodia-hub-timestamp": String(timestamp), "x-dinodia-hub-nonce": nonce, "x-dinodia-hub-signature": signature }, body: JSON.stringify(requestBody) });
+      const identity = await pairing.getPublicIdentity();
+      if (!identity?.generation) throw new Error("The hub signing identity generation is unavailable");
+      const signedBody = { serial, identityGeneration: Number(identity.generation), ...requestBody };
+      const bodyHash = crypto.createHash("sha256").update(JSON.stringify(signedBody), "utf8").digest("hex");
+      const platform = pairing.store?.getPlatform?.() || {};
+      const machineCredential = pairing.vault?.get?.("platform.machineCredential");
+      const machineVersion = Number(platform.provisioningCredentialVersion || 0);
+      if (!machineCredential || !Number.isInteger(machineVersion) || machineVersion < 1) throw new Error("The acknowledged hub machine credential is unavailable");
+      const machineSignature = crypto.createHmac("sha256", crypto.createHash("sha256").update(String(machineCredential), "utf8").digest("hex")).update(["POST", "/api/hub-agent/operator-session/consume", String(timestamp), nonce, bodyHash].join("\n"), "utf8").digest("base64url");
+      const platformOrigin = String(pairing.apiUrl || runtimeConfig.platformApiUrl || "").replace(/\/$/, "");
+      return fetch(`${platformOrigin}/api/hub-agent/operator-session/consume`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json", "x-dinodia-hub-timestamp": String(timestamp), "x-dinodia-hub-nonce": nonce, "x-dinodia-body-sha256": bodyHash, "x-dinodia-machine-version": String(machineVersion), "x-dinodia-machine-signature": machineSignature }, body: JSON.stringify(signedBody) });
     };
     let response;
     const requestBody = { handoffId, browserBinding, setupAttemptId, serial, phase: "prepare" };
@@ -2471,7 +2503,20 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       dashboardUrl.pathname.startsWith("/api/devices/") ||
       (req.method === "POST" && dashboardUrl.pathname.startsWith("/api/entities/") && dashboardUrl.pathname.endsWith("/service"))
     );
-    if (runtimeConfig.nodeEnv === "production" && !operator && !app) {
+    // Offline LAN authority is deliberately admitted only for the narrow
+    // native service-dispatch path. handleApi() performs the actual signed
+    // grant/challenge verification; this gate merely prevents the dashboard
+    // wrapper from rejecting a valid offline request before that verifier can
+    // run. It never unlocks the dashboard shell or any other route.
+    const offlineNativeCommand = runtimeConfig.nodeEnv === "production" && isDashboardAdminPath(url.pathname)
+      && req.method === "POST"
+      && dashboardUrl.pathname.startsWith("/api/entities/")
+      && dashboardUrl.pathname.endsWith("/service")
+      && Boolean(req.headers["x-dinodia-offline-grant"])
+      && Boolean(req.headers["x-dinodia-offline-challenge"])
+      && Boolean(req.headers["x-dinodia-offline-signature"])
+      && isPrivateLanRequest(req);
+    if (runtimeConfig.nodeEnv === "production" && !operator && !app && !offlineNativeCommand) {
       return json(res, 401, { error: "A temporary Dinodia OS operator session is required", errorCode: "operator_session_required" });
     }
     if (runtimeConfig.nodeEnv === "production" && app && !operator && !nativeAppApi) return json(res, 403, { error: "This app principal cannot open the Dinodia OS dashboard", errorCode: "insufficient_scope" });

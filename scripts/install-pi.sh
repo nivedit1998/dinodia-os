@@ -73,6 +73,38 @@ if [[ ! -f "$INSTALL_DIR/.env" ]]; then
   echo "Created $INSTALL_DIR/.env. Production access is session-based; no reusable dashboard or HA password is generated."
 fi
 
+# systemd EnvironmentFile and Docker Compose both require one assignment per
+# physical line. PEM values must therefore use literal \\n separators (the runtime decodes them), never pasted multi-line PEM text.
+if ! awk '
+  /^[[:space:]]*#/ || /^[[:space:]]*$/ || /^[A-Za-z_][A-Za-z0-9_]*=/ { next }
+  { print NR ":" $0; invalid = 1 }
+  END { exit invalid ? 1 : 0 }
+' "$INSTALL_DIR/.env"; then
+  echo "Invalid $INSTALL_DIR/.env: every setting must be one KEY=VALUE line; encode PEM newlines as literal \\n sequences. No service was started."
+  exit 78
+fi
+
+if ! grep -Eq '^NODE_ENV=production$' "$INSTALL_DIR/.env"; then
+  echo "Invalid $INSTALL_DIR/.env: NODE_ENV=production is required for the candidate."
+  exit 78
+fi
+if ! grep -Eq '^DINODIA_PLATFORM_API_URL=https://dinodia-platform-v2\\.vercel\\.app/?$' "$INSTALL_DIR/.env"; then
+  echo "Invalid $INSTALL_DIR/.env: DINODIA_PLATFORM_API_URL must be the canonical V2 origin."
+  exit 78
+fi
+for forbidden in DINODIA_ADMIN_TOKEN DINODIA_HA_TOKEN DINODIA_PLATFORM_TOKEN DINODIA_PLATFORM_BOOTSTRAP_SECRET; do
+  if grep -Eq "^${forbidden}=" "$INSTALL_DIR/.env"; then
+    echo "Invalid $INSTALL_DIR/.env: legacy credential setting ${forbidden} must be removed."
+    exit 78
+  fi
+done
+for required_native in DINODIA_APP_PUBLIC_KEYS DINODIA_OPERATOR_PUBLIC_KEY DINODIA_MANUFACTURING_ROOT_PUBLIC_KEYS; do
+  if ! grep -Eq "^${required_native}=.+$" "$INSTALL_DIR/.env"; then
+    echo "Invalid $INSTALL_DIR/.env: ${required_native} is required before Native V2 startup."
+    exit 78
+  fi
+done
+
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   mkdir -p "$DATA_DIR/mosquitto" "$DATA_DIR/mosquitto-log" "$DATA_DIR/zigbee2mqtt" "$DATA_DIR/matter" "$DATA_DIR/otbr"
   if grep -q '^MQTT_URL=$' "$INSTALL_DIR/.env"; then

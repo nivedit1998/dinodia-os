@@ -5,6 +5,36 @@ function sign(secret, serial, ts, nonce) {
   return crypto.createHmac("sha256", String(secret)).update(`${serial}.${ts}.${nonce}`).digest("hex");
 }
 
+function canonicalStepUpDescriptor(input) {
+  return JSON.stringify({
+    version: Number(input.version),
+    serial: String(input.serial),
+    identityGeneration: Number(input.identityGeneration),
+    actorId: String(input.actorId),
+    customerSessionId: String(input.customerSessionId),
+    trustedDeviceId: String(input.trustedDeviceId),
+    homeId: String(input.homeId),
+    membershipId: String(input.membershipId),
+    hubInstallId: String(input.hubInstallId),
+    operationKind: String(input.operationKind),
+    targetIds: Array.isArray(input.targetIds) ? input.targetIds.map(String) : [],
+    controlId: String(input.controlId),
+    descriptorRevision: Number(input.descriptorRevision),
+    descriptorDigest: input.descriptorDigest == null ? null : String(input.descriptorDigest),
+    operationDigest: String(input.operationDigest),
+    nonce: String(input.nonce),
+    issuedAt: Number(input.issuedAt),
+  });
+}
+
+function canonicalHubRequest({ method, path, timestamp, nonce, bodyHash }) {
+  return [String(method).toUpperCase(), String(path), String(timestamp), String(nonce), String(bodyHash).toLowerCase()].join("\n");
+}
+
+function sha256(value) {
+  return crypto.createHash("sha256").update(String(value), "utf8").digest("hex");
+}
+
 function privateLanIp() {
   const interfaces = os.networkInterfaces();
   for (const values of Object.values(interfaces)) {
@@ -143,18 +173,20 @@ class PlatformPairing {
   }
 
   async signStepUpDescriptor(payload) {
-    if (this.identityBroker) return (await this.identityBroker.signStepUpDescriptor({ payload })).signature;
+    const path = "/api/step-up/descriptor-challenge";
+    const bodyHash = sha256(canonicalStepUpDescriptor(payload));
+    if (this.identityBroker) {
+      return (await this.identityBroker.signPlatformRequest({
+        method: "POST",
+        path,
+        timestamp: Number(payload.issuedAt),
+        nonce: String(payload.nonce),
+        bodyHash,
+      })).signature;
+    }
     const identity = this.loadManufacturingIdentity();
-    if (!identity?.signingPrivateKey) throw new Error("A hub signing identity is required");
-    const canonical = JSON.stringify({
-      version: Number(payload.version), serial: String(payload.serial), identityGeneration: Number(payload.identityGeneration),
-      actorId: String(payload.actorId), customerSessionId: String(payload.customerSessionId), trustedDeviceId: String(payload.trustedDeviceId),
-      homeId: String(payload.homeId), membershipId: String(payload.membershipId), hubInstallId: String(payload.hubInstallId),
-      operationKind: String(payload.operationKind), targetIds: Array.isArray(payload.targetIds) ? payload.targetIds.map(String) : [],
-      controlId: String(payload.controlId), descriptorRevision: Number(payload.descriptorRevision), descriptorDigest: payload.descriptorDigest == null ? null : String(payload.descriptorDigest),
-      operationDigest: String(payload.operationDigest), nonce: String(payload.nonce), issuedAt: Number(payload.issuedAt),
-    });
-    return crypto.sign(null, Buffer.from(canonical, "utf8"), identity.signingPrivateKey).toString("base64url");
+    if (!identity?.privateKey) throw new Error("A hub signing identity is required");
+    return crypto.sign(null, Buffer.from(canonicalHubRequest({ method: "POST", path, timestamp: Number(payload.issuedAt), nonce: String(payload.nonce), bodyHash }), "utf8"), identity.privateKey).toString("base64url");
   }
 
   async registerProvisioningAttempt({ pairing, baseUrl } = {}) {
@@ -415,6 +447,7 @@ class PlatformPairing {
         publishedVersion: Number(result.publishedVersion || platform.publishedVersion || 0),
         acceptedTokenHashes: returnedHashes,
         operatorCredentialStates,
+        policyRevision: Number(result.policyRevision ?? platform.policyRevision ?? 0),
         syncIntervalMinutes: Number(result.platformSyncIntervalMinutes || platform.syncIntervalMinutes || 2),
         lastSyncAt: new Date().toISOString(),
         lastError: null,
