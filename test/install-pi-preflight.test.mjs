@@ -58,3 +58,14 @@ test("installer preflight rejects the legacy 0.5.0 package identity", async () =
   await fs.writeFile(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
   assert.throws(() => validateCandidate({ sourceDir: candidate, envFile: fixtureData.envFile, identityDir: fixtureData.identityDir }), /legacy 0\.5\.0/);
 });
+
+test("installer build identity changes when the locked setup runtime changes", async () => {
+  const fixtureData = await fixture();
+  const candidate = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-setup-build-"));
+  await fs.cp(sourceDir, candidate, { recursive: true, filter: (entry) => !entry.includes("node_modules") && !entry.includes(".git") });
+  const before = validateCandidate({ sourceDir: candidate, envFile: fixtureData.envFile, identityDir: fixtureData.identityDir });
+  const setupPath = path.join(candidate, "public", "setup.js");
+  await fs.appendFile(setupPath, "\n// build identity regression fixture\n");
+  const after = validateCandidate({ sourceDir: candidate, envFile: fixtureData.envFile, identityDir: fixtureData.identityDir });
+  assert.notEqual(after.buildId, before.buildId);
+});

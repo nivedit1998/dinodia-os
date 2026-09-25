@@ -39,6 +39,7 @@ function sourceFingerprint(sourceDir) {
     "src/config.js",
     "src/haCompat.js",
     "src/identityd.js",
+    "public/setup.js",
     "scripts/install-pi.sh",
     "scripts/install_pi_preflight.mjs",
   ];
