@@ -41,6 +41,26 @@ test("locked setup page serves its JavaScript without dashboard authentication",
   }
 });
 
+test("paired operator bootstrap can start over the private LAN before Cloudflare verification", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-local-operator-"));
+  const hub = createHub({
+    config: { nodeEnv: "development", adminToken: "local-operator-admin", haToken: "local-operator-ha", port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    mqttBridge: mockIntegration(),
+    matterBridge: mockIntegration(),
+    cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
+    platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
+  });
+  await hub.start();
+  const base = `http://127.0.0.1:${hub.server.address().port}`;
+  try {
+    const page = await fetch(`${base}/support-access`);
+    assert.equal(page.status, 200);
+    assert.match(page.headers.get("set-cookie") || "", /dinodia_operator_binding=/);
+  } finally {
+    await hub.stop();
+  }
+});
+
 test("development compatibility pairing remains isolated from production native access", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-provisioning-"));
   const serial = "hub-provisioning-test";

@@ -2356,8 +2356,9 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   }
 
   async function handleRemoteSupportPage(req, res) {
+    const local = localSetupHostAllowed(req);
     const remote = isHiveCredentialTransportAllowed(req, { nodeEnv: runtimeConfig.nodeEnv, configuredHostname: runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "", allowLoopback: false });
-    if (!remote) return text(res, 404, "Not found");
+    if (!local && !remote) return text(res, 404, "Not found");
     if (req.method !== "GET") return text(res, 405, "Method not allowed");
     const filePath = path.resolve(runtimeConfig.staticDir, "setup.html");
     const markup = await fs.promises.readFile(filePath, "utf8").catch(() => null);
@@ -2367,10 +2368,10 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     const operatorBinding = crypto.randomBytes(32).toString("base64url");
     const operatorAttempt = crypto.randomBytes(32).toString("base64url");
     setupHeaders(res, [
-      `dinodia_setup_browser=${encodeURIComponent(browser)}; HttpOnly; SameSite=Strict; Path=/_dinodia/setup; Max-Age=900; Secure`,
-      `dinodia_setup_csrf=${encodeURIComponent(csrf)}; SameSite=Strict; Path=/; Max-Age=900; Secure`,
-      `dinodia_operator_binding=${encodeURIComponent(operatorBinding)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=900; Secure`,
-      `dinodia_operator_attempt=${encodeURIComponent(operatorAttempt)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=900; Secure`,
+      `dinodia_setup_browser=${encodeURIComponent(browser)}; HttpOnly; SameSite=Strict; Path=/_dinodia/setup; Max-Age=900${remote ? "; Secure" : ""}`,
+      `dinodia_setup_csrf=${encodeURIComponent(csrf)}; SameSite=Strict; Path=/; Max-Age=900${remote ? "; Secure" : ""}`,
+      `dinodia_operator_binding=${encodeURIComponent(operatorBinding)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=900${remote ? "; Secure" : ""}`,
+      `dinodia_operator_attempt=${encodeURIComponent(operatorAttempt)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=900${remote ? "; Secure" : ""}`,
     ]);
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store, private" });
     return res.end(markup);
