@@ -62,6 +62,15 @@ if (args[0] === "tunnel" && args[1] === "--no-autoupdate") setInterval(() => {},
   stored.hostname = "";
   stored.tunnelName = "";
   stored.tunnelId = "";
+  await fs.writeFile(path.join(directory, "cloudflared", "config.yml"), [
+    "tunnel: stale-tunnel-id",
+    "credentials-file: /tmp/stale-tunnel-id.json",
+    "ingress:",
+    "  - hostname: old.dinodiasmartliving.com",
+    "    service: http://127.0.0.1:8123",
+    "  - service: http_status:404",
+    "",
+  ].join("\n"));
   const resumed = new CloudflareTunnel({ binary, dataDir: directory, origin: "http://127.0.0.1:8123", store, vault: { get: () => null, set: async () => {}, clear: async () => {} }, logger: { error() {} } });
   await resumed.beginSetup({ tunnelName: "DIN-HOME-001", hostname: "hub.dinodiasmartliving.com" });
   for (let attempt = 0; attempt < 100 && resumed.status().setup.state === "authorizing"; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 50));

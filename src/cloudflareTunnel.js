@@ -117,11 +117,17 @@ class CloudflareTunnel {
     await new Promise((resolve) => { const timer = setTimeout(() => { child.kill("SIGKILL"); resolve(); }, 2000); child.once("exit", () => { clearTimeout(timer); resolve(); }); });
   }
 
-  async findTunnelId(name) {
-    const output = await this.runCommand(["tunnel", "list", "--output", "json"]);
-    let tunnels;
-    try { tunnels = JSON.parse(output); } catch { tunnels = []; }
-    return (Array.isArray(tunnels) ? tunnels : []).find((item) => String(item.name || "").toLowerCase() === String(name).toLowerCase())?.id || "";
+  async findTunnelId(name, { attempts = 4 } = {}) {
+    const expectedName = String(name || "").trim().toLowerCase();
+    for (let attempt = 0; attempt < Math.max(1, attempts); attempt += 1) {
+      const output = await this.runCommand(["tunnel", "list", "--output", "json"]);
+      let tunnels;
+      try { tunnels = JSON.parse(output); } catch { tunnels = []; }
+      const id = (Array.isArray(tunnels) ? tunnels : []).find((item) => String(item.name || "").trim().toLowerCase() === expectedName)?.id || "";
+      if (id) return String(id);
+      if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+    }
+    return "";
   }
 
   localTunnelConfig() {
@@ -139,13 +145,18 @@ class CloudflareTunnel {
 
   existingTunnelIdForSafeResume({ tunnelName, hostname, listedTunnelId }) {
     const local = this.localTunnelConfig();
-    if (!local) return "";
-    if (!local.tunnelId || local.tunnelId !== listedTunnelId || local.hostname !== hostname) {
-      throw new Error("A Cloudflare tunnel with this reserved name exists but does not match the staged installation; refusing to adopt it");
-    }
-    const credentialsFile = local.credentialsFile || path.join(this.cloudflareHome, ".cloudflared", `${local.tunnelId}.json`);
+    const credentialsFile = path.join(this.cloudflareHome, ".cloudflared", `${listedTunnelId}.json`);
     if (!fs.existsSync(credentialsFile)) throw new Error("The staged Cloudflare tunnel credential is missing; refusing to adopt the existing tunnel");
-    return local.tunnelId;
+    if (local?.tunnelId === listedTunnelId && local.hostname === hostname) return listedTunnelId;
+    // A previous attempt may have written a config for a different tunnel
+    // before Cloudflare's list became authoritative. The durable reservation,
+    // exact listed name and matching local credential are the only evidence
+    // accepted for repairing that interrupted local state.
+    if (local?.tunnelId && local.tunnelId !== listedTunnelId) return listedTunnelId;
+    if (!local?.tunnelId) return listedTunnelId;
+    const localCredentialsFile = local.credentialsFile || path.join(this.cloudflareHome, ".cloudflared", `${local.tunnelId}.json`);
+    if (!fs.existsSync(localCredentialsFile)) throw new Error("The staged Cloudflare tunnel configuration is inconsistent; refusing to adopt the existing tunnel");
+    return listedTunnelId;
   }
 
   async finishSetup() {
@@ -156,8 +167,21 @@ class CloudflareTunnel {
     if (tunnelId) {
       tunnelId = this.existingTunnelIdForSafeResume({ tunnelName, hostname, listedTunnelId: tunnelId });
     } else {
-      await this.runCommand(["tunnel", "create", tunnelName]);
-      tunnelId = await this.findTunnelId(tunnelName);
+      try {
+        await this.runCommand(["tunnel", "create", tunnelName]);
+      } catch (error) {
+        // Cloudflare can make the tunnel visible after the create request has
+        // already returned an error. Recover only when the exact reserved
+        // name and its local credential become visible on retry.
+        const recoveredId = await this.findTunnelId(tunnelName, { attempts: 8 });
+        if (!recoveredId) throw error;
+        tunnelId = this.existingTunnelIdForSafeResume({ tunnelName, hostname, listedTunnelId: recoveredId });
+      }
+      if (tunnelId) {
+        // The create race recovered the authoritative existing tunnel.
+      } else {
+        tunnelId = await this.findTunnelId(tunnelName, { attempts: 8 });
+      }
       if (!tunnelId) throw new Error("Cloudflare created the tunnel but its ID could not be found");
     }
     const credentialPath = path.join(this.cloudflareHome, ".cloudflared", `${tunnelId}.json`);
