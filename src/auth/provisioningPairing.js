@@ -71,7 +71,7 @@ class ProvisioningPairingService {
       attemptId: this.current.attemptId,
       expiresAt: this.current.expiresAt,
       code,
-      qrPayload: `dinodia-pairing-v1:${this.current.id}:${code}`,
+      qrPayload: `dinodia-pairing-v1:${code}`,
     };
   }
 
@@ -81,8 +81,6 @@ class ProvisioningPairingService {
     const expired = Number(now) >= value.expiresAt;
     return {
       state: value.revokedAt ? "revoked" : value.consumedAt ? "consumed" : expired ? "expired" : "active",
-      id: value.id,
-      attemptId: value.attemptId,
       serial: value.serial,
       expiresAt: value.expiresAt,
       failures: value.failures,

@@ -208,7 +208,7 @@ function dashboardDevice(device) {
   return result;
 }
 
-function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, googleNestBridge, googleNestFetchImpl, googleNestNow, googleNestUpdateSource, platformSync, cloudflareTunnel, zigbeeService, threadService, serialAdapterLister = listSerialAdapters, serialAdapterProbe = probeSerialAdapter, logger = console } = {}) {
+function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, googleNestBridge, googleNestFetchImpl, googleNestNow, googleNestUpdateSource, platformSync, cloudflareTunnel, zigbeeService, threadService, identityBroker: providedIdentityBroker = null, serialAdapterLister = listSerialAdapters, serialAdapterProbe = probeSerialAdapter, logger = console } = {}) {
   const runtimeConfig = { ...baseConfig, ...config };
   // Native production is permanently fail-closed. In particular, do not let
   // a caller-supplied test/config object, an environment variable, or an old
@@ -225,7 +225,12 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   const offlineLanAuthorisations = new OfflineLanAuthorisationStore({ store: hubStore, platformPublicKeys: parsePublicKeys(runtimeConfig.appPublicKeys) });
   const eventBus = new EventEmitter();
   const vault = new SecretVault({ dataDir: config.dataDir || path.dirname(runtimeConfig.dataFile), logger });
-  const identityBroker = runtimeConfig.nodeEnv === "production" ? new IdentityBrokerClient({ socketPath: runtimeConfig.identitySocketPath }) : null;
+  // The integration harness may inject a disposable broker only when it
+  // explicitly selects its test-only runtime marker. Production always uses
+  // the restricted dinodia-identityd Unix-socket boundary.
+  const identityBroker = config.v2Environment === "test" && providedIdentityBroker
+    ? providedIdentityBroker
+    : runtimeConfig.nodeEnv === "production" ? new IdentityBrokerClient({ socketPath: runtimeConfig.identitySocketPath }) : null;
   const existingIdentity = hubStore.getIdentity ? hubStore.getIdentity() : {};
   const serial = existingIdentity.serial || runtimeConfig.hubId || `dinodia-${crypto.randomBytes(6).toString("hex")}`;
   if (!existingIdentity.serial && hubStore.saveIdentity) hubStore.saveIdentity({ serial, instanceId: existingIdentity.instanceId || crypto.randomUUID(), hostname: existingIdentity.hostname || "dinodia" }).catch((error) => logger.error(`[identity] ${error.message}`));
@@ -2247,7 +2252,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         `dinodia_setup_nonce=${encodeURIComponent(browserNonce)}; HttpOnly; SameSite=Strict; Path=/_dinodia/setup; Max-Age=900`,
       ]);
       const qrSvg = await QRCode.toString(presentation.qrPayload, { type: "svg", margin: 1, errorCorrectionLevel: "M" });
-      return json(res, 201, { ok: true, id: presentation.id, attemptId: presentation.attemptId, expiresAt: presentation.expiresAt, code: presentation.code, qrPayload: presentation.qrPayload, qrSvg });
+      return json(res, 201, { ok: true, expiresAt: presentation.expiresAt, code: presentation.code, qrPayload: presentation.qrPayload, qrSvg });
     }
     if (url.pathname === "/_dinodia/setup/pairing" && req.method === "DELETE") {
       if (!setupBrowserSessionValid(req) || !setupCookie(req, "dinodia_setup_attempt") || !setupCookie(req, "dinodia_setup_nonce")) return json(res, 403, { error: "Setup session is required" });
