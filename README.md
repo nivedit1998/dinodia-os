@@ -99,7 +99,7 @@ cd "Dinodia OS"
 sudo bash scripts/install-pi.sh
 ```
 
-The installer copies the service to `/opt/dinodia-os`, stores data in `/var/lib/dinodia-os`, generates an admin token once, and starts `dinodia-os.service`. The unified dashboard and HA compatibility surface is on `8123`; the Hub Agent compatibility surface is on `8099`. For the bundled Mosquitto/Zigbee2MQTT/Matter protocol topology, use the Docker Compose deployment below; the native service remains useful as the lightweight compatibility core when those protocol runtimes are managed separately.
+The installer copies the service to `/opt/dinodia-os`, stores data in `/var/lib/dinodia-os`, and starts `dinodia-os.service` only after the two-phase manufacturing identity ceremony completes. Phase 1 generates and encrypts the signing/encryption keys locally on the hub; the offline manufacturing authority signs the printed public certificate; phase 2 verifies that signature on the hub before activation. No manufacturing-root private key is copied to the hub. The unified dashboard and HA compatibility surface is on `8123`; the Hub Agent compatibility surface is on `8099`. For the bundled Mosquitto/Zigbee2MQTT/Matter protocol topology, use the Docker Compose deployment below; the native service remains useful as the lightweight compatibility core when those protocol runtimes are managed separately.
 
 Useful commands:
 

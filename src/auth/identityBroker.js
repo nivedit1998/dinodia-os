@@ -86,6 +86,21 @@ function canonicalPlatformRequest(input) {
   return [method, requestPath, String(timestamp), nonce, bodyHash].join("\n");
 }
 
+// This is the only certificate body signed by the offline manufacturing
+// authority.  It intentionally excludes attempt, URL and expiry fields; those
+// are transient hub-signed provisioning fields and must never change the
+// manufacturing certificate bytes.
+function stableManufacturingIdentityPayload(input = {}) {
+  return JSON.stringify({
+    serial: String(input.serial || ""),
+    identityGeneration: Number(input.identityGeneration ?? input.generation ?? 1),
+    publicKeyPem: String(input.publicKeyPem || input.signingPublicKeyPem || ""),
+    encryptionPublicKeyPem: String(input.encryptionPublicKeyPem || ""),
+    publicKeyFingerprint: String(input.publicKeyFingerprint || ""),
+    encryptionKeyFingerprint: String(input.encryptionKeyFingerprint || ""),
+  });
+}
+
 function readJsonLine(socket, timeoutMs) {
   return new Promise((resolve, reject) => {
     let buffer = "";
@@ -173,32 +188,91 @@ async function atomicWrite(filePath, value, mode = 0o600) {
   const dirHandle = await fsPromises.open(directory, "r"); try { await dirHandle.sync(); } finally { await dirHandle.close(); }
 }
 
-async function initializeIdentity({ directory = "/etc/dinodia-os/identity", serial, generation = 1, manufacturingSignature = "" } = {}) {
-  if (process.getuid?.() !== 0) throw new Error("identity initialization requires root");
-  const normalizedSerial = String(serial || "").trim(); if (!normalizedSerial) throw new Error("serial is required");
-  if (!String(manufacturingSignature || "").trim()) throw new Error("a manufacturing-root identity certificate is required");
+async function nextIdentityGeneration(directory, serial, requestedGeneration) {
+  let generation = Number(requestedGeneration) || 1;
+  for (const filename of ["identity.json", "identity.pending.json"]) {
+    try {
+      const previous = JSON.parse(await fsPromises.readFile(path.join(directory, filename), "utf8"));
+      if (previous?.serial === serial && Number.isInteger(Number(previous.generation))) generation = Math.max(generation, Number(previous.generation) + 1);
+    } catch {}
+  }
+  return generation;
+}
+
+function publicIdentityMaterial({ serial, generation, signingPublicKeyPem, encryptionPublicKeyPem, publicKeyFingerprint, encryptionKeyFingerprint }) {
+  return { version: 1, serial, generation, signingPublicKeyPem, encryptionPublicKeyPem, publicKeyFingerprint, encryptionKeyFingerprint };
+}
+
+async function prepareIdentity({ directory = "/etc/dinodia-os/identity", serial, generation = 1 } = {}) {
+  if (process.getuid?.() !== 0) throw new Error("identity preparation requires root");
+  const normalizedSerial = String(serial || "").trim();
+  if (!normalizedSerial) throw new Error("serial is required");
+  await fsPromises.mkdir(directory, { recursive: true, mode: 0o700 });
+  await fsPromises.chmod(directory, 0o700);
+  await fsPromises.chown(directory, 0, 0);
+
+  // A resumable preparation returns the same public material instead of
+  // replacing a still-unissued local key pair.
   try {
-    const previous = JSON.parse(await fsPromises.readFile(path.join(directory, "identity.json"), "utf8"));
-    if (previous?.serial === normalizedSerial && Number.isInteger(Number(previous.generation))) generation = Math.max(Number(generation), Number(previous.generation) + 1);
+    const pending = JSON.parse(await fsPromises.readFile(path.join(directory, "identity.pending.json"), "utf8"));
+    assertSecurePath(path.join(directory, "identity.pending.json"), 0o644);
+    assertSecurePath(path.join(directory, "identity.key"), 0o600);
+    assertSecurePath(path.join(directory, "signing-private.enc"), 0o600);
+    assertSecurePath(path.join(directory, "encryption-private.enc"), 0o600);
+    if (pending.serial === normalizedSerial) return { ...pending, certificatePayload: stableManufacturingIdentityPayload(pending) };
   } catch {}
+
+  const identityGeneration = await nextIdentityGeneration(directory, normalizedSerial, generation);
   const signing = crypto.generateKeyPairSync("ed25519");
   const encryption = crypto.generateKeyPairSync("x25519");
   const signingPublicKeyPem = signing.publicKey.export({ type: "spki", format: "pem" }).toString();
   const encryptionPublicKeyPem = encryption.publicKey.export({ type: "spki", format: "pem" }).toString();
-  const signingPrivateKeyPem = signing.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-  const encryptionPrivateKeyPem = encryption.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
   const signingPublicKey = crypto.createPublicKey(signingPublicKeyPem);
   const encryptionPublicKey = crypto.createPublicKey(encryptionPublicKeyPem);
   const publicKeyFingerprint = crypto.createHash("sha256").update(signingPublicKey.export({ type: "spki", format: "der" })).digest("hex");
   const encryptionKeyFingerprint = crypto.createHash("sha256").update(encryptionPublicKey.export({ type: "spki", format: "der" })).digest("hex");
   const wrappingKey = crypto.randomBytes(32);
-  await fsPromises.mkdir(directory, { recursive: true, mode: 0o700 });
-  await fsPromises.chmod(directory, 0o700); await fsPromises.chown(directory, 0, 0);
+  const pending = publicIdentityMaterial({ serial: normalizedSerial, generation: identityGeneration, signingPublicKeyPem, encryptionPublicKeyPem, publicKeyFingerprint, encryptionKeyFingerprint });
   await atomicWrite(path.join(directory, "identity.key"), wrappingKey, 0o600);
-  await atomicWrite(path.join(directory, "signing-private.enc"), encryptPrivateKey(signingPrivateKeyPem, wrappingKey, { serial: normalizedSerial, purpose: "signing", generation }), 0o600);
-  await atomicWrite(path.join(directory, "encryption-private.enc"), encryptPrivateKey(encryptionPrivateKeyPem, wrappingKey, { serial: normalizedSerial, purpose: "encryption", generation }), 0o600);
-  await atomicWrite(path.join(directory, "identity.json"), JSON.stringify({ version: 1, serial: normalizedSerial, generation, signingPublicKeyPem, encryptionPublicKeyPem, publicKeyFingerprint, encryptionKeyFingerprint, manufacturingSignature: String(manufacturingSignature || "") }, null, 2), 0o644);
-  return { serial: normalizedSerial, generation, signingPublicKeyPem, encryptionPublicKeyPem, publicKeyFingerprint, encryptionKeyFingerprint };
+  await atomicWrite(path.join(directory, "signing-private.enc"), encryptPrivateKey(signing.privateKey.export({ type: "pkcs8", format: "pem" }).toString(), wrappingKey, { serial: normalizedSerial, purpose: "signing", generation: identityGeneration }), 0o600);
+  await atomicWrite(path.join(directory, "encryption-private.enc"), encryptPrivateKey(encryption.privateKey.export({ type: "pkcs8", format: "pem" }).toString(), wrappingKey, { serial: normalizedSerial, purpose: "encryption", generation: identityGeneration }), 0o600);
+  await atomicWrite(path.join(directory, "identity.pending.json"), JSON.stringify(pending, null, 2), 0o644);
+  return { ...pending, certificatePayload: stableManufacturingIdentityPayload(pending) };
+}
+
+function parseManufacturingRootKeys(value) {
+  if (Array.isArray(value)) return value.map(String).filter(Boolean);
+  return String(value || "").replaceAll("\\n", "\n").match(/-----BEGIN [^-]+-----[\s\S]*?-----END [^-]+-----/g) || [];
+}
+
+async function finalizeIdentity({ directory = "/etc/dinodia-os/identity", manufacturingSignature = "", manufacturingRootPublicKeys = [] } = {}) {
+  if (process.getuid?.() !== 0) throw new Error("identity finalization requires root");
+  const signatureText = String(manufacturingSignature || "").trim();
+  if (!signatureText) throw new Error("a manufacturing-root identity certificate is required");
+  const pendingPath = path.join(directory, "identity.pending.json");
+  assertSecurePath(directory, 0o700);
+  assertSecurePath(pendingPath, 0o644);
+  const pending = JSON.parse(await fsPromises.readFile(pendingPath, "utf8"));
+  const roots = parseManufacturingRootKeys(manufacturingRootPublicKeys);
+  if (!roots.length) throw new Error("manufacturing-root public key is required");
+  const signature = Buffer.from(signatureText, "base64url");
+  const certificate = stableManufacturingIdentityPayload(pending);
+  const trusted = roots.some((pem) => {
+    try { return crypto.verify(null, Buffer.from(certificate, "utf8"), crypto.createPublicKey(pem), signature); } catch { return false; }
+  });
+  if (!trusted) throw new Error("manufacturing-root identity certificate rejected");
+  assertSecurePath(path.join(directory, "identity.key"), 0o600);
+  assertSecurePath(path.join(directory, "signing-private.enc"), 0o600);
+  assertSecurePath(path.join(directory, "encryption-private.enc"), 0o600);
+  await atomicWrite(path.join(directory, "identity.json"), JSON.stringify({ ...pending, manufacturingSignature: signatureText }, null, 2), 0o644);
+  await fsPromises.unlink(pendingPath);
+  const dirHandle = await fsPromises.open(directory, "r"); try { await dirHandle.sync(); } finally { await dirHandle.close(); }
+  return loadIdentity(directory);
+}
+
+async function initializeIdentity({ directory = "/etc/dinodia-os/identity", serial, generation = 1, manufacturingSignature = "" } = {}) {
+  await prepareIdentity({ directory, serial, generation });
+  return finalizeIdentity({ directory, manufacturingSignature, manufacturingRootPublicKeys: process.env.DINODIA_MANUFACTURING_ROOT_PUBLIC_KEYS });
 }
 
 function loadIdentity(directory = "/etc/dinodia-os/identity") {
@@ -259,4 +333,4 @@ function createIdentityBrokerServer({ socketPath = "/run/dinodia-identityd.sock"
   return server;
 }
 
-module.exports = { IdentityBrokerClient, initializeIdentity, loadIdentity, createIdentityBrokerServer, canonicalCloudChallenge, canonicalStepUpDescriptor, canonicalProvisioning, canonicalPlatformRequest, encryptPrivateKey, decryptPrivateKey };
+module.exports = { IdentityBrokerClient, initializeIdentity, prepareIdentity, finalizeIdentity, loadIdentity, createIdentityBrokerServer, canonicalCloudChallenge, canonicalStepUpDescriptor, canonicalProvisioning, canonicalPlatformRequest, stableManufacturingIdentityPayload, encryptPrivateKey, decryptPrivateKey };

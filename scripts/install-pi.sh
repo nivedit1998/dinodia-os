@@ -123,7 +123,8 @@ fi
 echo "cloudflared: $(cloudflared --version | head -1)"
 systemctl daemon-reload
 if [[ ! -f "$IDENTITY_DIR/identity.json" ]]; then
-  echo "No manufacturing identity is installed. Run: sudo node $INSTALL_DIR/scripts/initialize-identity.js <DINODIA-SERIAL>"
+  echo "No manufacturing identity is installed. Run phase 1: sudo node $INSTALL_DIR/scripts/prepare-identity.js <DINODIA-SERIAL>"
+  echo "Have the offline manufacturing authority sign the printed certificatePayload, then run phase 2: sudo node $INSTALL_DIR/scripts/finalize-identity.js <SIGNATURE_FILE> <ROOT_PUBLIC_KEY_FILE>"
   echo "The Dinodia OS runtime is intentionally not started until trusted identity imaging is complete."
   systemctl disable --now dinodia-os >/dev/null 2>&1 || true
   exit 1
