@@ -5,6 +5,10 @@ function stringEnv(name, fallback = "") {
   return value === undefined ? fallback : String(value).trim();
 }
 
+function pemEnv(name, fallback = "") {
+  return stringEnv(name, fallback).replaceAll("\\n", "\n");
+}
+
 function numberEnv(name, fallback) {
   const value = Number(stringEnv(name));
   return Number.isFinite(value) && value > 0 ? value : fallback;
@@ -47,7 +51,7 @@ module.exports = {
   backupDir: path.join(dataDir, "backups"),
   adminToken,
   legacyCompatibilityEnabled,
-  operatorPublicKey: stringEnv("DINODIA_OPERATOR_PUBLIC_KEY", ""),
+  operatorPublicKey: pemEnv("DINODIA_OPERATOR_PUBLIC_KEY", ""),
   appPublicKeys: stringEnv("DINODIA_APP_PUBLIC_KEYS", ""),
   setupInterface: stringEnv("DINODIA_SETUP_INTERFACE", ""),
   setupAllowedHosts: stringEnv("DINODIA_SETUP_ALLOWED_HOSTS", ""),
