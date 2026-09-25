@@ -36,6 +36,7 @@ test("locked setup page serves its JavaScript without dashboard authentication",
     assert.equal(script.status, 200);
     assert.match(script.headers.get("content-type") || "", /javascript/);
     assert.match(await script.text(), /_dinodia\/setup\/pairing/);
+    assert.match(await (await fetch(`${base}/setup.js`)).text(), /window\.location\.assign\("\/"\)/);
   } finally {
     await hub.stop();
   }

@@ -113,7 +113,7 @@ window.addEventListener("message", (event) => {
     // The hub creates the browser binding and setup-attempt cookies. The
     // portal may deliver only an opaque handoff reference to this window.
     fetch("/_dinodia/setup/operator-session", { method: "POST", headers: { "content-type": "application/json", "x-dinodia-setup-csrf": cookie("dinodia_setup_csrf") }, body: JSON.stringify({ handoffId: message.handoffId }) })
-      .then(async (response) => { const data = await response.json(); if (!response.ok) throw new Error(data.error || "The operator handoff was rejected."); show("Secure Dinodia OS operator session active."); })
+      .then(async (response) => { const data = await response.json(); if (!response.ok) throw new Error(data.error || "The operator handoff was rejected."); window.location.assign("/"); })
       .catch((error) => show(error.message, true));
     return;
   }
