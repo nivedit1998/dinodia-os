@@ -2058,15 +2058,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       if (body.action === "finish") {
         const result = await cloudflare.finishSetup();
         try {
-          if (!result?.publicUrl || !pairing?.reportCloudUrl) throw new Error("The local Cloudflare tunnel is not ready to report to Platform");
-          let reservationToken = cloudflare.reservationToken();
-          if (!reservationToken && runtimeConfig.nodeEnv === "production" && pairing.getCloudflareReservation) {
-            const reservation = await pairing.getCloudflareReservation();
-            if (String(reservation.reservedHostname || "") !== String(result.hostname || "") || String(reservation.reservedTunnelName || "") !== String(result.tunnelName || "")) throw new Error("The installation Cloudflare reservation does not match the paired tunnel");
-            reservationToken = await cloudflare.setReservationToken(reservation.reservationToken);
-          }
-          const report = await pairing.reportCloudUrl(result.publicUrl, { tunnelId: result.tunnelId, tunnelName: result.tunnelName, hostname: result.hostname, reservationToken });
-          return json(res, 200, await cloudflare.markPlatformVerification({ state: "PLATFORM_VERIFIED", cloudUrl: result.publicUrl, verificationId: report.verificationId || null }));
+          return json(res, 200, await reportCloudflareVerification(result));
         } catch (error) {
           await cloudflare.markPlatformVerification({ state: "PLATFORM_REPORT_FAILED", error: error.message || "Platform CloudURL verification failed" }).catch(() => {});
           throw error;
@@ -2141,6 +2133,18 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   }
   function googleNestCallbackAllowed(req) {
     return isHiveCredentialTransportAllowed(req, { nodeEnv: runtimeConfig.nodeEnv, allowInsecure: runtimeConfig.nodeEnv !== "production", configuredHostname: runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "" });
+  }
+
+  async function reportCloudflareVerification(result = cloudflare.status()) {
+    if (!result?.publicUrl || !pairing?.reportCloudUrl) throw new Error("The local Cloudflare tunnel is not ready to report to Platform");
+    let reservationToken = cloudflare.reservationToken();
+    if (!reservationToken && runtimeConfig.nodeEnv === "production" && pairing.getCloudflareReservation) {
+      const reservation = await pairing.getCloudflareReservation();
+      if (String(reservation.reservedHostname || "") !== String(result.hostname || "") || String(reservation.reservedTunnelName || "") !== String(result.tunnelName || "")) throw new Error("The installation Cloudflare reservation does not match the paired tunnel");
+      reservationToken = await cloudflare.setReservationToken(reservation.reservationToken);
+    }
+    const report = await pairing.reportCloudUrl(result.publicUrl, { tunnelId: result.tunnelId, tunnelName: result.tunnelName, hostname: result.hostname, reservationToken });
+    return cloudflare.markPlatformVerification({ state: "PLATFORM_VERIFIED", cloudUrl: result.publicUrl, verificationId: report.verificationId || null });
   }
 
   function localSetupHostAllowed(req) {
@@ -2632,6 +2636,11 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     electricTimer.unref?.();
     await hubAgentCompat.start();
     cloudflare.start();
+    const cloudflareSettings = hubStore.getCloudflare?.() || {};
+    if (runtimeConfig.nodeEnv === "production" && cloudflareSettings.mode === "local" && cloudflareSettings.platformVerification?.state !== "PLATFORM_VERIFIED") {
+      const retry = setTimeout(() => reportCloudflareVerification().catch((error) => logger.warn(`[cloudflare] automatic verification retry unavailable: ${error.message}`)), 3000);
+      retry.unref?.();
+    }
     heartbeat.start();
     pairing.start();
     alexaIntegration.start();
