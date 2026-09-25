@@ -1,6 +1,6 @@
 {
   "name": "dinodia-os",
-  "version": "0.5.0",
+  "version": "2.0.0",
   "private": true,
   "description": "A small, dependable smart-home hub for Raspberry Pi 4.",
   "license": "UNLICENSED",

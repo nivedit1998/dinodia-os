@@ -41,7 +41,10 @@ test("production rejects legacy admin, HA, bootstrap and dashboard credentials",
       assert.equal((await request(base, "/_dinodia/admin/api/provisioning/pair", { method: "POST", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify({ bootstrapSecret: token }) })).response.status, 401);
     }
     assert.equal((await request(base, "/_dinodia/admin/api/status")).response.status, 401);
-    assert.equal((await request(base, "/api/health")).response.status, 200);
+    const health = await request(base, "/api/health");
+    assert.equal(health.response.status, 200);
+    assert.equal(health.body.mode, "native-v2");
+    assert.equal(health.body.buildId, undefined);
 
     const socket = new WebSocket(`${base.replace("http", "ws")}/api/websocket`);
     const messages = [];

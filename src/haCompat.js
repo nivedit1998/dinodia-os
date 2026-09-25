@@ -102,7 +102,7 @@ function automationEntity(automation) {
   };
 }
 
-function createCompatInterface({ port = 8123, host = "0.0.0.0", model, store, auth, wsAuth = auth, authorizeWsMessage, filterWsStates, filterWsEvent, eventBus, mqtt, syncStatus, logger = console, hubAgent = false, flowHandlers = {}, onRemoteEvent, onRegistryChange, onAuthenticated } = {}) {
+function createCompatInterface({ port = 8123, host = "0.0.0.0", model, store, auth, wsAuth = auth, authorizeWsMessage, filterWsStates, filterWsEvent, eventBus, mqtt, syncStatus, logger = console, hubAgent = false, healthMode, buildId = "", flowHandlers = {}, onRemoteEvent, onRegistryChange, onAuthenticated } = {}) {
   const flows = new Map();
   const subscriptions = new Map();
 
@@ -255,7 +255,7 @@ function createCompatInterface({ port = 8123, host = "0.0.0.0", model, store, au
       if (!hubAgent) return json(res, 404, { message: "Not found" });
       return html(res, 200, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Dinodia Hub Agent</title></head><body><main><h1>Dinodia Hub Agent is online</h1><p>This address is reserved for the local Hub Agent compatibility interface.</p></main></body></html>`);
     }
-    if (path === "/api/health" && req.method === "GET") return json(res, 200, { ok: true, mode: hubAgent ? "hub-agent" : "ha", port });
+    if (path === "/api/health" && req.method === "GET") return json(res, 200, { ok: true, mode: healthMode || (hubAgent ? "hub-agent" : "ha"), ...(buildId ? { buildId } : {}), port });
     if (!requireAuth(req)) return json(res, 401, { message: "Unauthorized" });
     if (path === "/api/" && req.method === "GET") return json(res, 200, { message: "API running." });
     if (path === "/api/states" && req.method === "GET") return json(res, 200, listStates());

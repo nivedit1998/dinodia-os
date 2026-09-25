@@ -997,6 +997,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     syncStatus: () => pairing.status(),
     logger,
     hubAgent: false,
+    healthMode: runtimeConfig.nodeEnv === "production" ? "native-v2" : undefined,
+    buildId: runtimeConfig.buildId,
     flowHandlers: compatibilityFlows,
     onRemoteEvent: handleRemoteEvent,
   });
@@ -1011,6 +1013,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     syncStatus: () => pairing.status(),
     logger,
     hubAgent: true,
+    healthMode: "hub-agent",
+    buildId: runtimeConfig.buildId,
     flowHandlers: compatibilityFlows,
     onRemoteEvent: handleRemoteEvent,
   });

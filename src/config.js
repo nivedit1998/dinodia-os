@@ -84,6 +84,8 @@ module.exports = {
   platformToken: developmentCompatibility ? stringEnv("DINODIA_PLATFORM_TOKEN", "") : "",
   // Native V2 must be explicitly configured. An old platform URL is never a fallback.
   platformApiUrl,
+  canonicalPlatformOrigin,
+  buildId: stringEnv("DINODIA_BUILD_ID", ""),
   platformBootstrapSecret: developmentCompatibility ? stringEnv("DINODIA_PLATFORM_BOOTSTRAP_SECRET", "") : "",
   platformSyncIntervalMs: numberEnv("DINODIA_PLATFORM_SYNC_INTERVAL_MS", 120000),
   alexaNativeEnabled: stringEnv("ALEXA_NATIVE_DINODIA_OS_ENABLED", "false") === "true",
