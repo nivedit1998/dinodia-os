@@ -62,6 +62,30 @@ test("paired operator bootstrap can start over the private LAN before Cloudflare
   }
 });
 
+test("secure Cloudflare setup page serves the non-secret handoff script", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-remote-setup-assets-"));
+  const hub = createHub({
+    config: { nodeEnv: "production", adminToken: "remote-assets-admin", port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "", cloudflarePublicHostname: "secure.example.test" },
+    mqttBridge: mockIntegration(),
+    matterBridge: mockIntegration(),
+    cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: true, connected: true, running: true, mode: "local", hostname: "secure.example.test", publicUrl: "https://secure.example.test" }; } },
+    platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
+  });
+  await hub.start();
+  const base = `http://127.0.0.1:${hub.server.address().port}`;
+  const headers = { host: "secure.example.test", origin: "https://secure.example.test", "x-forwarded-proto": "https" };
+  try {
+    const page = await fetch(`${base}/support-access`, { headers });
+    assert.equal(page.status, 200);
+    const script = await fetch(`${base}/setup.js`, { headers });
+    assert.equal(script.status, 200);
+    assert.match(script.headers.get("content-type") || "", /javascript/);
+    assert.match(await script.text(), /dinodia-operator-handoff/);
+  } finally {
+    await hub.stop();
+  }
+});
+
 test("development compatibility pairing remains isolated from production native access", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-provisioning-"));
   const serial = "hub-provisioning-test";

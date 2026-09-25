@@ -2218,13 +2218,6 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     if (!localSetupHostAllowed(req)) return json(res, 404, { error: "Setup page is available only on the private provisioning network" });
     setupHeaders(res);
     if (!["GET", "POST", "DELETE"].includes(req.method)) return json(res, 405, { error: "Method not allowed" });
-    if (url.pathname === "/setup.js" && req.method === "GET") {
-      const filePath = path.resolve(runtimeConfig.staticDir, "setup.js");
-      const script = await fs.promises.readFile(filePath, "utf8").catch(() => null);
-      if (script === null) return text(res, 404, "Not found");
-      res.writeHead(200, { "content-type": "application/javascript; charset=utf-8", "cache-control": "no-store, private" });
-      return res.end(script);
-    }
     if (url.pathname === "/_dinodia/setup/claim-challenge" && req.method === "GET") {
       if (!(await setupRateLimitAllows(req))) return json(res, 429, { error: "Too many setup attempts. Wait before trying again." });
       const reference = String(url.searchParams.get("reference") || "").trim();
@@ -2300,6 +2293,19 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       return res.end(markup);
     }
     return json(res, 404, { error: "Setup route not found" });
+  }
+
+  async function handleSetupScriptRequest(req, res) {
+    const local = localSetupHostAllowed(req);
+    const remote = isHiveCredentialTransportAllowed(req, { nodeEnv: runtimeConfig.nodeEnv, configuredHostname: runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "", allowLoopback: false });
+    if (!local && !remote) return json(res, 404, { error: "Setup assets are available only on the paired setup network or secure Dinodia Cloud endpoint" });
+    if (req.method !== "GET") return json(res, 405, { error: "Method not allowed" });
+    const filePath = path.resolve(runtimeConfig.staticDir, "setup.js");
+    const script = await fs.promises.readFile(filePath, "utf8").catch(() => null);
+    if (script === null) return text(res, 404, "Not found");
+    setupHeaders(res);
+    res.writeHead(200, { "content-type": "application/javascript; charset=utf-8", "cache-control": "no-store, private" });
+    return res.end(script);
   }
 
   async function revokeSupportLease(lease) {
@@ -2597,7 +2603,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     if (url.pathname === "/_dinodia/setup/support-access") return handleSupportAccessRequest(req, res);
     if (url.pathname === "/_dinodia/setup/operator-attempt") return handleOperatorAttemptRegistration(req, res);
     if (url.pathname === "/_dinodia/setup/operator-session") return handleOperatorHandoffRequest(req, res);
-    if (url.pathname === "/setup" || url.pathname === "/setup.js" || url.pathname.startsWith("/_dinodia/setup/")) return handleLocalSetupRequest(req, res, url);
+    if (url.pathname === "/setup.js") return handleSetupScriptRequest(req, res);
+    if (url.pathname === "/setup" || url.pathname.startsWith("/_dinodia/setup/")) return handleLocalSetupRequest(req, res, url);
     if (url.pathname.startsWith("/_dinodia/platform/v1/alexa")) return handleNativeAlexaPlatformRequest(req, res, url);
     if (isDashboardAdminPath(url.pathname)) return handleDashboardRequest(req, res, url);
     if (isHaCompatibilityPath(url.pathname)) return haCompat.handleHttp(req, res);
