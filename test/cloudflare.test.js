@@ -19,6 +19,20 @@ test("Cloudflare configuration targets the HA compatibility origin and enforces 
   assert.equal(tunnel.status().origin, "http://127.0.0.1:8123");
 });
 
+test("Cloudflare reservation recovery persists only a valid installation proof", async () => {
+  const stored = {};
+  const vaultValues = new Map();
+  const tunnel = new CloudflareTunnel({
+    store: { getCloudflare: () => stored, saveCloudflare: async (value) => Object.assign(stored, value) },
+    vault: { get: (key) => vaultValues.get(key) || null, set: async (key, value) => vaultValues.set(key, value) },
+    logger: { error() {} },
+  });
+  const token = "A".repeat(48);
+  await tunnel.setReservationToken(token);
+  assert.equal(tunnel.reservationToken(), token);
+  await assert.rejects(() => tunnel.setReservationToken("not-a-reservation"), /reservation is required/);
+});
+
 test("local Cloudflare setup authorizes, creates, routes, and starts a tunnel", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-cloudflare-local-"));
   const binary = path.join(directory, "fake-cloudflared");

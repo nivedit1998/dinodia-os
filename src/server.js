@@ -2059,7 +2059,13 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         const result = await cloudflare.finishSetup();
         try {
           if (!result?.publicUrl || !pairing?.reportCloudUrl) throw new Error("The local Cloudflare tunnel is not ready to report to Platform");
-          const report = await pairing.reportCloudUrl(result.publicUrl, { tunnelId: result.tunnelId, tunnelName: result.tunnelName, hostname: result.hostname, reservationToken: cloudflare.reservationToken() });
+          let reservationToken = cloudflare.reservationToken();
+          if (!reservationToken && runtimeConfig.nodeEnv === "production" && pairing.getCloudflareReservation) {
+            const reservation = await pairing.getCloudflareReservation();
+            if (String(reservation.reservedHostname || "") !== String(result.hostname || "") || String(reservation.reservedTunnelName || "") !== String(result.tunnelName || "")) throw new Error("The installation Cloudflare reservation does not match the paired tunnel");
+            reservationToken = await cloudflare.setReservationToken(reservation.reservationToken);
+          }
+          const report = await pairing.reportCloudUrl(result.publicUrl, { tunnelId: result.tunnelId, tunnelName: result.tunnelName, hostname: result.hostname, reservationToken });
           return json(res, 200, await cloudflare.markPlatformVerification({ state: "PLATFORM_VERIFIED", cloudUrl: result.publicUrl, verificationId: report.verificationId || null }));
         } catch (error) {
           await cloudflare.markPlatformVerification({ state: "PLATFORM_REPORT_FAILED", error: error.message || "Platform CloudURL verification failed" }).catch(() => {});

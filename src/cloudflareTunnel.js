@@ -235,6 +235,14 @@ class CloudflareTunnel {
     return String(this.setup.reservationToken || this.vault?.get?.("cloudflare.reservationToken") || "");
   }
 
+  async setReservationToken(token) {
+    const value = String(token || "").trim();
+    if (!/^[A-Za-z0-9_-]{32,256}$/.test(value)) throw new Error("An installation-specific Cloudflare reservation is required");
+    if (this.vault) await this.vault.set("cloudflare.reservationToken", value);
+    this.setup.reservationToken = value;
+    return value;
+  }
+
   spawnTunnel(args, env = {}) {
     if (this.process) return;
     const child = spawn(this.binary, args, {
