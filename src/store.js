@@ -14,6 +14,7 @@ function clone(value) {
 
 const ACTIVITY_MAX_RECORDS = 2000;
 const ACTIVITY_RETENTION_MONTHS = 4;
+const CANONICAL_PLATFORM_ORIGIN = "https://dinodia-platform-v2.vercel.app";
 
 function activityRetentionCutoff(now = new Date()) {
   const current = now instanceof Date ? new Date(now) : new Date(now);
@@ -174,11 +175,12 @@ function initialState() {
     nativeAutomationMigration: { fromVersion: NATIVE_AUTOMATION_STORE_VERSION, native: 0, legacy: 0, rejected: 0, completedAt: null },
     remoteBindings: {},
     platform: {
-      apiUrl: "https://app.dinodiasmartliving.com",
+      apiUrl: "",
       paired: false,
       agentSeenVersion: 0,
       publishedVersion: 0,
       acceptedTokenHashes: [],
+      operatorCredentialStates: [],
       syncIntervalMinutes: 2,
       lastPairAt: null,
       lastSyncAt: null,
@@ -297,6 +299,11 @@ function normalizeState(value) {
   const migration = sourceVersion >= NATIVE_AUTOMATION_STORE_VERSION
     ? { automations: value.automations && typeof value.automations === "object" ? value.automations : {}, automationTriggers: value.automationTriggers && typeof value.automationTriggers === "object" ? value.automationTriggers : {}, automationActions: value.automationActions && typeof value.automationActions === "object" ? value.automationActions : {}, legacyAutomations: oldAutomationMap, report: value.nativeAutomationMigration || { fromVersion: sourceVersion, native: 0, legacy: Object.keys(oldAutomationMap).length, rejected: 0, completedAt: null } }
     : migrateLegacyAutomations(oldAutomationMap, localHomeId);
+  const persistedPlatform = value.platform && typeof value.platform === "object" ? value.platform : {};
+  const persistedApiUrl = String(persistedPlatform.apiUrl || "").replace(/\/$/, "");
+  const productionPlatformUrl = String(process.env.NODE_ENV || "development") === "production"
+    ? (persistedApiUrl === CANONICAL_PLATFORM_ORIGIN ? persistedApiUrl : "")
+    : persistedApiUrl;
   return {
     ...base,
     ...value,
@@ -333,7 +340,17 @@ function normalizeState(value) {
     // is deterministic and does not appear to migrate again on every restart.
     nativeAutomationMigration: { fromVersion: sourceVersion || NATIVE_AUTOMATION_STORE_VERSION, ...(migration.report || {}), completedAt: value.nativeAutomationMigration?.completedAt || (sourceVersion < NATIVE_AUTOMATION_STORE_VERSION ? (value.updatedAt || null) : null) },
     remoteBindings: value.remoteBindings && typeof value.remoteBindings === "object" ? value.remoteBindings : {},
-    platform: { ...base.platform, ...(value.platform && typeof value.platform === "object" ? value.platform : {}) },
+    // A persisted retired/foreign origin is discarded during state
+    // normalisation. The runtime pairing configuration must explicitly supply
+    // the canonical V2 origin before any production request can be made.
+    platform: {
+      ...base.platform,
+      ...persistedPlatform,
+      operatorCredentialStates: Array.isArray(persistedPlatform.operatorCredentialStates)
+        ? persistedPlatform.operatorCredentialStates.filter((entry) => entry && Number.isInteger(Number(entry.version))).map((entry) => ({ version: Number(entry.version), state: String(entry.state || ''), graceUntil: entry.graceUntil ? String(entry.graceUntil) : null }))
+        : [],
+      apiUrl: productionPlatformUrl,
+    },
     heatingUsage: { ...base.heatingUsage, ...(value.heatingUsage && typeof value.heatingUsage === "object" ? value.heatingUsage : {}) },
     electricUsage: normalizeElectricUsageState(value.electricUsage),
     heatingDemandController: normalizeHeatingDemandControllerState(value.heatingDemandController),

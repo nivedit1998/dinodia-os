@@ -33,7 +33,7 @@ class CloudflareTunnel {
     this.lastError = null;
     this.publicUrl = "";
     this.connected = false;
-    this.setup = { state: "idle", authUrl: "", tunnelName: "", hostname: "", error: null };
+    this.setup = { state: "idle", authUrl: "", tunnelName: "", hostname: "", reservationToken: "", error: null };
   }
 
   settings() {
@@ -82,14 +82,15 @@ class CloudflareTunnel {
     });
   }
 
-  async beginSetup({ tunnelName, hostname } = {}) {
+  async beginSetup({ tunnelName, hostname, reservationToken = "" } = {}) {
     const cleanHostname = safeHostname(hostname);
     if (!cleanHostname || !isDinodiaCloudHostname(cleanHostname)) throw new Error("Cloudflare hostname must use a dinodiasmartliving.com host");
     const cleanName = String(tunnelName || "").trim();
     if (!cleanName || !/^[a-z0-9][a-z0-9 ._-]{1,62}$/i.test(cleanName)) throw new Error("Cloudflare tunnel name must be 2–63 characters and contain only letters, numbers, spaces, dots, hyphens, or underscores");
     await this.ensureCloudflareHome();
     await this.stopLogin();
-    this.setup = { state: "authorizing", authUrl: "", tunnelName: cleanName, hostname: cleanHostname, error: null };
+    if (this.nodeEnv === "production" && !/^[A-Za-z0-9_-]{32,256}$/.test(String(reservationToken))) throw new Error("An installation-specific Cloudflare reservation is required");
+    this.setup = { state: "authorizing", authUrl: "", tunnelName: cleanName, hostname: cleanHostname, reservationToken: String(reservationToken || ""), error: null };
     const child = spawn(this.binary, ["tunnel", "login"], { cwd: this.cloudflareHome, env: this.runtimeEnv(), stdio: ["ignore", "pipe", "pipe"] });
     this.loginProcess = child;
     const collect = (chunk) => {
@@ -142,7 +143,7 @@ class CloudflareTunnel {
     // tunnel. Never retain it as a long-lived hub secret.
     await fsp.rm(path.join(this.cloudflareHome, ".cloudflared", "cert.pem"), { force: true });
     if (this.store) await this.store.saveCloudflare({ mode: "local", token: "", hostname, tunnelName, tunnelId, origin: this.origin });
-    this.setup = { state: "complete", authUrl: "", tunnelName, hostname, error: null };
+    this.setup = { state: "complete", authUrl: "", tunnelName, hostname, reservationToken: this.setup.reservationToken || "", error: null };
     this.startLocal({ tunnelName, tunnelId, hostname });
     return this.status();
   }
@@ -152,6 +153,10 @@ class CloudflareTunnel {
     this.lastError = null;
     this.connected = false;
     this.spawnTunnel(["tunnel", "--no-autoupdate", "--config", path.join(this.cloudflareHome, "config.yml"), "run", settings.tunnelName], this.runtimeEnv());
+  }
+
+  reservationToken() {
+    return String(this.setup.reservationToken || "");
   }
 
   spawnTunnel(args, env = {}) {
@@ -249,6 +254,7 @@ class CloudflareTunnel {
   status() {
     const settings = this.settings();
     const hostname = settings.hostname ? safeHostname(settings.hostname) : "";
+    const { reservationToken: _reservationToken, ...safeSetup } = this.setup;
     return {
       configured: settings.mode !== "disabled",
       mode: settings.mode,
@@ -256,10 +262,11 @@ class CloudflareTunnel {
       connected: this.connected,
       hostname,
       tunnelName: settings.tunnelName,
+      tunnelId: settings.tunnelId,
       publicUrl: this.publicUrl || (hostname ? `https://${hostname}` : ""),
       origin: this.origin,
       lastError: this.lastError,
-      setup: { ...this.setup, loginActive: Boolean(this.loginProcess) },
+      setup: { ...safeSetup, loginActive: Boolean(this.loginProcess) },
     };
   }
 }

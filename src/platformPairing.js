@@ -16,7 +16,7 @@ function privateLanIp() {
 }
 
 class PlatformPairing {
-  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, haPort = 8123, intervalMs = 120000, runtime, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, onSyncResult, logger = console, fetchImpl = fetch, legacyCompatibilityEnabled = false } = {}) {
+  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, haPort = 8123, intervalMs = 120000, runtime, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, legacyCompatibilityEnabled = false } = {}) {
     this.store = store;
     this.vault = vault;
     this.identityBroker = identityBroker;
@@ -41,6 +41,8 @@ class PlatformPairing {
     this.getActivityIncidents = getActivityIncidents || (() => ({ schemaVersion: 1, capturedAt: new Date().toISOString(), incidents: [] }));
     this.getAlexaCatalog = getAlexaCatalog || null;
     this.onSyncResult = onSyncResult || (() => {});
+    this.onOperatorCredentialStateChange = onOperatorCredentialStateChange || (async () => {});
+    this.acceptOfflineAuthorisations = acceptOfflineAuthorisations || (async () => {});
     this.logger = logger;
     this.fetchImpl = fetchImpl;
     this.legacyCompatibilityEnabled = Boolean(legacyCompatibilityEnabled);
@@ -99,6 +101,8 @@ class PlatformPairing {
       encryptionPublicKey: crypto.createPublicKey(encryptionPublicPem),
       publicKeyFingerprint: String(this.vault?.get?.("platform.identityFingerprint") || ""),
       encryptionKeyFingerprint: String(this.vault?.get?.("platform.encryptionFingerprint") || ""),
+      manufacturingSignature: String(this.vault?.get?.("platform.manufacturingCertificateSignature") || ""),
+      generation: Number(this.vault?.get?.("platform.identityGeneration") || 0),
     };
   }
 
@@ -134,8 +138,23 @@ class PlatformPairing {
     if (this.identityBroker) return (await this.identityBroker.signCloudChallenge({ payload })).signature;
     const identity = this.loadManufacturingIdentity();
     if (!identity?.privateKey) throw new Error("A factory-enrolled hub signing identity is required");
-    const canonical = JSON.stringify({ version: 1, serial: String(payload.serial), cloudUrl: String(payload.cloudUrl), challenge: String(payload.challenge), identityFingerprint: String(payload.identityFingerprint), identityGeneration: Number(payload.identityGeneration) });
+    const canonical = JSON.stringify({ version: 1, serial: String(payload.serial), cloudUrl: String(payload.cloudUrl), challenge: String(payload.challenge), tunnelId: String(payload.tunnelId), tunnelName: String(payload.tunnelName), timestamp: Number(payload.timestamp), bodyHash: String(payload.bodyHash), identityFingerprint: String(payload.identityFingerprint), identityGeneration: Number(payload.identityGeneration) });
     return crypto.sign(null, Buffer.from(canonical, "utf8"), identity.privateKey).toString("base64url");
+  }
+
+  async signStepUpDescriptor(payload) {
+    if (this.identityBroker) return (await this.identityBroker.signStepUpDescriptor({ payload })).signature;
+    const identity = this.loadManufacturingIdentity();
+    if (!identity?.signingPrivateKey) throw new Error("A hub signing identity is required");
+    const canonical = JSON.stringify({
+      version: Number(payload.version), serial: String(payload.serial), identityGeneration: Number(payload.identityGeneration),
+      actorId: String(payload.actorId), customerSessionId: String(payload.customerSessionId), trustedDeviceId: String(payload.trustedDeviceId),
+      homeId: String(payload.homeId), membershipId: String(payload.membershipId), hubInstallId: String(payload.hubInstallId),
+      operationKind: String(payload.operationKind), targetIds: Array.isArray(payload.targetIds) ? payload.targetIds.map(String) : [],
+      controlId: String(payload.controlId), descriptorRevision: Number(payload.descriptorRevision), descriptorDigest: payload.descriptorDigest == null ? null : String(payload.descriptorDigest),
+      operationDigest: String(payload.operationDigest), nonce: String(payload.nonce), issuedAt: Number(payload.issuedAt),
+    });
+    return crypto.sign(null, Buffer.from(canonical, "utf8"), identity.signingPrivateKey).toString("base64url");
   }
 
   async registerProvisioningAttempt({ pairing, baseUrl } = {}) {
@@ -151,6 +170,7 @@ class PlatformPairing {
       publicKeyPem: identity.publicKeyPem,
       encryptionPublicKeyPem: identity.encryptionPublicKeyPem,
       publicKeyFingerprint: identity.publicKeyFingerprint,
+      encryptionKeyFingerprint: identity.encryptionKeyFingerprint,
       baseUrl,
       issuedAt: Date.now(),
       expiresAt: pairing.expiresAt,
@@ -220,25 +240,53 @@ class PlatformPairing {
 
   async requestWithHubIdentity(path, body) {
     if (!this.apiUrl) throw new Error("A native V2 platform URL is required");
+    const identity = await this.getPublicIdentity();
+    if (!identity?.generation) throw new Error("A registered hub identity generation is required");
+    const signedBody = { serial: this.serial, identityGeneration: Number(identity.generation), ...(body || {}) };
     const timestamp = Date.now();
     const nonce = crypto.randomBytes(24).toString("base64url");
-    const bodyHash = crypto.createHash("sha256").update(JSON.stringify(body ?? null), "utf8").digest("hex");
-    const signature = await this.signPlatformRequest({ method: "POST", path, timestamp, nonce, bodyHash });
+    const bodyHash = crypto.createHash("sha256").update(JSON.stringify(signedBody), "utf8").digest("hex");
+    const platform = this.store.getPlatform?.() || {};
+    const machineCredential = platform.paired ? this.vault?.get?.("platform.machineCredential") : null;
+    const machineVersion = Number(platform.provisioningCredentialVersion || 0);
+    const signature = machineCredential && machineVersion > 0
+      ? crypto.createHmac("sha256", crypto.createHash("sha256").update(String(machineCredential), "utf8").digest("hex")).update(["POST", path, String(timestamp), nonce, bodyHash].join("\n"), "utf8").digest("base64url")
+      : await this.signPlatformRequest({ method: "POST", path, timestamp, nonce, bodyHash });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     let response;
     try {
-      response = await this.fetchImpl(`${this.apiUrl}${path}`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json", "x-dinodia-hub-timestamp": String(timestamp), "x-dinodia-hub-nonce": nonce, "x-dinodia-hub-signature": signature }, body: JSON.stringify(body), signal: controller.signal });
+      const headers = { "content-type": "application/json", accept: "application/json", "x-dinodia-hub-timestamp": String(timestamp), "x-dinodia-hub-nonce": nonce, "x-dinodia-body-sha256": bodyHash };
+      if (machineCredential && machineVersion > 0) { headers["x-dinodia-machine-version"] = String(machineVersion); headers["x-dinodia-machine-signature"] = signature; } else headers["x-dinodia-hub-signature"] = signature;
+      response = await this.fetchImpl(`${this.apiUrl}${path}`, { method: "POST", headers, body: JSON.stringify(signedBody), signal: controller.signal });
     } finally { clearTimeout(timeout); }
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw Object.assign(new Error(result.error || result.message || `Platform returned HTTP ${response.status}`), { statusCode: response.status });
     return result;
   }
 
-  async reportCloudUrl(cloudUrl) {
+  async getCloudflareReservation() {
+    return this.requestWithHubIdentity("/api/hub-agent/v2/pairing/reservation", { serial: this.serial });
+  }
+
+  async requestPermanentClaimChallenge(reference) {
+    const value = String(reference || '').trim();
+    if (!value || value.length > 512) throw new Error("A permanent hub claim reference is required");
+    const challenge = await this.requestWithHubIdentity("/api/hub-agent/v2/claim/resolver/challenge", { serial: this.serial, reference: value });
+    if (!challenge?.challenge || !challenge.challengeId || !challenge.expiresAt) throw new Error("Platform did not issue a permanent hub claim challenge");
+    const identity = await this.getPublicIdentity();
+    const proof = { version: 1, serial: this.serial, identityGeneration: Number(identity.generation || 0), challengeId: String(challenge.challengeId), challenge: String(challenge.challenge), resolverGeneration: Number(challenge.resolverGeneration || 0), expiresAt: String(challenge.expiresAt) };
+    const timestamp = Date.now();
+    const nonce = crypto.randomBytes(24).toString("base64url");
+    const bodyHash = crypto.createHash("sha256").update(JSON.stringify(proof), "utf8").digest("hex");
+    const hubSignature = await this.signPlatformRequest({ method: "POST", path: "/api/hub-agent/v2/claim/resolver/challenge", timestamp, nonce, bodyHash });
+    return { ...proof, timestamp, nonce, bodyHash, hubSignature };
+  }
+
+  async reportCloudUrl(cloudUrl, metadata = {}) {
     const value = String(cloudUrl || "").trim().replace(/\/$/, "");
     if (!/^https:\/\/([a-z0-9-]+\.)*dinodiasmartliving\.com$/i.test(value)) throw new Error("A Dinodia company CloudURL is required");
-    return this.requestWithHubIdentity("/api/hub-agent/v2/pairing/cloud-url", { serial: this.serial, cloudUrl: value });
+    return this.requestWithHubIdentity("/api/hub-agent/v2/pairing/cloud-url", { serial: this.serial, cloudUrl: value, tunnelId: String(metadata.tunnelId || ""), tunnelName: String(metadata.tunnelName || ""), hostname: String(metadata.hostname || new URL(value).hostname), reservationToken: String(metadata.reservationToken || "") });
   }
 
   async decryptCredentialDelivery(delivery, purpose = "operator-credential") {
@@ -262,7 +310,11 @@ class PlatformPairing {
   async acceptOperatorCredentialDelivery(delivery) {
     const credential = await this.decryptCredentialDelivery(delivery, "operator-credential");
     await this.vault.set(`platform.operatorCredential.${Number(delivery.version)}`, credential);
-    await this.store.savePlatform({ operatorCredentialVersion: Number(delivery.version), operatorCredentialReceivedAt: new Date().toISOString() });
+    const current = this.store.getPlatform?.() || {};
+    // This compatibility method is retained for callers that only receive a
+    // delivery envelope.  Delivery is not acknowledgement: it must remain
+    // unusable until the hub sends the exact fingerprint back to Platform.
+    await this.store.savePlatform({ operatorCredentialReceivedAt: new Date().toISOString(), operatorCredentialStates: [...(current.operatorCredentialStates || []).filter((entry) => Number(entry.version) !== Number(delivery.version)), { version: Number(delivery.version), state: 'DELIVERED', graceUntil: null }] });
     return Number(delivery.version);
   }
 
@@ -317,13 +369,42 @@ class PlatformPairing {
         activityIncidents,
         operatorCredentialVersion: Number(platform.operatorCredentialVersion || 0),
       };
-      const result = (await this.getPublicIdentity())
+      // Heartbeat is a deliberately narrow, signed liveness contract. The
+      // broader token-state response remains responsible for credential and
+      // offline-policy synchronisation, but it is not the source of the
+      // platform's approximately two-minute hub availability signal.
+      const nativeIdentity = await this.getPublicIdentity();
+      if (nativeIdentity) await this.requestWithHubIdentity("/api/hub-agent/v2/heartbeat", {
+        serial: this.serial,
+        hubRuntime: this.runtime,
+      });
+      const result = nativeIdentity
         ? await this.requestWithHubIdentity("/api/hub-agent/token-state", payload)
         : this.legacyCompatibilityEnabled && this.vault?.get("platform.syncSecret")
           ? await this.request("/api/hub-agent/token-state", payload, this.vault.get("platform.syncSecret"))
           : null;
       if (!result) throw new Error("A factory-enrolled hub identity is required for Platform synchronisation");
-      if (result.operatorCredentialDelivery) await this.acceptOperatorCredentialDelivery(result.operatorCredentialDelivery);
+      const previousOperatorCredentialStates = Array.isArray(platform.operatorCredentialStates) ? platform.operatorCredentialStates : [];
+      let operatorCredentialStates = Array.isArray(result.operatorCredentialStates)
+        ? result.operatorCredentialStates.map((entry) => ({ version: Number(entry.version), state: String(entry.state || ''), graceUntil: entry.graceUntil || null }))
+        : (platform.operatorCredentialStates || []);
+      if (result.operatorCredentialDelivery) {
+        const deliveredVersion = Number(result.operatorCredentialDelivery.version);
+        const acceptedCredential = await this.decryptCredentialDelivery(result.operatorCredentialDelivery, "operator-credential");
+        await this.vault.set(`platform.operatorCredential.${deliveredVersion}`, acceptedCredential);
+        const currentPlatform = this.store.getPlatform?.() || {};
+        // Receipt is durable before acknowledgement.  The credential must not
+        // become usable as an operator session until Platform has accepted the
+        // exact fingerprint.  If the acknowledgement fails, the next sync can
+        // retry the same encrypted delivery without creating a second active
+        // version.
+        await this.store.savePlatform({ operatorCredentialReceivedAt: new Date().toISOString(), operatorCredentialStates: [...(currentPlatform.operatorCredentialStates || []).filter((entry) => Number(entry.version) !== deliveredVersion), { version: deliveredVersion, state: 'DELIVERED', graceUntil: null }] });
+        const credentialFingerprint = crypto.createHash("sha256").update(acceptedCredential, "utf8").digest("hex");
+        await this.requestWithHubIdentity("/api/hub-agent/v2/credentials/acknowledge", { version: deliveredVersion, credentialFingerprint });
+        await this.requestWithHubIdentity("/api/hub-agent/v2/credentials/activate", { version: deliveredVersion, credentialFingerprint });
+        operatorCredentialStates = [...operatorCredentialStates.filter((entry) => Number(entry.version) !== deliveredVersion), { version: deliveredVersion, state: 'ACTIVE', graceUntil: null }];
+        await this.store.savePlatform({ operatorCredentialVersion: deliveredVersion, operatorCredentialStates });
+      }
       const nextVersion = Math.max(Number(platform.agentSeenVersion || 0), Number(result.latestVersion || 0));
       const returnedHashes = Array.isArray(result.hubTokenHashes) && result.hubTokenHashes.length
         ? result.hubTokenHashes
@@ -333,10 +414,13 @@ class PlatformPairing {
         agentSeenVersion: nextVersion,
         publishedVersion: Number(result.publishedVersion || platform.publishedVersion || 0),
         acceptedTokenHashes: returnedHashes,
+        operatorCredentialStates,
         syncIntervalMinutes: Number(result.platformSyncIntervalMinutes || platform.syncIntervalMinutes || 2),
         lastSyncAt: new Date().toISOString(),
         lastError: null,
       });
+      await this.onOperatorCredentialStateChange({ previous: previousOperatorCredentialStates, current: operatorCredentialStates, now: Date.now(), hubId: this.serial });
+      if (Array.isArray(result.offlineAuthorisations)) await this.acceptOfflineAuthorisations(result.offlineAuthorisations);
       await this.onSyncResult(result, heatingUsage, heatingUsageResetAckAt, electricUsage, electricUsageResetAckAt);
       // Alexa has a dedicated bounded synchroniser. Keeping it outside this
       // heartbeat prevents a catalogue update from delaying token/state sync.

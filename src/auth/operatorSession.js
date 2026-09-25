@@ -44,7 +44,7 @@ function createOperatorSessionToken(claims, privateKey, now = Date.now()) {
   return `dno1.${signingInput}.${signature}`;
 }
 
-function verifyOperatorSessionToken(token, { publicKey, hubId, requiredScope = "os:admin", now = Date.now() } = {}) {
+function verifyOperatorSessionToken(token, { publicKey, hubId, requiredScope = "os:admin", requireRecentAuth = false, now = Date.now() } = {}) {
   const parts = String(token || "").split(".");
   if (parts.length !== 4 || parts[0] !== "dno1" || !publicKey) return null;
   const signingInput = `${parts[1]}.${parts[2]}`;
@@ -66,7 +66,8 @@ function verifyOperatorSessionToken(token, { publicKey, hubId, requiredScope = "
   const recentAuthAt = Number(claims.recentAuthAt);
   if (claims.iss !== "dinodia-platform" || claims.aud !== `dinodia-os:${String(hubId || "")}` || claims.hubId !== String(hubId || "")) return null;
   if (!claims.sub || !claims.sid || !claims.jti || !Number.isFinite(exp) || !Number.isFinite(iat) || exp <= nowSeconds || exp - iat > MAX_SESSION_MS / 1000) return null;
-  if (!Number.isFinite(recentAuthAt) || Number(now) - recentAuthAt > MAX_RECENT_AUTH_MS) return null;
+  if (!Number.isFinite(recentAuthAt)) return null;
+  if (requireRecentAuth && Number(now) - recentAuthAt > MAX_RECENT_AUTH_MS) return null;
   if (!Array.isArray(claims.scope) || (requiredScope && !claims.scope.includes(requiredScope))) return null;
   return Object.freeze({ ...claims, scope: [...claims.scope] });
 }

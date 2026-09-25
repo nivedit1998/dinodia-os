@@ -41,7 +41,7 @@ class ProvisioningPairingService {
     await this.pendingPersist;
   }
 
-  issue({ attemptId = crypto.randomUUID(), publicKeyFingerprint = "", baseUrl = "", browserNonce = "" } = {}) {
+  issue({ attemptId = crypto.randomUUID(), publicKeyFingerprint = "", baseUrl = "", browserNonce = "", browserId = "" } = {}) {
     const code = `DNO-${crypto.randomBytes(18).toString("base64url")}`;
     const issuedAt = Number(this.now());
     const codeVaultKey = `provisioning.pairing.code.${crypto.randomUUID()}`;
@@ -53,6 +53,7 @@ class ProvisioningPairingService {
       baseUrl: String(baseUrl || "").replace(/\/$/, ""),
       codeHash: hash(code),
       codeVaultKey,
+      browserIdHash: browserId ? hash(browserId) : "",
       browserNonceHash: browserNonce ? hash(browserNonce) : "",
       issuedAt,
       expiresAt: issuedAt + this.ttlMs,
@@ -88,10 +89,11 @@ class ProvisioningPairingService {
     };
   }
 
-  matchesBrowserSession({ attemptId = "", browserNonce = "" } = {}) {
+  matchesBrowserSession({ attemptId = "", browserNonce = "", browserId = "" } = {}) {
     const value = this.current;
     if (!value || value.revokedAt || value.consumedAt || Number(this.now()) >= value.expiresAt) return false;
-    if (String(attemptId || "") !== value.attemptId || !value.browserNonceHash || !browserNonce) return false;
+    if (String(attemptId || "") !== value.attemptId || !value.browserNonceHash || !browserNonce || !value.browserIdHash || !browserId) return false;
+    if (hash(browserId) !== value.browserIdHash) return false;
     const expected = Buffer.from(value.browserNonceHash, "hex");
     const supplied = Buffer.from(hash(browserNonce), "hex");
     return expected.length === supplied.length && crypto.timingSafeEqual(expected, supplied);

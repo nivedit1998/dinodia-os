@@ -34,10 +34,11 @@ function canUseArea({ areaIds = [], areaId } = {}) {
 }
 
 class OfflineLanAuthorisationStore {
-  constructor({ store, now = () => Date.now(), maxOfflineMs = 24 * 60 * 60 * 1000 } = {}) {
+  constructor({ store, now = () => Date.now(), maxOfflineMs = 0, platformPublicKeys = [] } = {}) {
     this.store = store;
     this.now = now;
     this.maxOfflineMs = maxOfflineMs;
+    this.platformPublicKeys = platformPublicKeys;
   }
 
   records() { return this.store?.getSecurity?.().offlineAuthorisations || {}; }
@@ -48,7 +49,7 @@ class OfflineLanAuthorisationStore {
     if (!Array.isArray(input.scope) || !input.scope.includes("tenant:device-command")) throw new Error("Offline authorization requires tenant device command scope");
     const id = String(input.id || crypto.randomUUID());
     const issuedAt = Number(input.issuedAt || this.now());
-    const expiresAt = input.expiresAt == null ? null : Math.min(Number(input.expiresAt), issuedAt + this.maxOfflineMs);
+    const expiresAt = input.expiresAt == null || !this.maxOfflineMs ? null : Math.min(Number(input.expiresAt), issuedAt + this.maxOfflineMs);
     const grant = {
       version: 1,
       id,
@@ -68,6 +69,21 @@ class OfflineLanAuthorisationStore {
     };
     await this.store.saveSecurity({ offlineAuthorisations: { ...this.records(), [id]: grant } });
     return { ...grant };
+  }
+
+  async acceptPlatformEnvelope(envelope = {}) {
+    const encoded = String(envelope.signature || '').split('.')[0];
+    const signature = String(envelope.signature || '').split('.')[1];
+    if (!encoded || !signature || JSON.stringify(envelope.payload || {}) !== Buffer.from(encoded, 'base64url').toString('utf8')) throw new Error('Offline authorisation envelope is malformed');
+    let valid = false;
+    for (const key of this.platformPublicKeys) {
+      try { if (crypto.verify(null, Buffer.from(encoded, 'utf8'), key, Buffer.from(signature, 'base64url'))) { valid = true; break; } } catch {}
+    }
+    if (!valid) throw new Error('Offline authorisation envelope signature is invalid');
+    const payload = envelope.payload || {};
+    if (!payload.id || !payload.homeId || !payload.hubInstallId || !payload.membershipId || !payload.trustedDeviceId) throw new Error('Offline authorisation envelope identity is incomplete');
+    if (payload.revokedAt) return this.revoke(String(payload.id), String(payload.revokeReason || 'cloud_policy_revoked'));
+    return this.enroll({ id: payload.id, homeId: payload.homeId, hubInstallId: payload.hubInstallId, membershipId: payload.membershipId, trustedDeviceId: payload.trustedDeviceId, userId: payload.customerAccountId, householdRole: payload.householdRole, publicKey: payload.publicKey, areaIds: payload.areaIds, scope: payload.scope, policyRevision: payload.policyRevision, issuedAt: payload.issuedAt, expiresAt: null });
   }
 
   async revoke(id, reason = "revoked") {

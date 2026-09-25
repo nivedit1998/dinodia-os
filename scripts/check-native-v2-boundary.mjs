@@ -9,7 +9,7 @@ const pairing = fs.readFileSync(path.join(root, 'src/platformPairing.js'), 'utf8
 const failures = [];
 
 if (/https:\/\/app\.dinodiasmartliving\.com/.test(config + pairing)) failures.push('old platform URL remains in active native configuration/pairing');
-if (!/platformApiUrl: stringEnv\("DINODIA_PLATFORM_API_URL", ""\)/.test(config)) failures.push('native platform URL does not fail closed when absent');
+if (!/const configuredPlatformOrigin = stringEnv\("DINODIA_PLATFORM_API_URL", ""\)/.test(config) || !/configuredPlatformOrigin === canonicalPlatformOrigin/.test(config)) failures.push('native platform URL does not fail closed when absent or non-canonical');
 if (!/apiUrl = ""/.test(pairing)) failures.push('pairing constructor has a legacy URL fallback');
 if (!/A native V2 platform URL is required/.test(pairing)) failures.push('pairing does not fail closed without a V2 platform URL');
 

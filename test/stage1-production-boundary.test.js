@@ -14,7 +14,7 @@ function mockIntegration() {
 
 function appToken(claims, privateKey) {
   const encode = (value) => Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
-  const input = `${encode({ alg: "EdDSA", typ: "DNO-APP-1" })}.${encode(claims)}`;
+  const input = `${encode({ alg: "EdDSA", typ: "DNO-APP-1", v: 1 })}.${encode(claims)}`;
   return `dno-app-1.${input}.${crypto.sign(null, Buffer.from(input), privateKey).toString("base64url")}`;
 }
 
@@ -72,7 +72,7 @@ test("production app authorization is scoped and owners cannot command the hub",
   const base = `http://127.0.0.1:${hub.server.address().port}`;
   try {
     const now = Math.floor(Date.now() / 1000);
-    const token = appToken({ iss: "dinodia-platform", aud: "dinodia-hub:app-scope-hub", sub: "user:22", sid: "sid-1", jti: "jti-1", membershipId: "membership-1", trustedDeviceId: "trusted-1", hubInstallId: "app-scope-hub", iat: now, exp: now + 300, homeId: 7, householdRole: "OWNER", areaIds: ["area-1"], policyRevision: 1, scope: ["tenant:device-command"] }, keys.privateKey);
+    const token = appToken({ iss: "dinodia-platform-v2", aud: "dinodia-hub:app-scope-hub", sub: "user-22", sid: "sid-1", jti: "jti-1", membershipId: "membership-1", trustedDeviceId: "trusted-1", hubInstallationId: "app-scope-hub", iat: now, exp: now + 300, homeId: "home-7", householdRole: "OWNER", areaIds: ["area-1"], policyRevision: 0, scope: ["tenant:device-command"] }, keys.privateKey);
     const allowedRead = await request(base, "/_dinodia/admin/api/devices", { headers: { authorization: `Bearer ${token}` } });
     assert.equal(allowedRead.response.status, 200, JSON.stringify(allowedRead.body));
     const forbiddenAdmin = await request(base, "/_dinodia/admin/api/integrations/alexa", { headers: { authorization: `Bearer ${token}` } });

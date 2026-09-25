@@ -28,6 +28,11 @@ const legacyCompatibilityEnabled = nodeEnv === "production"
 const nativeAutomationsMode = ["off", "read_only", "enabled"].includes(stringEnv("DINODIA_NATIVE_AUTOMATIONS_MODE", nodeEnv === "production" ? "read_only" : "enabled"))
   ? stringEnv("DINODIA_NATIVE_AUTOMATIONS_MODE", nodeEnv === "production" ? "read_only" : "enabled")
   : "read_only";
+const canonicalPlatformOrigin = "https://dinodia-platform-v2.vercel.app";
+const configuredPlatformOrigin = stringEnv("DINODIA_PLATFORM_API_URL", "").replace(/\/$/, "");
+const platformApiUrl = nodeEnv === "production"
+  ? (configuredPlatformOrigin === canonicalPlatformOrigin ? configuredPlatformOrigin : "")
+  : configuredPlatformOrigin;
 
 module.exports = {
   nodeEnv,
@@ -68,10 +73,13 @@ module.exports = {
   cloudflareTunnelToken: stringEnv("CLOUDFLARE_TUNNEL_TOKEN", ""),
   cloudflarePublicHostname: stringEnv("CLOUDFLARE_PUBLIC_HOSTNAME", ""),
   cloudflaredBinary: stringEnv("CLOUDFLARED_BIN", "cloudflared"),
-  platformHeartbeatUrl: stringEnv("DINODIA_PLATFORM_HEARTBEAT_URL", ""),
-  platformToken: stringEnv("DINODIA_PLATFORM_TOKEN", ""),
+  // The old snapshot heartbeat is retained only for an explicit development
+  // compatibility run. Production uses the signed native heartbeat route and
+  // must not accept its legacy URL/token pair.
+  platformHeartbeatUrl: developmentCompatibility ? stringEnv("DINODIA_PLATFORM_HEARTBEAT_URL", "") : "",
+  platformToken: developmentCompatibility ? stringEnv("DINODIA_PLATFORM_TOKEN", "") : "",
   // Native V2 must be explicitly configured. An old platform URL is never a fallback.
-  platformApiUrl: stringEnv("DINODIA_PLATFORM_API_URL", ""),
+  platformApiUrl,
   platformBootstrapSecret: developmentCompatibility ? stringEnv("DINODIA_PLATFORM_BOOTSTRAP_SECRET", "") : "",
   platformSyncIntervalMs: numberEnv("DINODIA_PLATFORM_SYNC_INTERVAL_MS", 120000),
   alexaNativeEnabled: stringEnv("ALEXA_NATIVE_DINODIA_OS_ENABLED", "false") === "true",
@@ -82,7 +90,7 @@ module.exports = {
   haToken: developmentCompatibility ? stringEnv("DINODIA_HA_TOKEN", "") : "",
   haUsername: developmentCompatibility ? stringEnv("DINODIA_HA_USERNAME", "dinodia") : "",
   hubId: stringEnv("DINODIA_HUB_ID", ""),
-  heartbeatIntervalMs: numberEnv("DINODIA_HEARTBEAT_INTERVAL_MS", 300000),
+  heartbeatIntervalMs: numberEnv("DINODIA_HEARTBEAT_INTERVAL_MS", 120000),
   hiveEnabled: stringEnv("DINODIA_HIVE_ENABLED", "true") === "true",
   hivePythonPath: stringEnv("DINODIA_HIVE_PYTHON_PATH", path.join(process.cwd(), ".venv-hive", "bin", "python")),
   hiveWorkerPath: stringEnv("DINODIA_HIVE_WORKER_PATH", path.join(__dirname, "integrations", "hive", "python", "hive_worker.py")),

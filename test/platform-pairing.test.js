@@ -9,16 +9,16 @@ const { SecretVault } = require("../src/secretVault");
 const { PlatformPairing, sign } = require("../src/platformPairing");
 const { generateManufacturingIdentity, vaultIdentityRecord } = require("../src/auth/manufacturingIdentity");
 
-function encryptedMachineEnvelope(identity, credential, version) {
+function encryptedMachineEnvelope(identity, credential, version, purpose = "machine-credential") {
   const ephemeral = crypto.generateKeyPairSync("x25519");
   const shared = crypto.diffieHellman({ privateKey: ephemeral.privateKey, publicKey: identity.encryptionPublicKey });
-  const key = Buffer.from(crypto.hkdfSync("sha256", shared, Buffer.from("dinodia-os-machine-credential"), Buffer.from(String(version)), 32));
+  const key = Buffer.from(crypto.hkdfSync("sha256", shared, Buffer.from(`dinodia-os-${purpose}`), Buffer.from(String(version)), 32));
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
   const ciphertext = Buffer.concat([cipher.update(credential, "utf8"), cipher.final()]);
   return {
     version,
-    purpose: "machine-credential",
+    purpose,
     algorithm: "x25519-hkdf-sha256/aes-256-gcm",
     ephemeralPublicKeyPem: ephemeral.publicKey.export({ type: "spki", format: "pem" }).toString(),
     iv: iv.toString("base64"),
@@ -76,6 +76,7 @@ test("native provisioning completes the outbound challenge, encrypted credential
   await vault.set("platform.encryptionPublicKey", identityRecord.encryptionPublicKey);
   await vault.set("platform.identityFingerprint", identityRecord.publicKeyFingerprint);
   await vault.set("platform.encryptionFingerprint", identityRecord.encryptionKeyFingerprint);
+  await vault.set("platform.identityGeneration", "1");
   await vault.set("platform.manufacturingCertificateSignature", "factory-signature-for-platform-test");
   const credential = "dno_machine_test_credential";
   const calls = [];
@@ -89,6 +90,7 @@ test("native provisioning completes the outbound challenge, encrypted credential
       assert.equal(body.credentialFingerprint, crypto.createHash("sha256").update(credential).digest("hex"));
       return { ok: true, async json() { return { ok: true, acknowledged: true }; } };
     }
+    if (url.endsWith('/heartbeat')) return { ok: true, async json() { return { ok: true, online: true }; } };
     assert.match(url, /\/token-state$/);
     return { ok: true, async json() { return { latestVersion: 0, publishedVersion: 0, hubTokenHashes: [], acceptedActivityIncidentIds: [] }; } };
   };
@@ -105,6 +107,78 @@ test("native provisioning completes the outbound challenge, encrypted credential
     "/api/hub-agent/v2/pairing/challenge",
     "/api/hub-agent/v2/pairing/prove",
     "/api/hub-agent/v2/pairing/acknowledge",
+    "/api/hub-agent/v2/heartbeat",
     "/api/hub-agent/token-state",
   ]);
+});
+
+test("operator credential receipt stays DELIVERED until the hub acknowledgement succeeds", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-operator-delivery-"));
+  const store = new Store(path.join(directory, "dinodia.json"));
+  await store.saveIdentity({ serial: "DINODIA-OPERATOR-HUB" });
+  const vault = new SecretVault({ dataDir: directory });
+  const identity = generateManufacturingIdentity({ serial: "DINODIA-OPERATOR-HUB" });
+  const identityRecord = vaultIdentityRecord(identity);
+  await vault.set("platform.identityPrivateKey", identityRecord.signingPrivateKey);
+  await vault.set("platform.identityPublicKey", identityRecord.signingPublicKey);
+  await vault.set("platform.encryptionPrivateKey", identityRecord.encryptionPrivateKey);
+  await vault.set("platform.encryptionPublicKey", identityRecord.encryptionPublicKey);
+  await vault.set("platform.identityFingerprint", identityRecord.publicKeyFingerprint);
+  await vault.set("platform.encryptionFingerprint", identityRecord.encryptionKeyFingerprint);
+  await vault.set("platform.identityGeneration", "1");
+  await vault.set("platform.manufacturingCertificateSignature", "factory-signature-for-operator-test");
+  await store.savePlatform({ paired: true, provisioningCredentialVersion: 1, operatorCredentialVersion: 0 });
+  const credential = "dno_operator_test_credential";
+  const envelope = encryptedMachineEnvelope(identity, credential, 2, "operator-credential");
+  let acknowledgementAttempts = 0;
+  const fetchImpl = async (url) => {
+    if (url.endsWith("/heartbeat")) return { ok: true, async json() { return { ok: true, online: true }; } };
+    if (url.endsWith("/credentials/acknowledge")) {
+      acknowledgementAttempts += 1;
+      if (acknowledgementAttempts === 1) return { ok: false, status: 503, async json() { return { error: "temporarily_unavailable" }; } };
+      return { ok: true, async json() { return { ok: true, state: "ACKNOWLEDGED" }; } };
+    }
+    if (url.endsWith("/credentials/activate")) return { ok: true, async json() { return { ok: true, state: "ACTIVE" }; } };
+    assert.match(url, /\/token-state$/);
+    return { ok: true, async json() { return { latestVersion: 2, publishedVersion: 0, operatorCredentialDelivery: { version: 2, envelope }, operatorCredentialStates: [], offlineAuthorisations: [], acceptedActivityIncidentIds: [] }; } };
+  };
+  const pairing = new PlatformPairing({ store, vault, apiUrl: "https://platform.test", serial: "DINODIA-OPERATOR-HUB", fetchImpl, intervalMs: 60000 });
+  await pairing.syncNow();
+  assert.equal(store.getPlatform().operatorCredentialStates[0].state, "DELIVERED");
+  assert.equal(store.getPlatform().operatorCredentialVersion, 0);
+  pairing.nextRetryAt = 0;
+  await pairing.syncNow();
+  assert.equal(store.getPlatform().operatorCredentialStates[0].state, "ACTIVE");
+  assert.equal(store.getPlatform().operatorCredentialVersion, 2);
+  assert.equal(acknowledgementAttempts, 2);
+});
+
+test("permanent hub claim challenge is opaque, short-lived, and hub-signed", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-claim-resolver-"));
+  const store = new Store(path.join(directory, "dinodia.json"));
+  await store.saveIdentity({ serial: "DINODIA-CLAIM-HUB" });
+  const vault = new SecretVault({ dataDir: directory });
+  const identity = generateManufacturingIdentity({ serial: "DINODIA-CLAIM-HUB" });
+  const identityRecord = vaultIdentityRecord(identity);
+  await vault.set("platform.identityPrivateKey", identityRecord.signingPrivateKey);
+  await vault.set("platform.identityPublicKey", identityRecord.signingPublicKey);
+  await vault.set("platform.encryptionPrivateKey", identityRecord.encryptionPrivateKey);
+  await vault.set("platform.encryptionPublicKey", identityRecord.encryptionPublicKey);
+  await vault.set("platform.identityFingerprint", identityRecord.publicKeyFingerprint);
+  await vault.set("platform.encryptionFingerprint", identityRecord.encryptionKeyFingerprint);
+  await vault.set("platform.identityGeneration", "1");
+  await vault.set("platform.manufacturingCertificateSignature", "factory-signature-for-claim-test");
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return { ok: true, async json() { return { ok: true, challengeId: "challenge-1", challenge: "nonce-1", resolverGeneration: 1, expiresAt: new Date(Date.now() + 300000).toISOString() }; } };
+  };
+  const pairing = new PlatformPairing({ store, vault, apiUrl: "https://platform.test", serial: "DINODIA-CLAIM-HUB", fetchImpl, intervalMs: 60000 });
+  const result = await pairing.requestPermanentClaimChallenge("dno_home_claim_reference");
+  assert.equal(result.challengeId, "challenge-1");
+  assert.equal(result.hubSignature.length > 20, true);
+  assert.equal(result.bodyHash.length, 64);
+  assert.equal(calls[0].url.endsWith("/api/hub-agent/v2/claim/resolver/challenge"), true);
+  assert.equal(calls[0].body.reference, "dno_home_claim_reference");
+  assert.equal(Object.hasOwn(result, "homeId"), false);
 });

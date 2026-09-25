@@ -102,7 +102,7 @@ function automationEntity(automation) {
   };
 }
 
-function createCompatInterface({ port = 8123, host = "0.0.0.0", model, store, auth, wsAuth = auth, eventBus, mqtt, syncStatus, logger = console, hubAgent = false, flowHandlers = {}, onRemoteEvent, onRegistryChange, onAuthenticated } = {}) {
+function createCompatInterface({ port = 8123, host = "0.0.0.0", model, store, auth, wsAuth = auth, authorizeWsMessage, filterWsStates, filterWsEvent, eventBus, mqtt, syncStatus, logger = console, hubAgent = false, flowHandlers = {}, onRemoteEvent, onRegistryChange, onAuthenticated } = {}) {
   const flows = new Map();
   const subscriptions = new Map();
 
@@ -111,8 +111,9 @@ function createCompatInterface({ port = 8123, host = "0.0.0.0", model, store, au
     return false;
   }
 
-  function listStates() {
-    return uniqueStates([...model.states(), ...store.listAutomations().map(automationEntity)]);
+  function listStates(principal = null) {
+    const states = uniqueStates([...model.states(), ...store.listAutomations().map(automationEntity)]);
+    return typeof filterWsStates === "function" ? filterWsStates(states, principal) : states;
   }
 
   function registryList(type) {
@@ -371,12 +372,14 @@ function createCompatInterface({ port = 8123, host = "0.0.0.0", model, store, au
   }
 
   function dispatchWs(socket, message) {
+    const principal = socket.__dinodiaPrincipal || null;
     const id = message.id;
     const result = (value) => socket.send(JSON.stringify({ id, type: "result", success: true, result: value }));
     const failure = (error) => socket.send(JSON.stringify({ id, type: "result", success: false, error: { code: error.code || "invalid_request", message: error.message || "Command failed" } }));
     (async () => {
+      if (typeof authorizeWsMessage === "function" && !await authorizeWsMessage(message, principal, { model, store })) throw Object.assign(new Error("This WebSocket operation is not permitted"), { code: "insufficient_scope" });
       switch (message.type) {
-        case "get_states": return result(listStates());
+        case "get_states": return result(listStates(principal));
         case "call_service": {
           const serviceResult = await serviceCall(message.domain, message.service, { ...(message.service_data || {}), ...(message.target || {}) });
           return result(message.return_response ? serviceResult : serviceResult.changed_states);
@@ -492,6 +495,7 @@ function createCompatInterface({ port = 8123, host = "0.0.0.0", model, store, au
           return socket.close(1008, "Unauthorized");
         }
         authenticated = true;
+        socket.__dinodiaPrincipal = principal;
         clearTimeout(authTimer);
         try { onAuthenticated?.(socket, principal); } catch (error) { logger.error(`[auth] websocket session tracking failed: ${error.message}`); }
         socket.send(JSON.stringify({ type: "auth_ok", ha_version: "2026.8-dinodia", user: { id: "dinodia" } }));
@@ -505,7 +509,9 @@ function createCompatInterface({ port = 8123, host = "0.0.0.0", model, store, au
   const onEvent = (eventType, data) => {
     for (const [socket, types] of subscriptions) {
       if (socket.readyState !== 1 || (!types.has(eventType) && !types.has("*"))) continue;
-      socket.send(JSON.stringify({ id: 0, type: "event", event: { event_type: eventType, data } }));
+      const filtered = typeof filterWsEvent === "function" ? filterWsEvent(eventType, data, socket.__dinodiaPrincipal || null) : data;
+      if (filtered == null) continue;
+      socket.send(JSON.stringify({ id: 0, type: "event", event: { event_type: eventType, data: filtered } }));
     }
   };
   if (eventBus) {

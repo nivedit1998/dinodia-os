@@ -32,12 +32,12 @@ function verifyAppAccessToken(token, { publicKeys = [], hubId, now = Date.now(),
   const issuedAt = Number(claims.iat);
   const expiresAt = Number(claims.exp);
   const expectedAudience = `dinodia-hub:${String(hubId || "")}`;
-  if (claims.iss !== "dinodia-platform" || claims.aud !== expectedAudience || !/^user:\d+$/.test(String(claims.sub || ""))) return null;
-  if (!claims.sid || !claims.jti || !claims.membershipId || !claims.trustedDeviceId || !claims.hubInstallId || !Number.isFinite(issuedAt) || !Number.isFinite(expiresAt) || issuedAt > nowSeconds + 5 || expiresAt <= nowSeconds || expiresAt - issuedAt > MAX_TOKEN_TTL_SECONDS) return null;
+  if (claims.iss !== "dinodia-platform-v2" || claims.aud !== expectedAudience || typeof claims.sub !== "string" || !claims.sub) return null;
+  if (!claims.sid || !claims.jti || !claims.membershipId || !claims.trustedDeviceId || !claims.hubInstallationId || !Number.isFinite(issuedAt) || !Number.isFinite(expiresAt) || issuedAt > nowSeconds + 5 || expiresAt <= nowSeconds || expiresAt - issuedAt > MAX_TOKEN_TTL_SECONDS) return null;
   if (!["OWNER", "PROPERTY_MANAGER", "TENANT"].includes(claims.householdRole)) return null;
-  if (!Number.isInteger(claims.homeId) || !Number.isInteger(claims.policyRevision) || claims.policyRevision < Number(policyRevision || 0)) return null;
+  if (typeof claims.homeId !== "string" || !claims.homeId || !Number.isInteger(claims.policyRevision) || claims.policyRevision < Number(policyRevision || 0)) return null;
   if (!Array.isArray(claims.areaIds) || !Array.isArray(claims.scope)) return null;
-  return Object.freeze({ ...claims, areaIds: [...new Set(claims.areaIds.map(String))], scope: [...new Set(claims.scope.map(String))], principalType: "app" });
+  return Object.freeze({ ...claims, hubInstallId: claims.hubInstallationId, role: claims.householdRole, areaIds: [...new Set(claims.areaIds.map(String))], scope: [...new Set(claims.scope.map(String))], principalType: "app" });
 }
 
 function appTokenFingerprint(token) {

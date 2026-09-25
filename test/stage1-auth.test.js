@@ -4,7 +4,7 @@ const crypto = require("node:crypto");
 const { CredentialRegistry, CREDENTIAL_TYPES } = require("../src/auth/credentialRegistry");
 const { createOperatorSessionToken, verifyOperatorSessionToken } = require("../src/auth/operatorSession");
 const { ProvisioningPairingService } = require("../src/auth/provisioningPairing");
-const { generateManufacturingIdentity, signPairingEnvelope, verifyPairingEnvelope } = require("../src/auth/manufacturingIdentity");
+const { generateManufacturingIdentity, stableManufacturingIdentityPayload, signPairingEnvelope, verifyPairingEnvelope } = require("../src/auth/manufacturingIdentity");
 const { createLanChallenge, signLanChallenge, verifyLanProof, canUseArea } = require("../src/auth/offlineLanAuthorizer");
 const { StepUpProofRegistry } = require("../src/auth/stepUpProofs");
 const { RevocationCoordinator } = require("../src/auth/revocationCoordinator");
@@ -12,14 +12,15 @@ const { Store } = require("../src/store");
 const { SecretVault } = require("../src/secretVault");
 const { canonicalPlatformRequest, encryptPrivateKey, decryptPrivateKey } = require("../src/auth/identityBroker");
 
-test("operator sessions are signed, hub-bound, recent-auth-bound and time-limited", () => {
+test("operator sessions are signed, hub-bound, session-time-limited, with separate recent-auth enforcement", () => {
   const keys = crypto.generateKeyPairSync("ed25519");
   const now = Date.UTC(2026, 0, 1, 12);
   const token = createOperatorSessionToken({ sub: "employee-1", hubId: "DIN-001", scope: ["os:admin"], recentAuthAt: now }, keys.privateKey, now);
   assert.ok(verifyOperatorSessionToken(token, { publicKey: keys.publicKey, hubId: "DIN-001", now }));
   assert.equal(verifyOperatorSessionToken(token, { publicKey: keys.publicKey, hubId: "DIN-002", now }), null);
   assert.equal(verifyOperatorSessionToken(token, { publicKey: keys.publicKey, hubId: "DIN-001", requiredScope: "os:rotate", now }), null);
-  assert.equal(verifyOperatorSessionToken(token, { publicKey: keys.publicKey, hubId: "DIN-001", now: now + 5 * 60_001 }), null);
+  assert.ok(verifyOperatorSessionToken(token, { publicKey: keys.publicKey, hubId: "DIN-001", now: now + 5 * 60_001 }));
+  assert.equal(verifyOperatorSessionToken(token, { publicKey: keys.publicKey, hubId: "DIN-001", requireRecentAuth: true, now: now + 5 * 60_001 }), null);
 });
 
 test("credential registry stores hashes, rejects expiry and revokes sockets by fingerprint", () => {
@@ -40,11 +41,12 @@ test("credential registry stores hashes, rejects expiry and revokes sockets by f
 test("provisioning presentation is 15-minute, hub-bound and single-use", () => {
   let now = 10_000;
   const service = new ProvisioningPairingService({ serial: "DIN-001", now: () => now });
-  const issued = service.issue({ attemptId: "attempt-1", browserNonce: "browser-nonce-1", publicKeyFingerprint: "key-1", baseUrl: "http://192.168.1.76:8123" });
+  const issued = service.issue({ attemptId: "attempt-1", browserNonce: "browser-nonce-1", browserId: "browser-1", publicKeyFingerprint: "key-1", baseUrl: "http://192.168.1.76:8123" });
   assert.equal(service.status().state, "active");
-  assert.equal(service.matchesBrowserSession({ attemptId: "attempt-1", browserNonce: "browser-nonce-1" }), true);
-  assert.equal(service.matchesBrowserSession({ attemptId: "attempt-1", browserNonce: "wrong-browser" }), false);
-  assert.equal(service.matchesBrowserSession({ attemptId: "attempt-2", browserNonce: "browser-nonce-1" }), false);
+  assert.equal(service.matchesBrowserSession({ attemptId: "attempt-1", browserNonce: "browser-nonce-1", browserId: "browser-1" }), true);
+  assert.equal(service.matchesBrowserSession({ attemptId: "attempt-1", browserNonce: "browser-nonce-1", browserId: "browser-2" }), false);
+  assert.equal(service.matchesBrowserSession({ attemptId: "attempt-1", browserNonce: "wrong-browser", browserId: "browser-1" }), false);
+  assert.equal(service.matchesBrowserSession({ attemptId: "attempt-2", browserNonce: "browser-nonce-1", browserId: "browser-1" }), false);
   assert.equal(service.redeem({ code: issued.code, attemptId: "attempt-1", serial: "DIN-001", browserNonce: "browser-nonce-1", publicKeyFingerprint: "wrong" }).errorCode, "pairing_key_mismatch");
   assert.equal(service.redeem({ code: issued.code, attemptId: "attempt-1", serial: "DIN-001", browserNonce: "browser-nonce-1", publicKeyFingerprint: "key-1" }).ok, true);
   assert.equal(service.redeem({ code: issued.code, attemptId: "attempt-1", serial: "DIN-001", browserNonce: "browser-nonce-1", publicKeyFingerprint: "key-1" }).errorCode, "pairing_already_consumed");
@@ -70,6 +72,8 @@ test("provisioning presentation survives OS restart without persisting plaintext
 
 test("manufacturing identity signs a pairing envelope and rejects another hub key", () => {
   const identity = generateManufacturingIdentity({ serial: "DIN-001" });
+  assert.match(stableManufacturingIdentityPayload({ ...identity, identityGeneration: 1 }), /"identityGeneration":1/);
+  assert.match(stableManufacturingIdentityPayload({ ...identity, identityGeneration: 1 }), /"encryptionKeyFingerprint"/);
   const envelope = signPairingEnvelope(identity, { attemptId: "attempt-1", nonce: "n-1" });
   assert.equal(verifyPairingEnvelope({ ...envelope, publicKey: identity.publicKey }), true);
   const other = crypto.generateKeyPairSync("ed25519");
@@ -84,6 +88,13 @@ test("offline LAN proof is short-lived, area-scoped and operation-bound", () => 
   assert.equal(verifyLanProof({ challenge, signature, publicKey: keys.publicKey, now: 31_001 }), false);
   assert.equal(canUseArea({ areaIds: ["a1"], areaId: "a1" }), true);
   assert.equal(canUseArea({ areaIds: ["a1"], areaId: "a2" }), false);
+});
+
+test("offline authority is not accepted through forwarded or public transports", () => {
+  const source = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "src", "server.js"), "utf8");
+  assert.match(source, /function isPrivateLanRequest/);
+  assert.match(source, /cf-connecting-ip/);
+  assert.match(source, /challengeHeader && signature && grantId && isPrivateLanRequest\(req\)/);
 });
 
 test("generic step-up proof is one-use and exact-operation-bound", () => {
@@ -109,6 +120,17 @@ test("revocation coordinator closes only matching authenticated sockets", () => 
   assert.deepEqual(closed, [{ code: 4401, reason: "policy_changed" }]);
 });
 
+test("revocation coordinator closes sockets when their credential version leaves the accepted set", () => {
+  const coordinator = new RevocationCoordinator();
+  const closed = [];
+  const oldSocket = { close: (code, reason) => closed.push({ name: "old", code, reason }) };
+  const currentSocket = { close: (code, reason) => closed.push({ name: "current", code, reason }) };
+  coordinator.track(oldSocket, { fingerprint: "old-fp", credentialVersion: 4 });
+  coordinator.track(currentSocket, { fingerprint: "current-fp", credentialVersion: 5 });
+  assert.equal(coordinator.revoke({ credentialVersion: 4, reason: "grace_expired" }), 1);
+  assert.deepEqual(closed, [{ name: "old", code: 4401, reason: "grace_expired" }]);
+});
+
 test("identity broker canonical signing is operation-bound and encrypted blobs reject tampering/context swaps", () => {
   const request = canonicalPlatformRequest({ method: "POST", path: "/api/hub-agent/token-state", timestamp: 1_700_000_000_000, nonce: "nonce-identity-1", bodyHash: "a".repeat(64) });
   assert.equal(request, `POST\n/api/hub-agent/token-state\n1700000000000\nnonce-identity-1\n${"a".repeat(64)}`);
@@ -123,4 +145,18 @@ test("identity broker canonical signing is operation-bound and encrypted blobs r
   tampered.ciphertext = `${tampered.ciphertext.slice(0, -2)}AA`;
   assert.throws(() => decryptPrivateKey(JSON.stringify(tampered), wrappingKey, context));
   assert.throws(() => decryptPrivateKey(blob, wrappingKey, { ...context, purpose: "encryption" }), /context mismatch/);
+});
+
+test("identity broker is a root-only, certificate-bearing boundary", () => {
+  const identityBroker = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "src", "auth", "identityBroker.js"), "utf8");
+  const identityd = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "src", "identityd.js"), "utf8");
+  assert.match(identityd, /root privileges are required/);
+  assert.match(identityd, /identity socket must be under \/run/);
+  assert.match(identityBroker, /assertSecurePath\(metadataPath, 0o644\)/);
+  assert.match(identityBroker, /manufacturing-root identity certificate is required/);
+  assert.match(identityBroker, /signingPublicKey\.asymmetricKeyType !== "ed25519"/);
+  assert.match(identityBroker, /encryptionPublicKey\.asymmetricKeyType !== "x25519"/);
+  assert.doesNotMatch(identityBroker, /exportPrivateKey\s*\(/);
+  assert.match(identityBroker, /machine-credential.*operator-session/);
+  assert.match(identityBroker, /operator-session/);
 });

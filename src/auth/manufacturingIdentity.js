@@ -23,7 +23,21 @@ function generateManufacturingIdentity({ serial } = {}) {
   };
 }
 
-function createPlatformPairingEnvelope(identity, { attemptId, baseUrl, issuedAt = Date.now(), expiresAt, manufacturingSignature } = {}) {
+// This is the byte-stable certificate body signed by Dinodia's offline
+// manufacturing root. It intentionally excludes provisioning-attempt data;
+// Platform and the enrolment script use the same field order and JSON shape.
+function stableManufacturingIdentityPayload(input = {}) {
+  return JSON.stringify({
+    serial: String(input.serial || ""),
+    identityGeneration: Number(input.identityGeneration ?? input.generation ?? 1),
+    publicKeyPem: String(input.publicKeyPem || input.signingPublicKeyPem || (input.publicKey?.export?.({ type: "spki", format: "pem" }) || "")),
+    encryptionPublicKeyPem: String(input.encryptionPublicKeyPem || (input.encryptionPublicKey?.export?.({ type: "spki", format: "pem" }) || "")),
+    publicKeyFingerprint: String(input.publicKeyFingerprint || ""),
+    encryptionKeyFingerprint: String(input.encryptionKeyFingerprint || ""),
+  });
+}
+
+function createPlatformPairingEnvelope(identity, { attemptId, baseUrl, issuedAt = Date.now(), expiresAt, manufacturingSignature, generation = 1 } = {}) {
   if (!identity?.privateKey || !identity?.publicKey || !identity?.encryptionPublicKey) throw new Error("A complete manufacturing identity is required");
   if (!manufacturingSignature) throw new Error("A manufacturing-root certificate signature is required");
   const publicKeyPem = identity.publicKey.export({ type: "spki", format: "pem" }).toString();
@@ -31,10 +45,12 @@ function createPlatformPairingEnvelope(identity, { attemptId, baseUrl, issuedAt 
   const body = {
     version: 1,
     serial: identity.serial,
+    identityGeneration: Number(generation),
     attemptId: String(attemptId || ""),
     publicKeyPem,
     encryptionPublicKeyPem,
     publicKeyFingerprint: identity.publicKeyFingerprint,
+    encryptionKeyFingerprint: identity.encryptionKeyFingerprint,
     baseUrl: String(baseUrl || "").replace(/\/$/, ""),
     issuedAt: Number(issuedAt),
     expiresAt: Number(expiresAt),
@@ -72,4 +88,4 @@ function verifyPairingEnvelope({ body, encoded, signature, publicKey } = {}) {
   try { return crypto.verify(null, Buffer.from(encoded), publicKey, Buffer.from(signature, "base64url")); } catch { return false; }
 }
 
-module.exports = { generateManufacturingIdentity, createPlatformPairingEnvelope, vaultIdentityRecord, signPairingEnvelope, verifyPairingEnvelope };
+module.exports = { generateManufacturingIdentity, stableManufacturingIdentityPayload, createPlatformPairingEnvelope, vaultIdentityRecord, signPairingEnvelope, verifyPairingEnvelope };
