@@ -15,6 +15,63 @@ function isDinodiaCloudHostname(value) {
   return Boolean(hostname && (hostname === "dinodiasmartliving.com" || hostname.endsWith(".dinodiasmartliving.com")));
 }
 
+function verifyLocalTunnelCredential({ dataDir, tunnelId, tunnelName, hostname, origin }) {
+  try {
+    if (!/^[a-f0-9-]{36}$/i.test(String(tunnelId || "")) || !/^[a-z0-9][a-z0-9 ._-]{1,62}$/i.test(String(tunnelName || ""))) return false;
+    const cloudflareHome = path.join(String(dataDir || ""), "cloudflared");
+    const configPath = path.join(cloudflareHome, "config.yml");
+    const configStat = fs.lstatSync(configPath);
+    if (!configStat.isFile() || configStat.isSymbolicLink()) return false;
+    const config = fs.readFileSync(configPath, "utf8");
+    const configuredId = config.match(/^tunnel:\s*(\S+)\s*$/m)?.[1] || "";
+    const configuredCredential = config.match(/^credentials-file:\s*(\S+)\s*$/m)?.[1] || "";
+    const configuredHostname = config.match(/^\s*- hostname:\s*(\S+)\s*$/m)?.[1] || "";
+    const configuredOrigin = config.match(/^\s*service:\s*(\S+)\s*$/m)?.[1] || "";
+    const expectedCredential = path.join(cloudflareHome, ".cloudflared", `${tunnelId}.json`);
+    if (configuredId !== tunnelId || path.resolve(configuredCredential) !== path.resolve(expectedCredential)
+      || configuredHostname !== hostname || configuredOrigin !== origin
+      || !config.includes("  - service: http_status:404")) return false;
+    const credentialStat = fs.lstatSync(expectedCredential);
+    if (!credentialStat.isFile() || credentialStat.isSymbolicLink() || (credentialStat.mode & 0o077) !== 0) return false;
+    if (typeof process.getuid === "function" && credentialStat.uid !== process.getuid()) return false;
+    const credential = JSON.parse(fs.readFileSync(expectedCredential, "utf8"));
+    return credential && String(credential.TunnelID || "") === tunnelId
+      && typeof credential.TunnelSecret === "string"
+      && /^[A-Za-z0-9+/=]{32,512}$/.test(credential.TunnelSecret)
+      && typeof credential.AccountTag === "string"
+      && /^[A-Za-z0-9_-]{8,128}$/.test(credential.AccountTag);
+  } catch {
+    // Never include tunnel credential contents or filesystem details in a
+    // status/error response. A mismatch simply prevents remote verification.
+    return false;
+  }
+}
+
+function connectedLocalTunnelIdentity(status, requestHost, claimedTunnelId = "", claimedTunnelName = "") {
+  if (!status || status.mode !== "local" || status.running !== true || status.connected !== true || status.connectorIdentityVerified !== true) return { ok: false, reason: "connector_unavailable" };
+  const tunnelId = String(status.tunnelId || "").trim();
+  const tunnelName = String(status.tunnelName || "").trim();
+  let hostname;
+  let publicUrl;
+  try {
+    hostname = safeHostname(status.hostname);
+    publicUrl = new URL(String(status.publicUrl || ""));
+  } catch {
+    return { ok: false, reason: "connector_identity_invalid" };
+  }
+  if (!tunnelId || !tunnelName || !hostname || !isDinodiaCloudHostname(hostname)
+    || publicUrl.protocol !== "https:" || publicUrl.hostname.toLowerCase() !== hostname.toLowerCase()
+    || publicUrl.username || publicUrl.password || publicUrl.port || publicUrl.pathname !== "/"
+    || String(requestHost || "").trim().toLowerCase() !== hostname.toLowerCase()) {
+    return { ok: false, reason: "connector_identity_invalid" };
+  }
+  if ((claimedTunnelId && String(claimedTunnelId) !== tunnelId)
+    || (claimedTunnelName && String(claimedTunnelName) !== tunnelName)) {
+    return { ok: false, reason: "connector_identity_mismatch" };
+  }
+  return { ok: true, tunnelId, tunnelName, hostname, cloudUrl: `https://${hostname}` };
+}
+
 class CloudflareTunnel {
   constructor({ store, vault, origin = "http://127.0.0.1:8123", binary = "cloudflared", initialToken = "", initialHostname = "", dataDir = process.cwd(), nodeEnv = process.env.NODE_ENV || "development", logger = console } = {}) {
     this.store = store;
@@ -142,6 +199,16 @@ class CloudflareTunnel {
     } catch {
       return null;
     }
+  }
+
+  localConnectorIdentityVerified(settings = this.settings()) {
+    return settings.mode === "local" && verifyLocalTunnelCredential({
+      dataDir: this.dataDir,
+      tunnelId: settings.tunnelId,
+      tunnelName: settings.tunnelName,
+      hostname: safeHostname(settings.hostname),
+      origin: this.origin,
+    });
   }
 
   existingTunnelIdForSafeResume({ tunnelName, hostname, listedTunnelId }) {
@@ -353,6 +420,10 @@ class CloudflareTunnel {
       hostname,
       tunnelName: settings.tunnelName,
       tunnelId: settings.tunnelId,
+      // This is true only when the active local config, exact origin, private
+      // tunnel-specific credential file, and credential's embedded TunnelID
+      // all agree with the running connector's durable installation record.
+      connectorIdentityVerified: this.localConnectorIdentityVerified(settings),
       publicUrl: this.publicUrl || (hostname ? `https://${hostname}` : ""),
       origin: this.origin,
       lastError: this.lastError,
@@ -361,4 +432,4 @@ class CloudflareTunnel {
   }
 }
 
-module.exports = { CloudflareTunnel, safeHostname };
+module.exports = { CloudflareTunnel, safeHostname, connectedLocalTunnelIdentity, verifyLocalTunnelCredential };

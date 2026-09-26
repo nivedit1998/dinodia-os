@@ -381,7 +381,11 @@ function createCompatInterface({ port = 8123, host = "0.0.0.0", model, store, au
       switch (message.type) {
         case "get_states": return result(listStates(principal));
         case "call_service": {
-          const serviceResult = await serviceCall(message.domain, message.service, { ...(message.service_data || {}), ...(message.target || {}) });
+          const commandData = { ...(message.service_data || {}), ...(message.target || {}) };
+          // Step-up material is authorization metadata and must never reach a
+          // device adapter as command parameters.
+          for (const key of ["stepUpProof", "step_up_proof", "descriptorDigests", "descriptor_digests"]) delete commandData[key];
+          const serviceResult = await serviceCall(message.domain, message.service, commandData);
           return result(message.return_response ? serviceResult : serviceResult.changed_states);
         }
         case "subscribe_events": {

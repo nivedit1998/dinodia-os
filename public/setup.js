@@ -8,6 +8,7 @@ const supportRevoke = document.getElementById("support-revoke");
 const supportStatus = document.getElementById("support-status");
 const supportOnly = window.location.pathname === "/support-access";
 let supportExpiryTimer = null;
+let operatorHandoffStarted = false;
 function clearSupportSecrets() {
   supportCode.value = "";
 }
@@ -42,9 +43,16 @@ async function registerOperatorBrowserAttempt() {
     const response = await fetch("/_dinodia/setup/operator-attempt", { method: "POST", headers: { "content-type": "application/json", "x-dinodia-setup-csrf": cookie("dinodia_setup_csrf") }, body: "{}", cache: "no-store" });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || typeof data.setupAttemptId !== "string") throw new Error(data.error || "The hub could not register this browser.");
-    let targetOrigin = "*";
-    try { if (document.referrer) targetOrigin = new URL(document.referrer).origin; } catch {}
-    window.opener.postMessage({ type: "dinodia-operator-attempt", setupAttemptId: data.setupAttemptId }, targetOrigin);
+    // The setup page is opened by Company Portal. Never broadcast its
+    // hub-created attempt reference with postMessage("*") when the browser
+    // omits Referer; pin delivery to the sole canonical employee Portal.
+    const portalOrigin = "https://dinodia-platform-v2.vercel.app";
+    if (document.referrer) {
+      let referrerOrigin;
+      try { referrerOrigin = new URL(document.referrer).origin; } catch { throw new Error("The Company Portal origin could not be verified."); }
+      if (referrerOrigin !== portalOrigin) throw new Error("This setup window was not opened by the canonical Company Portal.");
+    }
+    window.opener.postMessage({ type: "dinodia-operator-attempt", setupAttemptId: data.setupAttemptId }, portalOrigin);
     show("This locked browser is ready for the Company Portal handoff.");
   } catch (error) {
     show(error instanceof Error ? error.message : "The hub could not register this browser.", true);
@@ -110,12 +118,22 @@ window.addEventListener("message", (event) => {
   if (event.origin !== "https://dinodia-platform-v2.vercel.app" || event.source !== window.opener) return;
   const message = event.data;
   if (message && message.type === "dinodia-operator-handoff" && typeof message.handoffId === "string") {
+    // Duplicate postMessage deliveries must not race the one-use Platform
+    // consume. This popup handles one opaque handoff; relaunch creates a new
+    // hub-bound browser attempt.
+    if (operatorHandoffStarted) return;
+    operatorHandoffStarted = true;
     // The hub creates the browser binding and setup-attempt cookies. The
     // portal may deliver only an opaque handoff reference to this window.
     fetch("/_dinodia/setup/operator-session", { method: "POST", headers: { "content-type": "application/json", "x-dinodia-setup-csrf": cookie("dinodia_setup_csrf") }, body: JSON.stringify({ handoffId: message.handoffId }) })
       .then(async (response) => {
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "The operator handoff was rejected.");
+        if (!response.ok) {
+          const failure = new Error(data.error || "The operator handoff was rejected.");
+          failure.phase = data.handoffPhase;
+          failure.errorCode = data.errorCode;
+          throw failure;
+        }
         // Verify the newly set HttpOnly cookie by calling an authenticated,
         // read-only OS endpoint before telling Company Portal the session works.
         const sessionCheck = await fetch("/_dinodia/admin/api/status", { cache: "no-store", credentials: "same-origin" });
@@ -123,7 +141,12 @@ window.addEventListener("message", (event) => {
         if (window.opener) window.opener.postMessage({ type: "dinodia-operator-session-established" }, "https://dinodia-platform-v2.vercel.app");
         window.location.assign("/");
       })
-      .catch((error) => show(error.message, true));
+      .catch((error) => {
+        const phase = error?.phase === "prepare" || error?.phase === "consume" ? error.phase : "hub";
+        const errorCode = typeof error?.errorCode === "string" && /^[a-z0-9_]{1,64}$/.test(error.errorCode) ? error.errorCode : "operator_handoff_rejected";
+        show(error instanceof Error ? error.message : "The operator handoff was rejected.", true);
+        if (window.opener) window.opener.postMessage({ type: "dinodia-operator-handoff-failed", phase, errorCode }, "https://dinodia-platform-v2.vercel.app");
+      });
     return;
   }
   if (!message || message.type !== "dinodia-support-proof" || typeof message.ticketId !== "string") return;

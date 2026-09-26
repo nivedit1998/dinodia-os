@@ -52,7 +52,8 @@ test("Hive credential endpoints require secure remote production transport and n
   const route = "/_dinodia/admin/api/integrations/hive/connect";
   assert.equal(hiveCredentialTransportAllowed({ headers: { host: "wrong.example.com", origin: "http://wrong.example.com" }, socket: { remoteAddress: "192.168.1.10" } }, { nodeEnv: "production", configuredHostname: "hub.example.com" }), false);
   assert.equal(hiveCredentialTransportAllowed({ headers: { host: "hub.example.com", origin: "https://hub.example.com" }, socket: { remoteAddress: "192.168.1.10" } }, { nodeEnv: "production", configuredHostname: "hub.example.com" }), false);
-  assert.equal(hiveCredentialTransportAllowed({ headers: { host: "hub.example.com", "x-forwarded-proto": "https" }, socket: { remoteAddress: "192.168.1.10" } }, { nodeEnv: "production", configuredHostname: "hub.example.com" }), true);
+  assert.equal(hiveCredentialTransportAllowed({ headers: { host: "hub.example.com", origin: "https://hub.example.com", "x-forwarded-proto": "https" }, socket: { remoteAddress: "192.168.1.10" } }, { nodeEnv: "production", configuredHostname: "hub.example.com" }), false, "a direct LAN client cannot spoof the Cloudflare forwarded-proto header");
+  assert.equal(hiveCredentialTransportAllowed({ headers: { host: "hub.example.com", origin: "https://hub.example.com", "x-forwarded-proto": "https" }, socket: { remoteAddress: "127.0.0.1" } }, { nodeEnv: "production", configuredHostname: "hub.example.com" }), true, "the local Cloudflared proxy may attest the HTTPS origin");
 
   const secure = await request(base, route, { method: "POST", headers: { ...auth, host: "hub.example.com", origin: "https://hub.example.com", "x-forwarded-proto": "https" }, body: JSON.stringify({ username: "owner@example.com", password: "secret" }) });
   assert.equal(secure.response.status, 200);

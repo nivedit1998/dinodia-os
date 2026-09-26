@@ -1,21 +1,40 @@
 const crypto = require("node:crypto");
 
-/**
- * Cross-runtime Stage 1 support proof. Platform stores only the hash of the
- * encrypted employee grant and the approved one-use code. The hub proves it
- * decrypted that grant and knows the code without sending either authority
- * value back to Platform.
- */
-function supportProofOfPossessionDigest({ employeeProofHash, serial, ticketId, requestId, codeHash, identityGeneration }) {
+function supportProofRequestDigest(input) {
   return crypto.createHash("sha256").update(JSON.stringify({
-    version: 1,
-    employeeProofHash: String(employeeProofHash),
-    serial: String(serial),
-    ticketId: String(ticketId),
-    requestId: String(requestId),
-    codeHash: String(codeHash),
-    identityGeneration: Number(identityGeneration),
+    version: 2,
+    serial: String(input.serial),
+    ticketId: String(input.ticketId),
+    requestId: String(input.requestId),
+    employeeId: String(input.employeeId),
+    homeId: String(input.homeId),
+    codeHash: String(input.codeHash),
+    identityGeneration: Number(input.identityGeneration),
+    nonce: String(input.nonce),
+    proofExpiresAt: Number(input.proofExpiresAt),
   }), "utf8").digest("hex");
 }
 
-module.exports = { supportProofOfPossessionDigest };
+function supportProofMessage(input) {
+  return Buffer.from(JSON.stringify({
+    version: 2,
+    serial: String(input.serial),
+    ticketId: String(input.ticketId),
+    requestId: String(input.requestId),
+    employeeId: String(input.employeeId),
+    homeId: String(input.homeId),
+    codeHash: String(input.codeHash),
+    identityGeneration: Number(input.identityGeneration),
+    nonce: String(input.nonce),
+    proofExpiresAt: Number(input.proofExpiresAt),
+    requestBodyDigest: String(input.requestBodyDigest),
+  }), "utf8");
+}
+
+function createSupportProofOfPossession({ privateKeyPem, ...input }) {
+  const requestBodyDigest = supportProofRequestDigest(input);
+  const signature = crypto.sign(null, supportProofMessage({ ...input, requestBodyDigest }), crypto.createPrivateKey(String(privateKeyPem))).toString("base64url");
+  return { requestBodyDigest, signature };
+}
+
+module.exports = { supportProofRequestDigest, supportProofMessage, createSupportProofOfPossession };

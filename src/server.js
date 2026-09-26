@@ -15,7 +15,7 @@ const { MqttBridge } = require("./mqttBridge");
 const { MatterBridge } = require("./matterBridge");
 const { PlatformSync } = require("./platformSync");
 const { createBackup } = require("./backup");
-const { CloudflareTunnel } = require("./cloudflareTunnel");
+const { CloudflareTunnel, connectedLocalTunnelIdentity } = require("./cloudflareTunnel");
 const { listSerialAdapters, probeSerialAdapter } = require("./serialAdapters");
 const { HomeAssistantModel, normalizeHaState } = require("./haModel");
 const { createCompatInterface, createCompatServer } = require("./haCompat");
@@ -51,7 +51,7 @@ const { RevocationCoordinator } = require("./auth/revocationCoordinator");
 const { OfflineLanAuthorisationStore, digestOfflineCommand } = require("./auth/offlineLanAuthorizer");
 const { StepUpProofVerifier, descriptorBoundValue, digestOperation } = require("./auth/stepUpProofVerifier");
 const { IdentityBrokerClient, canonicalCloudChallengeUnsigned } = require("./auth/identityBroker");
-const { supportProofOfPossessionDigest } = require("./auth/supportProofOfPossession");
+const { createSupportProofOfPossession } = require("./auth/supportProofOfPossession");
 
 const VERSION = require("../package.json").version;
 
@@ -76,12 +76,17 @@ function isHiveCredentialTransportAllowed(req, { nodeEnv = "development", allowI
   const origin = String(req?.headers?.origin || "").trim();
   const host = String(req?.headers?.host || "").split(":")[0].toLowerCase();
   const configuredHost = String(configuredHostname || "").split(":")[0].toLowerCase();
-  let secureOrigin = false;
-  const directSecure = req?.socket?.encrypted === true;
-  const forwardedSecure = String(req?.headers?.["x-forwarded-proto"] || "").toLowerCase() === "https";
-  try { secureOrigin = /^https:\/\//i.test(origin) && Boolean(configuredHost) && new URL(origin).hostname.toLowerCase() === configuredHost && (directSecure || forwardedSecure); } catch { secureOrigin = false; }
-  const proxySecure = String(req?.headers?.["x-forwarded-proto"] || "").toLowerCase() === "https" && Boolean(configuredHost) && host === configuredHost;
   const remote = String(req?.socket?.remoteAddress || "").replace(/^::ffff:/, "");
+  const localProxyPeer = ["127.0.0.1", "::1"].includes(remote);
+  const directSecure = req?.socket?.encrypted === true;
+  // X-Forwarded-* is trustworthy only when the TCP peer is the local
+  // Cloudflared process that terminates the public tunnel. A LAN client can
+  // choose Host, Origin and forwarded headers, so those headers alone must
+  // never turn a direct HTTP request into an authenticated CloudURL request.
+  const forwardedSecure = localProxyPeer && String(req?.headers?.["x-forwarded-proto"] || "").toLowerCase() === "https";
+  let secureOrigin = false;
+  try { secureOrigin = /^https:\/\//i.test(origin) && Boolean(configuredHost) && new URL(origin).hostname.toLowerCase() === configuredHost && (directSecure || forwardedSecure); } catch { secureOrigin = false; }
+  const proxySecure = forwardedSecure && Boolean(configuredHost) && host === configuredHost;
   const loopback = ["127.0.0.1", "::1"].includes(remote) && ["localhost", "127.0.0.1", "::1"].includes(host);
   return secureOrigin || proxySecure || (allowLoopback && loopback);
 }
@@ -986,13 +991,53 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       if (["get_states", "subscribe_events", "unsubscribe_events", "get_services_for_target"].includes(String(message.type))) return true;
       if (message.type !== "call_service" || principal.householdRole !== "TENANT" || !principal.scope.includes("tenant:device-command")) return false;
       const target = { ...(message.service_data || {}), ...(message.target || {}) };
-      const entityId = String(target.entity_id || target.entityId || "");
+      // Native tenant WS commands are single-control operations. Reject
+      // device/area/label selectors and multi-entity values instead of
+      // authorizing one entity and letting the HA compatibility model expand
+      // the request to other devices during dispatch.
+      const forbiddenSelectors = ["device_id", "deviceId", "area_id", "areaId", "label_id", "labelId", "target"];
+      if (forbiddenSelectors.some((key) => Object.prototype.hasOwnProperty.call(target, key))) return false;
+      if (Object.prototype.hasOwnProperty.call(target, "entity_id") && Object.prototype.hasOwnProperty.call(target, "entityId")) return false;
+      const rawEntityId = target.entity_id ?? target.entityId;
+      if (typeof rawEntityId !== "string" || !rawEntityId.trim() || /[,\s]/.test(rawEntityId.trim())) return false;
+      const entityId = rawEntityId.trim();
       const entity = context.model.entities().find((item) => item.haId === entityId || item.entityId === entityId || item.rawId === entityId);
       if (!entity) return false;
+      const targets = context.model.resolveTargets({ entity_id: entityId });
+      if (targets.length !== 1 || targets[0].haId !== entity.haId) return false;
       const requestedService = message.domain && message.service
         ? `${String(message.domain).toLowerCase()}.${String(message.service).toLowerCase()}`
         : message.service;
-      return appCanCommandDevice(principal, entity.device, target, entity, requestedService);
+      if (!appCanCommandDevice(principal, entity.device, target, entity, requestedService)) return false;
+
+      const requestedDomain = String(message.domain || entity.domain || "").toLowerCase();
+      const sensitive = Boolean(entity.entity?.capability?.sensitive) || /^(lock|alarm|security)$/i.test(requestedDomain.split(".")[0]);
+      if (sensitive) {
+        const descriptorDigests = message.descriptorDigests && typeof message.descriptorDigests === "object" && !Array.isArray(message.descriptorDigests)
+          ? message.descriptorDigests
+          : {};
+        const currentDescriptor = entity.device.presentation?.sourceFingerprint || entity.device.presentation?.descriptorDigest || null;
+        const suppliedDescriptor = descriptorDigests[entity.device.id] == null ? null : String(descriptorDigests[entity.device.id]);
+        const controlId = String(target.controlId || target.control_id || entity.entity?.controlId || entity.entity?.capability?.controlId || entity.entity?.id || "");
+        if (!controlId || !Object.prototype.hasOwnProperty.call(descriptorDigests, entity.device.id) || suppliedDescriptor !== (currentDescriptor == null ? null : String(currentDescriptor))) return false;
+        const serviceData = { ...target };
+        for (const key of ["entity_id", "entityId", "controlId", "control_id", "stepUpProof", "step_up_proof", "descriptorDigests", "descriptor_digests"]) delete serviceData[key];
+        const requestedValue = { ...serviceData, controlId };
+        const proof = String(message.stepUpProof || message.step_up_proof || target.stepUpProof || target.step_up_proof || "");
+        const approved = await stepUpVerifier.verify(proof, {
+          actorId: principal.sub,
+          trustedDeviceId: principal.trustedDeviceId,
+          trustedSessionId: principal.sid,
+          homeId: principal.homeId,
+          membershipId: principal.membershipId,
+          hubInstallId: principal.hubInstallId,
+          operation: "device_sensitive_command",
+          targetIds: [entity.device.id],
+          value: descriptorBoundValue(requestedValue, { [entity.device.id]: suppliedDescriptor }),
+        });
+        if (!approved) return false;
+      }
+      return true;
     },
     filterWsStates: (states, principal) => {
       if (principal?.principalType !== "app") return states;
@@ -1766,6 +1811,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     if (resource === "devices" && id && parts[3] === "capabilities" && req.method === "GET") {
       const device = hubStore.getDevice(id);
       if (!device) return json(res, 404, { error: "Device not found" });
+      if (supportOperator && !supportCanReadDevice(operatorPrincipal, device)) return json(res, 403, { error: "Device is outside the support scope", errorCode: "support_scope_denied" });
+      if (scopedPrincipal && !appCanReadDevice(scopedPrincipal, device)) return json(res, 403, { error: "Device is outside the selected membership scope", errorCode: "device_scope_denied" });
       const surfaces = allProjectedSurfaces(device);
       const sourceIds = new Set(surfaces.flatMap((surface) => surface.sourceEntityIds || []));
       const publicRaw = (entity) => ({
@@ -1868,6 +1915,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       const device = hubStore.getDevice(id);
       if (!device) return json(res, 404, { error: "Device not found" });
       if (supportOperator && !supportCanReadDevice(operatorPrincipal, device)) return json(res, 403, { error: "Device is outside the support scope", errorCode: "support_scope_denied" });
+      if (scopedPrincipal && !appCanReadDevice(scopedPrincipal, device)) return json(res, 403, { error: "Device is outside the selected membership scope", errorCode: "device_scope_denied" });
       const metadata = JSON.parse(JSON.stringify(device.metadata || {}));
       for (const key of Object.keys(metadata)) if (/token|secret|credential|password|code|dataset|fabric/i.test(key)) delete metadata[key];
       if (device.protocol === "google_nest") {
@@ -2406,18 +2454,33 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         const proofRequestId = String(proof?.requestId || "");
         const proofIdentityGeneration = Number(proof?.identityGeneration || 0);
         if (!proofEnvelope || proofEnvelope.length > 12000 || !/^[0-9a-f-]{36}$/i.test(proofRequestId) || !Number.isInteger(proofIdentityGeneration) || proofIdentityGeneration < 1) throw Object.assign(new Error("The employee proof was not delivered to the hub"), { statusCode: 401, code: "support_proof_unavailable" });
-        const proofToken = await pairing.decryptCredentialDelivery({ version: 1, envelope: JSON.parse(proofEnvelope) }, "support-session");
+        const decryptedProofPayload = await pairing.decryptCredentialDelivery({ version: 1, envelope: JSON.parse(proofEnvelope) }, "support-session");
+        let proofPayload;
+        try { proofPayload = JSON.parse(decryptedProofPayload); } catch { proofPayload = null; }
+        if (proofPayload?.version !== 2 || typeof proofPayload.employeeGrant !== "string" || typeof proofPayload.employeeProofPrivateKey !== "string") throw Object.assign(new Error("The employee proof payload is invalid"), { statusCode: 401, code: "support_proof_invalid" });
+        const proofToken = proofPayload.employeeGrant;
         const proofPrincipal = verifyOperatorSessionToken(proofToken, { publicKey: operatorPublicKey, hubId: serial, requiredScope: "support:redeem", requireRecentAuth: true });
-        if (!proofPrincipal) throw Object.assign(new Error("The employee proof is not valid for this hub"), { statusCode: 401, code: "support_proof_invalid" });
-        const employeeProofHash = crypto.createHash("sha256").update(proofToken, "utf8").digest("hex");
-        // Platform stores only the approved code hash.  The hub may receive
-        // the one-use code over this local support surface, but the
-        // proof-of-possession message must never send or persist the
-        // plaintext code and must use the same canonical digest on both
-        // runtimes.
+        if (!proofPrincipal || String(proofPrincipal.requestId || "") !== proofRequestId || !proofPrincipal.homeId || Number(proofPrincipal.identityGeneration) !== proofIdentityGeneration) throw Object.assign(new Error("The employee proof is not valid for this hub request"), { statusCode: 401, code: "support_proof_invalid" });
         const codeHash = crypto.createHash("sha256").update(code, "utf8").digest("hex");
-        const employeeProofOfPossession = supportProofOfPossessionDigest({ employeeProofHash, serial, ticketId, requestId: proofRequestId, codeHash, identityGeneration: proofIdentityGeneration });
-        result = await pairing.requestWithHubIdentity("/api/hub-agent/support/v2/redeem", { serial, ticketId, requestId: proofRequestId, identityGeneration: proofIdentityGeneration, code, employeeProofOfPossession });
+        const proofContext = {
+          serial,
+          ticketId,
+          requestId: proofRequestId,
+          employeeId: String(proofPrincipal.sub),
+          homeId: String(proofPrincipal.homeId),
+          codeHash,
+          identityGeneration: proofIdentityGeneration,
+          nonce: crypto.randomBytes(24).toString("base64url"),
+          proofExpiresAt: Number(proofPrincipal.exp),
+        };
+        const possession = createSupportProofOfPossession({ ...proofContext, privateKeyPem: proofPayload.employeeProofPrivateKey });
+        proofPayload.employeeProofPrivateKey = "";
+        result = await pairing.requestWithHubIdentity("/api/hub-agent/support/v2/redeem", {
+          serial, ticketId, requestId: proofRequestId, identityGeneration: proofIdentityGeneration,
+          employeeId: proofContext.employeeId, homeId: proofContext.homeId, code,
+          nonce: proofContext.nonce, proofExpiresAt: proofContext.proofExpiresAt,
+          requestBodyDigest: possession.requestBodyDigest, employeeProofSignature: possession.signature,
+        });
       } catch (error) {
         return json(res, Number(error.statusCode) || 502, { error: "The support code was not accepted", errorCode: error.code || "support_redeem_rejected" });
       }
@@ -2521,7 +2584,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       return json(res, 503, { error: "The hub signing identity or Company Portal connection is unavailable", errorCode: "hub_identity_or_platform_unavailable" });
     }
     const result = await response.json().catch(() => ({}));
-    if (!response.ok || !result.handoffSecretEnvelope) return json(res, response.status || 502, { error: "This operator handoff was not accepted", errorCode: result.errorCode || "operator_handoff_rejected" });
+    if (!response.ok || !result.handoffSecretEnvelope) return json(res, response.status || 502, { error: "This operator handoff was not accepted", errorCode: result.errorCode || "operator_handoff_rejected", handoffPhase: "prepare" });
     let handoffSecret;
     try {
       handoffSecret = await pairing.decryptCredentialDelivery({ version: 1, envelope: JSON.parse(String(result.handoffSecretEnvelope)) }, "operator-handoff");
@@ -2535,7 +2598,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       return json(res, 503, { error: "This hub signing identity or Company Portal connection is unavailable", errorCode: "hub_identity_or_platform_unavailable" });
     }
     const consumeResult = await response.json().catch(() => ({}));
-    if (!response.ok || !consumeResult.sessionGrant?.envelope) return json(res, response.status || 502, { error: "This operator handoff was not accepted", errorCode: consumeResult.errorCode || "operator_handoff_rejected" });
+    if (!response.ok || !consumeResult.sessionGrant?.envelope) return json(res, response.status || 502, { error: "This operator handoff was not accepted", errorCode: consumeResult.errorCode || "operator_handoff_rejected", handoffPhase: "consume" });
     const sessionGrant = consumeResult.sessionGrant;
     let operatorToken;
     try {
@@ -2682,10 +2745,17 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       if (!remote) return json(res, 404, { error: "Not found" });
       const challenge = String(url.searchParams.get("challenge") || "");
       if (!/^[A-Za-z0-9_-]{20,128}$/.test(challenge)) return json(res, 400, { error: "A valid challenge is required" });
-      const cloudUrl = `https://${String(req.headers.host || "").toLowerCase()}`.replace(/\/$/, "");
-      const tunnelId = String(url.searchParams.get("tunnelId") || "").trim();
-      const tunnelName = String(url.searchParams.get("tunnelName") || "").trim();
-      if (!tunnelId || !tunnelName) return json(res, 400, { error: "Tunnel identity is required" });
+      const connector = connectedLocalTunnelIdentity(
+        cloudflare.status(),
+        String(req.headers.host || "").split(":")[0],
+        String(url.searchParams.get("tunnelId") || "").trim(),
+        String(url.searchParams.get("tunnelName") || "").trim(),
+      );
+      if (!connector.ok) {
+        const status = connector.reason === "connector_identity_mismatch" ? 403 : 503;
+        return json(res, status, { error: "The active Cloudflare connector identity could not be independently verified", errorCode: connector.reason });
+      }
+      const { cloudUrl, tunnelId, tunnelName } = connector;
       const publicIdentity = await pairing.getPublicIdentity();
       const identityFingerprint = publicIdentity?.publicKeyFingerprint || null;
       if (!identityFingerprint) return json(res, 503, { error: "Hub signing identity is unavailable" });
