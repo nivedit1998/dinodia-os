@@ -153,6 +153,76 @@ test("operator credential receipt stays DELIVERED until the hub acknowledgement 
   assert.equal(acknowledgementAttempts, 2);
 });
 
+test("operator policy sync is at most 30 seconds while the signed operations heartbeat remains two minutes", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-policy-cadence-"));
+  const store = new Store(path.join(directory, "dinodia.json"));
+  await store.saveIdentity({ serial: "DINODIA-POLICY-HUB" });
+  const vault = new SecretVault({ dataDir: directory });
+  const identity = generateManufacturingIdentity({ serial: "DINODIA-POLICY-HUB" });
+  const record = vaultIdentityRecord(identity);
+  await vault.set("platform.identityPrivateKey", record.signingPrivateKey);
+  await vault.set("platform.identityPublicKey", record.signingPublicKey);
+  await vault.set("platform.encryptionPrivateKey", record.encryptionPrivateKey);
+  await vault.set("platform.encryptionPublicKey", record.encryptionPublicKey);
+  await vault.set("platform.identityFingerprint", record.publicKeyFingerprint);
+  await vault.set("platform.encryptionFingerprint", record.encryptionKeyFingerprint);
+  await vault.set("platform.identityGeneration", "1");
+  await vault.set("platform.manufacturingCertificateSignature", "test-only-certificate-signature");
+  await store.savePlatform({ paired: true, provisioningCredentialVersion: 1 });
+  let now = 1_000_000;
+  const routes = [];
+  const pairing = new PlatformPairing({
+    store, vault, apiUrl: "https://platform.test", serial: "DINODIA-POLICY-HUB",
+    intervalMs: 30_000, heartbeatIntervalMs: 120_000, clock: () => now,
+    fetchImpl: async (url) => {
+      routes.push(new URL(url).pathname);
+      return { ok: true, async json() { return { latestVersion: 0, publishedVersion: 0, operatorCredentialStates: [], offlineAuthorisations: [], acceptedActivityIncidentIds: [] }; } };
+    },
+  });
+  await pairing.syncNow();
+  now += 30_000;
+  await pairing.syncNow();
+  now += 89_999;
+  await pairing.syncNow();
+  assert.equal(routes.filter((route) => route.endsWith("/heartbeat")).length, 1);
+  assert.equal(routes.filter((route) => route.endsWith("/token-state")).length, 3);
+  now += 1;
+  await pairing.syncNow();
+  assert.equal(routes.filter((route) => route.endsWith("/heartbeat")).length, 2);
+  assert.equal(routes.filter((route) => route.endsWith("/token-state")).length, 4);
+});
+
+test("CloudURL re-verification is included inside the machine-signed Platform request body", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-cloud-reverify-"));
+  const store = new Store(path.join(directory, "dinodia.json"));
+  await store.saveIdentity({ serial: "DINODIA-CLOUD-HUB" });
+  const vault = new SecretVault({ dataDir: directory });
+  const identity = generateManufacturingIdentity({ serial: "DINODIA-CLOUD-HUB" });
+  const record = vaultIdentityRecord(identity);
+  await vault.set("platform.identityPrivateKey", record.signingPrivateKey);
+  await vault.set("platform.identityPublicKey", record.signingPublicKey);
+  await vault.set("platform.encryptionPrivateKey", record.encryptionPrivateKey);
+  await vault.set("platform.encryptionPublicKey", record.encryptionPublicKey);
+  await vault.set("platform.identityFingerprint", record.publicKeyFingerprint);
+  await vault.set("platform.encryptionFingerprint", record.encryptionKeyFingerprint);
+  await vault.set("platform.identityGeneration", "1");
+  await vault.set("platform.manufacturingCertificateSignature", "test-only-certificate-signature");
+  const bodies = [];
+  const pairing = new PlatformPairing({
+    store, vault, apiUrl: "https://platform.test", serial: "DINODIA-CLOUD-HUB",
+    fetchImpl: async (_url, options) => {
+      bodies.push(JSON.parse(options.body));
+      return { ok: true, async json() { return { ok: true, verified: true, verificationId: "verification-redacted" }; } };
+    },
+  });
+  const metadata = { tunnelId: "tunnel-test", tunnelName: "dinodia-test-hub", hostname: "dinodia-test-hub.dinodiasmartliving.com", reservationToken: "test-only-reservation" };
+  await pairing.reportCloudUrl("https://dinodia-test-hub.dinodiasmartliving.com", { ...metadata, reverifyChallenge: true });
+  await pairing.reportCloudUrl("https://dinodia-test-hub.dinodiasmartliving.com", metadata);
+  assert.equal(bodies[0].reverifyChallenge, true);
+  assert.equal(Object.hasOwn(bodies[1], "reverifyChallenge"), false);
+  assert.equal(bodies.every((body) => body.serial === "DINODIA-CLOUD-HUB" && body.identityGeneration === 1), true);
+});
+
 test("permanent hub claim challenge is opaque, short-lived, and hub-signed", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-claim-resolver-"));
   const store = new Store(path.join(directory, "dinodia.json"));

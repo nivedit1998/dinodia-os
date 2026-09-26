@@ -72,6 +72,18 @@ test("completed secure access and provisioning replace setup inputs with confirm
   assert.doesNotMatch(app, /bootstrapSecret|haUsername|haPassword|oneTimeLongLivedToken/);
 });
 
+test("secure-access re-verification requires a connected tunnel and the operator handoff confirms an authenticated session", () => {
+  const setupScript = fs.readFileSync(path.join(__dirname, "../public/setup.js"), "utf8");
+  assert.match(html, /id="cloudflare-reverify"/);
+  assert.match(app, /cloudflare-reverify.*hidden.*verified && localConnected/);
+  assert.match(app, /action: "reverify"/);
+  assert.match(setupScript, /fetch\("\/_dinodia\/admin\/api\/status", \{ cache: "no-store", credentials: "same-origin" \}\)/);
+  assert.match(setupScript, /if \(!sessionCheck\.ok\) throw/);
+  assert.match(setupScript, /dinodia-operator-session-established/);
+  assert.match(setupScript, /"https:\/\/dinodia-platform-v2\.vercel\.app"/);
+  assert.match(fs.readFileSync(path.join(__dirname, "../src/config.js"), "utf8"), /operatorPolicySyncIntervalMs: Math\.max\(15000, Math\.min\(numberEnv\("DINODIA_OPERATOR_POLICY_SYNC_INTERVAL_MS", 30000\), 60000\)\)/);
+});
+
 test("dashboard controls are generated from capability metadata and call the typed route", () => {
   assert.match(controls, /data-service/);
   assert.match(controls, /capability\.kind === "number"/);

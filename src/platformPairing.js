@@ -47,7 +47,7 @@ function privateLanIp() {
 }
 
 class PlatformPairing {
-  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, haPort = 8123, intervalMs = 120000, runtime, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, legacyCompatibilityEnabled = false } = {}) {
+  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, haPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, runtime, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, legacyCompatibilityEnabled = false, clock = () => Date.now() } = {}) {
     this.store = store;
     this.vault = vault;
     this.identityBroker = identityBroker;
@@ -59,6 +59,9 @@ class PlatformPairing {
     this.serial = String(serial || store?.getIdentity()?.serial || "");
     this.haPort = Number(haPort) || 8123;
     this.intervalMs = Math.max(15000, Number(intervalMs) || 120000);
+    this.heartbeatIntervalMs = Math.max(15000, Number(heartbeatIntervalMs) || 120000);
+    this.clock = clock;
+    this.lastHeartbeatAt = 0;
     this.runtime = {
       kind: String(runtime?.kind || "dinodia_os"),
       version: String(runtime?.version || "0.0.0"),
@@ -319,7 +322,7 @@ class PlatformPairing {
   async reportCloudUrl(cloudUrl, metadata = {}) {
     const value = String(cloudUrl || "").trim().replace(/\/$/, "");
     if (!/^https:\/\/([a-z0-9-]+\.)*dinodiasmartliving\.com$/i.test(value)) throw new Error("A Dinodia company CloudURL is required");
-    return this.requestWithHubIdentity("/api/hub-agent/v2/pairing/cloud-url", { serial: this.serial, cloudUrl: value, tunnelId: String(metadata.tunnelId || ""), tunnelName: String(metadata.tunnelName || ""), hostname: String(metadata.hostname || new URL(value).hostname), reservationToken: String(metadata.reservationToken || "") });
+    return this.requestWithHubIdentity("/api/hub-agent/v2/pairing/cloud-url", { serial: this.serial, cloudUrl: value, tunnelId: String(metadata.tunnelId || ""), tunnelName: String(metadata.tunnelName || ""), hostname: String(metadata.hostname || new URL(value).hostname), reservationToken: String(metadata.reservationToken || ""), ...(metadata.reverifyChallenge === true ? { reverifyChallenge: true } : {}) });
   }
 
   async decryptCredentialDelivery(delivery, purpose = "operator-credential") {
@@ -407,10 +410,14 @@ class PlatformPairing {
       // offline-policy synchronisation, but it is not the source of the
       // platform's approximately two-minute hub availability signal.
       const nativeIdentity = await this.getPublicIdentity();
-      if (nativeIdentity) await this.requestWithHubIdentity("/api/hub-agent/v2/heartbeat", {
-        serial: this.serial,
-        hubRuntime: this.runtime,
-      });
+      const syncStartedAt = this.clock();
+      if (nativeIdentity && syncStartedAt - this.lastHeartbeatAt >= this.heartbeatIntervalMs) {
+        await this.requestWithHubIdentity("/api/hub-agent/v2/heartbeat", {
+          serial: this.serial,
+          hubRuntime: this.runtime,
+        });
+        this.lastHeartbeatAt = this.clock();
+      }
       const result = nativeIdentity
         ? await this.requestWithHubIdentity("/api/hub-agent/token-state", payload)
         : this.legacyCompatibilityEnabled && this.vault?.get("platform.syncSecret")
@@ -473,7 +480,9 @@ class PlatformPairing {
     } catch (error) {
       this.lastError = String(error.message || error);
       this.retryAttempt = Math.min(this.retryAttempt + 1, 8);
-      const retryDelay = Math.min(15 * 60 * 1000, 5000 * (2 ** (this.retryAttempt - 1))) + Math.floor(Math.random() * 1000);
+      // Do not let transient Platform errors stretch policy/revocation
+      // convergence beyond the 60-second connected-hub enforcement target.
+      const retryDelay = Math.min(15_000, 5000 * (2 ** (this.retryAttempt - 1))) + Math.floor(Math.random() * 1000);
       this.nextRetryAt = Date.now() + retryDelay;
       if (!this.retryTimer) {
         this.retryTimer = setTimeout(() => {

@@ -113,7 +113,16 @@ window.addEventListener("message", (event) => {
     // The hub creates the browser binding and setup-attempt cookies. The
     // portal may deliver only an opaque handoff reference to this window.
     fetch("/_dinodia/setup/operator-session", { method: "POST", headers: { "content-type": "application/json", "x-dinodia-setup-csrf": cookie("dinodia_setup_csrf") }, body: JSON.stringify({ handoffId: message.handoffId }) })
-      .then(async (response) => { const data = await response.json(); if (!response.ok) throw new Error(data.error || "The operator handoff was rejected."); window.location.assign("/"); })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "The operator handoff was rejected.");
+        // Verify the newly set HttpOnly cookie by calling an authenticated,
+        // read-only OS endpoint before telling Company Portal the session works.
+        const sessionCheck = await fetch("/_dinodia/admin/api/status", { cache: "no-store", credentials: "same-origin" });
+        if (!sessionCheck.ok) throw new Error("The hub did not confirm the new operator session.");
+        if (window.opener) window.opener.postMessage({ type: "dinodia-operator-session-established" }, "https://dinodia-platform-v2.vercel.app");
+        window.location.assign("/");
+      })
       .catch((error) => show(error.message, true));
     return;
   }

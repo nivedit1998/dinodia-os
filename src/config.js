@@ -88,6 +88,10 @@ module.exports = {
   buildId: stringEnv("DINODIA_BUILD_ID", ""),
   platformBootstrapSecret: developmentCompatibility ? stringEnv("DINODIA_PLATFORM_BOOTSTRAP_SECRET", "") : "",
   platformSyncIntervalMs: numberEnv("DINODIA_PLATFORM_SYNC_INTERVAL_MS", 120000),
+  // Operator revocation and policy changes must reach a connected hub well
+  // inside the 60-second enforcement window. This is separate from heartbeat
+  // cadence, which remains the existing two-minute operations signal.
+  operatorPolicySyncIntervalMs: Math.max(15000, Math.min(numberEnv("DINODIA_OPERATOR_POLICY_SYNC_INTERVAL_MS", 30000), 60000)),
   alexaNativeEnabled: stringEnv("ALEXA_NATIVE_DINODIA_OS_ENABLED", "false") === "true",
   alexaConnectIntentsEnabled: stringEnv("ALEXA_CONNECT_INTENTS_ENABLED", "false") === "true",
   alexaNativeMaxStaleMs: Math.max(60000, Math.min(numberEnv("ALEXA_NATIVE_MAX_STALE_MS", 300000), 3600000)),

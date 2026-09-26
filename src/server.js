@@ -809,7 +809,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     apiUrl: runtimeConfig.platformApiUrl,
     serial,
     haPort: runtimeConfig.haPort,
-    intervalMs: runtimeConfig.platformSyncIntervalMs,
+    intervalMs: runtimeConfig.operatorPolicySyncIntervalMs,
+    heartbeatIntervalMs: runtimeConfig.heartbeatIntervalMs,
     runtime: {
       nodeEnv: runtimeConfig.nodeEnv,
       kind: "dinodia_os",
@@ -2055,6 +2056,16 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         }
         return json(res, 200, await cloudflare.beginSetup({ tunnelName: body.tunnelName, hostname: body.hostname }));
       }
+      if (body.action === "reverify") {
+        if (runtimeConfig.nodeEnv !== "production") return json(res, 409, { error: "A live reserved Cloudflare tunnel is required for independent verification", errorCode: "cloudflare_reverification_unavailable" });
+        const result = cloudflare.status();
+        if (result.mode !== "local" || !result.connected || !result.publicUrl || !result.tunnelId || !result.tunnelName || result.hostname !== new URL(result.publicUrl).hostname) return json(res, 409, { error: "The existing reserved Cloudflare tunnel is not connected and ready to verify", errorCode: "cloudflare_tunnel_not_connected" });
+        try { return json(res, 200, await reportCloudflareVerification(result, { reverifyChallenge: true })); }
+        catch (error) {
+          await cloudflare.markPlatformVerification({ state: "PLATFORM_REPORT_FAILED", error: error.message || "Independent Platform CloudURL verification failed" }).catch(() => {});
+          throw error;
+        }
+      }
       if (body.action === "finish") {
         const result = await cloudflare.finishSetup();
         try {
@@ -2066,7 +2077,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       }
       if (body.action === "connect" && runtimeConfig.nodeEnv === "production") return json(res, 410, { error: "Arbitrary Cloudflare tunnel tokens are retired", errorCode: "cloudflare_token_flow_retired" });
       if (body.action === "connect") return json(res, 200, await cloudflare.configure({ token: body.token, hostname: body.hostname }));
-      return json(res, 400, { error: "action must be quick, setup, finish, connect, or disconnect" });
+      return json(res, 400, { error: "action must be quick, setup, finish, reverify, connect, or disconnect" });
     }
     if (resource === "integrations" && parts[2] === "matter" && parts[3] === "commission" && req.method === "POST") {
       const body = await readBody(req);
@@ -2135,15 +2146,16 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     return isHiveCredentialTransportAllowed(req, { nodeEnv: runtimeConfig.nodeEnv, allowInsecure: runtimeConfig.nodeEnv !== "production", configuredHostname: runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "" });
   }
 
-  async function reportCloudflareVerification(result = cloudflare.status()) {
+  async function reportCloudflareVerification(result = cloudflare.status(), { reverifyChallenge = false } = {}) {
     if (!result?.publicUrl || !pairing?.reportCloudUrl) throw new Error("The local Cloudflare tunnel is not ready to report to Platform");
+    await cloudflare.markPlatformVerification({ state: "PLATFORM_REPORT_PENDING", cloudUrl: result.publicUrl, verificationId: cloudflare.status()?.platformVerification?.verificationId || null });
     let reservationToken = cloudflare.reservationToken();
     if (!reservationToken && runtimeConfig.nodeEnv === "production" && pairing.getCloudflareReservation) {
       const reservation = await pairing.getCloudflareReservation();
       if (String(reservation.reservedHostname || "") !== String(result.hostname || "") || String(reservation.reservedTunnelName || "") !== String(result.tunnelName || "")) throw new Error("The installation Cloudflare reservation does not match the paired tunnel");
       reservationToken = await cloudflare.setReservationToken(reservation.reservationToken);
     }
-    const report = await pairing.reportCloudUrl(result.publicUrl, { tunnelId: result.tunnelId, tunnelName: result.tunnelName, hostname: result.hostname, reservationToken });
+    const report = await pairing.reportCloudUrl(result.publicUrl, { tunnelId: result.tunnelId, tunnelName: result.tunnelName, hostname: result.hostname, reservationToken, reverifyChallenge });
     return cloudflare.markPlatformVerification({ state: "PLATFORM_VERIFIED", cloudUrl: result.publicUrl, verificationId: report.verificationId || null });
   }
 
