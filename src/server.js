@@ -257,6 +257,10 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   // browser cookie. The absolute deadline is never renewed; a service restart
   // deliberately drops the map and requires a fresh Portal handoff.
   const operatorBrowserSessions = new Map();
+  // Handoff work may outlive a Cloudflare proxy request. Keep its state only
+  // in memory, keyed to the hub-created attempt and browser binding. A service
+  // restart intentionally drops pending handoffs; the employee must relaunch.
+  const operatorHandoffJobs = new Map();
   const supportBrowserSessions = new Map();
   function issueBrowserOperatorSession(token, expiresAt, authority = {}) {
     const handle = `osb_${crypto.randomBytes(32).toString("base64url")}`;
@@ -2547,6 +2551,141 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     }
   }
 
+  function operatorHandoffJobKey(setupAttemptId, browserBinding) {
+    return crypto.createHash("sha256").update(`${setupAttemptId}\0${browserBinding}`, "utf8").digest("hex");
+  }
+
+  function pruneOperatorHandoffJobs() {
+    const now = operatorNow();
+    for (const [key, job] of operatorHandoffJobs) {
+      if (now >= job.retainUntil) operatorHandoffJobs.delete(key);
+    }
+    if (operatorHandoffJobs.size >= 128) {
+      const terminal = [...operatorHandoffJobs].find(([, job]) => job.state !== "pending");
+      if (terminal) operatorHandoffJobs.delete(terminal[0]);
+    }
+    return operatorHandoffJobs.size < 128;
+  }
+
+  function respondOperatorHandoffJob(res, job) {
+    if (job.state === "pending") {
+      return json(res, 202, { ok: true, state: "pending", correlationId: job.correlationId, handoffPhase: job.phase });
+    }
+    if (job.state === "failed") {
+      return json(res, job.statusCode || 502, {
+        ok: false,
+        error: "The secure Dinodia OS operator handoff could not be completed. Close this window and relaunch from Company Portal.",
+        errorCode: job.errorCode || "operator_handoff_rejected",
+        handoffPhase: job.phase || "hub",
+        correlationId: job.correlationId,
+      });
+    }
+    if (!job.sessionHandle || !Number.isFinite(job.expiresAt) || operatorNow() >= job.expiresAt) {
+      job.state = "failed";
+      job.phase = "hub";
+      job.errorCode = "operator_session_expired";
+      job.statusCode = 401;
+      return respondOperatorHandoffJob(res, job);
+    }
+    const sessionMaxAge = Math.max(1, Math.min(Math.ceil((job.expiresAt - operatorNow()) / 1000), runtimeConfig.stage1InternalOperatorDaySession === true ? 86_400 : 900));
+    setupHeaders(res, [
+      `dinodia_os_operator_session=${encodeURIComponent(job.sessionHandle)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${sessionMaxAge}${job.remote ? "; Secure" : ""}`,
+      "dinodia_os_operator=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+      "dinodia_operator_binding=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+      "dinodia_operator_attempt=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+    ]);
+    return json(res, 200, { ok: true, state: "established", expiresAt: new Date(job.expiresAt).toISOString(), serial, correlationId: job.correlationId });
+  }
+
+  async function runOperatorHandoffJob(job) {
+    let handoffSecret = null;
+    let operatorToken = null;
+    const operatorPlatformRequest = async (requestBody) => {
+      const timestamp = Date.now();
+      const nonce = crypto.randomBytes(24).toString("base64url");
+      const identity = await pairing.getPublicIdentity();
+      if (!identity?.generation) throw Object.assign(new Error("identity unavailable"), { safeCode: "hub_identity_unavailable" });
+      const signedBody = { serial, identityGeneration: Number(identity.generation), ...requestBody };
+      const bodyHash = crypto.createHash("sha256").update(JSON.stringify(signedBody), "utf8").digest("hex");
+      const platform = pairing.store?.getPlatform?.() || {};
+      const machineCredential = pairing.vault?.get?.("platform.machineCredential");
+      const machineVersion = Number(platform.provisioningCredentialVersion || 0);
+      if (!machineCredential || !Number.isInteger(machineVersion) || machineVersion < 1) throw Object.assign(new Error("machine credential unavailable"), { safeCode: "machine_credential_unavailable" });
+      const machineSignature = crypto.createHmac("sha256", crypto.createHash("sha256").update(String(machineCredential), "utf8").digest("hex")).update(["POST", "/api/hub-agent/operator-session/consume", String(timestamp), nonce, bodyHash].join("\n"), "utf8").digest("base64url");
+      const platformOrigin = String(pairing.apiUrl || runtimeConfig.platformApiUrl || "").replace(/\/$/, "");
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 12_000);
+      try {
+        return await fetch(`${platformOrigin}/api/hub-agent/operator-session/consume`, {
+          method: "POST",
+          headers: { "content-type": "application/json", accept: "application/json", "x-dinodia-hub-timestamp": String(timestamp), "x-dinodia-hub-nonce": nonce, "x-dinodia-body-sha256": bodyHash, "x-dinodia-machine-version": String(machineVersion), "x-dinodia-machine-signature": machineSignature },
+          body: JSON.stringify(signedBody),
+          signal: controller.signal,
+        });
+      } finally { clearTimeout(timer); }
+    };
+    const readPlatformJson = async (response, phase) => {
+      const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+      if (!contentType.includes("application/json")) throw Object.assign(new Error("non-json platform response"), { safeCode: "platform_non_json_response", phase, statusCode: 502 });
+      let body;
+      try { body = await response.json(); }
+      catch { throw Object.assign(new Error("invalid platform response"), { safeCode: "platform_invalid_response", phase, statusCode: 502 }); }
+      if (!response.ok) {
+        const candidate = String(body?.errorCode || "operator_handoff_rejected");
+        throw Object.assign(new Error("platform rejected handoff"), { safeCode: /^[a-z0-9_]{1,64}$/.test(candidate) ? candidate : "operator_handoff_rejected", phase, statusCode: response.status || 502 });
+      }
+      return body;
+    };
+    try {
+      if (operatorNow() >= job.deadlineAt) throw Object.assign(new Error("handoff expired"), { safeCode: "operator_handoff_expired", phase: "prepare", statusCode: 401 });
+      job.phase = "prepare";
+      let response = await operatorPlatformRequest({ handoffId: job.handoffId, browserBinding: job.browserBinding, setupAttemptId: job.setupAttemptId, serial, phase: "prepare" });
+      const prepared = await readPlatformJson(response, "prepare");
+      if (!prepared.handoffSecretEnvelope) throw Object.assign(new Error("prepare envelope missing"), { safeCode: "operator_handoff_prepare_incomplete", phase: "prepare", statusCode: 502 });
+      try { handoffSecret = await pairing.decryptCredentialDelivery({ version: 1, envelope: JSON.parse(String(prepared.handoffSecretEnvelope)) }, "operator-handoff"); }
+      catch { throw Object.assign(new Error("handoff envelope rejected"), { safeCode: "operator_handoff_delivery_failed", phase: "prepare", statusCode: 502 }); }
+      if (operatorNow() >= job.deadlineAt) throw Object.assign(new Error("handoff expired"), { safeCode: "operator_handoff_expired", phase: "consume", statusCode: 401 });
+      job.phase = "consume";
+      response = await operatorPlatformRequest({ handoffId: job.handoffId, browserBinding: job.browserBinding, setupAttemptId: job.setupAttemptId, serial, phase: "consume", handoffSecret });
+      const consumed = await readPlatformJson(response, "consume");
+      if (!consumed.sessionGrant?.envelope) throw Object.assign(new Error("session grant missing"), { safeCode: "operator_session_grant_missing", phase: "consume", statusCode: 502 });
+      try { operatorToken = await pairing.decryptCredentialDelivery({ version: Number(consumed.sessionGrant.version || 1), envelope: consumed.sessionGrant.envelope }, "operator-session"); }
+      catch { throw Object.assign(new Error("session envelope rejected"), { safeCode: "operator_session_delivery_failed", phase: "consume", statusCode: 502 }); }
+      const grantedPrincipal = verifyOperatorSessionToken(operatorToken, {
+        publicKey: operatorPublicKey,
+        hubId: serial,
+        requiredScope: "os:admin",
+        requireRecentAuth: false,
+        now: operatorNow(),
+        internalOperatorDaySession: runtimeConfig.stage1InternalOperatorDaySession === true,
+      });
+      if (!grantedPrincipal || grantedPrincipal.handoffId !== job.handoffId || grantedPrincipal.homeId == null || !grantedPrincipal.employeeSessionId) {
+        throw Object.assign(new Error("grant policy mismatch"), { safeCode: "operator_session_grant_invalid", phase: "consume", statusCode: 502 });
+      }
+      const expiresAt = Math.min(Number(new Date(consumed.expiresAt).getTime()), Number(grantedPrincipal.exp) * 1000);
+      if (!Number.isFinite(expiresAt) || expiresAt <= operatorNow()) throw Object.assign(new Error("grant expired"), { safeCode: "operator_session_expired", phase: "consume", statusCode: 401 });
+      job.sessionHandle = issueBrowserOperatorSession(operatorToken, expiresAt, { jti: grantedPrincipal.jti, handoffId: grantedPrincipal.handoffId, credentialVersion: grantedPrincipal.credentialVersion });
+      job.expiresAt = expiresAt;
+      job.state = "established";
+      job.phase = null;
+      job.retainUntil = Math.min(expiresAt, operatorNow() + 2 * 60_000);
+      logger.log(`[operator-handoff] correlation=${job.correlationId} state=established`);
+    } catch (error) {
+      job.state = "failed";
+      job.phase = error?.phase === "prepare" || error?.phase === "consume" ? error.phase : job.phase || "hub";
+      job.errorCode = String(error?.safeCode || (error?.name === "AbortError" ? "platform_request_timeout" : "platform_unavailable"));
+      if (!/^[a-z0-9_]{1,64}$/.test(job.errorCode)) job.errorCode = "operator_handoff_rejected";
+      job.statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : error?.name === "AbortError" ? 504 : 503;
+      job.retainUntil = operatorNow() + 60_000;
+      logger.warn(`[operator-handoff] correlation=${job.correlationId} phase=${job.phase} code=${job.errorCode} status=${job.statusCode}`);
+    } finally {
+      handoffSecret = null;
+      operatorToken = null;
+      job.handoffSecret = null;
+      job.running = false;
+    }
+  }
+
   async function handleOperatorHandoffRequest(req, res) {
     const local = localSetupHostAllowed(req);
     const remote = isHiveCredentialTransportAllowed(req, { nodeEnv: runtimeConfig.nodeEnv, configuredHostname: runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "", allowLoopback: false });
@@ -2556,78 +2695,45 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     if (String(req.headers.origin || "") !== `${expectedProtocol}://${req.headers.host}`) return json(res, 403, { error: "Operator handoff origin is not allowed" });
     const body = await readBody(req);
     if (!setupInitialBrowserSessionValid(req)) return json(res, 403, { error: "This setup browser session is not valid" });
-    const handoffId = String(body.handoffId || "").trim();
     const browserBinding = setupCookie(req, "dinodia_operator_binding");
     const setupAttemptId = setupCookie(req, "dinodia_operator_attempt");
-    if (!/^[0-9a-f-]{36}$/i.test(handoffId) || !/^[A-Za-z0-9_-]{32,256}$/.test(browserBinding || "")) return json(res, 400, { error: "A one-use operator handoff id and hub-issued browser binding are required" });
-    if (!/^[A-Za-z0-9_-]{8,160}$/.test(setupAttemptId)) return json(res, 400, { error: "The operator handoff setup attempt is required" });
-    const operatorPlatformRequest = async (requestBody) => {
-      const timestamp = Date.now();
-      const nonce = crypto.randomBytes(24).toString("base64url");
-      const identity = await pairing.getPublicIdentity();
-      if (!identity?.generation) throw new Error("The hub signing identity generation is unavailable");
-      const signedBody = { serial, identityGeneration: Number(identity.generation), ...requestBody };
-      const bodyHash = crypto.createHash("sha256").update(JSON.stringify(signedBody), "utf8").digest("hex");
-      const platform = pairing.store?.getPlatform?.() || {};
-      const machineCredential = pairing.vault?.get?.("platform.machineCredential");
-      const machineVersion = Number(platform.provisioningCredentialVersion || 0);
-      if (!machineCredential || !Number.isInteger(machineVersion) || machineVersion < 1) throw new Error("The acknowledged hub machine credential is unavailable");
-      const machineSignature = crypto.createHmac("sha256", crypto.createHash("sha256").update(String(machineCredential), "utf8").digest("hex")).update(["POST", "/api/hub-agent/operator-session/consume", String(timestamp), nonce, bodyHash].join("\n"), "utf8").digest("base64url");
-      const platformOrigin = String(pairing.apiUrl || runtimeConfig.platformApiUrl || "").replace(/\/$/, "");
-      return fetch(`${platformOrigin}/api/hub-agent/operator-session/consume`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json", "x-dinodia-hub-timestamp": String(timestamp), "x-dinodia-hub-nonce": nonce, "x-dinodia-body-sha256": bodyHash, "x-dinodia-machine-version": String(machineVersion), "x-dinodia-machine-signature": machineSignature }, body: JSON.stringify(signedBody) });
-    };
-    let response;
-    const requestBody = { handoffId, browserBinding, setupAttemptId, serial, phase: "prepare" };
-    try {
-      response = await operatorPlatformRequest(requestBody);
-    } catch {
-      return json(res, 503, { error: "The hub signing identity or Company Portal connection is unavailable", errorCode: "hub_identity_or_platform_unavailable" });
+    if (!/^[A-Za-z0-9_-]{32,256}$/.test(browserBinding || "") || !/^[A-Za-z0-9_-]{8,160}$/.test(setupAttemptId)) return json(res, 400, { error: "The hub-created operator browser context is unavailable", errorCode: "operator_browser_context_invalid", handoffPhase: "hub" });
+    const key = operatorHandoffJobKey(setupAttemptId, browserBinding);
+    const handoffCapacityAvailable = pruneOperatorHandoffJobs();
+    const origin = `${expectedProtocol}://${req.headers.host}`;
+    let job = operatorHandoffJobs.get(key);
+    if (String(body.action || "start") === "start") {
+      const handoffId = String(body.handoffId || "").trim();
+      if (!/^[0-9a-f-]{36}$/i.test(handoffId)) return json(res, 400, { error: "A one-use operator handoff reference is required", errorCode: "operator_handoff_reference_invalid", handoffPhase: "hub" });
+      const handoffHash = hashTokenValue(handoffId);
+      if (job) {
+        if (job.handoffHash !== handoffHash || job.origin !== origin) return json(res, 409, { error: "This browser already has a different operator handoff in progress", errorCode: "operator_handoff_conflict", handoffPhase: job.phase || "hub", correlationId: job.correlationId });
+        return respondOperatorHandoffJob(res, job);
+      }
+      if (!handoffCapacityAvailable) return json(res, 503, { error: "The hub is completing other secure handoffs. Try again shortly.", errorCode: "operator_handoff_capacity_reached", handoffPhase: "hub" });
+      job = {
+        handoffId,
+        handoffHash,
+        browserBinding,
+        setupAttemptId,
+        origin,
+        remote,
+        key,
+        correlationId: crypto.randomUUID(),
+        state: "pending",
+        phase: "prepare",
+        createdAt: operatorNow(),
+        deadlineAt: operatorNow() + 55_000,
+        retainUntil: operatorNow() + 2 * 60_000,
+        running: true,
+      };
+      operatorHandoffJobs.set(key, job);
+      void runOperatorHandoffJob(job);
+      return respondOperatorHandoffJob(res, job);
     }
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok || !result.handoffSecretEnvelope) return json(res, response.status || 502, { error: "This operator handoff was not accepted", errorCode: result.errorCode || "operator_handoff_rejected", handoffPhase: "prepare" });
-    let handoffSecret;
-    try {
-      handoffSecret = await pairing.decryptCredentialDelivery({ version: 1, envelope: JSON.parse(String(result.handoffSecretEnvelope)) }, "operator-handoff");
-    } catch {
-      return json(res, 502, { error: "The hub could not establish the temporary operator handoff", errorCode: "operator_handoff_delivery_failed" });
-    }
-    const consumeBody = { handoffId, browserBinding, setupAttemptId, serial, phase: "consume", handoffSecret };
-    try {
-      response = await operatorPlatformRequest(consumeBody);
-    } catch {
-      return json(res, 503, { error: "This hub signing identity or Company Portal connection is unavailable", errorCode: "hub_identity_or_platform_unavailable" });
-    }
-    const consumeResult = await response.json().catch(() => ({}));
-    if (!response.ok || !consumeResult.sessionGrant?.envelope) return json(res, response.status || 502, { error: "This operator handoff was not accepted", errorCode: consumeResult.errorCode || "operator_handoff_rejected", handoffPhase: "consume" });
-    const sessionGrant = consumeResult.sessionGrant;
-    let operatorToken;
-    try {
-      operatorToken = await pairing.decryptCredentialDelivery({ version: Number(sessionGrant.version || 1), envelope: sessionGrant.envelope }, "operator-session");
-    } catch {
-      return json(res, 502, { error: "The hub could not establish the temporary operator session", errorCode: "operator_session_delivery_failed" });
-    }
-    const grantedPrincipal = verifyOperatorSessionToken(operatorToken, {
-      publicKey: operatorPublicKey,
-      hubId: serial,
-      requiredScope: "os:admin",
-      requireRecentAuth: false,
-      now: operatorNow(),
-      internalOperatorDaySession: runtimeConfig.stage1InternalOperatorDaySession === true,
-    });
-    if (!grantedPrincipal || grantedPrincipal.handoffId !== handoffId || grantedPrincipal.homeId == null || !grantedPrincipal.employeeSessionId) {
-      return json(res, 502, { error: "The hub rejected an operator grant that did not match its active session policy", errorCode: "operator_session_grant_invalid" });
-    }
-    handoffSecret = null;
-    const grantExpiresAt = Math.min(Number(new Date(consumeResult.expiresAt).getTime()), Number(grantedPrincipal.exp) * 1000);
-    const sessionHandle = issueBrowserOperatorSession(operatorToken, grantExpiresAt, { jti: grantedPrincipal.jti, handoffId: grantedPrincipal.handoffId, credentialVersion: grantedPrincipal.credentialVersion });
-    const sessionMaxAge = Math.max(1, Math.min(Math.ceil((grantExpiresAt - operatorNow()) / 1000), runtimeConfig.stage1InternalOperatorDaySession === true ? 86_400 : 900));
-    setupHeaders(res, [
-      `dinodia_os_operator_session=${encodeURIComponent(sessionHandle)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${sessionMaxAge}${remote ? "; Secure" : ""}`,
-      "dinodia_os_operator=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
-      "dinodia_operator_binding=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
-      "dinodia_operator_attempt=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
-    ]);
-    return json(res, 200, { ok: true, expiresAt: consumeResult.expiresAt, serial });
+    if (String(body.action) !== "status") return json(res, 400, { error: "Unknown operator handoff action", errorCode: "operator_handoff_action_invalid", handoffPhase: "hub" });
+    if (!job || job.origin !== origin || operatorNow() >= job.retainUntil) return json(res, 404, { error: "No active handoff exists for this originating browser", errorCode: "operator_handoff_job_missing", handoffPhase: "hub" });
+    return respondOperatorHandoffJob(res, job);
   }
 
   async function handleOperatorSessionEnd(req, res) {

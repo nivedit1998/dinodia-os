@@ -97,8 +97,15 @@ test("secure-access re-verification requires a connected tunnel and the operator
   assert.match(setupScript, /window\.opener\.postMessage\(\{ type: "dinodia-operator-attempt", setupAttemptId: data\.setupAttemptId \}, portalOrigin\)/);
   assert.doesNotMatch(setupScript, /postMessage\(\{ type: "dinodia-operator-attempt"[^\n]*, "\*"\)/);
   const server = fs.readFileSync(path.join(__dirname, "../src/server.js"), "utf8");
-  assert.match(server, /handoffPhase: "prepare"/);
-  assert.match(server, /handoffPhase: "consume"/);
+  assert.match(server, /operatorHandoffJobs = new Map\(\)/);
+  assert.match(server, /void runOperatorHandoffJob\(job\)/);
+  assert.match(server, /handoffPhase: job\.phase/);
+  assert.match(server, /correlationId: job\.correlationId/);
+  assert.match(setupScript, /action: "start"/);
+  assert.match(setupScript, /action: "status"/);
+  assert.match(setupScript, /operator_handoff_non_json_response/);
+  assert.doesNotMatch(setupScript, /localStorage|sessionStorage/);
+  assert.doesNotMatch(setupScript, /JSON\.stringify\(\{[^}]*operatorToken|JSON\.stringify\(\{[^}]*handoffSecret/);
   assert.match(setupScript, /"https:\/\/dinodia-platform-v2\.vercel\.app"/);
   assert.match(app, /Your Dinodia OS session expired or was revoked\. Return to Company Portal and select Open secure Dinodia OS again\./);
   assert.match(app, /event\.code === 4401/);
