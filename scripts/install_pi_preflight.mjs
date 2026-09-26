@@ -32,25 +32,32 @@ function required(values, name) {
 }
 
 function sourceFingerprint(sourceDir) {
-  const files = [
-    "package.json",
-    "package-lock.json",
-    "src/server.js",
-    "src/config.js",
-    "src/haCompat.js",
-    "src/identityd.js",
-    "src/cloudflareTunnel.js",
-    "public/setup.js",
-    "scripts/install-pi.sh",
-    "scripts/install_pi_preflight.mjs",
-  ];
+  // Hash every file copied into a release, not a hand-maintained sample of
+  // runtime entry points. An omitted security module previously allowed a
+  // changed identityBroker.js to collide with the already-installed build ID.
+  const files = [];
+  const roots = ["src", "public", "scripts", "docker", "systemd", "docs"];
+  for (const root of roots) {
+    const rootPath = path.join(sourceDir, root);
+    if (!fs.existsSync(rootPath)) continue;
+    const visit = (directory) => {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        const absolute = path.join(directory, entry.name);
+        if (entry.isDirectory()) visit(absolute);
+        else if (entry.isFile() || entry.isSymbolicLink()) files.push(path.relative(sourceDir, absolute));
+      }
+    };
+    visit(rootPath);
+  }
+  files.push("Dockerfile", "docker-compose.yml", "package.json", "package-lock.json", ".env.example", "requirements-hive.in", "requirements-hive.lock", "THIRD_PARTY_NOTICES.md");
+  const uniqueFiles = [...new Set(files)].sort((a, b) => a.localeCompare(b));
   const hash = crypto.createHash("sha256");
-  for (const relative of files) {
+  for (const relative of uniqueFiles) {
     const filePath = path.join(sourceDir, relative);
     if (!fs.statSync(filePath).isFile()) fail(`candidate is missing ${relative}`);
     hash.update(relative);
     hash.update("\0");
-    hash.update(fs.readFileSync(filePath));
+    hash.update(fs.lstatSync(filePath).isSymbolicLink() ? fs.readlinkSync(filePath) : fs.readFileSync(filePath));
     hash.update("\0");
   }
   return `native-v2-${hash.digest("hex").slice(0, 24)}`;

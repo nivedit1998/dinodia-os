@@ -72,4 +72,12 @@ test("installer build identity changes when the locked setup runtime changes", a
   await fs.appendFile(cloudflarePath, "\n// build identity regression fixture\n");
   const afterCloudflare = validateCandidate({ sourceDir: candidate, envFile: fixtureData.envFile, identityDir: fixtureData.identityDir });
   assert.notEqual(afterCloudflare.buildId, after.buildId);
+  const identityBrokerPath = path.join(candidate, "src", "auth", "identityBroker.js");
+  await fs.appendFile(identityBrokerPath, "\n// identity broker build identity regression fixture\n");
+  const afterIdentityBroker = validateCandidate({ sourceDir: candidate, envFile: fixtureData.envFile, identityDir: fixtureData.identityDir });
+  assert.notEqual(afterIdentityBroker.buildId, afterCloudflare.buildId);
+  const pairingPath = path.join(candidate, "src", "platformPairing.js");
+  await fs.appendFile(pairingPath, "\n// credential lifecycle build identity regression fixture\n");
+  const afterPairing = validateCandidate({ sourceDir: candidate, envFile: fixtureData.envFile, identityDir: fixtureData.identityDir });
+  assert.notEqual(afterPairing.buildId, afterIdentityBroker.buildId);
 });
