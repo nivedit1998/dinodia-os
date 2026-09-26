@@ -64,8 +64,8 @@ class SetupDiscovery {
       // The Pi can have Docker bridges, VPNs and multiple physical links.
       // Publish only on the selected setup interface to avoid Avahi duplicate
       // address/name collisions and accidental exposure on another LAN.
-      ["avahi-publish-address", ["--interface", selectedInterface.name, this.state.hostname, address]],
-      ["avahi-publish-service", ["--interface", selectedInterface.name, `Dinodia OS ${this.serial}`, "_http._tcp", String(port), "path=/setup", `serial=${this.serial}`]],
+      ["avahi-publish-address", ["-i", selectedInterface.name, this.state.hostname, address]],
+      ["avahi-publish-service", ["-i", selectedInterface.name, `Dinodia OS ${this.serial}`, "_http._tcp", String(port), "path=/setup", `serial=${this.serial}`]],
     ];
     const spawned = new Set();
     const generation = ++this.generation;

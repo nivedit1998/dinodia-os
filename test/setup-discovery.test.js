@@ -49,8 +49,8 @@ test("production setup discovery pins the exact serial alias and setup service t
   const status = discovery.status();
   assert.deepEqual(status, { running: true, hostname: "dinodia-din-home-001.local", address: "192.168.1.76", error: null });
   assert.deepEqual(calls.map(({ command, args }) => [command, args]), [
-    ["avahi-publish-address", ["--interface", "eth0", "dinodia-din-home-001.local", "192.168.1.76"]],
-    ["avahi-publish-service", ["--interface", "eth0", "Dinodia OS din-home-001", "_http._tcp", "8123", "path=/setup", "serial=din-home-001"]],
+    ["avahi-publish-address", ["-i", "eth0", "dinodia-din-home-001.local", "192.168.1.76"]],
+    ["avahi-publish-service", ["-i", "eth0", "Dinodia OS din-home-001", "_http._tcp", "8123", "path=/setup", "serial=din-home-001"]],
   ]);
   discovery.stop();
   assert.equal(discovery.status().running, false);
