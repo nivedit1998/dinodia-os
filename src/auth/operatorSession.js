@@ -1,6 +1,8 @@
 const crypto = require("node:crypto");
 
 const MAX_SESSION_MS = 15 * 60 * 1000;
+const INTERNAL_OPERATOR_DAY_SESSION_POLICY = "STAGE1_INTERNAL_OPERATOR_DAY_SESSION";
+const INTERNAL_OPERATOR_DAY_SESSION_MS = 24 * 60 * 60 * 1000;
 const MAX_RECENT_AUTH_MS = 5 * 60 * 1000;
 
 function encode(value) {
@@ -15,11 +17,15 @@ function canonicalSigningInput(header, claims) {
   return `${encode(header)}.${encode(claims)}`;
 }
 
-function createOperatorSessionToken(claims, privateKey, now = Date.now()) {
+function createOperatorSessionToken(claims, privateKey, now = Date.now(), { internalOperatorDaySession = false } = {}) {
   if (!privateKey) throw new Error("Operator signing key is not configured");
   const issuedAt = Math.floor(Number(now) / 1000);
-  const requestedExpiry = Number(claims.exp || issuedAt + MAX_SESSION_MS / 1000);
-  const exp = Math.min(requestedExpiry, issuedAt + MAX_SESSION_MS / 1000);
+  const scope = Array.isArray(claims.scope) ? [...new Set(claims.scope.map(String))] : [];
+  const adminOnly = scope.includes("os:admin") && !scope.includes("support:redeem");
+  const dayPolicy = adminOnly && internalOperatorDaySession === true;
+  const sessionLimitSeconds = dayPolicy ? INTERNAL_OPERATOR_DAY_SESSION_MS / 1000 : MAX_SESSION_MS / 1000;
+  const requestedExpiry = Number(claims.exp || issuedAt + sessionLimitSeconds);
+  const exp = Math.min(requestedExpiry, issuedAt + sessionLimitSeconds);
   const payload = {
     iss: "dinodia-platform",
     aud: `dinodia-os:${String(claims.hubId || "")}`,
@@ -27,7 +33,7 @@ function createOperatorSessionToken(claims, privateKey, now = Date.now()) {
     sid: String(claims.sid || crypto.randomUUID()),
     jti: String(claims.jti || crypto.randomUUID()),
     hubId: String(claims.hubId || ""),
-    scope: Array.isArray(claims.scope) ? [...new Set(claims.scope.map(String))] : [],
+    scope,
     iat: issuedAt,
     exp,
     recentAuthAt: Number(claims.recentAuthAt || now),
@@ -36,6 +42,7 @@ function createOperatorSessionToken(claims, privateKey, now = Date.now()) {
     ...(Array.isArray(claims.areaIds) ? { areaIds: [...new Set(claims.areaIds.map(String))] } : {}),
     ...(claims.targetUserId != null ? { targetUserId: String(claims.targetUserId) } : {}),
     ...(claims.includesTenantDevices != null ? { includesTenantDevices: claims.includesTenantDevices === true } : {}),
+    ...(dayPolicy ? { sessionPolicy: INTERNAL_OPERATOR_DAY_SESSION_POLICY } : {}),
   };
   if (!payload.sub || !payload.hubId || payload.scope.length === 0) throw new Error("Operator token claims are incomplete");
   const header = { alg: "EdDSA", typ: "DNO-OPS-1" };
@@ -44,7 +51,7 @@ function createOperatorSessionToken(claims, privateKey, now = Date.now()) {
   return `dno1.${signingInput}.${signature}`;
 }
 
-function verifyOperatorSessionToken(token, { publicKey, hubId, requiredScope = "os:admin", requireRecentAuth = false, now = Date.now() } = {}) {
+function verifyOperatorSessionToken(token, { publicKey, hubId, requiredScope = "os:admin", requireRecentAuth = false, now = Date.now(), internalOperatorDaySession = false } = {}) {
   const parts = String(token || "").split(".");
   if (parts.length !== 4 || parts[0] !== "dno1" || !publicKey) return null;
   const signingInput = `${parts[1]}.${parts[2]}`;
@@ -64,12 +71,19 @@ function verifyOperatorSessionToken(token, { publicKey, hubId, requiredScope = "
   const exp = Number(claims.exp);
   const iat = Number(claims.iat);
   const recentAuthAt = Number(claims.recentAuthAt);
+  const scope = Array.isArray(claims.scope) ? claims.scope.map(String) : [];
+  const adminOnly = scope.includes("os:admin") && !scope.includes("support:redeem");
+  const supportScope = scope.includes("support:redeem") || scope.includes("os:support");
+  const isDayPolicy = claims.sessionPolicy === INTERNAL_OPERATOR_DAY_SESSION_POLICY;
+  if (adminOnly && (internalOperatorDaySession !== isDayPolicy)) return null;
+  if ((!adminOnly || supportScope) && isDayPolicy) return null;
+  const maxSessionSeconds = adminOnly && isDayPolicy ? INTERNAL_OPERATOR_DAY_SESSION_MS / 1000 : MAX_SESSION_MS / 1000;
   if (claims.iss !== "dinodia-platform" || claims.aud !== `dinodia-os:${String(hubId || "")}` || claims.hubId !== String(hubId || "")) return null;
-  if (!claims.sub || !claims.sid || !claims.jti || !Number.isFinite(exp) || !Number.isFinite(iat) || exp <= nowSeconds || exp - iat > MAX_SESSION_MS / 1000) return null;
+  if (!claims.sub || !claims.sid || !claims.jti || !Number.isFinite(exp) || !Number.isFinite(iat) || exp <= nowSeconds || exp - iat > maxSessionSeconds) return null;
   if (!Number.isFinite(recentAuthAt)) return null;
   if (requireRecentAuth && Number(now) - recentAuthAt > MAX_RECENT_AUTH_MS) return null;
   if (!Array.isArray(claims.scope) || (requiredScope && !claims.scope.includes(requiredScope))) return null;
   return Object.freeze({ ...claims, scope: [...claims.scope] });
 }
 
-module.exports = { MAX_SESSION_MS, MAX_RECENT_AUTH_MS, createOperatorSessionToken, verifyOperatorSessionToken };
+module.exports = { MAX_SESSION_MS, INTERNAL_OPERATOR_DAY_SESSION_MS, INTERNAL_OPERATOR_DAY_SESSION_POLICY, MAX_RECENT_AUTH_MS, createOperatorSessionToken, verifyOperatorSessionToken };

@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const { spawnSync } = require("node:child_process");
 
 const html = fs.readFileSync(path.join(__dirname, "../public/index.html"), "utf8");
 const app = fs.readFileSync(path.join(__dirname, "../public/app.js"), "utf8");
@@ -19,6 +20,17 @@ const dockerfile = fs.readFileSync(path.join(__dirname, "../Dockerfile"), "utf8"
 const healthcheck = fs.readFileSync(path.join(__dirname, "../scripts/healthcheck.js"), "utf8");
 const installer = fs.readFileSync(path.join(__dirname, "../scripts/install-pi.sh"), "utf8");
 const readme = fs.readFileSync(path.join(__dirname, "../README.md"), "utf8");
+
+test("temporary internal day mode requires the exact opt-in in the OS runtime", () => {
+  const root = path.resolve(__dirname, "..");
+  for (const [value, expected] of [[undefined, "false"], ["false", "false"], ["TRUE", "false"], [" true ", "false"], ["true", "true"]]) {
+    const env = { PATH: process.env.PATH || "" };
+    if (value !== undefined) env.STAGE1_INTERNAL_OPERATOR_DAY_SESSION = value;
+    const result = spawnSync(process.execPath, ["-e", "process.stdout.write(String(require('./src/config').stage1InternalOperatorDaySession))"], { cwd: root, env, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, expected);
+  }
+});
 
 test("dashboard keeps the intended setup order and production safety boundary", () => {
   const order = ["cloudflare-section", "provisioning-section", "areas-section", "radios-section", "devices-section"];
@@ -81,6 +93,11 @@ test("secure-access re-verification requires a connected tunnel and the operator
   assert.match(setupScript, /if \(!sessionCheck\.ok\) throw/);
   assert.match(setupScript, /dinodia-operator-session-established/);
   assert.match(setupScript, /"https:\/\/dinodia-platform-v2\.vercel\.app"/);
+  assert.match(app, /Your Dinodia OS session expired or was revoked\. Return to Company Portal and select Open secure Dinodia OS again\./);
+  assert.match(app, /event\.code === 4401/);
+  assert.match(app, /\/_dinodia\/operator-session\/end/);
+  assert.match(fs.readFileSync(path.join(__dirname, "../public/js/api.js"), "utf8"), /operator_session_expired/);
+  assert.match(fs.readFileSync(path.join(__dirname, "../src/config.js"), "utf8"), /process\.env\.STAGE1_INTERNAL_OPERATOR_DAY_SESSION === "true"/);
   assert.match(fs.readFileSync(path.join(__dirname, "../src/config.js"), "utf8"), /operatorPolicySyncIntervalMs: Math\.max\(15000, Math\.min\(numberEnv\("DINODIA_OPERATOR_POLICY_SYNC_INTERVAL_MS", 30000\), 60000\)\)/);
 });
 

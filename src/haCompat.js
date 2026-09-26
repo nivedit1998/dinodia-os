@@ -479,7 +479,7 @@ function createCompatInterface({ port = 8123, host = "0.0.0.0", model, store, au
     if (url.pathname !== "/api/websocket") return socket.destroy();
     websocket.handleUpgrade(req, socket, head, (client) => websocket.emit("connection", client, req));
   }
-  websocket.on("connection", (socket) => {
+  websocket.on("connection", (socket, request) => {
     let authenticated = false;
     const authTimer = setTimeout(() => { if (!authenticated) socket.close(1008, "Authentication timeout"); }, 10000);
     authTimer.unref?.();
@@ -489,7 +489,7 @@ function createCompatInterface({ port = 8123, host = "0.0.0.0", model, store, au
       let message;
       try { message = JSON.parse(raw.toString()); } catch { socket.close(1007, "Invalid JSON"); return; }
       if (!authenticated) {
-        const principal = message.type === "auth" && typeof wsAuth === "function" ? wsAuth(String(message.access_token || "")) : null;
+        const principal = message.type === "auth" && typeof wsAuth === "function" ? wsAuth(String(message.access_token || ""), request) : null;
         if (!principal) {
           socket.send(JSON.stringify({ type: "auth_invalid", message: "Invalid access token" }));
           return socket.close(1008, "Unauthorized");

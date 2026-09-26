@@ -208,8 +208,10 @@ function dashboardDevice(device) {
   return result;
 }
 
-function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, googleNestBridge, googleNestFetchImpl, googleNestNow, googleNestUpdateSource, platformSync, cloudflareTunnel, zigbeeService, threadService, identityBroker: providedIdentityBroker = null, serialAdapterLister = listSerialAdapters, serialAdapterProbe = probeSerialAdapter, logger = console } = {}) {
+function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, googleNestBridge, googleNestFetchImpl, googleNestNow, googleNestUpdateSource, platformSync, cloudflareTunnel, zigbeeService, threadService, identityBroker: providedIdentityBroker = null, serialAdapterLister = listSerialAdapters, serialAdapterProbe = probeSerialAdapter, logger = console, clock = Date.now } = {}) {
   const runtimeConfig = { ...baseConfig, ...config };
+  const operatorNow = () => Number(clock());
+  let operatorSessionRevalidationTimer = null;
   // Native production is permanently fail-closed. In particular, do not let
   // a caller-supplied test/config object, an environment variable, or an old
   // token field turn the legacy dashboard/HA verifier back on. The explicit
@@ -247,19 +249,19 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   const revokedOperatorJtis = new Set();
   // The browser must receive only an opaque session handle. The signed OS
   // bearer is retained in this process and is never placed in HTML, JSON or a
-  // browser cookie. Sessions are intentionally short-lived and are cleared
-  // when the corresponding operator token is revoked.
+  // browser cookie. The absolute deadline is never renewed; a service restart
+  // deliberately drops the map and requires a fresh Portal handoff.
   const operatorBrowserSessions = new Map();
   const supportBrowserSessions = new Map();
-  function issueBrowserOperatorSession(token, expiresAt) {
+  function issueBrowserOperatorSession(token, expiresAt, authority = {}) {
     const handle = `osb_${crypto.randomBytes(32).toString("base64url")}`;
-    operatorBrowserSessions.set(handle, { token: String(token), expiresAt: Number(new Date(expiresAt).getTime()), jti: null });
+    operatorBrowserSessions.set(handle, { token: String(token), expiresAt: Number(new Date(expiresAt).getTime()), jti: String(authority.jti || ""), handoffId: String(authority.handoffId || ""), credentialVersion: Number(authority.credentialVersion || 0), lastAuthorizationCheckAt: operatorNow() });
     return handle;
   }
   function browserSessionToken(handle) {
     const value = operatorBrowserSessions.get(String(handle || ""));
     if (!value) return null;
-    if (!Number.isFinite(value.expiresAt) || Date.now() >= value.expiresAt) {
+    if (!Number.isFinite(value.expiresAt) || operatorNow() >= value.expiresAt) {
       operatorBrowserSessions.delete(String(handle));
       return null;
     }
@@ -331,26 +333,51 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   function clearOperatorBrowserSessions() {
     for (const [handle, value] of operatorBrowserSessions) {
       try {
-        const principal = verifyOperatorSessionToken(value.token, { publicKey: operatorPublicKey, hubId: serial, requiredScope: null, requireRecentAuth: false });
+        const principal = verifyOperatorSessionToken(value.token, { publicKey: operatorPublicKey, hubId: serial, requiredScope: null, requireRecentAuth: false, now: operatorNow(), internalOperatorDaySession: runtimeConfig.stage1InternalOperatorDaySession === true });
         if (!principal || revokedOperatorJtis.has(String(principal.jti))) operatorBrowserSessions.delete(handle);
       } catch { operatorBrowserSessions.delete(handle); }
     }
   }
   for (const jti of Object.keys(hubStore.getSecurity?.().revokedOperatorJtis || {})) revokedOperatorJtis.add(jti);
+  async function revokeLocalOperatorSession(session, reason) {
+    if (!session?.jti) return 0;
+    revokedOperatorJtis.add(String(session.jti));
+    const security = hubStore.getSecurity?.() || {};
+    await hubStore.saveSecurity?.({ revokedOperatorJtis: { ...(security.revokedOperatorJtis || {}), [session.jti]: new Date(operatorNow()).toISOString() } });
+    for (const [handle, entry] of operatorBrowserSessions) if (entry.jti === session.jti) operatorBrowserSessions.delete(handle);
+    return revocationCoordinator.revoke({ jti: session.jti, reason });
+  }
+  async function syncOperatorBrowserSessions() {
+    for (const session of operatorBrowserSessions.values()) {
+      if (!session.handoffId || !session.jti || operatorNow() >= session.expiresAt || revokedOperatorJtis.has(session.jti)) continue;
+      try {
+        const result = await pairing.requestWithHubIdentity("/api/hub-agent/operator-session/revalidate", { handoffId: session.handoffId, jti: session.jti, credentialVersion: session.credentialVersion });
+        if (result?.active !== true) await revokeLocalOperatorSession(session, "operator_authority_changed");
+        else session.lastAuthorizationCheckAt = operatorNow();
+      } catch {
+        // Never extend the last successful decision. operatorSessionAuth and
+        // the socket deadline fail closed once its 60-second freshness ends.
+      }
+    }
+  }
+  function armOperatorSessionFreshnessDeadline(socket, session) {
+    const checkAt = Number(session?.lastAuthorizationCheckAt || 0) + 60_000;
+    const delay = Math.max(1, checkAt - operatorNow());
+    const timer = setTimeout(() => {
+      if (operatorNow() >= Number(session?.lastAuthorizationCheckAt || 0) + 60_000) socket.close?.(4401, "Authorization revalidation expired");
+    }, delay);
+    timer.unref?.();
+    return timer;
+  }
   const operatorSessionAuth = (token) => {
     clearOperatorBrowserSessions();
-    const principal = verifyOperatorSessionToken(token, { publicKey: operatorPublicKey, hubId: serial, requiredScope: null, requireRecentAuth: false });
+    const principal = verifyOperatorSessionToken(token, { publicKey: operatorPublicKey, hubId: serial, requiredScope: null, requireRecentAuth: false, now: operatorNow(), internalOperatorDaySession: runtimeConfig.stage1InternalOperatorDaySession === true });
     if (!principal || !principal.scope.some((scope) => ["os:admin", "os:support"].includes(String(scope))) || revokedOperatorJtis.has(String(principal.jti))) return null;
-    const platformState = hubStore.getPlatform?.() || {};
-    const sessionCredentialVersion = Number(principal.credentialVersion || 0);
-    const acceptedCredentialVersions = Array.isArray(platformState.operatorCredentialStates)
-      ? platformState.operatorCredentialStates
-        .filter((entry) => entry && ['ACTIVE', 'GRACE'].includes(String(entry.state)) && (!entry.graceUntil || Date.parse(String(entry.graceUntil)) > Date.now()))
-        .map((entry) => Number(entry.version))
-        .filter((version) => Number.isInteger(version) && version > 0)
-      : [Number(platformState.operatorCredentialVersion || 0)].filter((version) => version > 0);
-    if (sessionCredentialVersion > 0 && !acceptedCredentialVersions.includes(sessionCredentialVersion)) return null;
-    return { ...principal, principalType: "operator", credentialFingerprint: hashTokenValue(token).slice(0, 32) };
+    const activeHandle = [...operatorBrowserSessions.values()].find((entry) => entry.token === String(token));
+    if (principal.scope.includes("os:admin") && runtimeConfig.nodeEnv === "production") {
+      if (activeHandle && operatorNow() - Number(activeHandle.lastAuthorizationCheckAt || 0) >= 60_000) return null;
+    }
+    return { ...principal, principalType: "operator", authToken: String(token), credentialFingerprint: hashTokenValue(token).slice(0, 32) };
   };
   const appSessionAuth = (token) => {
     const platform = hubStore.getPlatform?.() || {};
@@ -825,14 +852,11 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     getActivityIncidents: () => ({ schemaVersion: 1, capturedAt: new Date().toISOString(), incidents: activity.store.listPendingIncidentEnvelopes(100).map((entry) => entry.envelope).filter((envelope) => envelope?.severity === "critical" && ["open", "resolved"].includes(envelope?.state)) }),
     getAlexaCatalog: () => alexaIntegration?.publicCatalog?.() || null,
     acceptOfflineAuthorisations: async (rows) => { for (const row of Array.isArray(rows) ? rows : []) await offlineLanAuthorisations.acceptPlatformEnvelope(row); },
-    onOperatorCredentialStateChange: async ({ previous = [], current = [], now = Date.now(), hubId = serial } = {}) => {
-      const accepted = (rows) => new Set((Array.isArray(rows) ? rows : [])
-        .filter((entry) => entry && ['ACTIVE', 'GRACE'].includes(String(entry.state)) && (!entry.graceUntil || Date.parse(String(entry.graceUntil)) > Number(now)))
-        .map((entry) => Number(entry.version))
-        .filter((version) => Number.isInteger(version) && version > 0));
-      for (const version of accepted(previous)) if (!accepted(current).has(version)) {
-        revocationCoordinator.revoke({ credentialVersion: version, reason: "operator_credential_state_changed" });
-      }
+    onOperatorCredentialStateChange: async () => {
+      // A normal scheduled credential rotation must not end an already-issued
+      // browser grant. The machine-authenticated durable revalidation path
+      // distinguishes emergency revocation from ordinary grace retirement.
+      await syncOperatorBrowserSessions();
     },
     legacyCompatibilityEnabled,
     onSyncResult: async (result, payload, resetAckAt, electricPayload, electricResetAckAt) => {
@@ -917,8 +941,12 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     // It is therefore an operator-only surface in production; app tokens must
     // use the scoped native HTTP contract so a tenant can never receive a
     // cross-area or private-device broadcast through this legacy transport.
-    wsAuth: (token) => {
-      const principal = operatorSessionAuth(token);
+    wsAuth: (token, request) => {
+      // Same-origin WebSockets carry the opaque HttpOnly browser handle in the
+      // upgrade Cookie header; the browser never receives the signed bearer.
+      const browserToken = request ? browserOperatorToken(request) : "";
+      const operatorToken = browserToken || token;
+      const principal = operatorSessionAuth(operatorToken);
       if (principal && principal.scope.includes("os:admin")) return principal;
       const appPrincipal = appSessionAuth(token);
       if (appPrincipal) return { ...appPrincipal, principalType: "app", authToken: String(token), credentialFingerprint: hashTokenValue(token).slice(0, 32) };
@@ -935,8 +963,15 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         // boundary above; keep its legacy message authorization isolated so
         // existing compatibility fixtures remain truthful without creating a
         // production bypass.
-        return principal?.principalType === "operator"
-          || (runtimeConfig.nodeEnv !== "production" && legacyCompatibilityEnabled && ["legacy_ha", "legacy_admin"].includes(principal?.principalType));
+        if (principal?.principalType === "operator") {
+          const current = operatorSessionAuth(principal.authToken);
+          if (!current || !current.scope.includes("os:admin")) {
+            context.socket?.close?.(4401, "Operator session expired or revoked");
+            return false;
+          }
+          return true;
+        }
+        return runtimeConfig.nodeEnv !== "production" && legacyCompatibilityEnabled && ["legacy_ha", "legacy_admin"].includes(principal?.principalType);
       }
       // A native app token is short-lived, but a WebSocket can outlive its
       // original HTTP request. Revalidate the exact signed token against the
@@ -986,6 +1021,25 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
           credentialVersion: principal.credentialVersion || null,
         });
         socket.once?.("close", untrack);
+      }
+      if (principal?.principalType === "operator") {
+        let stopped = false;
+        let freshnessTimer;
+        let expiryTimer;
+        const checkFreshness = () => {
+          if (stopped) return;
+          const session = [...operatorBrowserSessions.values()].find((entry) => entry.jti === String(principal.jti));
+          if (!session || operatorNow() >= session.expiresAt) { socket.close?.(4401, "Operator session expired"); return; }
+          const remaining = session.lastAuthorizationCheckAt + 60_000 - operatorNow();
+          if (remaining <= 0) { socket.close?.(4401, "Operator authorization could not be revalidated"); return; }
+          freshnessTimer = setTimeout(checkFreshness, remaining);
+          freshnessTimer.unref?.();
+        };
+        const expiryDelay = Math.max(1, Number(principal.exp) * 1000 - operatorNow());
+        expiryTimer = setTimeout(() => socket.close?.(4401, "Operator session expired"), expiryDelay);
+        expiryTimer.unref?.();
+        checkFreshness();
+        socket.once?.("close", () => { stopped = true; clearTimeout(freshnessTimer); clearTimeout(expiryTimer); });
       }
     },
     eventBus,
@@ -2489,15 +2543,47 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     } catch {
       return json(res, 502, { error: "The hub could not establish the temporary operator session", errorCode: "operator_session_delivery_failed" });
     }
+    const grantedPrincipal = verifyOperatorSessionToken(operatorToken, {
+      publicKey: operatorPublicKey,
+      hubId: serial,
+      requiredScope: "os:admin",
+      requireRecentAuth: false,
+      now: operatorNow(),
+      internalOperatorDaySession: runtimeConfig.stage1InternalOperatorDaySession === true,
+    });
+    if (!grantedPrincipal || grantedPrincipal.handoffId !== handoffId || grantedPrincipal.homeId == null || !grantedPrincipal.employeeSessionId) {
+      return json(res, 502, { error: "The hub rejected an operator grant that did not match its active session policy", errorCode: "operator_session_grant_invalid" });
+    }
     handoffSecret = null;
-    const sessionHandle = issueBrowserOperatorSession(operatorToken, consumeResult.expiresAt);
+    const grantExpiresAt = Math.min(Number(new Date(consumeResult.expiresAt).getTime()), Number(grantedPrincipal.exp) * 1000);
+    const sessionHandle = issueBrowserOperatorSession(operatorToken, grantExpiresAt, { jti: grantedPrincipal.jti, handoffId: grantedPrincipal.handoffId, credentialVersion: grantedPrincipal.credentialVersion });
+    const sessionMaxAge = Math.max(1, Math.min(Math.ceil((grantExpiresAt - operatorNow()) / 1000), runtimeConfig.stage1InternalOperatorDaySession === true ? 86_400 : 900));
     setupHeaders(res, [
-      `dinodia_os_operator_session=${encodeURIComponent(sessionHandle)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=900${remote ? "; Secure" : ""}`,
+      `dinodia_os_operator_session=${encodeURIComponent(sessionHandle)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${sessionMaxAge}${remote ? "; Secure" : ""}`,
       "dinodia_os_operator=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
       "dinodia_operator_binding=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
       "dinodia_operator_attempt=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
     ]);
     return json(res, 200, { ok: true, expiresAt: consumeResult.expiresAt, serial });
+  }
+
+  async function handleOperatorSessionEnd(req, res) {
+    const local = localSetupHostAllowed(req);
+    const remote = isHiveCredentialTransportAllowed(req, { nodeEnv: runtimeConfig.nodeEnv, configuredHostname: runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "", allowLoopback: false });
+    if (!local && !remote) return json(res, 404, { error: "Not found" });
+    if (req.method !== "POST") return json(res, 405, { error: "Method not allowed" });
+    const expectedProtocol = remote ? "https" : "http";
+    if (String(req.headers.origin || "") !== `${expectedProtocol}://${req.headers.host}`) return json(res, 403, { error: "Operator session origin is not allowed" });
+    const cookie = String(req.headers.cookie || "").split(";").map((part) => part.trim()).find((part) => part.startsWith("dinodia_os_operator_session="));
+    const handle = cookie ? decodeURIComponent(cookie.slice("dinodia_os_operator_session=".length)) : "";
+    const session = operatorBrowserSessions.get(handle);
+    if (session) {
+      const principal = operatorSessionAuth(session.token);
+      if (!principal || !principal.scope.includes("os:admin")) return json(res, 401, { error: "This Dinodia OS session has expired or is no longer active", errorCode: "operator_session_expired" });
+      await revokeLocalOperatorSession(session, "operator_session_ended");
+    }
+    setupHeaders(res, ["dinodia_os_operator_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"]);
+    return json(res, 200, { ok: true, message: "Dinodia OS session ended" });
   }
   function googleNestCallbackPage(kind = "success") {
     const success = kind === "success";
@@ -2568,6 +2654,11 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       && Boolean(req.headers["x-dinodia-offline-signature"])
       && isPrivateLanRequest(req);
     if (runtimeConfig.nodeEnv === "production" && !operator && !app && !offlineNativeCommand) {
+      const hasOperatorCookie = String(req.headers.cookie || "").split(";").some((item) => item.trim().startsWith("dinodia_os_operator_session="));
+      if (hasOperatorCookie) {
+        setupHeaders(res, ["dinodia_os_operator_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"]);
+        return json(res, 401, { error: "Your Dinodia OS session expired or was revoked. Return to Company Portal and launch secure access again.", errorCode: "operator_session_expired" });
+      }
       return json(res, 401, { error: "A temporary Dinodia OS operator session is required", errorCode: "operator_session_required" });
     }
     if (runtimeConfig.nodeEnv === "production" && app && !operator && !nativeAppApi) return json(res, 403, { error: "This app principal cannot open the Dinodia OS dashboard", errorCode: "insufficient_scope" });
@@ -2615,6 +2706,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     if (url.pathname === "/_dinodia/setup/support-access") return handleSupportAccessRequest(req, res);
     if (url.pathname === "/_dinodia/setup/operator-attempt") return handleOperatorAttemptRegistration(req, res);
     if (url.pathname === "/_dinodia/setup/operator-session") return handleOperatorHandoffRequest(req, res);
+    if (url.pathname === "/_dinodia/operator-session/end") return handleOperatorSessionEnd(req, res);
     if (url.pathname === "/setup.js") return handleSetupScriptRequest(req, res);
     if (url.pathname === "/setup" || url.pathname.startsWith("/_dinodia/setup/")) return handleLocalSetupRequest(req, res, url);
     if (url.pathname.startsWith("/_dinodia/platform/v1/alexa")) return handleNativeAlexaPlatformRequest(req, res, url);
@@ -2641,6 +2733,10 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     automation.start?.();
     await hubStore.pruneActivity();
     activity.start();
+    if (runtimeConfig.nodeEnv === "production" && !operatorSessionRevalidationTimer) {
+      operatorSessionRevalidationTimer = setInterval(() => syncOperatorBrowserSessions().catch(() => {}), runtimeConfig.operatorPolicySyncIntervalMs);
+      operatorSessionRevalidationTimer.unref?.();
+    }
     if (runtimeConfig.nativeAutomationsMode === "enabled") await nativeAutomationScheduler.start();
     const previousActivity = hubStore.getActivityState();
     const previousShutdownClean = previousActivity.lastShutdownClean !== false;
@@ -2680,6 +2776,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   }
 
   async function stop() {
+    if (operatorSessionRevalidationTimer) clearInterval(operatorSessionRevalidationTimer);
+    operatorSessionRevalidationTimer = null;
     mqtt.close();
     matter.close();
     heatingDemandController.stop();
@@ -2705,7 +2803,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     if (server.listening) await new Promise((resolve) => server.close(resolve));
   }
 
-  return { server, start, stop, haServer: server, hubAgentServer: hubAgentCompat.server, store: hubStore, mqtt, matter, hive, googleNest, alexa: alexaIntegration, heatingDemandController, cloudflare, sync: heartbeat, pairing, activity, electric, model: haModel, vault, eventBus, config: runtimeConfig, nativeAutomationService, nativeAutomationScheduler };
+  return { server, start, stop, haServer: server, hubAgentServer: hubAgentCompat.server, store: hubStore, mqtt, matter, hive, googleNest, alexa: alexaIntegration, heatingDemandController, cloudflare, sync: heartbeat, pairing, activity, electric, model: haModel, vault, eventBus, config: runtimeConfig, syncOperatorBrowserSessions, nativeAutomationService, nativeAutomationScheduler };
 }
 
 if (require.main === module) {

@@ -37,6 +37,9 @@ const configuredPlatformOrigin = stringEnv("DINODIA_PLATFORM_API_URL", "").repla
 const platformApiUrl = nodeEnv === "production"
   ? (configuredPlatformOrigin === canonicalPlatformOrigin ? configuredPlatformOrigin : "")
   : configuredPlatformOrigin;
+// Match Platform's exact opt-in semantics. Whitespace or any other malformed
+// value is OFF, avoiding a policy-mode disagreement between the two runtimes.
+const stage1InternalOperatorDaySession = process.env.STAGE1_INTERNAL_OPERATOR_DAY_SESSION === "true";
 
 module.exports = {
   nodeEnv,
@@ -56,7 +59,11 @@ module.exports = {
   setupInterface: stringEnv("DINODIA_SETUP_INTERFACE", ""),
   setupAllowedHosts: stringEnv("DINODIA_SETUP_ALLOWED_HOSTS", ""),
   pairingTtlMs: Math.max(60_000, Math.min(numberEnv("DINODIA_PAIRING_TTL_MS", 900_000), 900_000)),
-  operatorSessionTtlMs: Math.max(60_000, Math.min(numberEnv("DINODIA_OPERATOR_SESSION_TTL_MS", 900_000), 900_000)),
+  // Temporary Stage 1 exception; Platform grants must carry the matching
+  // signed policy marker or the OS verifier rejects them. Stage 14 Section 7.2
+  // removes this branch and restores the 15-minute bound.
+  stage1InternalOperatorDaySession,
+  operatorSessionTtlMs: stage1InternalOperatorDaySession ? 86_400_000 : 900_000,
   manufacturingRootPublicKeys: stringEnv("DINODIA_MANUFACTURING_ROOT_PUBLIC_KEYS", ""),
   mqttUrl: stringEnv("MQTT_URL", ""),
   zigbeeBaseTopic: stringEnv("ZIGBEE2MQTT_BASE_TOPIC", "zigbee2mqtt"),

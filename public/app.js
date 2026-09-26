@@ -676,13 +676,38 @@ function connectDashboardSocket(force = false) {
     if (eventType === "state_changed" || value.event?.data?.kind === "device") refreshDevices();
     else if (eventType === "dinodia_dashboard_updated") load();
   });
-  socket.addEventListener("close", () => { if (dashboardSocket !== socket) return; dashboardSocket = null; setActivityLiveStatus(false); scheduleDashboardSocketReconnect(); });
+  socket.addEventListener("close", (event) => {
+    if (dashboardSocket !== socket) return;
+    dashboardSocket = null;
+    setActivityLiveStatus(false);
+    if (event.code === 4401) {
+      if (dashboardSocketReconnectTimer) clearTimeout(dashboardSocketReconnectTimer);
+      dashboardSocketReconnectTimer = null;
+      showNotice("Your Dinodia OS session expired or was revoked. Return to Company Portal and select Open secure Dinodia OS again.", "error");
+      return;
+    }
+    scheduleDashboardSocketReconnect();
+  });
   socket.addEventListener("error", () => { setActivityLiveStatus(false); if (dashboardSocket === socket) socket.close(); });
 }
 setInterval(refreshDevices, 10000);
 function renderAutomations(automations) { const legacy = $("#automations"); if (!legacy) return; legacy.innerHTML = automations.length ? automations.map((item) => `<div class="list-item"><span>${escapeHtml(item.name)}<br><small class="subtle">${item.enabled ? "Enabled" : "Disabled"}</small></span><button class="danger" data-delete-automation="${escapeHtml(item.id)}" type="button">Delete</button></div>`).join("") : `<p class="subtle small">No legacy automations yet.</p>`; document.querySelectorAll("[data-delete-automation]").forEach((button) => button.addEventListener("click", async () => { try { await api(`/api/automations/${encodeURIComponent(button.dataset.deleteAutomation)}`, { method: "DELETE" }); await load(); } catch (error) { showNotice(error.message, "error"); } })); }
 
-$("#end-session")?.addEventListener("click", () => { state.token = ""; dashboardSocket?.close(); window.location.replace("/setup"); });
+$("#end-session")?.addEventListener("click", async () => {
+  const button = $("#end-session");
+  if (button) button.disabled = true;
+  try {
+    const response = await fetch("/_dinodia/operator-session/end", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" } });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || "The Dinodia OS session could not be ended");
+    state.token = "";
+    dashboardSocket?.close();
+    window.location.replace("/setup");
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : "The Dinodia OS session could not be ended", "error");
+    if (button) button.disabled = false;
+  }
+});
 $("#refresh").addEventListener("click", load);
 $("#activity-refresh").addEventListener("click", () => loadActivity({ reset: true }).catch((error) => showNotice(error.message, "error")));
 $("#activity-expand").addEventListener("click", () => toggleActivityExpanded().catch((error) => showNotice(error.message, "error")));
