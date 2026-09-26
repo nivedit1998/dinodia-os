@@ -51,6 +51,18 @@ for relative in "${candidate_files[@]}"; do [[ -e "$APP_SOURCE/$relative" ]] || 
 BUILD_ID="$(node "$APP_SOURCE/scripts/install_pi_preflight.mjs" --source "$APP_SOURCE" --env "$CURRENT_ENV" --identity "$IDENTITY_DIR" --print-build-id)"
 [[ "$BUILD_ID" =~ ^native-v2-[a-f0-9]{24}$ ]] || die "candidate build identity is invalid"
 
+# Setup discovery publishes the exact dinodia-<serial>.local address and
+# _http._tcp setup service. Install the small Avahi publisher utilities only
+# after the candidate, environment and enrolled identity have passed preflight.
+if ! command -v avahi-publish-address >/dev/null 2>&1 || ! command -v avahi-publish-service >/dev/null 2>&1 || ! command -v avahi-daemon >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y avahi-daemon avahi-utils
+fi
+command -v avahi-publish-address >/dev/null 2>&1 || die "avahi-publish-address is required for locked-setup discovery"
+command -v avahi-publish-service >/dev/null 2>&1 || die "avahi-publish-service is required for locked-setup discovery"
+command -v avahi-daemon >/dev/null 2>&1 || die "avahi-daemon is required for locked-setup discovery"
+systemctl enable --now avahi-daemon
+
 install_gid="$(id -g "$INSTALL_USER")"
 mkdir -p "$RELEASE_ROOT" "$DATA_DIR"
 STAGE_DIR="$RELEASE_ROOT/.staging-${BUILD_ID}-${BASHPID}"

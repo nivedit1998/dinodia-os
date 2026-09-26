@@ -236,7 +236,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   if (!existingIdentity.serial && hubStore.saveIdentity) hubStore.saveIdentity({ serial, instanceId: existingIdentity.instanceId || crypto.randomUUID(), hostname: existingIdentity.hostname || "dinodia" }).catch((error) => logger.error(`[identity] ${error.message}`));
   const revocationCoordinator = new RevocationCoordinator();
   const provisioningPairing = new ProvisioningPairingService({ serial, ttlMs: runtimeConfig.pairingTtlMs, store: hubStore, vault, logger });
-  const setupDiscovery = new SetupDiscovery({ serial, interfaceName: runtimeConfig.setupInterface, nodeEnv: runtimeConfig.nodeEnv, logger });
+  const setupDiscovery = new SetupDiscovery({ serial, interfaceAddress: runtimeConfig.setupInterface, nodeEnv: runtimeConfig.nodeEnv, logger });
   let operatorPublicKey = null;
   if (runtimeConfig.operatorPublicKey) {
     try { operatorPublicKey = crypto.createPublicKey(runtimeConfig.operatorPublicKey); } catch (error) { logger.error(`[auth] operator public key rejected: ${error.message}`); }

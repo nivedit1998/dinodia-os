@@ -1,6 +1,10 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
+const fs = require("node:fs");
+const net = require("node:net");
+const os = require("node:os");
+const path = require("node:path");
 const { CredentialRegistry, CREDENTIAL_TYPES } = require("../src/auth/credentialRegistry");
 const { createOperatorSessionToken, verifyOperatorSessionToken } = require("../src/auth/operatorSession");
 const { ProvisioningPairingService } = require("../src/auth/provisioningPairing");
@@ -10,7 +14,7 @@ const { StepUpProofRegistry } = require("../src/auth/stepUpProofs");
 const { RevocationCoordinator } = require("../src/auth/revocationCoordinator");
 const { Store } = require("../src/store");
 const { SecretVault } = require("../src/secretVault");
-const { canonicalPlatformRequest, canonicalCloudChallenge, canonicalCloudChallengeUnsigned, encryptPrivateKey, decryptPrivateKey } = require("../src/auth/identityBroker");
+const { canonicalPlatformRequest, canonicalCloudChallenge, canonicalCloudChallengeUnsigned, encryptPrivateKey, decryptPrivateKey, loadIdentity, createIdentityBrokerServer } = require("../src/auth/identityBroker");
 const { supportProofOfPossessionDigest } = require("../src/auth/supportProofOfPossession");
 
 test("operator sessions are signed, hub-bound, session-time-limited, with separate recent-auth enforcement", () => {
@@ -146,6 +150,42 @@ test("identity broker canonical signing is operation-bound and encrypted blobs r
   tampered.ciphertext = `${tampered.ciphertext.slice(0, -2)}AA`;
   assert.throws(() => decryptPrivateKey(JSON.stringify(tampered), wrappingKey, context));
   assert.throws(() => decryptPrivateKey(blob, wrappingKey, { ...context, purpose: "encryption" }), /context mismatch/);
+  assert.throws(() => decryptPrivateKey(blob, wrappingKey, { ...context, serial: "DIN-IDENTITY-CLONE" }), /context mismatch/);
+  assert.throws(() => decryptPrivateKey(blob, wrappingKey, { ...context, generation: 5 }), /context mismatch/);
+});
+
+test("identity broker rejects symlinked identity roots in a disposable filesystem fixture", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "dinodia-identity-symlink-test-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const real = path.join(root, "identity-real");
+  const link = path.join(root, "identity-link");
+  fs.mkdirSync(real, { mode: 0o700 });
+  fs.symlinkSync(real, link, "dir");
+  assert.throws(() => loadIdentity(link), /identity symlink is forbidden/);
+});
+
+test("identityd refuses an unsupported private-key export operation over its Unix socket", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "dinodia-identity-socket-test-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const socketPath = path.join(root, "identityd.sock");
+  const server = createIdentityBrokerServer({ socketPath, directory: path.join(root, "identity"), logger: { warn() {} } });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, resolve);
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const response = await new Promise((resolve, reject) => {
+    const client = net.createConnection(socketPath);
+    let body = "";
+    client.once("error", reject);
+    client.on("connect", () => client.write(`${JSON.stringify({ version: 1, id: "test-export-denial", operation: "exportPrivateKey", input: {} })}\n`));
+    client.on("data", (chunk) => { body += chunk.toString("utf8"); });
+    client.on("end", () => {
+      try { resolve(JSON.parse(body)); } catch (error) { reject(error); }
+    });
+  });
+  assert.deepEqual(response, { ok: false, error: "identity broker request is not authorised" });
 });
 
 test("CloudURL challenge signing is byte-stable across identityd and in-process paths", () => {
