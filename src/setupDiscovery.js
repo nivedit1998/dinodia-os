@@ -21,7 +21,7 @@ function isPhysicalLanInterface(name) {
  * prefer a physical Ethernet/Wi-Fi interface and never publish a container,
  * VPN, loopback or bridge address just because it is RFC1918.
  */
-function privateAddress(interfaceAddress = "", interfaces = os.networkInterfaces()) {
+function privateInterface(interfaceAddress = "", interfaces = os.networkInterfaces()) {
   const requested = String(interfaceAddress || "").trim();
   const candidates = [];
   for (const [name, values] of Object.entries(interfaces || {})) {
@@ -33,7 +33,11 @@ function privateAddress(interfaceAddress = "", interfaces = os.networkInterfaces
     }
   }
   candidates.sort((left, right) => left.physicalPriority - right.physicalPriority || left.name.localeCompare(right.name) || left.address.localeCompare(right.address));
-  return candidates[0]?.address || "";
+  return candidates[0] || null;
+}
+
+function privateAddress(interfaceAddress = "", interfaces = os.networkInterfaces()) {
+  return privateInterface(interfaceAddress, interfaces)?.address || "";
 }
 
 class SetupDiscovery {
@@ -52,12 +56,16 @@ class SetupDiscovery {
 
   start(port) {
     if (this.nodeEnv !== "production" || this.children.length || !this.serial) return this.status();
-    const address = privateAddress(this.interfaceAddress, this.interfaces());
+    const selectedInterface = privateInterface(this.interfaceAddress, this.interfaces());
+    const address = selectedInterface?.address || "";
     this.state = { ...this.state, address, error: address ? null : "No physical private interface is available" };
     if (!address) return this.status();
     const specs = [
-      ["avahi-publish-address", [this.state.hostname, address]],
-      ["avahi-publish-service", [`Dinodia OS ${this.serial}`, "_http._tcp", String(port), "path=/setup", `serial=${this.serial}`]],
+      // The Pi can have Docker bridges, VPNs and multiple physical links.
+      // Publish only on the selected setup interface to avoid Avahi duplicate
+      // address/name collisions and accidental exposure on another LAN.
+      ["avahi-publish-address", ["--interface", selectedInterface.name, this.state.hostname, address]],
+      ["avahi-publish-service", ["--interface", selectedInterface.name, `Dinodia OS ${this.serial}`, "_http._tcp", String(port), "path=/setup", `serial=${this.serial}`]],
     ];
     const spawned = new Set();
     const generation = ++this.generation;
@@ -109,4 +117,4 @@ class SetupDiscovery {
   status() { return { ...this.state }; }
 }
 
-module.exports = { SetupDiscovery, privateAddress, isPrivateIPv4, isVirtualInterface };
+module.exports = { SetupDiscovery, privateInterface, privateAddress, isPrivateIPv4, isVirtualInterface };

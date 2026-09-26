@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const path = require("node:path");
-const { SetupDiscovery, privateAddress } = require("../src/setupDiscovery");
+const { SetupDiscovery, privateInterface, privateAddress } = require("../src/setupDiscovery");
 
 const interfacesWithBridgeFirst = {
   docker0: [{ address: "172.17.0.1", family: "IPv4", internal: false }],
@@ -31,11 +31,13 @@ function spawnRecorder() {
 
 test("mDNS discovery prefers the actual Ethernet/Wi-Fi address over RFC1918 container bridges", () => {
   assert.equal(privateAddress("", interfacesWithBridgeFirst), "192.168.1.76");
+  assert.deepEqual(privateInterface("", interfacesWithBridgeFirst), { name: "eth0", address: "192.168.1.76", physicalPriority: 0 });
   assert.equal(privateAddress("10.0.0.27", interfacesWithBridgeFirst), "10.0.0.27");
+  assert.deepEqual(privateInterface("10.0.0.27", interfacesWithBridgeFirst), { name: "wlan0", address: "10.0.0.27", physicalPriority: 0 });
   assert.equal(privateAddress("172.17.0.1", interfacesWithBridgeFirst), "", "configured Docker bridge address is refused");
 });
 
-test("production setup discovery publishes the exact serial alias and setup service on the selected LAN IP", () => {
+test("production setup discovery pins the exact serial alias and setup service to the selected LAN interface", () => {
   const { calls, spawnProcess } = spawnRecorder();
   const discovery = new SetupDiscovery({
     serial: "DIN-HOME-001", nodeEnv: "production", interfaces: () => interfacesWithBridgeFirst,
@@ -47,8 +49,8 @@ test("production setup discovery publishes the exact serial alias and setup serv
   const status = discovery.status();
   assert.deepEqual(status, { running: true, hostname: "dinodia-din-home-001.local", address: "192.168.1.76", error: null });
   assert.deepEqual(calls.map(({ command, args }) => [command, args]), [
-    ["avahi-publish-address", ["dinodia-din-home-001.local", "192.168.1.76"]],
-    ["avahi-publish-service", ["Dinodia OS din-home-001", "_http._tcp", "8123", "path=/setup", "serial=din-home-001"]],
+    ["avahi-publish-address", ["--interface", "eth0", "dinodia-din-home-001.local", "192.168.1.76"]],
+    ["avahi-publish-service", ["--interface", "eth0", "Dinodia OS din-home-001", "_http._tcp", "8123", "path=/setup", "serial=din-home-001"]],
   ]);
   discovery.stop();
   assert.equal(discovery.status().running, false);
