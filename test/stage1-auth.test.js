@@ -175,7 +175,7 @@ test("identity broker is a root-only, certificate-bearing boundary", () => {
   assert.match(identityBroker, /encryptionPublicKey\.asymmetricKeyType !== "x25519"/);
   assert.doesNotMatch(identityBroker, /exportPrivateKey\s*\(/);
   assert.doesNotMatch(identityBroker, /signStepUpDescriptor/);
-  assert.match(identityBroker, /machine-credential.*operator-session/);
+  assert.match(identityBroker, /machine-credential.*operator-credential.*operator-session/);
   assert.match(identityBroker, /operator-session/);
 });
 

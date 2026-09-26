@@ -79,6 +79,30 @@ const { createBackup, decryptBackup } = require('/repo/src/backup');
   const socketPath = path.join(root, 'identityd.sock');
   const broker = createIdentityBrokerServer({ socketPath, directory: identityDir, allowedGid: 0, logger: { warn() {} } });
   await new Promise((resolve) => broker.listen(socketPath, resolve));
+  const operatorCredential = 'dno_ops_disposable_test_credential';
+  const ephemeral = crypto.generateKeyPairSync('x25519');
+  const shared = crypto.diffieHellman({ privateKey: ephemeral.privateKey, publicKey: current.encryptionPublicKey });
+  const key = Buffer.from(crypto.hkdfSync('sha256', shared, Buffer.from('dinodia-os-operator-credential'), Buffer.from('1'), 32));
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const ciphertext = Buffer.concat([cipher.update(operatorCredential, 'utf8'), cipher.final()]);
+  const operatorEnvelope = {
+    version: 1,
+    purpose: 'operator-credential',
+    algorithm: 'x25519-hkdf-sha256/aes-256-gcm',
+    ephemeralPublicKeyPem: ephemeral.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+    iv: iv.toString('base64'),
+    tag: cipher.getAuthTag().toString('base64'),
+    ciphertext: ciphertext.toString('base64'),
+  };
+  const operatorResponse = await new Promise((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    let text = '';
+    socket.on('data', (chunk) => { text += chunk; if (text.includes('\n')) { socket.destroy(); resolve(JSON.parse(text)); } });
+    socket.on('error', reject);
+    socket.on('connect', () => socket.end(JSON.stringify({ version: 1, id: 'operator-credential-test', operation: 'decryptMachineCredentialEnvelope', input: { envelope: operatorEnvelope, version: 1, purpose: 'operator-credential' } }) + '\n'));
+  });
+  assert.deepEqual(operatorResponse, { ok: true, result: { credential: operatorCredential } });
   const response = await new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
     let text = '';

@@ -47,7 +47,7 @@ function assertBrokerInput(operation, input) {
     // This operation is deliberately limited to the two fixed hub-delivery
     // envelopes. It is not an arbitrary decryptor: no caller-selected key,
     // file, algorithm or purpose is accepted.
-    if (!new Set(["machine-credential", "operator-session", "operator-handoff", "support-session"]).has(String(input.purpose)) || !envelope || typeof envelope !== "object" || Array.isArray(envelope) || envelope.algorithm !== "x25519-hkdf-sha256/aes-256-gcm" || input.version === undefined) throw new Error("credential envelope is not allowed");
+    if (!new Set(["machine-credential", "operator-credential", "operator-session", "operator-handoff", "support-session"]).has(String(input.purpose)) || !envelope || typeof envelope !== "object" || Array.isArray(envelope) || envelope.algorithm !== "x25519-hkdf-sha256/aes-256-gcm" || input.version === undefined) throw new Error("credential envelope is not allowed");
     if (JSON.stringify(envelope).length > 32 * 1024) throw new Error("credential envelope is too large");
   }
 }
@@ -287,7 +287,7 @@ function brokerResult(operation, input, identity) {
   if (operation === "signPlatformRequest") return { signature: crypto.sign(null, Buffer.from(canonicalPlatformRequest(input), "utf8"), identity.signingPrivateKey).toString("base64url") };
   if (operation === "signCloudChallenge") return { signature: crypto.sign(null, Buffer.from(canonicalCloudChallenge(input.payload), "utf8"), identity.signingPrivateKey).toString("base64url") };
   if (operation === "decryptMachineCredentialEnvelope") {
-    const envelope = input.envelope; if (!envelope || envelope.algorithm !== "x25519-hkdf-sha256/aes-256-gcm" || !new Set(["machine-credential", "operator-session", "operator-handoff", "support-session"]).has(String(input.purpose))) throw new Error("credential envelope is not allowed");
+    const envelope = input.envelope; if (!envelope || envelope.algorithm !== "x25519-hkdf-sha256/aes-256-gcm" || !new Set(["machine-credential", "operator-credential", "operator-session", "operator-handoff", "support-session"]).has(String(input.purpose))) throw new Error("credential envelope is not allowed");
     const sender = crypto.createPublicKey(String(envelope.ephemeralPublicKeyPem || "")); if (sender.asymmetricKeyType !== "x25519") throw new Error("credential sender key is invalid");
     const shared = crypto.diffieHellman({ privateKey: identity.encryptionPrivateKey, publicKey: sender });
     const key = Buffer.from(crypto.hkdfSync("sha256", shared, Buffer.from(`dinodia-os-${input.purpose}`), Buffer.from(String(input.version)), 32));
