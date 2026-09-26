@@ -81,7 +81,7 @@ class OfflineLanAuthorisationStore {
     }
     if (!valid) throw new Error('Offline authorisation envelope signature is invalid');
     const payload = envelope.payload || {};
-    if (!payload.id || !payload.homeId || !payload.hubInstallId || !payload.membershipId || !payload.trustedDeviceId) throw new Error('Offline authorisation envelope identity is incomplete');
+    if (!payload.id || !payload.customerAccountId || !payload.homeId || !payload.hubInstallId || !payload.membershipId || !payload.trustedDeviceId) throw new Error('Offline authorisation envelope identity is incomplete');
     if (payload.revokedAt) return this.revoke(String(payload.id), String(payload.revokeReason || 'cloud_policy_revoked'));
     return this.enroll({ id: payload.id, homeId: payload.homeId, hubInstallId: payload.hubInstallId, membershipId: payload.membershipId, trustedDeviceId: payload.trustedDeviceId, userId: payload.customerAccountId, householdRole: payload.householdRole, publicKey: payload.publicKey, areaIds: payload.areaIds, scope: payload.scope, policyRevision: payload.policyRevision, issuedAt: payload.issuedAt, expiresAt: null });
   }

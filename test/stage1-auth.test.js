@@ -9,7 +9,7 @@ const { CredentialRegistry, CREDENTIAL_TYPES } = require("../src/auth/credential
 const { createOperatorSessionToken, verifyOperatorSessionToken } = require("../src/auth/operatorSession");
 const { ProvisioningPairingService } = require("../src/auth/provisioningPairing");
 const { generateManufacturingIdentity, stableManufacturingIdentityPayload, signPairingEnvelope, verifyPairingEnvelope } = require("../src/auth/manufacturingIdentity");
-const { createLanChallenge, signLanChallenge, verifyLanProof, canUseArea } = require("../src/auth/offlineLanAuthorizer");
+const { createLanChallenge, signLanChallenge, verifyLanProof, canUseArea, OfflineLanAuthorisationStore } = require("../src/auth/offlineLanAuthorizer");
 const { StepUpProofRegistry } = require("../src/auth/stepUpProofs");
 const { RevocationCoordinator } = require("../src/auth/revocationCoordinator");
 const { Store } = require("../src/store");
@@ -117,6 +117,34 @@ test("offline LAN proof is short-lived, area-scoped and operation-bound", () => 
   assert.equal(verifyLanProof({ challenge, signature, publicKey: keys.publicKey, now: 31_001 }), false);
   assert.equal(canUseArea({ areaIds: ["a1"], areaId: "a1" }), true);
   assert.equal(canUseArea({ areaIds: ["a1"], areaId: "a2" }), false);
+});
+
+test("signed offline grants require the customer account identity and persist account-wide revocation", async () => {
+  const platform = crypto.generateKeyPairSync("ed25519");
+  const security = { offlineAuthorisations: {}, usedLanNonces: {} };
+  const store = {
+    getSecurity: () => structuredClone(security),
+    async saveSecurity(update) { Object.assign(security, structuredClone(update)); },
+  };
+  const authorisations = new OfflineLanAuthorisationStore({ store, platformPublicKeys: [platform.publicKey] });
+  const payload = {
+    version: 1, id: "offline-account-bound", customerAccountId: "customer-1",
+    trustedDeviceId: "phone-1", membershipId: "membership-1", homeId: "home-1",
+    hubInstallId: "hub-1", publicKey: crypto.generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }),
+    areaIds: ["area-1"], scope: ["tenant:device-command"], householdRole: "TENANT",
+    policyRevision: 1, issuedAt: Date.now(), revokedAt: null,
+  };
+  const envelopeFor = (value) => {
+    const encoded = Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+    const signature = crypto.sign(null, Buffer.from(encoded, "utf8"), platform.privateKey).toString("base64url");
+    return { payload: value, signature: `${encoded}.${signature}` };
+  };
+  const { customerAccountId, ...missingAccount } = payload;
+  await assert.rejects(authorisations.acceptPlatformEnvelope(envelopeFor(missingAccount)), /identity is incomplete/);
+  await authorisations.acceptPlatformEnvelope(envelopeFor(payload));
+  assert.equal(security.offlineAuthorisations[payload.id].userId, "customer-1");
+  assert.equal(await authorisations.revokeDevice("phone-1"), 1);
+  assert.equal(security.offlineAuthorisations[payload.id].revokeReason, "trusted_device_removed");
 });
 
 test("offline authority is not accepted through forwarded or public transports", () => {

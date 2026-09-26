@@ -13,14 +13,21 @@ IDENTITY_DIR="${DINODIA_IDENTITY_DIR:-/etc/dinodia-os/identity}"
 IDENTITY_SOCKET="${DINODIA_IDENTITY_SOCKET:-/run/dinodia-identityd.sock}"
 SERVICE_FILE="/etc/systemd/system/dinodia-os.service"
 IDENTITY_SERVICE_FILE="/etc/systemd/system/dinodia-identityd.service"
+AVAHI_CONFIG="/etc/avahi/avahi-daemon.conf"
 INSTALL_USER="${SUDO_USER:-${USER:-dinodia}}"
 CURRENT_ENV="${DINODIA_ENV_FILE:-$INSTALL_DIR/.env}"
 STAGE_DIR=""
 OLD_RELEASE=""
 SWITCHED=0
+SERVICES_STOPPED=0
 COMPLETED=0
 OLD_OS_UNIT_PRESENT=0
 OLD_IDENTITY_UNIT_PRESENT=0
+AVAHI_CONFIG_CHANGED=0
+OLD_AVAHI_CONFIG_PRESENT=0
+AVAHI_SETUP_ADDRESS=""
+AVAHI_CONFIG_CANDIDATE=""
+AVAHI_CONFIG_ATOMIC_TMP=""
 BACKUP_DIR=""
 
 die() { echo "Installer stopped: $*" >&2; exit 1; }
@@ -51,17 +58,16 @@ for relative in "${candidate_files[@]}"; do [[ -e "$APP_SOURCE/$relative" ]] || 
 BUILD_ID="$(node "$APP_SOURCE/scripts/install_pi_preflight.mjs" --source "$APP_SOURCE" --env "$CURRENT_ENV" --identity "$IDENTITY_DIR" --print-build-id)"
 [[ "$BUILD_ID" =~ ^native-v2-[a-f0-9]{24}$ ]] || die "candidate build identity is invalid"
 
-# Setup discovery publishes the exact dinodia-<serial>.local address and
-# _http._tcp setup service. Install the small Avahi publisher utilities only
-# after the candidate, environment and enrolled identity have passed preflight.
-if ! command -v avahi-publish-address >/dev/null 2>&1 || ! command -v avahi-publish-service >/dev/null 2>&1 || ! command -v avahi-daemon >/dev/null 2>&1; then
+# Both publishers use supported positional CLI syntax. Avahi's daemon-level
+# allow-interfaces setting confines publication to the selected private LAN.
+if ! command -v avahi-publish-address >/dev/null 2>&1 || ! command -v avahi-publish-service >/dev/null 2>&1 || ! command -v avahi-resolve-host-name >/dev/null 2>&1 || ! command -v avahi-daemon >/dev/null 2>&1; then
   apt-get update
   apt-get install -y avahi-daemon avahi-utils
 fi
 command -v avahi-publish-address >/dev/null 2>&1 || die "avahi-publish-address is required for locked-setup discovery"
 command -v avahi-publish-service >/dev/null 2>&1 || die "avahi-publish-service is required for locked-setup discovery"
+command -v avahi-resolve-host-name >/dev/null 2>&1 || die "avahi-resolve-host-name is required for locked-setup discovery"
 command -v avahi-daemon >/dev/null 2>&1 || die "avahi-daemon is required for locked-setup discovery"
-systemctl enable --now avahi-daemon
 
 install_gid="$(id -g "$INSTALL_USER")"
 mkdir -p "$RELEASE_ROOT" "$DATA_DIR"
@@ -82,14 +88,30 @@ cleanup_failed_install() {
     if [[ "$OLD_OS_UNIT_PRESENT" -eq 1 && -f "$BACKUP_DIR/dinodia-os.service" ]]; then install -o root -g root -m 0644 "$BACKUP_DIR/dinodia-os.service" "$SERVICE_FILE"; else rm -f "$SERVICE_FILE"; fi
     if [[ "$OLD_IDENTITY_UNIT_PRESENT" -eq 1 && -f "$BACKUP_DIR/dinodia-identityd.service" ]]; then install -o root -g root -m 0644 "$BACKUP_DIR/dinodia-identityd.service" "$IDENTITY_SERVICE_FILE"; else rm -f "$IDENTITY_SERVICE_FILE"; fi
     systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl enable --now dinodia-identityd >/dev/null 2>&1 || true
-    systemctl enable --now dinodia-os >/dev/null 2>&1 || true
-    echo "The candidate failed after the release switch; the previous release was restored." >&2
   elif [[ -n "${RELEASE_DIR:-}" && -e "$RELEASE_DIR" ]]; then
     # A copy/install failure before the switch must not strand a partial
     # release identity that blocks a later guarded retry.
     rm -rf -- "$RELEASE_DIR" 2>/dev/null || true
   fi
+  if [[ "$AVAHI_CONFIG_CHANGED" -eq 1 ]]; then
+    if [[ "$OLD_AVAHI_CONFIG_PRESENT" -eq 1 && -f "$BACKUP_DIR/avahi-daemon.conf" ]]; then
+      install -o root -g root -m 0644 "$BACKUP_DIR/avahi-daemon.conf" "$AVAHI_CONFIG"
+    else
+      rm -f -- "$AVAHI_CONFIG"
+    fi
+    systemctl restart avahi-daemon >/dev/null 2>&1 || true
+    AVAHI_CONFIG_CHANGED=0
+  fi
+  if [[ "$SWITCHED" -eq 1 ]]; then
+    systemctl enable --now dinodia-identityd >/dev/null 2>&1 || true
+    systemctl enable --now dinodia-os >/dev/null 2>&1 || true
+    echo "The candidate failed after the release switch; the previous release was restored." >&2
+  elif [[ "$SERVICES_STOPPED" -eq 1 ]]; then
+    systemctl enable --now dinodia-identityd >/dev/null 2>&1 || true
+    systemctl enable --now dinodia-os >/dev/null 2>&1 || true
+  fi
+  [[ -z "$AVAHI_CONFIG_CANDIDATE" ]] || rm -f -- "$AVAHI_CONFIG_CANDIDATE"
+  [[ -z "$AVAHI_CONFIG_ATOMIC_TMP" ]] || rm -f -- "$AVAHI_CONFIG_ATOMIC_TMP"
   rm -rf -- "$STAGE_DIR" 2>/dev/null || true
 }
 trap cleanup_failed_install EXIT
@@ -147,6 +169,7 @@ BACKUP_DIR="/var/backups/dinodia-os-pre-native-v2-${timestamp}"
 mkdir -p "$BACKUP_DIR"
 if [[ -e "$SERVICE_FILE" ]]; then cp -p "$SERVICE_FILE" "$BACKUP_DIR/dinodia-os.service"; OLD_OS_UNIT_PRESENT=1; fi
 if [[ -e "$IDENTITY_SERVICE_FILE" ]]; then cp -p "$IDENTITY_SERVICE_FILE" "$BACKUP_DIR/dinodia-identityd.service"; OLD_IDENTITY_UNIT_PRESENT=1; fi
+if [[ -f "$AVAHI_CONFIG" ]]; then cp -p "$AVAHI_CONFIG" "$BACKUP_DIR/avahi-daemon.conf"; OLD_AVAHI_CONFIG_PRESENT=1; fi
 if [[ -d "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then
   current_real="$(readlink -f "$INSTALL_DIR")"
   tar --exclude='*/.env*' --exclude='*/node_modules' --exclude='*/.venv-hive' -czf "$BACKUP_DIR/application.tar.gz" -C "$current_real" .
@@ -158,10 +181,23 @@ rm -rf -- "$STAGE_DIR"
 STAGE_DIR=""
 
 systemctl stop dinodia-os dinodia-identityd >/dev/null 2>&1 || true
+SERVICES_STOPPED=1
+AVAHI_CONFIG_CANDIDATE="$(mktemp /tmp/dinodia-avahi-candidate.XXXXXX)"
+AVAHI_SETUP_ADDRESS="$(node "$RELEASE_DIR/scripts/configure_avahi_setup.mjs" \
+  --input "$AVAHI_CONFIG" --output "$AVAHI_CONFIG_CANDIDATE" \
+  --identity "$IDENTITY_DIR/identity.json" --interface-address "${DINODIA_SETUP_INTERFACE:-}")"
+AVAHI_CONFIG_ATOMIC_TMP="$(mktemp "${AVAHI_CONFIG}.dinodia.XXXXXX")"
+install -o root -g root -m 0644 "$AVAHI_CONFIG_CANDIDATE" "$AVAHI_CONFIG_ATOMIC_TMP"
+mv -f -- "$AVAHI_CONFIG_ATOMIC_TMP" "$AVAHI_CONFIG"
+AVAHI_CONFIG_ATOMIC_TMP=""
+AVAHI_CONFIG_CHANGED=1
+systemctl enable --now avahi-daemon
+systemctl restart avahi-daemon
+systemctl is-active --quiet avahi-daemon || die "Avahi did not restart with the setup-interface restriction"
 OLD_RELEASE="$RELEASE_ROOT/previous-${timestamp}-${BASHPID}"
 if [[ -e "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then mv -- "$INSTALL_DIR" "$OLD_RELEASE"; fi
-ln -s "$RELEASE_DIR" "$INSTALL_DIR"
 SWITCHED=1
+ln -s "$RELEASE_DIR" "$INSTALL_DIR"
 
 service_tmp="$(mktemp /tmp/dinodia-os.service.XXXXXX)"
 sed -e "s#@INSTALL_USER@#$INSTALL_USER#g" -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" -e "s#@DATA_DIR@#$DATA_DIR#g" -e "s#@IDENTITY_DIR@#$IDENTITY_DIR#g" -e "s#@IDENTITY_SOCKET@#$IDENTITY_SOCKET#g" -e "s#@INSTALL_GID@#$install_gid#g" -e "s#@NODE_BIN@#$(command -v node)#g" "$RELEASE_DIR/systemd/dinodia-os.service" > "$service_tmp"
@@ -188,6 +224,18 @@ NODE
 done
 if [[ "$health_ok" -ne 1 ]]; then die "candidate health did not report the expected native-v2 build; rollback will restore the prior release"; fi
 
+setup_hostname="$(node -e 'const x=require(process.argv[1]); process.stdout.write("dinodia-"+String(x.serialNumber||x.serial||"").toLowerCase()+".local")' "$IDENTITY_DIR/identity.json")"
+discovery_ok=0
+for attempt in $(seq 1 15); do
+  resolved_address="$(timeout 3 avahi-resolve-host-name -4 "$setup_hostname" 2>/dev/null | awk 'NR==1 { print $NF }' || true)"
+  if [[ "$resolved_address" == "$AVAHI_SETUP_ADDRESS" ]]; then discovery_ok=1; break; fi
+  sleep 1
+done
+if [[ "$discovery_ok" -ne 1 ]]; then die "locked-setup mDNS did not resolve the candidate alias to the selected private interface; rollback will restore the prior configuration"; fi
+rm -f -- "$AVAHI_CONFIG_CANDIDATE"
+AVAHI_CONFIG_CANDIDATE=""
+
 COMPLETED=1
+SERVICES_STOPPED=0
 echo "Native V2 installed: build=$BUILD_ID release=$RELEASE_DIR backup=$BACKUP_DIR"
 echo "Health verified: mode=native-v2 build=$BUILD_ID"

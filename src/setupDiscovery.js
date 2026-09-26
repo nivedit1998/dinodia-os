@@ -1,5 +1,7 @@
 const os = require("node:os");
 const { spawn } = require("node:child_process");
+const fs = require("node:fs");
+const { avahiSetupConfigMatches } = require("./avahiSetupConfig");
 
 function isPrivateIPv4(address) {
   const parts = String(address || "").split(".").map(Number);
@@ -41,13 +43,14 @@ function privateAddress(interfaceAddress = "", interfaces = os.networkInterfaces
 }
 
 class SetupDiscovery {
-  constructor({ serial, interfaceAddress = "", nodeEnv = "development", logger = console, spawnProcess = spawn, interfaces = os.networkInterfaces } = {}) {
+  constructor({ serial, interfaceAddress = "", nodeEnv = "development", logger = console, spawnProcess = spawn, interfaces = os.networkInterfaces, readAvahiConfig = () => fs.readFileSync("/etc/avahi/avahi-daemon.conf", "utf8") } = {}) {
     this.serial = String(serial || "").toLowerCase();
     this.interfaceAddress = String(interfaceAddress || "").trim();
     this.nodeEnv = String(nodeEnv || "development");
     this.logger = logger;
     this.spawnProcess = spawnProcess;
     this.interfaces = interfaces;
+    this.readAvahiConfig = readAvahiConfig;
     this.children = [];
     this.generation = 0;
     this.activeGeneration = null;
@@ -60,12 +63,18 @@ class SetupDiscovery {
     const address = selectedInterface?.address || "";
     this.state = { ...this.state, address, error: address ? null : "No physical private interface is available" };
     if (!address) return this.status();
+    let avahiConfig = "";
+    try { avahiConfig = this.readAvahiConfig(); } catch {}
+    if (!avahiSetupConfigMatches(avahiConfig, { serial: this.serial, interfaceName: selectedInterface.name })) {
+      this.state = { ...this.state, error: "Avahi is not restricted to the selected setup interface" };
+      return this.status();
+    }
+    // Avahi's publisher CLI does not accept an interface option. The guarded
+    // installer restricts the daemon to the selected private LAN interface;
+    // both publisher commands then use their supported positional syntax.
     const specs = [
-      // The Pi can have Docker bridges, VPNs and multiple physical links.
-      // Publish only on the selected setup interface to avoid Avahi duplicate
-      // address/name collisions and accidental exposure on another LAN.
-      ["avahi-publish-address", ["-i", selectedInterface.name, this.state.hostname, address]],
-      ["avahi-publish-service", ["-i", selectedInterface.name, `Dinodia OS ${this.serial}`, "_http._tcp", String(port), "path=/setup", `serial=${this.serial}`]],
+      ["avahi-publish-address", [this.state.hostname, address]],
+      ["avahi-publish-service", [`Dinodia OS ${this.serial}`, "_http._tcp", String(port), "path=/setup", `serial=${this.serial}`]],
     ];
     const spawned = new Set();
     const generation = ++this.generation;
