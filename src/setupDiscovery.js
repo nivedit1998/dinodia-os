@@ -70,10 +70,12 @@ class SetupDiscovery {
       return this.status();
     }
     // Avahi's publisher CLI does not accept an interface option. The guarded
-    // installer restricts the daemon to the selected private LAN interface;
-    // both publisher commands then use their supported positional syntax.
+    // installer restricts the daemon to the selected private LAN interface.
+    // -R is required because the Pi's existing hostname already owns the
+    // address's reverse-DNS record; the setup alias needs only a forward A
+    // record, otherwise Avahi reports a local name collision.
     const specs = [
-      ["avahi-publish-address", [this.state.hostname, address]],
+      ["avahi-publish-address", ["-R", this.state.hostname, address]],
       ["avahi-publish-service", [`Dinodia OS ${this.serial}`, "_http._tcp", String(port), "path=/setup", `serial=${this.serial}`]],
     ];
     const spawned = new Set();

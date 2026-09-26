@@ -68,6 +68,8 @@ command -v avahi-publish-address >/dev/null 2>&1 || die "avahi-publish-address i
 command -v avahi-publish-service >/dev/null 2>&1 || die "avahi-publish-service is required for locked-setup discovery"
 command -v avahi-resolve-host-name >/dev/null 2>&1 || die "avahi-resolve-host-name is required for locked-setup discovery"
 command -v avahi-daemon >/dev/null 2>&1 || die "avahi-daemon is required for locked-setup discovery"
+address_publisher_help="$(avahi-publish-address --help 2>&1 || true)"
+[[ "$address_publisher_help" == *"--no-reverse"* ]] || die "avahi-publish-address must support --no-reverse to avoid colliding with the hub's existing reverse record"
 
 install_gid="$(id -g "$INSTALL_USER")"
 mkdir -p "$RELEASE_ROOT" "$DATA_DIR"

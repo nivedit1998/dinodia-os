@@ -51,7 +51,7 @@ test("production setup discovery pins the exact serial alias and setup service t
   const status = discovery.status();
   assert.deepEqual(status, { running: true, hostname: "dinodia-din-home-001.local", address: "192.168.1.76", error: null });
   assert.deepEqual(calls.map(({ command, args }) => [command, args]), [
-    ["avahi-publish-address", ["dinodia-din-home-001.local", "192.168.1.76"]],
+    ["avahi-publish-address", ["-R", "dinodia-din-home-001.local", "192.168.1.76"]],
     ["avahi-publish-service", ["Dinodia OS din-home-001", "_http._tcp", "8123", "path=/setup", "serial=din-home-001"]],
   ]);
   discovery.stop();
@@ -115,6 +115,8 @@ test("Pi installer preflights candidate before installing Avahi publisher depend
   assert.match(installer, /avahi-publish-address.*required for locked-setup discovery/);
   assert.match(installer, /apt-get install -y avahi-daemon avahi-utils/);
   assert.match(installer, /avahi-resolve-host-name/);
+  assert.match(installer, /avahi-publish-address --help/);
+  assert.match(installer, /--no-reverse/);
   assert.match(installer, /AVAHI_CONFIG/);
   assert.match(installer, /cp -p "\$AVAHI_CONFIG" "\$BACKUP_DIR\/avahi-daemon.conf"/);
   assert.match(installer, /install -o root -g root -m 0644 "\$BACKUP_DIR\/avahi-daemon.conf" "\$AVAHI_CONFIG"/);
@@ -144,7 +146,18 @@ test("Avahi CLI integration confirms supported publisher syntax when Linux tools
   const help = spawnSync("avahi-publish-service", ["--help"], { encoding: "utf8" });
   assert.equal(addressHelp.status, 0);
   assert.match(addressHelp.stdout + addressHelp.stderr, /<host-name> <address>/);
+  assert.match(addressHelp.stdout + addressHelp.stderr, /-R\s+--no-reverse/);
   assert.equal(help.status, 0);
   assert.match(help.stdout + help.stderr, /<name> <type> <port>/);
   assert.doesNotMatch(addressHelp.stdout + addressHelp.stderr + help.stdout + help.stderr, /--interface/);
+});
+
+test("isolated Linux Avahi daemon proves reverse-record collision avoidance, interface scope, and restart", {
+  skip: process.platform !== "linux" || process.env.DINODIA_AVAHI_LINUX_INTEGRATION !== "1" || process.getuid?.() !== 0,
+}, () => {
+  const { spawnSync } = require("node:child_process");
+  const script = path.join(__dirname, "..", "scripts", "test_setup_discovery_linux.sh");
+  const result = spawnSync("bash", [script], { encoding: "utf8", timeout: 60_000 });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /Avahi setup discovery integration passed/);
 });
