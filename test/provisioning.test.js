@@ -42,6 +42,36 @@ test("locked setup page serves its JavaScript without dashboard authentication",
   }
 });
 
+test("locked setup sends CSRF on its status read and reports a valid hub identity", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-setup-status-"));
+  const hub = createHub({
+    config: { nodeEnv: "development", adminToken: "setup-status-admin", haToken: "setup-status-ha", hubId: "setup-status-hub", port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    mqttBridge: mockIntegration(),
+    matterBridge: mockIntegration(),
+    cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
+    platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
+  });
+  await hub.start();
+  const base = "http://127.0.0.1:" + hub.server.address().port;
+  try {
+    const page = await fetch(base + "/setup");
+    const cookies = page.headers.getSetCookie().map((value) => value.split(";", 1)[0]);
+    const cookieHeader = cookies.join("; ");
+    const csrf = cookies.find((value) => value.startsWith("dinodia_setup_csrf="))?.slice("dinodia_setup_csrf=".length);
+    assert.ok(csrf);
+    const withoutCsrf = await fetch(base + "/_dinodia/setup/status", { headers: { cookie: cookieHeader } });
+    assert.equal(withoutCsrf.status, 403);
+    const withCsrf = await fetch(base + "/_dinodia/setup/status", { headers: { cookie: cookieHeader, "x-dinodia-setup-csrf": csrf } });
+    assert.equal(withCsrf.status, 200);
+    const body = await withCsrf.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.identity.serial, "setup-status-hub");
+    assert.match(await (await fetch(base + "/setup.js")).text(), /_dinodia\/setup\/status[\s\S]*?x-dinodia-setup-csrf/);
+  } finally {
+    await hub.stop();
+  }
+});
+
 test("paired operator bootstrap can start over the private LAN before Cloudflare verification", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-local-operator-"));
   const hub = createHub({

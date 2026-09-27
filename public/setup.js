@@ -33,8 +33,13 @@ function show(value, isError = false) {
 }
 async function refresh() {
   if (supportOnly) return;
-  const response = await fetch("/_dinodia/setup/status", { cache: "no-store" });
-  const data = await response.json();
+  const response = await fetch("/_dinodia/setup/status", {
+    headers: { "x-dinodia-setup-csrf": cookie("dinodia_setup_csrf") },
+    cache: "no-store",
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || "Hub setup status is unavailable.");
+  if (data.ok !== true || !data.identity?.serial) throw new Error("Hub identity is unavailable.");
   show(data.identity?.serial ? `Hub serial: ${data.identity.serial}\nState: ${data.pairing?.state || "not issued"}` : "Hub identity unavailable.");
 }
 async function registerOperatorBrowserAttempt() {
