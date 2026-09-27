@@ -1,0 +1,5 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "sample": { "bucket": "day-invalid", "onMinutes": -1, "offMinutes": 0, "unknownMinutes": 0 },
+  "expected": "reject"
+}

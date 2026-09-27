@@ -3,7 +3,7 @@ const { normalizeCapability } = require("../../capabilities/schema");
 const { zigbeeName } = require("../../deviceNaming");
 
 const STANDARD_DOMAINS = new Set(["light", "switch", "cover", "climate", "fan", "lock", "vacuum", "humidifier", "button"]);
-const CONTROL_PROPERTIES = new Set(["state", "brightness", "color_temp", "color", "position", "current_position", "temperature", "target_temperature", "hvac_mode", "fan_mode", "preset", "lock"]);
+const CONTROL_PROPERTIES = new Set(["state", "brightness", "color_temp", "color", "position", "current_position", "temperature", "target_temperature", "hvac_mode", "system_mode", "operation_mode", "fan_mode", "preset", "lock"]);
 const DIAGNOSTIC_PROPERTIES = new Set(["battery", "voltage", "current", "power", "energy", "linkquality", "last_seen", "device_temperature", "temperature", "humidity", "pressure", "illuminance"]);
 
 function clone(value) {
@@ -82,7 +82,9 @@ function serviceBindings(expose, domain, kind, writable) {
     if (parameter && serviceId === "cover.set_cover_position") parameter.key = "position";
     bindings.push({ serviceId, operation: serviceId.split(".").pop(), parameter });
   } else if (kind === "enum") {
-    const serviceId = domain === "climate" ? "climate.set_hvac_mode" : domain === "fan" ? "fan.set_preset_mode" : "select.select_option";
+    // Keep the adapter binding protocol-native. devicePresentation maps this
+    // descriptor-declared operating-mode role to the customer climate action.
+    const serviceId = domain === "fan" ? "fan.set_preset_mode" : "select.select_option";
     const parameter = parameterFor(expose, kind, domain) || { key: "option", type: "string", options: expose.values || [] };
     if (domain === "climate") parameter.key = "hvac_mode";
     if (domain === "fan") parameter.key = "preset_mode";
@@ -93,6 +95,21 @@ function serviceBindings(expose, domain, kind, writable) {
     bindings.push({ serviceId: `${domain}.turn_on`, operation: "turn_on" }, { serviceId: `${domain}.turn_off`, operation: "turn_off" });
   }
   return bindings;
+}
+
+// Derive semantics only from adapter property identifiers and protocol
+// metadata, never from presentation labels or device names.
+function semanticRoleFor(property, domain) {
+  const key = String(property || "").trim().toLowerCase();
+  if ((key === "state" || key === "power" || /^state_[a-z0-9]+$/.test(key)) && ["light", "switch"].includes(domain)) return "power";
+  if (/^brightness(?:_[a-z0-9]+)?$/.test(key) && ["light", "number", "switch"].includes(domain)) return "brightness";
+  if (["target_temperature", "occupied_heating_setpoint"].includes(key)) return "target_temperature";
+  if (["hvac_mode", "system_mode", "operation_mode"].includes(key) && domain === "climate") return "operating_mode";
+  if (["current_temperature", "local_temperature", "temperature_measurement"].includes(key)) return "ambient_temperature";
+  if (["position", "current_position"].includes(key)) return "opening_percentage";
+  if (["color", "color_temp", "color_temperature"].includes(key)) return "color";
+  if (["lock", "locked"].includes(key) && domain === "lock") return "security_lock";
+  return "unknown";
 }
 
 function normalizeExpose(expose, context, output) {
@@ -118,7 +135,8 @@ function normalizeExpose(expose, context, output) {
       readable: flags.readable,
       writable: flags.writable,
       observable: flags.readable,
-      primary: ["state", "power", "position", "brightness"].includes(property.toLowerCase()) || property.toLowerCase().startsWith("state_"),
+      primary: ["state", "power", "position", "brightness"].includes(property.toLowerCase()) || property.toLowerCase().startsWith("state_") || property.toLowerCase().startsWith("brightness_"),
+      semanticRole: semanticRoleFor(property, domain),
       stateKey: property,
       unit: expose.unit,
       deviceClass: expose.device_class,
@@ -224,4 +242,4 @@ function normalizeZigbeeDevice(input = {}) {
   };
 }
 
-module.exports = { normalizeExposes, normalizeZigbeeDevice, normalizeExpose, humanize };
+module.exports = { normalizeExposes, normalizeZigbeeDevice, normalizeExpose, humanize, semanticRoleFor };

@@ -1,0 +1,1 @@
+{"homeId":"home:opaque-a","homeMembershipId":"membership:tenant-a","role":"TENANT","scopes":["device.read","device.command"],"areaIds":["area:living"],"revision":8}

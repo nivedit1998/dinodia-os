@@ -7,6 +7,8 @@ const WebSocket = require("ws");
 const { createHub } = require("../src/server");
 const crypto = require("node:crypto");
 const { createOperatorSessionToken } = require("../src/auth/operatorSession");
+const { validateCommand: validateNativeCommand } = require("../src/contracts/dinodiaV1");
+const { digestOperation, descriptorBoundValue, StepUpProofVerifier } = require("../src/auth/stepUpProofVerifier");
 
 function mockIntegration() {
   return { start() {}, close() {}, status() { return { configured: false, connected: false, lastError: null }; }, async command() {}, async refresh() {}, async permitJoin() {} };
@@ -88,6 +90,121 @@ test("production app authorization is scoped and owners cannot command the hub",
   }
 });
 
+test("Native v1 device route emits a home-bound contract envelope and never returns HA projection fields", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-native-v1-read-"));
+  const keys = crypto.generateKeyPairSync("ed25519");
+  const hub = createHub({
+    config: { nodeEnv: "production", appPublicKeys: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), hubId: "native-v1-hub", port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    mqttBridge: mockIntegration(), matterBridge: mockIntegration(),
+    cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
+    platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
+  });
+  await hub.store.upsertDevice({ id: "tenant-owned-light", name: "Private lamp", protocol: "virtual", areaId: "area-kitchen", managementClass: "tenant_device", tenantOwnerMembershipId: "membership-tenant-a", metadata: { managementClass: "tenant_device", tenantOwnerMembershipId: "membership-tenant-a" } });
+  await hub.start();
+  const base = `http://127.0.0.1:${hub.server.address().port}`;
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const token = appToken({ iss: "dinodia-platform-v2", aud: "dinodia-hub:native-v1-hub", sub: "account-tenant-a", sid: "sid-native-v1", jti: "jti-native-v1", membershipId: "membership-tenant-a", trustedDeviceId: "trusted-a", hubInstallationId: "native-v1-hub", iat: now, exp: now + 300, homeId: "home-a", householdRole: "TENANT", areaIds: ["area-kitchen"], policyRevision: 0, scope: ["tenant:device-command"] }, keys.privateKey);
+    const result = await request(base, "/_dinodia/admin/api/dinodia/v1/devices", { headers: { authorization: `Bearer ${token}` } });
+    assert.equal(result.response.status, 200, JSON.stringify(result.body));
+    assert.equal(result.body.schemaVersion, "dinodia.v1");
+    assert.equal(result.body.homeId, "home-a");
+    assert.equal(result.body.data.length, 1);
+    assert.equal(result.body.data[0].ownerMembershipId, "membership-tenant-a");
+    assert.equal("protocol" in result.body.data[0], false);
+    assert.equal("entity_id" in result.body.data[0], false);
+
+    const wrongHomeToken = appToken({ iss: "dinodia-platform-v2", aud: "dinodia-hub:native-v1-hub", sub: "account-tenant-a", sid: "sid-native-v1b", jti: "jti-native-v1b", membershipId: "membership-tenant-b", trustedDeviceId: "trusted-a", hubInstallationId: "native-v1-hub", iat: now, exp: now + 300, homeId: "home-b", householdRole: "TENANT", areaIds: ["area-kitchen"], policyRevision: 0, scope: ["tenant:device-command"] }, keys.privateKey);
+    const wrongHome = await request(base, "/_dinodia/admin/api/dinodia/v1/devices", { headers: { authorization: `Bearer ${wrongHomeToken}` } });
+    assert.equal(wrongHome.response.status, 200);
+    assert.deepEqual(wrongHome.body.data, []);
+    assert.equal(wrongHome.body.homeId, "home-b");
+  } finally { await hub.stop(); }
+});
+
+test("Native v1 command route enforces current DTO, tenant scope and durable idempotency before dispatch", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-native-v1-command-"));
+  const keys = crypto.generateKeyPairSync("ed25519");
+  const hub = createHub({
+    config: { nodeEnv: "production", appPublicKeys: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), hubId: "native-command-hub", port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    mqttBridge: mockIntegration(), matterBridge: mockIntegration(),
+    cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
+    platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
+  });
+  const area = await hub.store.saveArea({ name: "Kitchen" }, "area-command-kitchen");
+  const deviceId = "device-native-command";
+  await hub.store.upsertDevice({
+    id: deviceId, name: "Kitchen switch", protocol: "virtual", areaId: area.id,
+    managementClass: "tenant_device", tenantOwnerMembershipId: "membership-command-tenant",
+    entities: { [`${deviceId}:0:state`]: {
+      id: `${deviceId}:0:state`, sourceId: `${deviceId}:0:state`, deviceId, endpointId: "0", logicalKey: "state", stateKey: "state", domain: "switch", state: "OFF",
+      capability: { runtime: "dinodia_os", kind: "binary", category: "control", readable: true, writable: true, observable: true, primary: true, semanticRole: "power", bindings: [{ serviceId: "switch.turn_on" }, { serviceId: "switch.turn_off" }] },
+    }, [`${deviceId}:0:lock`]: {
+      id: `${deviceId}:0:lock`, sourceId: `${deviceId}:0:lock`, deviceId, endpointId: "0", logicalKey: "lock", stateKey: "lock", domain: "lock", state: "LOCKED",
+      capability: { runtime: "dinodia_os", kind: "binary", category: "control", readable: true, writable: true, observable: true, primary: true, semanticRole: "security_lock", stepUpPolicy: "required", bindings: [{ serviceId: "lock.lock" }, { serviceId: "lock.unlock" }] },
+    } },
+  });
+  await hub.store.completeDeviceSetup(deviceId, { areaId: area.id, labelId: "light" });
+  await hub.start();
+  const base = `http://127.0.0.1:${hub.server.address().port}`;
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const token = appToken({ iss: "dinodia-platform-v2", aud: "dinodia-hub:native-command-hub", sub: "account-command-tenant", sid: "sid-command", jti: "jti-command", membershipId: "membership-command-tenant", trustedDeviceId: "trusted-command", hubInstallationId: "native-command-hub", iat: now, exp: now + 300, homeId: "home-command", householdRole: "TENANT", areaIds: [area.id], policyRevision: 0, scope: ["tenant:device-command"] }, keys.privateKey);
+    const headers = { authorization: `Bearer ${token}` };
+    const catalog = await request(base, "/_dinodia/admin/api/dinodia/v1/devices", { headers });
+    assert.equal(catalog.response.status, 200);
+    const dto = catalog.body.data.find((item) => item.id === deviceId);
+    assert.ok(dto);
+    const power = dto.controls.find((control) => control.semanticRole === "power");
+    const lock = dto.controls.find((control) => control.semanticRole === "security_lock");
+    assert.ok(power && lock);
+    assert.equal(power.valueType, "boolean");
+    const key = "native-command-idempotency-0001";
+    const command = { commandId: "command-native-1", homeId: "home-command", homeMembershipId: "membership-command-tenant", deviceId, controlId: power.controlId, descriptorRevision: dto.descriptorRevision, value: true, issuedAt: new Date().toISOString(), idempotencyKey: key };
+    assert.equal(validateNativeCommand(command, dto, power, "membership-command-tenant"), true);
+    const send = (payload) => request(base, "/_dinodia/admin/api/dinodia/v1/commands", { method: "POST", headers: { ...headers, "idempotency-key": payload.idempotencyKey }, body: JSON.stringify(payload) });
+    const accepted = await send(command);
+    assert.equal(accepted.response.status, 202, JSON.stringify(accepted.body));
+    assert.equal(accepted.body.status, "accepted");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON");
+    const dispatchCount = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
+    const retry = await send(command);
+    assert.equal(retry.response.status, 202);
+    assert.equal(retry.body.commandId, command.commandId);
+    assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, dispatchCount);
+    const conflicting = await send({ ...command, value: false });
+    assert.equal(conflicting.response.status, 409);
+    const stale = await send({ ...command, commandId: "command-native-stale", idempotencyKey: "native-command-idempotency-0002", descriptorRevision: dto.descriptorRevision - 1 });
+    assert.equal(stale.response.status, 409);
+    const wrongHome = await send({ ...command, commandId: "command-native-wrong-home", idempotencyKey: "native-command-idempotency-0003", homeId: "home-other" });
+    assert.equal(wrongHome.response.status, 403);
+    assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, dispatchCount);
+
+    const lockKey = "native-lock-command-idempotency-0001";
+    const lockCommand = { ...command, commandId: "command-native-lock", controlId: lock.controlId, value: true, idempotencyKey: lockKey };
+    const sendLock = (payload, proof = "") => request(base, "/_dinodia/admin/api/dinodia/v1/commands", { method: "POST", headers: { ...headers, "idempotency-key": payload.idempotencyKey, ...(proof ? { "x-dinodia-step-up-proof": proof } : {}) }, body: JSON.stringify(payload) });
+    assert.equal((await sendLock(lockCommand)).response.status, 400);
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:lock`].state, "LOCKED");
+    const jti = "stepup-operation-native-1";
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const descriptorDigest = hub.store.getDevice(deviceId).presentation.sourceFingerprint || hub.store.getDevice(deviceId).presentation.descriptorDigest || null;
+    const signedValue = descriptorBoundValue({ value: true, controlId: lock.controlId }, { [deviceId]: descriptorDigest });
+    const operationDigest = digestOperation({ actorId: "account-command-tenant", trustedDeviceId: "trusted-command", customerSessionId: "sid-command", homeId: "home-command", membershipId: "membership-command-tenant", hubInstallId: "native-command-hub", operationKind: "device_sensitive_command", targetIds: [deviceId], value: signedValue });
+    const unsignedProof = { jti, actorId: "account-command-tenant", trustedDeviceId: "trusted-command", customerSessionId: "sid-command", homeId: "home-command", membershipId: "membership-command-tenant", hubInstallId: "native-command-hub", operationDigest, issuedAt, expiresAt: issuedAt + 60 };
+    const encodedProof = Buffer.from(JSON.stringify(unsignedProof)).toString("base64url");
+    const proof = `${encodedProof}.${crypto.sign(null, Buffer.from(JSON.stringify(unsignedProof)), keys.privateKey).toString("base64url")}`;
+    lockCommand.stepUpOperationId = jti;
+    const proofCheck = await new StepUpProofVerifier({ publicKeys: [keys.publicKey] }).verify(proof, { actorId: "account-command-tenant", trustedDeviceId: "trusted-command", trustedSessionId: "sid-command", homeId: "home-command", membershipId: "membership-command-tenant", hubInstallId: "native-command-hub", operation: "device_sensitive_command", targetIds: [deviceId], value: signedValue });
+    assert.ok(proofCheck, "test proof must verify under the Platform/OS step-up contract");
+    const unlocked = await sendLock(lockCommand, proof);
+    assert.equal(unlocked.response.status, 202, JSON.stringify(unlocked.body));
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:lock`].state, "UNLOCKED");
+    const replay = await sendLock({ ...lockCommand, commandId: "command-native-lock-replay", idempotencyKey: "native-lock-command-idempotency-0002" }, proof);
+    assert.equal(replay.response.status, 403);
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:lock`].state, "UNLOCKED");
+  } finally { await hub.stop(); }
+});
+
 test("support operator sessions are read-only and cannot leak private tenant devices", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-stage1-support-scope-"));
   const keys = crypto.generateKeyPairSync("ed25519");
@@ -99,8 +216,8 @@ test("support operator sessions are read-only and cannot leak private tenant dev
     cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
     platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
   });
-  await hub.store.upsertDevice({ id: "property-light", name: "Property light", protocol: "virtual", areaId: "area-1", metadata: { label: "Light" } });
-  await hub.store.upsertDevice({ id: "private-lamp", name: "Tenant lamp", protocol: "virtual", areaId: "area-1", metadata: { label: "tenant_device", tenantOwnerId: "tenant-42" } });
+  await hub.store.upsertDevice({ id: "property-light", name: "Property light", protocol: "virtual", areaId: "area-1", managementClass: "property_device", metadata: { label: "tenant_device", managementClass: "property_device" } });
+  await hub.store.upsertDevice({ id: "private-lamp", name: "Tenant lamp", protocol: "virtual", areaId: "area-1", managementClass: "tenant_device", tenantOwnerMembershipId: "membership-tenant-42", metadata: { label: "Tenant's lamp", managementClass: "tenant_device", tenantOwnerMembershipId: "membership-tenant-42" } });
   await hub.start();
   const base = `http://127.0.0.1:${hub.server.address().port}`;
   const token = createOperatorSessionToken({ sub: "employee-support", hubId, scope: ["os:support"], supportScope: "PROPERTY_SCOPE", areaIds: ["area-1"], includesTenantDevices: false, recentAuthAt: Date.now() }, keys.privateKey);

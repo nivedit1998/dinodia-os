@@ -1,0 +1,1 @@
+{"command":{"commandId":"command:one","homeId":"home:opaque-a","homeMembershipId":"membership:tenant-a","deviceId":"device:opaque-1","controlId":"control:power","descriptorRevision":3,"value":true,"issuedAt":"2026-09-27T10:00:00Z","idempotencyKey":"0123456789abcdef"},"currentDescriptorRevision":4,"expected":"reject_before_dispatch"}

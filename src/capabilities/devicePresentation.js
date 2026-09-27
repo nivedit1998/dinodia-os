@@ -4,16 +4,8 @@ const { haObjectId } = require("./identity");
 
 const PRESENTATION_VERSION = 1;
 const POLICY_REVISION = "device-presentation-v1";
-const APPROVED_LABELS = new Set(["light", "boiler", "radiator", "tenant_device"]);
 const CONTROL_DOMAINS = new Set(["light", "switch", "cover", "climate", "fan", "lock", "humidifier", "number", "select", "button"]);
 const DIAGNOSTIC_DOMAINS = new Set(["sensor", "binary_sensor", "event"]);
-const DIAGNOSTIC_TOKENS = new Set([
-  "battery", "voltage", "current", "power", "energy", "linkquality", "lqi", "rssi", "last_seen",
-  "temperature_calibration", "local_temperature_calibration", "calibration", "child_lock", "window_detection",
-  "window_open", "schedule", "program", "motor_state", "running_state", "pi_heating_demand", "identify",
-  "firmware", "update", "signal_strength", "occupancy", "motion", "humidity", "pressure", "illuminance",
-]);
-const CONFIG_TOKENS = new Set(["calibration", "child_lock", "window_detection", "schedule", "program", "reporting", "led"]);
 
 function clone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
@@ -32,12 +24,11 @@ function token(value) {
 
 function labelId(device) {
   const values = Array.isArray(device?.labelIds) ? device.labelIds : Array.isArray(device?.labels) ? device.labels : [];
-  const value = values.map(token).find((candidate) => APPROVED_LABELS.has(candidate));
-  return value || null;
+  return values.map((value) => String(value || "").trim()).find(Boolean) || null;
 }
 
 function isConfigured(device) {
-  return Boolean(device?.areaId && labelId(device));
+  return Boolean(device?.areaId);
 }
 
 function rawEntities(device) {
@@ -48,26 +39,17 @@ function sourceKey(entity) {
   return normalize(entity.id || entity.sourceId || entity.stateKey || entity.name);
 }
 
-function entityText(entity) {
-  return [entity.id, entity.sourceId, entity.stateKey, entity.logicalKey, entity.name, entity.original_name, entity.domain, entity.expose?.property, entity.binding?.property]
-    .map(token)
-    .filter(Boolean)
-    .join("_");
-}
-
 function isDiagnostic(entity) {
   const capability = entity.capability || {};
   const category = token(entity.category || capability.category);
   const domain = token(entity.domain);
-  const text = entityText(entity);
   if (category === "diagnostic" || category === "config") return true;
   if (DIAGNOSTIC_DOMAINS.has(domain)) return true;
-  return [...DIAGNOSTIC_TOKENS].some((item) => text === item || text.startsWith(`${item}_`) || text.includes(`_${item}_`) || text.endsWith(`_${item}`));
+  return false;
 }
 
 function isConfig(entity) {
-  const text = entityText(entity);
-  return [...CONFIG_TOKENS].some((item) => text === item || text.includes(`_${item}`) || text.includes(`${item}_`));
+  return token(entity.category || entity.capability?.category) === "config";
 }
 
 function isWritable(entity) {
@@ -96,85 +78,62 @@ function endpointLabel(entity, endpoint) {
   return channel ? channel[1] : "";
 }
 
-function semanticDomain(entity, selectedLabel) {
+function semanticDomain(entity) {
   const domain = token(entity.domain);
-  const textValue = entityText(entity);
-  if (selectedLabel === "radiator" || selectedLabel === "boiler") {
-    if (domain === "climate" || /(hvac|setpoint|target_temperature|current_temperature|heating|thermostat)/.test(textValue)) return "climate";
-    if (domain === "select" && /(mode|hvac|preset)/.test(textValue)) return "climate";
-    if (domain === "switch" || domain === "light" || domain === "number") return "climate";
-  }
-  if (selectedLabel === "light" && (domain === "switch" || domain === "light" || (domain === "number" && /(brightness|level|color|colour)/.test(textValue)))) return "light";
+  const semanticRole = token(entity.capability?.semanticRole);
+  if (["active_heat_demand", "active_heat_production", "target_temperature", "ambient_temperature", "operating_mode"].includes(semanticRole)) return "climate";
+  if (semanticRole === "brightness" || semanticRole === "power") return ["light", "switch"].includes(domain) ? domain : token(entity.capability?.nativeDomain) || "sensor";
   if (domain === "switch" || domain === "light" || domain === "cover" || domain === "climate" || domain === "fan" || domain === "lock" || domain === "humidifier") return domain;
   if (domain === "number" || domain === "select" || domain === "button") return domain;
-  if (/brightness|color|colour|onoff|on_off/.test(textValue)) return "light";
-  if (/temperature|hvac|thermostat|heating|setpoint/.test(textValue)) return "climate";
   return domain || "sensor";
 }
 
-function primaryCandidate(entity, selectedLabel) {
+function primaryCandidate(entity) {
   if (!isWritable(entity) || isDiagnostic(entity) || isConfig(entity)) return false;
-  const domain = semanticDomain(entity, selectedLabel);
-  const textValue = entityText(entity);
+  const domain = semanticDomain(entity);
   const capability = entity.capability || {};
   if (!CONTROL_DOMAINS.has(domain)) return false;
-  if (domain === "number" || domain === "select" || domain === "button") return Boolean(capability.primary || /(setpoint|target|level|brightness|mode|preset)/.test(textValue));
-  if (domain === "climate") return true;
-  if (domain === "light" || domain === "switch") return Boolean(capability.primary || /(state|power|onoff|on_off|switch|relay|outlet)/.test(textValue));
+  if (domain === "number" || domain === "select" || domain === "button") return Boolean(capability.primary && capability.semanticRole);
+  // A descriptor's target-temperature role is sufficient to anchor a climate
+  // surface; it is derived from the device protocol, never the user label.
+  if (domain === "climate") return Boolean(capability.semanticRole === "target_temperature" || (capability.primary && capability.semanticRole));
+  if (domain === "light" || domain === "switch") return Boolean(capability.primary && capability.semanticRole);
   return Boolean(capability.primary || services(entity).length);
 }
 
-function featureCandidate(entity, selectedLabel, groupDomain) {
+function featureCandidate(entity, groupDomain) {
   if (!isWritable(entity) || isDiagnostic(entity) || isConfig(entity)) return false;
-  const domain = semanticDomain(entity, selectedLabel);
-  const textValue = entityText(entity);
-  if (domain !== groupDomain) {
-    if (groupDomain === "light" && /(brightness|color|colour|temperature)/.test(textValue)) return true;
-    if (groupDomain === "climate" && /(temperature|hvac|heating|setpoint|preset|mode|running)/.test(textValue)) return true;
-    return false;
-  }
-  return !primaryCandidate(entity, selectedLabel) && Boolean(services(entity).length);
+  return semanticDomain(entity) === groupDomain && Boolean(entity.capability?.semanticRole) && Boolean(services(entity).length);
 }
 
-function relatedStatus(entity, selectedLabel, groupDomain) {
-  if (isConfig(entity) || isDiagnostic(entity)) {
-    const textValue = entityText(entity);
-    if (groupDomain === "climate" && /(current_temperature|local_temperature|temperature|heating_action|hvac_action|running_state)/.test(textValue)) return true;
-    if (groupDomain === "light" && /(brightness|color|colour)/.test(textValue)) return true;
-    return false;
-  }
-  const domain = semanticDomain(entity, selectedLabel);
+function relatedStatus(entity, groupDomain) {
+  const semanticRole = token(entity.capability?.semanticRole);
+  if (groupDomain === "climate" && ["ambient_temperature", "active_heat_demand", "active_heat_production"].includes(semanticRole)) return true;
+  if (groupDomain === "light" && ["brightness", "color"].includes(semanticRole)) return true;
+  if (isConfig(entity) || isDiagnostic(entity)) return false;
+  const domain = semanticDomain(entity);
   return domain === groupDomain && !isWritable(entity);
 }
 
-function choosePrimary(group, selectedLabel, groupDomain) {
-  const candidates = group.filter((entity) => primaryCandidate(entity, selectedLabel) && semanticDomain(entity, selectedLabel) === groupDomain);
+function choosePrimary(group, groupDomain) {
+  const candidates = group.filter((entity) => primaryCandidate(entity) && semanticDomain(entity) === groupDomain);
   return candidates.sort((left, right) => {
-    const leftText = entityText(left);
-    const rightText = entityText(right);
-    const score = (entity) => {
-      const textValue = entityText(entity);
-      let value = entity.capability?.primary ? 100 : 0;
-      if (/^(state|power|onoff|on_off)$/.test(token(entity.stateKey || entity.logicalKey))) value += 50;
-      if (/(state|power|onoff|on_off)/.test(textValue)) value += 20;
-      if (groupDomain === "climate" && /(hvac|system_mode|heating)/.test(textValue)) value += 30;
-      return value;
-    };
-    return score(right) - score(left) || leftText.localeCompare(rightText);
+    const priority = (entity) => Number(entity.capability?.primary === true) * 2 + Number(entity.capability?.semanticRole === (groupDomain === "climate" ? "target_temperature" : "power"));
+    return priority(right) - priority(left) || sourceKey(left).localeCompare(sourceKey(right));
   })[0] || null;
 }
 
-function groupKey(entity, selectedLabel) {
+function groupKey(entity) {
   const endpoint = endpointOf(entity);
-  const domain = semanticDomain(entity, selectedLabel);
+  const domain = semanticDomain(entity);
   return `${endpoint}::${domain}`;
 }
 
-function groupEntities(device, selectedLabel) {
+function groupEntities(device) {
   const groups = new Map();
   for (const entity of rawEntities(device)) {
-    if (!isWritable(entity) && !relatedStatus(entity, selectedLabel, semanticDomain(entity, selectedLabel))) continue;
-    const key = groupKey(entity, selectedLabel);
+    if (!isWritable(entity) && !relatedStatus(entity, semanticDomain(entity))) continue;
+    const key = groupKey(entity);
     const existing = groups.get(key) || [];
     existing.push(entity);
     groups.set(key, existing);
@@ -211,7 +170,7 @@ function addBinding(bindings, routes, serviceId, entity, sourceServiceId = servi
   const route = routes[normalized];
   const parameter = binding.parameter ? { ...clone(binding.parameter) } : null;
   if (parameter) {
-    if (normalized === "light.turn_on") parameter.key = /(color_temp|color_temperature)/.test(entityText(entity)) ? "color_temp" : "brightness";
+    if (normalized === "light.turn_on") parameter.key = entity.capability?.semanticRole === "color" ? "color_temp" : "brightness";
     if (normalized === "climate.set_temperature") parameter.key = "temperature";
     if (normalized === "climate.set_hvac_mode") parameter.key = "hvac_mode";
   }
@@ -249,9 +208,9 @@ function publicServiceFor(domain, rawServiceId, entity) {
   if (!rawDomain || !rawService) return null;
   if (domain === "light" && rawDomain === "switch" && ["turn_on", "turn_off", "toggle"].includes(rawService)) return `light.${rawService}`;
   if (domain === "climate" && rawDomain === "switch" && ["turn_on", "turn_off"].includes(rawService)) return `climate.${rawService}`;
-  if (domain === "climate" && rawDomain === "number" && rawService === "set_value" && /(temperature|setpoint|target|heat)/.test(entityText(entity))) return "climate.set_temperature";
-  if (domain === "climate" && rawDomain === "select" && rawService === "select_option" && /(mode|hvac|preset)/.test(entityText(entity))) return "climate.set_hvac_mode";
-  if (domain === "light" && rawDomain === "number" && rawService === "set_value" && /(brightness|level|color_temp|color_temperature)/.test(entityText(entity))) return "light.turn_on";
+  if (domain === "climate" && rawDomain === "number" && rawService === "set_value" && entity.capability?.semanticRole === "target_temperature") return "climate.set_temperature";
+  if (domain === "climate" && rawDomain === "select" && rawService === "select_option" && entity.capability?.semanticRole === "operating_mode") return "climate.set_hvac_mode";
+  if (domain === "light" && rawDomain === "number" && rawService === "set_value" && ["brightness", "color"].includes(entity.capability?.semanticRole)) return "light.turn_on";
   if (rawDomain === domain) return serviceId;
   return null;
 }
@@ -321,7 +280,7 @@ function initialStateFor(group, primary, domain) {
   const stateEntity = group.find((entity) => entity === primary) || primary || group.find((entity) => entity.state !== undefined);
   let state = stateEntity?.state;
   if (domain === "climate") {
-    const modeEntity = group.find((entity) => /(hvac_mode|system_mode|mode|running_state)/.test(entityText(entity)) && entity.state !== undefined);
+    const modeEntity = group.find((entity) => entity.capability?.semanticRole === "operating_mode" && entity.state !== undefined);
     state = modeEntity?.state ?? state;
     if (String(state || "").toLowerCase() === "off") state = "off";
     else if (state !== undefined && state !== null && String(state).toLowerCase() !== "unknown") state = String(state).toLowerCase();
@@ -329,8 +288,8 @@ function initialStateFor(group, primary, domain) {
   return state === undefined ? "unknown" : clone(state);
 }
 
-function buildSurface(device, group, endpoint, domain, index, total, selectedLabel) {
-  const primary = choosePrimary(group, selectedLabel, domain);
+function buildSurface(device, group, endpoint, domain, index, total) {
+  const primary = choosePrimary(group, domain);
   if (!primary) return null;
   const surfaceId = safeSurfaceId(device, endpoint, domain);
   const sourceEntityIds = [...new Set(group.map(sourceKey).filter(Boolean))];
@@ -360,6 +319,9 @@ function buildSurface(device, group, endpoint, domain, index, total, selectedLab
     idempotency: routeBindings.some((binding) => String(binding.serviceId || "").endsWith(".toggle")) ? "set_value" : "set_value",
     observable: true,
     primary: true,
+    // Preserve adapter-declared semantics in the composed descriptor. The
+    // device label is presentation-only and is never used to infer a role.
+    semanticRole: primary.capability?.semanticRole || "unknown",
     stateKey: primary.stateKey || primary.logicalKey || "state",
     constraints: constraintsFor(group),
     bindings: routeBindings,
@@ -382,7 +344,7 @@ function buildSurface(device, group, endpoint, domain, index, total, selectedLab
     available: device.available !== false,
     sourceEntityIds,
     stateSourceEntityId: sourceKey(primary),
-    attributeSources: Object.fromEntries(group.filter((entity) => entity !== primary && (entity.capability?.writable || relatedStatus(entity, selectedLabel, domain))).map((entity) => [token(entity.stateKey || entity.logicalKey || entity.name), sourceKey(entity)])),
+    attributeSources: Object.fromEntries(group.filter((entity) => entity !== primary && (entity.capability?.writable || relatedStatus(entity, domain))).map((entity) => [token(entity.stateKey || entity.logicalKey), sourceKey(entity)])),
     serviceRoutes,
     visibility: "household",
     priority: domain === "climate" ? 10 : 20,
@@ -394,14 +356,14 @@ function buildSurface(device, group, endpoint, domain, index, total, selectedLab
   };
 }
 
-function rawRoleSummary(device, selectedLabel) {
+function rawRoleSummary(device) {
   const entities = rawEntities(device);
   const roles = { primary_control: 0, control_feature: 0, status_attribute: 0, diagnostic: 0, installer_configuration: 0, unsafe_or_unsupported: 0 };
   for (const entity of entities) {
     if (isDiagnostic(entity)) roles[isConfig(entity) ? "installer_configuration" : "diagnostic"] += 1;
-    else if (primaryCandidate(entity, selectedLabel)) roles.primary_control += 1;
-    else if (featureCandidate(entity, selectedLabel, semanticDomain(entity, selectedLabel))) roles.control_feature += 1;
-    else if (relatedStatus(entity, selectedLabel, semanticDomain(entity, selectedLabel))) roles.status_attribute += 1;
+    else if (primaryCandidate(entity)) roles.primary_control += 1;
+    else if (featureCandidate(entity, semanticDomain(entity))) roles.control_feature += 1;
+    else if (relatedStatus(entity, semanticDomain(entity))) roles.status_attribute += 1;
     else roles.unsafe_or_unsupported += 1;
   }
   return roles;
@@ -422,15 +384,15 @@ function sourceFingerprint(device) {
 function buildPresentation(device, now = new Date().toISOString()) {
   const selectedLabel = labelId(device);
   const configured = isConfigured(device) && ["ready", "preview"].includes(String(device.setup?.status || ""));
-  const groups = configured ? groupEntities(device, selectedLabel) : new Map();
+  const groups = configured ? groupEntities(device) : new Map();
   const values = [];
   const renderableGroups = [...groups.entries()].filter(([key, group]) => {
     const [endpoint, domain] = key.split("::");
-    return Boolean(choosePrimary(group, selectedLabel, domain || "switch"));
+    return Boolean(choosePrimary(group, domain || "switch"));
   });
   for (const [[key, group], index] of renderableGroups.map((entry, position) => [entry, position])) {
     const [endpoint, domain] = key.split("::");
-    const surface = buildSurface(device, group, endpoint || "0", domain || "switch", index, renderableGroups.length, selectedLabel);
+    const surface = buildSurface(device, group, endpoint || "0", domain || "switch", index, renderableGroups.length);
     if (surface) values.push(surface);
   }
   values.sort((left, right) => left.id.localeCompare(right.id));
@@ -445,7 +407,7 @@ function buildPresentation(device, now = new Date().toISOString()) {
     status,
     inferredType,
     selectedLabel,
-    roleCounts: rawRoleSummary(device, selectedLabel),
+    roleCounts: rawRoleSummary(device),
     surfaces,
   };
 }
@@ -477,7 +439,6 @@ function publicPresentation(surface) {
 }
 
 module.exports = {
-  APPROVED_LABELS,
   PRESENTATION_VERSION,
   POLICY_REVISION,
   buildPresentation,

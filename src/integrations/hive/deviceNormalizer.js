@@ -97,22 +97,22 @@ function heatingEntities(deviceId, state) {
     [base("mode")]: {
       id: base("mode"), sourceId: base("mode"), deviceId, endpointId, logicalKey: "mode", stateKey: "mode",
       domain: "climate", name: "Heating mode", original_name: "Heating mode", state: state.mode, primary: true,
-      capability: { runtime: "dinodia_os", kind: "composite", category: "control", readable: true, writable: true, observable: true, primary: true, bindings: climateBindings },
+      capability: { runtime: "dinodia_os", kind: "composite", category: "control", readable: true, writable: true, observable: true, primary: true, semanticRole: "operating_mode", bindings: climateBindings },
     },
     [base("target_temperature")]: {
       id: base("target_temperature"), sourceId: base("target_temperature"), deviceId, endpointId, logicalKey: "target_temperature", stateKey: "target_temperature",
       domain: "number", name: "Target temperature", original_name: "Target temperature", state: state.target_temperature,
-      capability: { runtime: "dinodia_os", kind: "number", category: "control", readable: true, writable: true, observable: true, primary: true, bindings: [{ serviceId: "climate.set_temperature", parameter: { key: "temperature", type: "number", min: state.min_temperature ?? 5, max: state.max_temperature ?? 35, step: 0.5 } }], constraints: { min: state.min_temperature ?? 5, max: state.max_temperature ?? 35, step: 0.5 }, unit: state.temperature_unit },
+      capability: { runtime: "dinodia_os", kind: "number", category: "control", readable: true, writable: true, observable: true, primary: true, semanticRole: "target_temperature", bindings: [{ serviceId: "climate.set_temperature", parameter: { key: "temperature", type: "number", min: state.min_temperature ?? 5, max: state.max_temperature ?? 35, step: 0.5 } }], constraints: { min: state.min_temperature ?? 5, max: state.max_temperature ?? 35, step: 0.5 }, unit: state.temperature_unit },
     },
     [base("current_temperature")]: {
       id: base("current_temperature"), sourceId: base("current_temperature"), deviceId, endpointId, logicalKey: "current_temperature", stateKey: "current_temperature",
       domain: "sensor", category: "diagnostic", name: "Current temperature", original_name: "Current temperature", state: state.current_temperature,
-      capability: { runtime: "dinodia_os", kind: "sensor", category: "diagnostic", readable: true, writable: false, observable: true, bindings: [] },
+      capability: { runtime: "dinodia_os", kind: "sensor", category: "diagnostic", readable: true, writable: false, observable: true, semanticRole: "ambient_temperature", bindings: [] },
     },
     [base("heating_action")]: {
       id: base("heating_action"), sourceId: base("heating_action"), deviceId, endpointId, logicalKey: "heating_action", stateKey: "heating_action",
       domain: "sensor", category: "diagnostic", name: "Heating action", original_name: "Heating action", state: state.heating_action,
-      capability: { runtime: "dinodia_os", kind: "sensor", category: "diagnostic", readable: true, writable: false, observable: true, bindings: [] },
+      capability: { runtime: "dinodia_os", kind: "sensor", category: "diagnostic", readable: true, writable: false, observable: true, semanticRole: "active_heat_demand", bindings: [] },
     },
     [base("online")]: {
       id: base("online"), sourceId: base("online"), deviceId, endpointId, logicalKey: "online", stateKey: "online",

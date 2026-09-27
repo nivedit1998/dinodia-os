@@ -3,7 +3,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { fixedLabelState } = require("./labelCatalog");
 const { normalizeCapability, text } = require("./capabilities/schema");
-const { APPROVED_LABELS, buildPresentation, isConfigured, labelId } = require("./capabilities/devicePresentation");
+const { buildPresentation, isConfigured, labelId } = require("./capabilities/devicePresentation");
 const { DEFAULT_HEATING_DEMAND_CONFIG, DEFAULT_HEATING_DEMAND_RUNTIME } = require("./heatingDemandController");
 const { NATIVE_AUTOMATION_STORE_VERSION, LIMITS } = require("./automations/constants");
 const { migrateLegacyAutomations } = require("./automations/legacyAdapter");
@@ -474,26 +474,26 @@ function migrateLegacySetup(device, areas, legacyVersion) {
     : legacyVersion < 5 ? normalizeLegacyAssignments(device) : null;
   const validArea = (value) => Boolean(value && areas && areas[String(value)]);
   const deviceArea = device.areaId ? String(device.areaId) : null;
-  const deviceLabels = normalizeIds(device.labelIds || device.labels).filter((label) => APPROVED_LABELS.has(String(label).toLowerCase()));
+  const deviceLabels = normalizeIds(device.labelIds || device.labels);
   const childAreas = Object.values(existingAssignments || {}).map((item) => item?.areaId).filter(Boolean).map(String);
-  const childLabels = Object.values(existingAssignments || {}).flatMap((item) => normalizeIds(item?.labelIds)).filter((label) => APPROVED_LABELS.has(String(label).toLowerCase())).map((label) => String(label).toLowerCase());
+  const childLabels = Object.values(existingAssignments || {}).flatMap((item) => normalizeIds(item?.labelIds));
   const uniqueAreas = [...new Set(childAreas)];
   const uniqueLabels = [...new Set(childLabels)];
   const promotedArea = deviceArea || (uniqueAreas.length === 1 ? uniqueAreas[0] : null);
   const promotedLabel = deviceLabels.length === 1 ? String(deviceLabels[0]).toLowerCase() : uniqueLabels.length === 1 ? uniqueLabels[0] : null;
-  const childConflict = uniqueAreas.length > 1 || uniqueLabels.length > 1;
-  const canBeReady = !childConflict && validArea(promotedArea) && Boolean(promotedLabel);
+  const childConflict = uniqueAreas.length > 1;
+  const canBeReady = !childConflict && validArea(promotedArea);
   const status = existingSetup.status && existingSetup.status !== "needs_setup"
     ? existingSetup.status
     : canBeReady ? "ready" : "needs_setup";
   const setup = normalizeSetup(existingSetup, {
     status,
     completedAt: canBeReady ? (existingSetup.completedAt || new Date(0).toISOString()) : null,
-    reason: canBeReady ? null : childConflict ? "conflicting_legacy_assignments" : "area_and_label_required",
+    reason: canBeReady ? null : childConflict ? "conflicting_legacy_assignments" : "area_required",
   });
   if (legacyVersion < 5) {
     setup.status = status;
-    setup.reason = canBeReady ? null : childConflict ? "conflicting_legacy_assignments" : "area_and_label_required";
+    setup.reason = canBeReady ? null : childConflict ? "conflicting_legacy_assignments" : "area_required";
     if (!canBeReady) setup.completedAt = null;
   }
   return {
@@ -965,7 +965,6 @@ class Store {
   }
 
   async deleteLabel(id) {
-    if (APPROVED_LABELS.has(String(id || "").trim().toLowerCase())) return false;
     const existed = Boolean(this.state.labels[id]);
     if (!existed) return false;
     const before = this.snapshot();
@@ -976,13 +975,6 @@ class Store {
       for (const entity of Object.values(device.entities || {})) {
         entity.labels = normalizeIds(entity.labels).filter((labelId) => labelId !== id);
         entity.labelIds = normalizeIds(entity.labelIds).filter((labelId) => labelId !== id);
-      }
-      if (device.setup?.status === "ready" && !labelId(device)) {
-        device.setup = normalizeSetup(device.setup, { status: "needs_setup", reason: "area_and_label_required" });
-        device.setup.status = "needs_setup";
-        device.setup.completedAt = null;
-        device.setup.updatedAt = new Date().toISOString();
-        device.setup.reason = "area_and_label_required";
       }
       device.presentation = buildPresentation(device);
     }
@@ -1131,8 +1123,7 @@ class Store {
     if (["zigbee", "matter"].includes(existing.protocol) && (existing.interviewStatus === "pending" || !Object.keys(existing.entities || {}).length)) throw Object.assign(new Error("The device has not finished discovery yet"), { statusCode: 409, code: "interview_incomplete" });
     const areaId = String(input.areaId || input.area_id || "").trim();
     if (!areaId || !this.state.areas[areaId]) throw Object.assign(new Error("Choose a provisioned area"), { statusCode: 400, code: "invalid_area" });
-    const selectedLabel = String(input.labelId || input.label_id || "").trim().toLowerCase();
-    if (!APPROVED_LABELS.has(selectedLabel)) throw Object.assign(new Error("Choose one of the approved device labels"), { statusCode: 400, code: "invalid_label" });
+    const selectedLabel = String(input.labelId || input.label_id || "").trim();
     const name = input.name === undefined ? existing.name : String(input.name || "").trim();
     if (name.length > 128) throw Object.assign(new Error("Device name is too long"), { statusCode: 400, code: "invalid_name" });
     const setup = {
@@ -1148,8 +1139,8 @@ class Store {
       id: resolvedId,
       name: name || existing.name || resolvedId,
       areaId,
-      labelIds: [selectedLabel],
-      labels: [selectedLabel],
+      labelIds: selectedLabel ? [selectedLabel] : normalizeIds(existing.labelIds || existing.labels),
+      labels: selectedLabel ? [selectedLabel] : normalizeIds(existing.labels || existing.labelIds),
       setup,
       presentation: null,
     });
@@ -1166,7 +1157,7 @@ class Store {
       areaId: null,
       labelIds: [],
       labels: [],
-      setup: { ...(existing.setup || {}), status: "needs_setup", completedAt: null, updatedAt: new Date().toISOString(), reason: "area_and_label_required" },
+      setup: { ...(existing.setup || {}), status: "needs_setup", completedAt: null, updatedAt: new Date().toISOString(), reason: "area_required" },
       presentation: null,
     });
   }

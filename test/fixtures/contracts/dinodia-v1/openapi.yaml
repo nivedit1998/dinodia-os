@@ -1,0 +1,876 @@
+openapi: 3.1.0
+info:
+  title: Dinodia Native V2 API Contract
+  version: dinodia.v1
+  description: >-
+    Contract-only route catalogue for Native V2. Implementations must enforce current
+    authenticated membership and descriptor authority; this document does not grant access.
+servers:
+  - url: https://dinodia-platform-v2.vercel.app
+    description: Canonical Platform origin; tenant live commands use the selected hub BaseURL or verified CloudURL.
+security:
+  - CustomerBearer: []
+tags:
+  - name: Session
+  - name: Home
+  - name: Devices
+  - name: Account
+  - name: Notifications
+  - name: Support
+paths:
+  /api/v2/auth/session:
+    get:
+      operationId: restoreCustomerSession
+      tags: [Session]
+      security: [{ CustomerSessionCookie: [] }]
+      responses:
+        "200":
+          {
+            description: Restored account-global context and active memberships; no home is selected and no hub bearer is issued,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "./contract.json#/$defs/accountSessionContext" } },
+              },
+          }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: createCustomerSession
+      tags: [Session]
+      security: []
+      requestBody:
+        required: true
+        content:
+          {
+            application/json:
+              {
+                schema:
+                  {
+                    type: object,
+                    required: [email, password, deviceInstallationId, publicKey, deviceName],
+                    properties:
+                      {
+                        email: { type: string, format: email },
+                        password: { type: string, writeOnly: true },
+                        deviceInstallationId: { type: string, minLength: 1, maxLength: 160 },
+                        publicKey: { type: string, minLength: 1, maxLength: 4096, writeOnly: true },
+                        deviceName: { type: string, minLength: 1, maxLength: 160 },
+                        model: { type: string, maxLength: 160 },
+                        osFamily: { type: string, maxLength: 80 },
+                        osVersion: { type: string, maxLength: 80 },
+                      },
+                    additionalProperties: false,
+                  },
+              },
+          }
+      responses:
+        "200":
+          description: Customer session established; response metadata contains no session bearer and cookie is HttpOnly.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/customerSessionReceipt" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      operationId: endCompatibilityCustomerSession
+      tags: [Session]
+      security: [{ CustomerSessionCookie: [] }]
+      responses: { "200": { description: Durable customer-session revocation and cookie clearing } }
+  /api/v2/session:
+    get:
+      operationId: restoreCanonicalAccountSession
+      tags: [Session]
+      security: [{ CustomerSessionCookie: [] }]
+      responses:
+        "200":
+          {
+            description: Canonical account-global membership context,
+            content:
+              { application/json: { schema: { $ref: "./contract.json#/$defs/accountSessionContext" } } },
+          }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: createCanonicalCustomerSession
+      tags: [Session]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, deviceInstallationId, publicKey, deviceName]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, writeOnly: true }
+                deviceInstallationId: { type: string, minLength: 1, maxLength: 160 }
+                publicKey: { type: string, minLength: 1, maxLength: 4096, writeOnly: true }
+                deviceName: { type: string, minLength: 1, maxLength: 160 }
+                model: { type: string, maxLength: 160 }
+                osFamily: { type: string, maxLength: 80 }
+                osVersion: { type: string, maxLength: 80 }
+              additionalProperties: false
+      responses:
+        "200":
+          description: Customer session established with an HttpOnly session cookie; receipt contains no reusable bearer.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/customerSessionReceipt" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      operationId: endCanonicalCustomerSession
+      tags: [Session]
+      security: [{ CustomerSessionCookie: [] }]
+      responses: { "200": { description: Durable customer-session revocation } }
+  /api/v2/session/logout:
+    post:
+      operationId: endCustomerSession
+      tags: [Session]
+      security: [{ CustomerSessionCookie: [] }]
+      responses:
+        "200": { description: Session revoked and cookie cleared }
+  /api/v2/hub-sessions:
+    post:
+      operationId: issueSelectedHomeHubSession
+      tags: [Session]
+      security: [{ CustomerSessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [homeId]
+              properties:
+                homeId: { $ref: "./contract.json#/$defs/id" }
+              additionalProperties: false
+      responses:
+        "200":
+          description: Five-minute home- and membership-bound customer bearer; native client memory only, never persisted, logged or rendered.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/customerHubSession" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "400": { description: Invalid or missing selected-home request }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/homes/{homeId}/context:
+    get:
+      operationId: getMembershipScopedHomeContext
+      tags: [Home]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }]
+      responses:
+        "200":
+          {
+            description: Selected-home membership context,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "./contract.json#/$defs/membership" } },
+              },
+          }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v2/homes/{homeId}/access-policy:
+    get:
+      operationId: getCurrentHomeAccessPolicy
+      tags: [Home]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }]
+      responses:
+        "200":
+          {
+            description: Current role and area authority,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "./contract.json#/$defs/accessPolicy" } },
+              },
+          }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v2/homes/{homeId}/overrides:
+    get:
+      operationId: listHomeDisplayOverrides
+      tags: [Home]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }]
+      responses:
+        "200":
+          {
+            description: Revisioned display-only overrides,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "./contract.json#/$defs/override" } },
+              },
+          }
+    put:
+      operationId: replaceHomeDisplayOverrides
+      tags: [Home]
+      parameters:
+        [
+          { $ref: "#/components/parameters/HomeId" },
+          { $ref: "#/components/parameters/IfMatch" },
+        ]
+      requestBody:
+        {
+          required: true,
+          content:
+            {
+              application/json:
+                { schema: { $ref: "./contract.json#/$defs/override" } },
+            },
+        }
+      responses:
+        "200": { description: Overrides saved }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/homes/{homeId}/preferences:
+    get:
+      operationId: getHomePreferences
+      tags: [Home]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }]
+      responses:
+        { "200": { description: Revisioned selected-home preferences } }
+    put:
+      operationId: updateHomePreferences
+      tags: [Home]
+      parameters:
+        [
+          { $ref: "#/components/parameters/HomeId" },
+          { $ref: "#/components/parameters/IfMatch" },
+        ]
+      responses:
+        "200": { description: Preferences saved }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/homes/{homeId}/analytics/{period}:
+    get:
+      operationId: getHomeAnalytics
+      tags: [Home]
+      parameters:
+        - { $ref: "#/components/parameters/HomeId" }
+        - name: period
+          in: path
+          required: true
+          schema: { type: string, enum: [year, month, week, day, hour] }
+      responses:
+        "200":
+          {
+            description: Sample-based Native analytics,
+            content:
+              {
+                application/json:
+                  {
+                    schema:
+                      { $ref: "./contract.json#/$defs/analyticsObservation" },
+                  },
+              },
+          }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v2/homes/{homeId}/property-managers:
+    get:
+      operationId: listPropertyManagers
+      tags: [Home]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }]
+      responses:
+        { "200": { description: Current active manager memberships only } }
+    post:
+      operationId: invitePropertyManager
+      tags: [Home]
+      parameters:
+        [
+          { $ref: "#/components/parameters/HomeId" },
+          { $ref: "#/components/parameters/IdempotencyKey" },
+        ]
+      responses:
+        "201":
+          {
+            description: Invitation created; invitation alone does not create membership,
+          }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v2/homes/{homeId}/tenant/devices:
+    get:
+      operationId: listAuthorizedNativeDevices
+      tags: [Devices]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }]
+      responses:
+        "200":
+          {
+            description: Selected-membership devices only,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "./contract.json#/$defs/device" } },
+              },
+          }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v2/homes/{homeId}/tenant/devices/{deviceId}:
+    get:
+      operationId: getAuthorizedNativeDevice
+      tags: [Devices]
+      parameters:
+        [
+          { $ref: "#/components/parameters/DeviceId" },
+          { $ref: "#/components/parameters/HomeId" },
+        ]
+      responses:
+        "200":
+          {
+            description: Current device descriptor,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "./contract.json#/$defs/device" } },
+              },
+          }
+        "404": { description: Missing or privacy-hidden device }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/dinodia/v1/devices:
+    get:
+      operationId: readSelectedHomeHubDeviceDescriptors
+      tags: [Devices]
+      description: Direct authenticated request to the selected hub over pinned HTTPS LAN BaseURL or the independently verified CloudURL. The home and membership are taken from the signed app token, never from query parameters.
+      servers:
+        - url: https://dinodia-{hubId}.local:8123
+          variables:
+            hubId: { default: hub-identifier, description: Public hub DNS label, not an authority claim }
+      responses:
+        "200":
+          description: Current membership/area filtered canonical Native v1 device envelope
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [schemaVersion, homeId, streamId, sequence, generatedAt, revision, data]
+                properties:
+                  schemaVersion: { const: dinodia.v1 }
+                  homeId: { type: string }
+                  streamId: { type: string }
+                  sequence: { type: integer, minimum: 0 }
+                  generatedAt: { type: string, format: date-time }
+                  revision: { type: integer, minimum: 0 }
+                  data:
+                    type: array
+                    items: { $ref: "./contract.json#/$defs/device" }
+                additionalProperties: false
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { description: Current catalogue cannot be represented without losing safety or authority fields }
+  /api/v2/alexa/discovery:
+    get:
+      operationId: getNativeAlexaDiscoveryProjection
+      tags: [Devices]
+      security: [{ AlexaBearer: [] }]
+      description: Stage 2 contract boundary. Account linking and live projection execution are owned by the later Alexa integration stage; until enabled, consumers must fail closed and must not fall back to HA or static data.
+      responses:
+        "200":
+          description: Current selected-home and area-scoped canonical discovery projection
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/alexaDiscoveryProjection" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "501": { description: Alexa account-linking/projection feature is not enabled in this stage; no fallback is permitted }
+  /api/v2/alexa/directives:
+    post:
+      operationId: dispatchNativeAlexaDirective
+      tags: [Devices]
+      security: [{ AlexaBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [directive], properties: { directive: { type: object } }, additionalProperties: false }
+      responses:
+        "200": { description: Canonical selected-home directive result }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "501": { description: Alexa directive execution is not enabled in this stage; no HA/entity fallback is permitted }
+  /api/v2/alexa/report-state:
+    post:
+      operationId: reportNativeAlexaState
+      tags: [Devices]
+      security: [{ AlexaBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [directive], properties: { directive: { type: object } }, additionalProperties: false }
+      responses:
+        "200": { description: Current canonical control state projection }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "501": { description: Alexa report-state projection is not enabled in this stage; no static fallback is permitted }
+  /api/dinodia/v1/commands:
+    post:
+      operationId: issueDinodiaOSCommand
+      tags: [Devices]
+      description: Tenant live command is sent directly to the selected hub's pinned HTTPS BaseURL or verified CloudURL. Platform does not proxy device commands; HA/AWS transports are forbidden.
+      servers:
+        - url: https://dinodia-{hubId}.local:8123
+          description: Illustrative pinned LAN authority; resolve the selected hub endpoint from its current Platform record.
+          variables:
+            hubId:
+              {
+                default: hub-identifier,
+                description: Public hub DNS label,
+                not an authority claim,
+              }
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        {
+          required: true,
+          content:
+            {
+              application/json:
+                { schema: { $ref: "./contract.json#/$defs/command" } },
+            },
+        }
+      responses:
+        "202": { description: Hub accepted idempotent command }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422":
+          {
+            description: Current descriptor rejects command value or sensitive policy,
+          }
+  /api/v2/tenant/account/delete:
+    post:
+      operationId: deleteCustomerAccount
+      tags: [Account]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "202":
+          {
+            description: Account deletion follows final-relationship retention rules,
+          }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/notifications:
+    get:
+      operationId: listAuthorizedNotifications
+      tags: [Notifications]
+      responses:
+        { "200": { description: Current audience-scoped notification items } }
+  /api/v2/notifications/{notificationId}/acknowledgement:
+    put:
+      operationId: acknowledgeNotification
+      tags: [Notifications]
+      parameters:
+        [
+          {
+            name: notificationId,
+            in: path,
+            required: true,
+            schema: { type: string },
+          },
+        ]
+      responses:
+        { "204": { description: Notification acknowledgement recorded } }
+  /api/v2/homes/{homeId}/activity:
+    get:
+      operationId: listHomeActivity
+      tags: [Home]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }]
+      responses:
+        { "200": { description: Role-filtered activity for selected home } }
+  /api/v2/trusted-devices:
+    get:
+      operationId: listTrustedCustomerDevices
+      tags: [Account]
+      responses: { "200": { description: Current account's trusted devices } }
+  /api/v2/trusted-devices/{trustedDeviceId}:
+    delete:
+      operationId: revokeTrustedCustomerDevice
+      tags: [Account]
+      parameters:
+        [
+          {
+            name: trustedDeviceId,
+            in: path,
+            required: true,
+            schema: { type: string },
+          },
+        ]
+      responses:
+        {
+          "204":
+            {
+              description: Device revoked account-wide and connected authority invalidated,
+            },
+        }
+  /api/v2/support/tickets:
+    get:
+      operationId: listRoleScopedSupportTickets
+      tags: [Support]
+      responses:
+        {
+          "200":
+            {
+              description: Tenant-private or property-authorized ticket projection,
+            },
+        }
+    post:
+      operationId: createSupportTicket
+      tags: [Support]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        {
+          required: true,
+          content:
+            {
+              application/json:
+                { schema: { $ref: "./contract.json#/$defs/supportTicket" } },
+            },
+        }
+      responses:
+        {
+          "201":
+            {
+              description: Support ticket created without expanding account authority,
+            },
+        }
+  /api/v2/support/tickets/{ticketId}/access-request:
+    post:
+      operationId: requestScopedSupportAccess
+      tags: [Support]
+      parameters:
+        [
+          {
+            name: ticketId,
+            in: path,
+            required: true,
+            schema: { type: string },
+          },
+          { $ref: "#/components/parameters/IdempotencyKey" },
+        ]
+      requestBody:
+        {
+          required: true,
+          content:
+            {
+              application/json:
+                {
+                  schema:
+                    { $ref: "./contract.json#/$defs/supportAccessRequest" },
+                },
+            },
+        }
+      responses:
+        "201": { description: Scope-bound request awaiting required approvals }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v2/support/tickets/{ticketId}/code-exchange:
+    post:
+      operationId: exchangeApprovedSupportCode
+      tags: [Support]
+      parameters:
+        [{ name: ticketId, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        {
+          required: true,
+          content:
+            {
+              application/json:
+                {
+                  schema:
+                    { $ref: "./contract.json#/$defs/supportCodeExchange" },
+                },
+            },
+        }
+      responses:
+        "200":
+          {
+            description: One-use code exchanged into a short scope-bound support session,
+          }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/support/tickets/{ticketId}:
+    get:
+      operationId: getCustomerSupportTicket
+      tags: [Support]
+      parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: Ticket projection filtered to the current requester and customer-visible timeline. }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Ticket is not visible to this principal. }
+    patch:
+      operationId: updateCustomerSupportTicket
+      tags: [Support]
+      parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses:
+        "200": { description: Revisioned customer-visible ticket update. }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/support/tickets/{ticketId}/access-requests:
+    get:
+      operationId: listTicketSupportAccessRequests
+      tags: [Support]
+      parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: Access requests visible to the current customer or assigned employee. }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: requestTicketSupportAccess
+      tags: [Support]
+      parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/supportAccessRequest" } } } }
+      responses:
+        "201": { description: Scope-bound access request; no support authority is granted. }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v2/support/tickets/{ticketId}/access-requests/{requestId}/approve:
+    post:
+      operationId: approveTicketSupportAccess
+      tags: [Support]
+      parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }, { name: requestId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [stepUpOperationId], properties: { stepUpOperationId: { type: string } }, additionalProperties: false } } } }
+      responses:
+        "200": { description: Exact-approver, exact-scope approval; issuance remains a separate operation. }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/support/tickets/{ticketId}/access-requests/{requestId}/deny:
+    post:
+      operationId: denyTicketSupportAccess
+      tags: [Support]
+      parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }, { name: requestId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Denial is terminal for this request revision and creates no code. }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v2/support/tickets/{ticketId}/access-requests/{requestId}/issue:
+    post:
+      operationId: issueTicketSupportCode
+      tags: [Support]
+      parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }, { name: requestId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: One-time code is returned only to the assigned employee; storage is hash-only. }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v2/support/tickets/{ticketId}/access-requests/{requestId}/revoke:
+    post:
+      operationId: revokeTicketSupportAccess
+      tags: [Support]
+      parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }, { name: requestId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Revocation is immediate in cloud authority; hub acknowledgement may remain pending. }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v2/homes/{homeId}/reset-property-ownership:
+    post:
+      operationId: resetPropertyOwnership
+      tags: [Home]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [stepUpOperationId], properties: { stepUpOperationId: { type: string } }, additionalProperties: false } } } }
+      responses:
+        "202": { description: Customer relationships are revoked immediately; hub cleanup remains tracked until acknowledgement. }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/automations:
+    get:
+      operationId: listHomeAutomations
+      tags: [Home]
+      parameters: [{ name: homeId, in: query, required: true, schema: { type: string } }, { name: homeMembershipId, in: query, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: Current membership-authorized full automation bundle and revision. }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      operationId: replaceHomeAutomations
+      tags: [Home]
+      parameters: [{ name: homeId, in: query, required: true, schema: { type: string } }, { name: homeMembershipId, in: query, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/automation" } } } }
+      responses:
+        "200": { description: Atomically replaced complete revisioned automation set. }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/dinodia/v1/snapshot:
+    servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
+    get:
+      operationId: readSelectedHomeSnapshot
+      tags: [Devices]
+      security: [{ CustomerBearer: [] }]
+      parameters: [{ name: homeId, in: query, required: true, schema: { type: string } }, { name: homeMembershipId, in: query, required: true, schema: { type: string } }, { name: cursor, in: query, required: false, schema: { type: string } }]
+      responses:
+        "200": { description: Bounded home-scoped snapshot page with stream/revision envelope and tombstones. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/dinodia/v1/areas:
+    servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
+    get:
+      operationId: listCanonicalAreas
+      tags: [Home]
+      security: [{ CustomerBearer: [] }]
+      responses: { "200": { description: Canonical original/override area DTOs, including empty active areas. }, "401": { $ref: "#/components/responses/Unauthorized" } }
+  /api/dinodia/v1/devices/{deviceId}:
+    servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
+    get:
+      operationId: getCurrentNativeDevice
+      tags: [Devices]
+      security: [{ CustomerBearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/DeviceId" }]
+      responses: { "200": { description: Current device descriptor and separately revisioned state. }, "401": { $ref: "#/components/responses/Unauthorized" }, "403": { $ref: "#/components/responses/Forbidden" }, "404": { description: Not visible in the selected membership scope. } }
+  /api/dinodia/v1/control-catalog:
+    servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
+    get:
+      operationId: getCurrentControlCatalog
+      tags: [Devices]
+      security: [{ CustomerBearer: [] }]
+      parameters: [{ name: deviceId, in: query, required: true, schema: { type: string } }]
+      responses: { "200": { description: Current descriptor revision and bounded typed controls. }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/dinodia/v1/events:
+    servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
+    get:
+      operationId: subscribeHomeEvents
+      tags: [Devices]
+      security: [{ CustomerBearer: [] }]
+      parameters: [{ name: homeId, in: query, required: true, schema: { type: string } }, { name: homeMembershipId, in: query, required: true, schema: { type: string } }, { name: streamId, in: query, required: false, schema: { type: string } }, { name: sequence, in: query, required: false, schema: { type: integer, minimum: 0 } }]
+      responses: { "200": { description: Authenticated ordered dinodia.v1 event stream; current authorization is rechecked. }, "401": { $ref: "#/components/responses/Unauthorized" }, "403": { $ref: "#/components/responses/Forbidden" } }
+  /api/dinodia/v1/commands/{commandId}:
+    servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
+    get:
+      operationId: getCommandReceipt
+      tags: [Devices]
+      security: [{ CustomerBearer: [] }]
+      parameters: [{ name: commandId, in: path, required: true, schema: { type: string } }]
+      responses: { "200": { description: Accepted, completed, rejected, uncertain or expired command receipt. }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { description: Receipt is not visible in the current home/membership scope. } }
+  /api/dinodia/v1/commissioning/sessions:
+    servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
+    post:
+      operationId: createCommissioningSession
+      tags: [Devices]
+      security: [{ CustomerBearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/commissioning" } } } }
+      responses: { "201": { description: Fifteen-minute bounded commissioning session. }, "401": { $ref: "#/components/responses/Unauthorized" }, "403": { $ref: "#/components/responses/Forbidden" } }
+  /api/dinodia/v1/commissioning/sessions/{sessionId}:
+    servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
+    get:
+      operationId: getCommissioningSession
+      tags: [Devices]
+      security: [{ CustomerBearer: [] }]
+      parameters: [{ name: sessionId, in: path, required: true, schema: { type: string } }]
+      responses: { "200": { description: Current bounded commissioning candidates and terminal state. }, "404": { description: Session is unavailable or outside current membership scope. } }
+    delete:
+      operationId: cancelCommissioningSession
+      tags: [Devices]
+      security: [{ CustomerBearer: [] }]
+      parameters: [{ name: sessionId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses: { "204": { description: Session cancelled and setup material removed. }, "404": { description: Session is unavailable or outside current membership scope. } }
+  /api/dinodia/v1/support/exchange:
+    servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
+    post:
+      operationId: exchangeSupportCodeAtHub
+      tags: [Support]
+      security: [{ EmployeeBearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/supportCodeExchange" } } } }
+      responses: { "200": { description: Scope-bound support session; no dashboard principal is created. }, "403": { $ref: "#/components/responses/Forbidden" }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/dinodia/v1/support/session/status:
+    servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
+    get:
+      operationId: getSupportSessionStatus
+      tags: [Support]
+      security: [{ SupportSession: [] }]
+      responses: { "200": { description: Redacted current scope and absolute expiry; no reusable proof is returned. }, "401": { $ref: "#/components/responses/Unauthorized" } }
+  /api/dinodia/v1/support/session/end:
+    servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
+    post:
+      operationId: endSupportSession
+      tags: [Support]
+      security: [{ SupportSession: [] }]
+      responses: { "204": { description: Local support authority and sockets revoked. }, "401": { $ref: "#/components/responses/Unauthorized" } }
+  /api/installer/hubs/provision:
+    post:
+      operationId: provisionCertifiedHub
+      tags: [Home]
+      security: [{ EmployeeBearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [pairingCode, workflowId], properties: { pairingCode: { type: string, minLength: 1 }, workflowId: { type: string, minLength: 1 } }, additionalProperties: false } } } }
+      responses: { "200": { description: Assigned-workflow-bound Home and HubInstallation result; pairing secret is not returned. }, "401": { description: Employee session required. }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/installer/hubs/{hubInstallationId}/provisioning-status:
+    get:
+      operationId: getHubProvisioningStatus
+      tags: [Home]
+      parameters: [{ name: hubInstallationId, in: path, required: true, schema: { type: string } }]
+      security: [{ EmployeeBearer: [] }]
+      responses: { "200": { description: Authorized redacted installation and machine-credential lifecycle state. }, "403": { $ref: "#/components/responses/Forbidden" } }
+  /api/installer/hubs/{hubInstallationId}/cloudflare-status:
+    get:
+      operationId: getReservedCloudflareStatus
+      tags: [Home]
+      parameters: [{ name: hubInstallationId, in: path, required: true, schema: { type: string } }]
+      security: [{ EmployeeBearer: [] }]
+      responses: { "200": { description: Current reservation and independently verified CloudURL state. }, "403": { $ref: "#/components/responses/Forbidden" } }
+  /api/hub-provisioning/pairings/advertise:
+    post:
+      operationId: advertiseCertifiedPairingAttempt
+      tags: [Home]
+      security: [{ HubSignature: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "201": { description: Durable pairing attempt with one-way presentation-code hash. }, "401": { $ref: "#/components/responses/Unauthorized" } }
+  /api/hub-provisioning/pairings/{attemptId}/poll:
+    post:
+      operationId: pollPairingAttempt
+      tags: [Home]
+      security: [{ HubSignature: [] }]
+      parameters: [{ name: attemptId, in: path, required: true, schema: { type: string } }]
+      responses: { "200": { description: Current signed challenge or machine-credential delivery envelope. }, "401": { $ref: "#/components/responses/Unauthorized" } }
+  /api/hub-provisioning/pairings/{attemptId}/prove:
+    post:
+      operationId: provePairingChallenge
+      tags: [Home]
+      security: [{ HubSignature: [] }]
+      parameters: [{ name: attemptId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "200": { description: Challenge proof accepted for the registered generation and key. }, "401": { $ref: "#/components/responses/Unauthorized" }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/hub-provisioning/pairings/{attemptId}/ack:
+    post:
+      operationId: acknowledgePairingCredential
+      tags: [Home]
+      security: [{ HubSignature: [] }]
+      parameters: [{ name: attemptId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "200": { description: Exact machine-credential version acknowledged by the paired hub. }, "401": { $ref: "#/components/responses/Unauthorized" }, "409": { $ref: "#/components/responses/Conflict" } }
+components:
+  securitySchemes:
+    CustomerSessionCookie:
+      { type: apiKey, in: cookie, name: dinodia_customer_session }
+    CustomerBearer:
+      { type: http, scheme: bearer, bearerFormat: customer-session }
+    AlexaBearer:
+      { type: http, scheme: bearer, bearerFormat: linked-alexa-account }
+    EmployeeBearer:
+      { type: http, scheme: bearer, bearerFormat: signed-employee-session }
+    HubSignature:
+      { type: http, scheme: bearer, bearerFormat: machine-authenticated-hub-request }
+    SupportSession:
+      { type: http, scheme: bearer, bearerFormat: short-lived-scope-bound-support-session }
+  parameters:
+    HomeId:
+      {
+        name: homeId,
+        in: path,
+        required: true,
+        schema: { type: string, minLength: 1, maxLength: 160 },
+      }
+    DeviceId:
+      {
+        name: deviceId,
+        in: path,
+        required: true,
+        schema: { type: string, minLength: 1, maxLength: 160 },
+      }
+    IfMatch:
+      { name: If-Match, in: header, required: true, schema: { type: string } }
+    IdempotencyKey:
+      {
+        name: Idempotency-Key,
+        in: header,
+        required: true,
+        schema: { type: string, minLength: 16, maxLength: 160 },
+      }
+  responses:
+    Unauthorized:
+      { description: Missing, malformed, expired or revoked customer session }
+    Forbidden:
+      {
+        description: Authenticated principal lacks current membership,
+        role,
+        area or device authority,
+      }
+    Conflict:
+      { description: Revision, descriptor, idempotency or lifecycle conflict }
+    ServiceUnavailable:
+      { description: The selected home hub or required Native V2 authority is unavailable; no alternate backend is attempted }

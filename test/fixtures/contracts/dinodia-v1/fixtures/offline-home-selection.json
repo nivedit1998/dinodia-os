@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "accountId": "account:offline-demo",
+  "generatedAt": "2026-09-27T10:00:00Z",
+  "state": "offline",
+  "candidates": [
+    {
+      "schemaVersion": "dinodia.v1",
+      "grantId": "offline-grant:tenant-one-home",
+      "accountId": "account:offline-demo",
+      "homeId": "home:tenant-one",
+      "homeMembershipId": "membership:tenant-one",
+      "trustedDeviceId": "trusted-device:phone-one",
+      "role": "TENANT",
+      "areaIds": ["area:kitchen"],
+      "membershipRevision": 7,
+      "issuedAt": "2026-09-27T09:00:00Z",
+      "expiresAt": "2026-09-28T09:00:00Z"
+    }
+  ]
+}

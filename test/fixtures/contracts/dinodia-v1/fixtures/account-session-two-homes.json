@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "accountId": "account:multi-home",
+  "memberships": [
+    {
+      "accountId": "account:multi-home",
+      "homeId": "home:owner-property",
+      "homeMembershipId": "membership:owner-property",
+      "role": "OWNER",
+      "status": "active",
+      "areaIds": [],
+      "revision": 3
+    },
+    {
+      "accountId": "account:multi-home",
+      "homeId": "home:tenant-property",
+      "homeMembershipId": "membership:tenant-property",
+      "role": "TENANT",
+      "status": "active",
+      "areaIds": ["area:kitchen"],
+      "revision": 7
+    }
+  ],
+  "expiresAt": "2030-01-01T00:00:00Z"
+}

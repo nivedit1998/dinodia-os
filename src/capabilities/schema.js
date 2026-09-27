@@ -11,6 +11,7 @@ const PARAMETER_TYPES = new Set(["boolean", "number", "string"]);
 const SAFE_SERVICE_RE = /^[a-z][a-z0-9_]{0,31}\.[a-z][a-z0-9_]{0,63}$/;
 const SAFE_SERVICE_DOMAINS = new Set(["homeassistant", "light", "switch", "cover", "climate", "fan", "lock", "vacuum", "humidifier", "button", "number", "select", "text", "media_player"]);
 const VOICE_SEMANTICS = new Set(["power", "brightness", "color_rgb", "color_temperature_kelvin", "target_temperature", "ambient_temperature", "opening_percent", "toggle", "volume", "playback", "motion", "contact", "connectivity"]);
+const NATIVE_SEMANTIC_ROLES = new Set(["power", "brightness", "active_heat_demand", "active_heat_production", "target_temperature", "ambient_temperature", "opening_percentage", "connectivity", "security_lock", "lock_state", "operating_mode", "position", "volume", "color", "state", "unknown"]);
 
 function text(value, fallback = "") {
   const result = String(value === undefined || value === null ? fallback : value).trim();
@@ -100,6 +101,8 @@ function normalizeCapability(input = {}, fallback = {}) {
     bindings,
     constraints,
   };
+  const semanticRole = String(input.semanticRole || fallback.semanticRole || "unknown");
+  result.semanticRole = NATIVE_SEMANTIC_ROLES.has(semanticRole) ? semanticRole : "unknown";
   const voice = input.voice || fallback.voice;
   if (voice && typeof voice === "object" && VOICE_SEMANTICS.has(String(voice.semantic || ""))) {
     result.voice = {
@@ -138,6 +141,7 @@ function manifestFromCapability(capability, entity = {}) {
     idempotency: normalized.idempotency,
     observable: normalized.observable,
     primary: normalized.primary,
+    semanticRole: normalized.semanticRole,
     service: normalized.bindings.length === 1 ? {
       id: normalized.bindings[0].serviceId,
       ...(normalized.bindings[0].parameter ? { parameter: clone(normalized.bindings[0].parameter) } : {}),
@@ -163,6 +167,7 @@ function validateManifest(input) {
   if (Number(input.version) !== CAPABILITY_VERSION) return { ok: false, reason: "unsupported capability version" };
   if (input.runtime !== "dinodia_os") return { ok: false, reason: "unknown capability runtime" };
   if (!KINDS.has(String(input.kind || ""))) return { ok: false, reason: "unsupported capability kind" };
+  if (input.semanticRole !== undefined && !NATIVE_SEMANTIC_ROLES.has(String(input.semanticRole))) return { ok: false, reason: "unsupported semantic role" };
   const serviceItems = Array.isArray(input.services) ? input.services : input.service ? [input.service] : [];
   if (serviceItems.length > MAX_MANIFEST_SERVICES) return { ok: false, reason: "too many services" };
   const bindings = serviceItems.map((service) => {
@@ -190,6 +195,7 @@ function validateManifest(input) {
     idempotency: input.idempotency === "invoke" ? "invoke" : "set_value",
     observable: input.observable !== false,
     primary: Boolean(input.primary),
+    semanticRole: NATIVE_SEMANTIC_ROLES.has(String(input.semanticRole || "unknown")) ? String(input.semanticRole || "unknown") : "unknown",
     ...(bindings.length === 1 ? { service: { id: bindings[0].serviceId, ...(bindings[0].parameter ? { parameter: bindings[0].parameter } : {}) } } : {}),
     ...(bindings.length ? { services: bindings.map((binding) => ({ id: binding.serviceId, ...(binding.parameter ? { parameter: binding.parameter } : {}) })) } : {}),
     constraints,
@@ -226,5 +232,6 @@ module.exports = {
   publicCapability,
   safeServiceId,
   VOICE_SEMANTICS,
+  NATIVE_SEMANTIC_ROLES,
   text,
 };

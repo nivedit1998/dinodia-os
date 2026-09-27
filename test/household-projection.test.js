@@ -35,11 +35,11 @@ test("household projection excludes raw voltage and exposes the merged light con
   assert.equal(calls[1][4].value, 100);
 });
 
-test("Matter multi-endpoint switches use the same surface contract as Zigbee", async () => {
+test("Matter multi-endpoint switches remain switches when the presentation label says light", async () => {
   const { model } = await modelWith(normalizeMatterNode(load("matter/two-endpoint-switch-node.json")));
   const entities = model.entities();
   assert.equal(entities.length, 2);
-  assert.ok(entities.every((item) => item.domain === "light"));
+  assert.ok(entities.every((item) => item.domain === "switch"));
   assert.equal(new Set(entities.map((item) => item.haId)).size, 2);
-  assert.ok(entities.every((item) => item.entity.attributes.dinodia_presentation.semantic_type === "light"));
+  assert.ok(entities.every((item) => item.entity.attributes.dinodia_presentation.semantic_type === "switch"));
 });

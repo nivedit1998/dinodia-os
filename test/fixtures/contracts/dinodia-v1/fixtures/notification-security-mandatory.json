@@ -1,0 +1,1 @@
+{"notificationId":"notification:security-a","homeId":"home:opaque-a","recipientMembershipId":"membership:owner-a","kind":"security","createdAt":"2026-09-27T10:00:00Z","deduplicationKey":"event:security-a:recipient:owner-a","deliveryState":"sent","mandatory":true}

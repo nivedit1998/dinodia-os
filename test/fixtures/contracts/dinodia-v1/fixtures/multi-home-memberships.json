@@ -1,0 +1,1 @@
+{"accountId":"account:one","memberships":[{"homeId":"home:a","homeMembershipId":"membership:a","role":"OWNER","status":"active","areaIds":["area:a"],"revision":2},{"homeId":"home:b","homeMembershipId":"membership:b","role":"TENANT","status":"active","areaIds":["area:b"],"revision":8}]}

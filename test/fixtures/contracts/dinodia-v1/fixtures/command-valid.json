@@ -1,0 +1,1 @@
+{"commandId":"command:opaque-1","homeId":"home:opaque-a","homeMembershipId":"membership:tenant-a","deviceId":"device:opaque-1","controlId":"control:brightness","descriptorRevision":4,"value":25,"issuedAt":"2026-09-27T10:00:00Z","idempotencyKey":"fixture-idempotency-key-001"}

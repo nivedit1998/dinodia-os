@@ -19,7 +19,7 @@ test("device setup promotes one assignment into multiple light control surfaces"
   const device = normalizeZigbeeDevice({
     friendly_name: "three-gang-switch",
     ieee_address: "0x00124b0001",
-    definition: { vendor: "SONOFF", model: "Switch", exposes: [{ type: "switch", features: [
+    definition: { vendor: "SONOFF", model: "Dimming light", exposes: [{ type: "light", features: [
       { type: "binary", property: "state_l1", access: 7 },
       { type: "binary", property: "state_l2", access: 7 },
       { type: "binary", property: "state_l3", access: 7 },
@@ -57,7 +57,7 @@ test("device setup promotes one assignment into multiple light control surfaces"
   assert.equal(model.entityRegistry().every((item) => item.area_id === area.id), true);
   await model.callService("light", "turn_on", { entity_id: publicEntities[0].haId, brightness: 100 });
   assert.equal(calls.length, 2);
-  assert.equal(calls[0][2], "switch.turn_on");
+  assert.equal(calls[0][2], "light.turn_on");
   assert.equal(calls[0][1].stateKey, "state_l1");
   assert.equal(calls[0][3].brightness, 100);
   assert.equal(calls[1][2], "number.set_value");
@@ -68,6 +68,22 @@ test("device setup promotes one assignment into multiple light control surfaces"
   assert.equal(cleared.setup.status, "needs_setup");
   assert.equal(Object.keys(cleared.presentation.surfaces).length, 0);
   assert.equal(model.entities().length, 0);
+});
+
+test("presentation labels cannot promote a switch to a light capability", async () => {
+  const store = await testStore();
+  const area = await store.saveArea({ name: "Hall" }, "hall");
+  const device = normalizeZigbeeDevice({
+    friendly_name: "plain-switch",
+    ieee_address: "0x00124b0002",
+    definition: { vendor: "Test", model: "Switch", exposes: [{ type: "switch", features: [{ type: "binary", property: "state", access: 7 }] }] },
+  });
+  await store.upsertDevice(device);
+  const updated = await store.completeDeviceSetup(device.id, { areaId: area.id, labelId: "light" });
+  const [surface] = Object.values(updated.presentation.surfaces);
+  assert.equal(surface.domain, "switch");
+  assert.deepEqual(surface.labels, []);
+  assert.equal(updated.presentation.selectedLabel, "light");
 });
 
 test("radiator setup produces one climate surface from Matter thermostat capabilities", async () => {

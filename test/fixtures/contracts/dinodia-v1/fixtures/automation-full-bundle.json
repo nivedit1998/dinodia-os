@@ -1,0 +1,1 @@
+{"id":"automation:opaque-1","homeId":"home:opaque-a","revision":5,"name":"Evening light","enabled":true,"trigger":{"kind":"schedule","schedule":{"timezone":"Europe/London","daysOfWeek":[1,2,3,4,5],"localTime":"19:00"}},"actions":[{"deviceId":"device:opaque-1","controlId":"control:power","descriptorRevision":4,"value":true}],"status":"active"}

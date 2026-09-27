@@ -68,7 +68,8 @@ test("device setup API returns separated controls and commits one device-level a
   assert.equal(saved.body.setup.status, "ready");
   assert.equal(saved.body.device.name, "Kitchen lights");
   assert.equal(saved.body.surfacePreview.surfaces.length, 1);
-  assert.equal(saved.body.surfacePreview.surfaces[0].domain, "light");
+  // The selected label is presentation-only; the adapter declares this as a switch.
+  assert.equal(saved.body.surfacePreview.surfaces[0].domain, "switch");
 
   const capabilities = await request(base, `/_dinodia/admin/api/devices/${encodeURIComponent(device.id)}/capabilities`);
   assert.equal(capabilities.body.controlsShownInApps.length, 1);
@@ -77,7 +78,8 @@ test("device setup API returns separated controls and commits one device-level a
   assert.equal(capabilities.body.presentation.status, "ready");
 
   const cleared = await request(base, `/_dinodia/admin/api/devices/${encodeURIComponent(device.id)}/setup`, { method: "PUT", body: JSON.stringify({ areaId: area.id, labelId: "not-approved" }) });
-  assert.equal(cleared.response.status, 400);
+  assert.equal(cleared.response.status, 200);
+  assert.equal(cleared.body.surfacePreview.surfaces[0].domain, "switch");
   await hub.stop();
 });
 

@@ -1,0 +1,1 @@
+{"context":{"homeId":"home:opaque-a","homeMembershipId":"membership:tenant-a"},"device":{"id":"device:private-1","homeId":"home:opaque-a","managementClass":"tenant_device","ownerMembershipId":"membership:tenant-b","lifecycle":"installed","technicalLabel":"sensor","customerLabel":"Bedroom","areaIds":["area:private"],"descriptorRevision":1,"controls":[]}}

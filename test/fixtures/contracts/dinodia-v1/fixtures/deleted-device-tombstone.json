@@ -1,0 +1,1 @@
+{"schemaVersion":"dinodia.v1","homeId":"home:opaque-a","streamId":"stream:hub-a","sequence":44,"generatedAt":"2026-09-27T10:00:00Z","revision":44,"data":{"kind":"device_tombstone","deviceId":"device:retired","deviceRevision":11,"deletedAt":"2026-09-27T09:59:59Z","historicalAnalyticsRetained":true}}

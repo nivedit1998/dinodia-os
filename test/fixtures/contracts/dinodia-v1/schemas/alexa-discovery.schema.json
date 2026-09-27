@@ -1,0 +1,5 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dinodiasmartliving.com/contracts/dinodia-v1/schemas/alexa-discovery.schema.json",
+  "$ref": "./contract.json#/$defs/alexaDiscoveryProjection"
+}

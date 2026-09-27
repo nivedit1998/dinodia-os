@@ -24,6 +24,20 @@ function attributesFor(clusterId, clusterValue) {
   return Object.entries(source);
 }
 
+function semanticRoleFor(clusterId, attributeId) {
+  const clusterKey = String(clusterId);
+  const attributeKey = String(attributeId);
+  if (clusterKey === CLUSTERS.onoff && attributeKey === "0") return "power";
+  if (clusterKey === CLUSTERS.levelcontrol && attributeKey === "0") return "brightness";
+  if (clusterKey === CLUSTERS.thermostat && attributeKey === "0") return "ambient_temperature";
+  if (clusterKey === CLUSTERS.thermostat && attributeKey === "18") return "target_temperature";
+  if (clusterKey === CLUSTERS.thermostat && attributeKey === "28") return "operating_mode";
+  if (clusterKey === CLUSTERS.doorlock) return "security_lock";
+  if (clusterKey === CLUSTERS.windowcovering && ["8", "10"].includes(attributeKey)) return "opening_percentage";
+  if (clusterKey === CLUSTERS.fancontrol && ["0", "2"].includes(attributeKey)) return "operating_mode";
+  return "unknown";
+}
+
 function serviceFor(clusterId, attributeId, descriptor, endpoint, rawDescriptor = null) {
   const clusterInfo = cluster(clusterId);
   const clusterKey = String(clusterId);
@@ -71,7 +85,7 @@ function serviceFor(clusterId, attributeId, descriptor, endpoint, rawDescriptor 
   const endpointId = normalizeEndpoint(endpoint?.endpoint_id ?? endpoint?.endpointId ?? endpoint?.id ?? "0");
   const logicalKey = normalizeLogicalKey(`${clusterInfo.name}_${name}`);
   const unit = descriptor?.unit || clusterInfo.attributes?.[String(attributeId)]?.unit;
-  const capability = normalizeCapability({ runtime: "dinodia_os", kind, category, readable: true, writable, observable: true, primary: clusterId === CLUSTERS.onoff || clusterId === CLUSTERS.levelcontrol, stateKey: logicalKey, unit, deviceClass: descriptor?.device_class, constraints: descriptor, bindings });
+  const capability = normalizeCapability({ runtime: "dinodia_os", kind, category, readable: true, writable, observable: true, primary: clusterId === CLUSTERS.onoff || clusterId === CLUSTERS.levelcontrol || clusterId === CLUSTERS.thermostat && attributeId === "18", semanticRole: semanticRoleFor(clusterId, attributeId), stateKey: logicalKey, unit, deviceClass: descriptor?.device_class, constraints: descriptor, bindings });
   return {
     id: `${endpointId}:${logicalKey}`,
     sourceId: `${endpointId}:${clusterId}:${attributeId}`,
@@ -144,4 +158,4 @@ function normalizeMatterNode(node = {}) {
   };
 }
 
-module.exports = { normalizeMatterNode, serviceFor, fallbackStateEntities, CLUSTERS };
+module.exports = { normalizeMatterNode, serviceFor, fallbackStateEntities, semanticRoleFor, CLUSTERS };

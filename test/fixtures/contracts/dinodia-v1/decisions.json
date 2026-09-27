@@ -1,0 +1,357 @@
+{
+  "version": "dinodia.v1",
+  "identifiers": {
+    "wireType": "opaque-string",
+    "homeScoped": ["areaId", "deviceId"],
+    "membershipScopedContext": ["homeId", "homeMembershipId"],
+    "managementClassWireValues": ["property_device", "tenant_device"],
+    "idsAreNotParsedForAuthority": true
+  },
+  "limits": {
+    "areasPerHome": 128,
+    "visibleDevicesPerHome": 512,
+    "controlsPerDevice": 64,
+    "descriptorBytesPerControl": 4096,
+    "snapshotDevicesPerPage": 100,
+    "decodedPageBytes": 2097152,
+    "syncEventsPerBatch": 200,
+    "syncBatchBytes": 524288,
+    "syncRequestBodyBytes": 1048576,
+    "outboxDays": 30,
+    "outboxEvents": 100000,
+    "outboxBytes": 268435456,
+    "syncReceiptDays": 7,
+    "mutationIdempotencyHours": 24,
+    "listDefault": 50,
+    "listMaximum": 100,
+    "sensitiveStepUpSeconds": 120,
+    "hubAccessTokenSeconds": 300,
+    "heartbeatSeconds": 120,
+    "hubOnlineSeconds": 420,
+    "commissioningSeconds": 900,
+    "commissioningCandidateMaximum": 32,
+    "automationMaximumPerHome": 100,
+    "automationActionsMaximum": 32,
+    "automationNameCharacters": 60,
+    "automationTargetTextCharacters": 128,
+    "supportCodeSeconds": 600,
+    "supportSessionMaximumSeconds": 1800,
+    "claimReservationSeconds": 1800,
+    "roomRequestDays": 7,
+    "invitationDays": 7,
+    "analyticsRetentionMonths": 12,
+    "notificationReceiptDays": 30
+  },
+  "text": {
+    "areaAndDeviceNameCharacters": [1, 80],
+    "customerLabelCharacters": [1, 40],
+    "installationNotesMaximum": 500,
+    "rejectControlCharacters": true,
+    "rejectBidiOverrides": true,
+    "normalizeIdsNotDisplayNames": true
+  },
+  "retries": {
+    "safeReadsMaximumAttempts": 3,
+    "fullJitterSeconds": [0.5, 1, 2],
+    "mutationRetryRequiresIdempotencyKey": true,
+    "uncertainCommandMustQueryReceiptBeforeRedispatch": true,
+    "platformTimeoutSeconds": 10
+  },
+  "sync": {
+    "retryFullJitterSeconds": [1, 300],
+    "singleInflightBatchPerHub": true,
+    "dispatcherExecutionSeconds": 45,
+    "taskRowsMaximum": 500,
+    "taskTurnSeconds": 8,
+    "taskLeaseSeconds": 120,
+    "vercelScheduledMechanisms": [
+      "supabase_pg_cron_pg_net_every_2_minutes_to_vercel_native_operations",
+      "vercel_hobby_daily_native_maintenance"
+    ],
+    "edgeSchedules": 0,
+    "nativeTaskRegistry": [
+      { "taskId": "operator_credential_lifecycle", "owner": "supabase_pg_cron_two_minute" },
+      { "taskId": "support_expiry_and_revocation", "owner": "supabase_pg_cron_two_minute" },
+      { "taskId": "claim_reservation_expiry", "owner": "supabase_pg_cron_two_minute" },
+      { "taskId": "expired_dispatch_lease_cleanup", "owner": "vercel_hobby_daily" }
+    ],
+    "stage2TaskAllocation": [
+      { "taskId": "healthAndIncidentQualification", "dispatcher": "operations", "primaryPath": "signed_heartbeat_or_incident_ingestion", "implementationStage": 4 },
+      { "taskId": "deliveryAndEnforcement", "dispatcher": "operations", "primaryPath": "durable_outbox_and_hub_sync", "implementationStage": 3 },
+      { "taskId": "credentialLifecycle", "dispatcher": "operations", "primaryPath": "staff_mutation_inline", "implementationStage": 1 },
+      { "taskId": "alexaProactiveDelivery", "dispatcher": "operations", "primaryPath": "native_event_ingestion", "implementationStage": 7 },
+      { "taskId": "retentionCleanup", "dispatcher": "maintenance", "primaryPath": "domain_expiry_metadata", "implementationStage": 3 },
+      { "taskId": "expiryAndOrphanCleanup", "dispatcher": "maintenance", "primaryPath": "request_completion_or_cancellation", "implementationStage": 3 },
+      { "taskId": "analyticsAndStorageMaintenance", "dispatcher": "maintenance", "primaryPath": "analytics_ingestion", "implementationStage": 10 }
+    ]
+  },
+  "transportPolicy": {
+    "installerSetup": { "scheme": "http", "path": "/setup", "bonjourScope": "selected_private_lan_interface_only" },
+    "tenantRuntimeLan": { "scheme": "https", "port": 8123, "endpointPattern": "https://dinodia-<publicHubId>.local:8123", "spkiPinRequired": true },
+    "tenantRuntimeCloud": { "scheme": "https", "platformVerifiedCloudUrlRequired": true },
+    "cloudFallbackAfterLanFailures": 2,
+    "lanProbeWindowSeconds": 3,
+    "preferLanAfterSuccessfulProbes": 2,
+    "preferLanAgainAfterSeconds": 30,
+    "ownerManagerDirectHubTransport": false,
+    "thirdTransportFallbackAllowed": false
+  },
+  "offlineAuthority": {
+    "requiresPreviouslyEnrolledTrustedInstallation": true,
+    "bindsExactHomeAndMembership": true,
+    "scopeCannotWidenOffline": true,
+    "offlineEnrollmentAllowed": false,
+    "disconnectOldHomeBeforeTargetChallenge": true,
+    "applyRevocationAndCurrentPolicyBeforeConnected": true,
+    "trustedDeviceRemovalAccountWide": true,
+    "hubRevocationAcknowledgementMayRemainPending": true
+  },
+  "commandPolicy": {
+    "authority": "homeId+homeMembershipId+deviceId+controlId+descriptorRevision",
+    "valueMustMatchDescriptorTypeAndConstraints": true,
+    "currentDescriptorAndWritabilityRequiredAtDispatch": true,
+    "unknownControlReadOnlyOrOmitted": true,
+    "sensitiveProofOperationBoundAndSingleUse": true,
+    "lockAndSecurityAutomation": false,
+    "lockAndSecurityAlexa": false,
+    "labelsGrantCapability": false,
+    "uncertainMutationQueriesReceiptBeforeRetry": true
+  },
+  "consumerEligibility": {
+    "tenantOwnSupportedTenantDeviceMayUseAlexa": true,
+    "otherTenantDeviceMayUseAlexa": false,
+    "ownerManagerDirectHubTransport": false,
+    "nativeCloudOrigin": "https://dinodia-platform-v2.vercel.app",
+    "alternateCloudOrigin": false,
+    "legacyHaRuntime": false,
+    "productionStaticDataFallback": false
+  },
+  "identityAndLifecycle": {
+    "ownerAuthority": "one_active_OWNER_HomeMembership_per_active_home",
+    "multiplePropertyManagersAllowed": true,
+    "invitationCreatesMembership": false,
+    "tenantAreaGrantAuthority": "canonical_area_id_and_current_membership",
+    "tenantDeviceVisibility": "owning_membership_only",
+    "finalRelationshipDeletionCleansAccount": true,
+    "homeMembershipInvitedStatusAllowed": false,
+    "homeOwnerUserIdAuthority": false,
+    "ownershipMergeFromLabelsOrNames": false
+  },
+  "uiAndConnectionStates": {
+    "ownerManagerHomeCloudIndicatorIsSolePersistentConnectionCue": true,
+    "tenantHubUnavailableRetainsDisabledStaleTiles": true,
+    "localLanRuntimeUsesPinnedHttps": true,
+    "installerSetupUsesHttpOnlyOnLan": true,
+    "offlineHomeSelectionRequiresPreviouslyEnrolledExactMembership": true,
+    "offlineCandidateMustMatchAccountMembershipAndTrustedDevice": true,
+    "offlineCandidateSelectionRequiresExactHomeChallenge": true,
+    "offlineCandidateMayNotCreateOrWidenAuthority": true,
+    "commandsAllowedWhenStaleOrOffline": false,
+    "accessRevocationAppliedBeforeConnected": true
+  },
+  "sensitiveOperations": {
+    "catalogueVersion": "dinodia.sensitive.v1",
+    "proofLifetimeSeconds": 120,
+    "singleUse": true,
+    "reusableGrace": false,
+    "requiredBindings": ["actorId", "homeMembershipId", "trustedDeviceId", "operationKind", "targetDigest", "nonce", "expectedRevision"],
+    "operationKinds": ["device.safety_command", "access.grant_change", "tenant.remove", "manager.administer", "automation.intervene", "support.approve", "support.revoke", "trusted_device.revoke", "tenant_device.remove", "account.security_change", "alexa.unlink", "home.transfer", "home.deregister", "account.final_relationship_cleanup"],
+    "normalTemperatureAdjustmentRequiresStepUp": false,
+    "descriptorMarkedSafetyHeatingRequiresStepUp": true,
+    "cancellationExpiryReplayOrTargetMismatchMutates": false
+  },
+  "mobile": {
+    "refreshTokenInactivityDays": 30,
+    "refreshTokenAbsoluteDays": 180,
+    "cacheBytes": 10485760,
+    "cacheProtection": "NSFileProtectionCompleteUntilFirstUserAuthentication",
+    "cacheKey": ["userId", "homeMembershipId", "homeId", "revision"],
+    "lanPreferAfterSuccesses": 2,
+    "cloudFallbackAfterLanFailures": 2,
+    "lanFallbackWindowSeconds": 3,
+    "preferLanAgainAfterSeconds": 30,
+    "singleEventSubscriptionPerHome": true
+  },
+  "hubTransport": {
+    "tenantLiveTransport": "direct-to-selected-OS-BaseURL-or-CloudURL",
+    "ownerManagerTransport": "Vercel-Supabase-projection-only",
+    "runtimeLanEndpointPattern": "https://dinodia-<publicHubId>.local:8123",
+    "hubTlsCertificateMonths": 24,
+    "nextCertificateGenerationDaysBeforeExpiry": 30,
+    "pinRotationOverlapMaximumDays": 30,
+    "heartbeatSigned": true,
+    "hubHoldsDatabaseCredentials": false
+  },
+  "authorityModel": {
+    "ownerMembershipsPerActiveHome": 1,
+    "propertyManagersPerHomeMaximum": "multiple",
+    "roleAuthority": "active-HomeMembership-only",
+    "globalAdminOrTenantRoleGrantsHouseholdAuthority": false,
+    "pendingInvitationCreatesMembership": false,
+    "homeOwnerUserIdAuthority": false,
+    "sameDisplayNameMergesIdentity": false,
+    "samePermanentDeviceIdentityRequiresProtocolEvidence": true,
+    "replacementHubPreservesHomeId": true
+  },
+  "identityLifecycle": {
+    "customerAccountIsGlobal": true,
+    "membershipIsPerHomeAuthority": true,
+    "invitationCreatesMembership": false,
+    "activeOwnerMaximumPerHome": 1,
+    "propertyManagersMayBeMultiple": true,
+    "accountDeletionRemovesFinalRelationshipOnly": true,
+    "accountDeletionRetainsOtherHomeMemberships": true,
+    "retiredDeviceHistoricalAnalyticsRetained": true,
+    "deviceIdentityMergeRequiresProtocolEvidence": true,
+    "nameBasedIdentityMerge": false
+  },
+  "homeLifecycle": {
+    "claimReservationFirstWins": true,
+    "claimReservationSeconds": 1800,
+    "roomQrRetryDays": 7,
+    "invitationReplacementDays": 7,
+    "retainedAddressRequiresExplicitConfirmation": true,
+    "hubReplacementPreservesHomeAndAreaIds": true,
+    "offlineDeregistrationRemainsPendingUntilAcknowledged": true
+  },
+  "areaAuthority": {
+    "areaWireNames": ["originalName", "overrideName"],
+    "displayNameUniquenessNotRequired": true,
+    "membershipAreaGrantsAreCanonicalIds": true,
+    "retiredAreaRejectsNewAssignment": true,
+    "emptyAreaIsValid": true
+  },
+  "controlPolicy": {
+    "labelAuthority": false,
+    "displayNameAuthority": false,
+    "protocolGuessAuthority": false,
+    "currentDescriptorRequiredForWrites": true,
+    "descriptorChangeInvalidatesPendingCommand": true,
+    "unknownInteractionSafeFallback": "read_only_or_omit",
+    "appOnlySecurityManualStepUp": true,
+    "appOnlySecurityAutomation": false,
+    "appOnlySecurityAlexa": false
+  },
+  "uiStates": {
+    "vocabulary": ["restoring_session", "loading", "ready", "empty", "stale", "offline", "denied", "expired", "uncertain", "maintenance", "error"],
+    "staleOrOfflineCommandsAllowed": false,
+    "ambiguousMutationQueriesReceiptBeforeRetry": true,
+    "selectedHomeRequiredBeforeFeatureData": true
+  },
+  "notifications": {
+    "audienceFromCurrentAuthority": true,
+    "deliveryChannels": ["push", "verified_email"],
+    "sms": false,
+    "inbox": false,
+    "quietHoursDefaultEnabled": false,
+    "deliveryAttemptsMaximum": 8,
+    "deliveryRetryHoursMaximum": 24,
+    "deliveryReceiptDays": 30,
+    "tenantDeviceEventAudience": "owning_membership_only",
+    "hubIncidentSuppressesCausedDeviceAlerts": true,
+    "mandatorySecurityEventsIgnoreQuietHours": true,
+    "deduplicateByEventAndRecipient": true,
+    "deliveryReceiptIsNotAuthority": true
+  },
+  "provisioning": {
+    "hubOwnsDiscoveryAndCapabilityDescriptors": true,
+    "platformOwnsHomeMembershipAndCloudProjection": true,
+    "cloudUrlMustBeIndependentlyVerified": true,
+    "manufacturingRootPrivateKeyOnHub": false
+  },
+  "distribution": {
+    "customerBundleIsSeparateFromOldApp": true,
+    "oldAppImportAllowed": false,
+    "oldAppSessionReuseAllowed": false,
+    "apnsKeychainAndDeepLinkNamespaceMustBeV2Specific": true
+  },
+  "retentionAndOperations": {
+    "noInitialAnalyticsRollup": true,
+    "analyticsRawRetentionMonths": 12,
+    "anonymousSecurityReceiptMonths": 12,
+    "supportCodeSeconds": 600,
+    "supportSessionMaximumSeconds": 1800,
+    "supportTicketAccountRetentionAuthority": false,
+    "roomRequestDays": 7,
+    "membershipIndefiniteUntilManualRemoval": true,
+    "nativeAutomationFamilies": 1,
+    "nativeAlexaFamilies": 1,
+    "alexaAreaAuthorityRelational": true,
+    "alexaConnectionPerActiveTenantMembership": 1
+  },
+  "routeFamilies": [
+    "/api/v2/session/*",
+    "/api/v2/homes/:homeId/context",
+    "/api/v2/homes/:homeId/access-policy",
+    "/api/v2/homes/:homeId/overrides",
+    "/api/v2/homes/:homeId/preferences",
+    "/api/v2/homes/:homeId/analytics/*",
+    "/api/v2/homes/:homeId/property-managers/*",
+    "/api/v2/tenant/devices/:deviceId/*",
+    "/api/v2/tenant/account/delete",
+    "/api/v2/notifications/*",
+    "/api/v2/homes/:homeId/activity",
+    "/api/v2/trusted-devices/*",
+    "/api/v2/support/tickets/*"
+  ],
+  "analytics": {
+    "activityCategories": ["light", "radiator", "boiler"],
+    "lightOnWhenPowerOnOrBrightnessAboveZero": true,
+    "radiatorOnRequiresActiveHeatDemand": true,
+    "boilerOnRequiresActiveHeatProduction": true,
+    "expiredOrUnreliableTelemetryIsUnknown": true,
+    "targetTemperatureIsActivity": false,
+    "tenantDeviceIncluded": false,
+    "onRules": {
+      "light": "reported power on OR brightness > 0",
+      "radiator": "reported active heat demand",
+      "boiler": "reported active heat production"
+    },
+    "unreliableOrExpired": "unknown",
+    "usageUnits": ["minutes_on", "minutes_off", "minutes_unknown"],
+    "temperature": "radiator temperature only",
+    "periodAggregation": "average contributing device samples for year/month/week/day",
+    "hourAggregation": "sum selected devices per hour",
+    "summaryAggregation": "average displayed buckets",
+    "initialRollupTable": false
+  },
+  "automations": {
+    "oneScheduleTrigger": true,
+    "fullHomeBundle": true,
+    "deterministicSort": true,
+    "atomicApply": true,
+    "maximumOccurrences": 500,
+    "maximumExecutionSummaries": 500,
+    "historyDays": 90,
+    "locksAndSecurityAllowed": false
+  },
+  "alexa": {
+    "activeMembershipRole": "TENANT",
+    "selectedAreaIdsAreAuthoritative": true,
+    "tenantDeviceEligibleOnlyForOwningMembership": true,
+    "appOnlySecurityControlsExcludedRegardlessOfClientFlags": true,
+    "exposureGeneration": "monotonic per active tenant membership",
+    "endpointId": "dos_ plus SHA-256(homeId || NUL || deviceId); never expose canonical identifiers",
+    "supportedSemanticRoles": [
+      "power",
+      "brightness",
+      "target_temperature",
+      "ambient_temperature",
+      "opening_percentage",
+      "position",
+      "volume"
+    ],
+    "canonicalPlatformOrigin": "https://dinodia-platform-v2.vercel.app"
+  },
+  "privacy": {
+    "tenantDeviceVisibleOnlyToOwningMembership": true,
+    "ownerManagerTenantDevicesOmitted": true,
+    "ownerControlTransport": "cloud-projection-only",
+    "tenantLiveTransport": "direct-os",
+    "customerAndEmployeeIdentitiesSeparate": true,
+    "oldAppSessionReuse": false,
+    "staticOrHaFallback": false,
+    "canonicalPlatformOrigin": "https://dinodia-platform-v2.vercel.app",
+    "customerAppName": "Dinodia Smart Living"
+  }
+}

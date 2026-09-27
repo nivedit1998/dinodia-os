@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "now": "2026-09-27T10:02:00Z",
+  "activityCases": [
+    { "id": "light-power-on", "category": "light", "quality": "fresh", "validUntil": "2026-09-27T10:03:00Z", "signals": { "powerOn": true, "brightness": 0 }, "expected": "on" },
+    { "id": "light-brightness-on", "category": "light", "quality": "fresh", "validUntil": "2026-09-27T10:03:00Z", "signals": { "powerOn": false, "brightness": 1 }, "expected": "on" },
+    { "id": "light-reliably-off", "category": "light", "quality": "fresh", "validUntil": "2026-09-27T10:03:00Z", "signals": { "powerOn": false, "brightness": 0 }, "expected": "off" },
+    { "id": "light-no-activity-signal", "category": "light", "quality": "fresh", "validUntil": "2026-09-27T10:03:00Z", "signals": {}, "expected": "unknown" },
+    { "id": "radiator-demand", "category": "radiator", "quality": "fresh", "validUntil": "2026-09-27T10:03:00Z", "signals": { "activeHeatDemand": true, "targetTemperature": 22 }, "expected": "on" },
+    { "id": "radiator-satisfied", "category": "radiator", "quality": "fresh", "validUntil": "2026-09-27T10:03:00Z", "signals": { "activeHeatDemand": false, "targetTemperature": 22 }, "expected": "off" },
+    { "id": "radiator-target-only", "category": "radiator", "quality": "fresh", "validUntil": "2026-09-27T10:03:00Z", "signals": { "targetTemperature": 22 }, "expected": "unknown" },
+    { "id": "boiler-producing", "category": "boiler", "quality": "fresh", "validUntil": "2026-09-27T10:03:00Z", "signals": { "activeHeatProduction": true, "mode": "heat" }, "expected": "on" },
+    { "id": "boiler-mode-only", "category": "boiler", "quality": "fresh", "validUntil": "2026-09-27T10:03:00Z", "signals": { "mode": "heat", "targetTemperature": 21 }, "expected": "unknown" },
+    { "id": "expired-telemetry", "category": "light", "quality": "fresh", "validUntil": "2026-09-27T10:02:00Z", "signals": { "powerOn": true }, "expected": "unknown" },
+    { "id": "stale-telemetry", "category": "boiler", "quality": "stale", "validUntil": "2026-09-27T10:03:00Z", "signals": { "activeHeatProduction": true }, "expected": "unknown" },
+    { "id": "unsupported-category", "category": "none", "quality": "fresh", "validUntil": "2026-09-27T10:03:00Z", "signals": { "powerOn": true }, "expected": "unknown" }
+  ],
+  "aggregation": {
+    "periodSamples": [
+      { "bucket": "day-a", "onMinutes": 10, "offMinutes": 20, "unknownMinutes": 30 },
+      { "bucket": "day-a", "onMinutes": 30, "offMinutes": 40, "unknownMinutes": 50 },
+      { "bucket": "day-b", "onMinutes": 9, "offMinutes": 8, "unknownMinutes": 7 }
+    ],
+    "periodExpected": [
+      { "bucket": "day-a", "onMinutes": 20, "offMinutes": 30, "unknownMinutes": 40 },
+      { "bucket": "day-b", "onMinutes": 9, "offMinutes": 8, "unknownMinutes": 7 }
+    ],
+    "hourSamples": [
+      { "bucket": "10:00", "onMinutes": 5, "offMinutes": 2, "unknownMinutes": 1 },
+      { "bucket": "10:00", "onMinutes": 15, "offMinutes": 3, "unknownMinutes": 4 },
+      { "bucket": "11:00", "onMinutes": 0, "offMinutes": 7, "unknownMinutes": 0 }
+    ],
+    "hourExpected": [
+      { "bucket": "10:00", "onMinutes": 20, "offMinutes": 5, "unknownMinutes": 5 },
+      { "bucket": "11:00", "onMinutes": 0, "offMinutes": 7, "unknownMinutes": 0 }
+    ],
+    "displayedBuckets": [
+      { "onMinutes": 10, "offMinutes": 20, "unknownMinutes": 30 },
+      { "onMinutes": 30, "offMinutes": 40, "unknownMinutes": 50 }
+    ],
+    "summaryExpected": { "onMinutes": 20, "offMinutes": 30, "unknownMinutes": 40 }
+  }
+}

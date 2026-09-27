@@ -52,6 +52,7 @@ const { OfflineLanAuthorisationStore, digestOfflineCommand } = require("./auth/o
 const { StepUpProofVerifier, descriptorBoundValue, digestOperation } = require("./auth/stepUpProofVerifier");
 const { IdentityBrokerClient, canonicalCloudChallengeUnsigned } = require("./auth/identityBroker");
 const { createSupportProofOfPossession } = require("./auth/supportProofOfPossession");
+const { validateMembership: validateNativeMembership, serializeDevice: serializeNativeDevice, validateCommand: validateNativeCommand, makeEnvelope: makeNativeEnvelope } = require("./contracts/dinodiaV1");
 
 const VERSION = require("../package.json").version;
 
@@ -59,6 +60,12 @@ function safeEqual(left, right) {
   const a = Buffer.from(String(left || ""));
   const b = Buffer.from(String(right || ""));
   return a.length > 0 && a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+  return JSON.stringify(value === undefined ? null : value);
 }
 
 function hashTokenValue(value) {
@@ -408,6 +415,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   let heatingDemandController;
   let alexaIntegration;
   let haModel;
+  let nativeCommandQueue = Promise.resolve();
   const activity = new ActivityService({ store: hubStore, eventBus, logger });
   let activityIntegrationTimer = null;
   let electricTimer = null;
@@ -657,6 +665,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       let nextState;
       if (sourceService === "number.set_value") nextState = data.value;
       else if (sourceService === "select.select_option") nextState = data.option;
+      else if (sourceService === "lock.lock") nextState = "LOCKED";
+      else if (sourceService === "lock.unlock") nextState = "UNLOCKED";
       else if (["turn_on", "turn_off", "toggle"].includes(sourceService.split(".").pop())) {
         const operation = sourceService.split(".").pop();
         const current = String(entity.state || "").toUpperCase();
@@ -1236,6 +1246,15 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
 
   function appCanReadDevice(principal, device) {
     if (!principal || !["app", "offline"].includes(principal.principalType) || !device) return false;
+    if (!validateNativeMembership({
+      accountId: String(principal.sub || ""),
+      homeId: String(principal.homeId || ""),
+      homeMembershipId: String(principal.membershipId || ""),
+      role: String(principal.householdRole || ""),
+      status: "active",
+      areaIds: Array.isArray(principal.areaIds) ? principal.areaIds.map(String) : [],
+      revision: Number(principal.policyRevision),
+    }, String(principal.homeId || ""))) return false;
     // Homeowners and property managers use the Supabase projection. They do
     // not receive a local OS read or command authority, even when they have a
     // valid property:read token.
@@ -1244,8 +1263,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     const areaId = String(device.areaId || device.metadata?.areaId || "");
     if (!areaId || !areaIds.has(areaId)) return false;
     const ownerMembershipId = String(device.tenantOwnerMembershipId || device.metadata?.tenantOwnerMembershipId || "");
-    const label = String(device.metadata?.label || device.label || device.definition?.analyticsLabel || "").toLowerCase();
-    const privateDevice = label === "tenant_device" || Boolean(ownerMembershipId);
+    const managementClass = String(device.managementClass || device.metadata?.managementClass || "");
+    const privateDevice = managementClass === "tenant_device" || Boolean(ownerMembershipId);
     // The durable membership is the only tenant-device authority. The legacy
     // account-level tenantOwnerId is deliberately ignored and can never grant
     // access, even if it happens to match the current account.
@@ -1267,6 +1286,54 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     return String(descriptor.controlId || capability.controlId || descriptor.id) === controlId;
   }
 
+  function nativeCommandBinding(control, entity) {
+    const bindings = Array.isArray(entity?.capability?.bindings) ? entity.capability.bindings : [];
+    if (!bindings.length) return null;
+    const role = String(control.semanticRole || "");
+    if (control.valueType === "boolean") {
+      const ending = role === "security_lock" || role === "lock_state"
+        ? (control.value ? "unlock" : "lock")
+        : (control.value ? "turn_on" : "turn_off");
+      return bindings.find((binding) => String(binding.serviceId || "").toLowerCase().endsWith(`.${ending}`)) || null;
+    }
+    if (control.valueType === "number") {
+      return bindings.find((binding) => ["number.set_value", "climate.set_temperature", "light.turn_on", "fan.set_percentage", "cover.set_cover_position"].includes(String(binding.serviceId || "").toLowerCase())) || null;
+    }
+    if (control.valueType === "option") {
+      return bindings.find((binding) => ["select.select_option", "climate.set_hvac_mode", "fan.set_preset_mode"].includes(String(binding.serviceId || "").toLowerCase())) || null;
+    }
+    if (control.valueType === "text") return bindings.find((binding) => String(binding.serviceId || "").toLowerCase() === "text.set_value") || null;
+    return control.valueType === "invoke" && bindings.length === 1 ? bindings[0] : null;
+  }
+
+  function nativeCommandData(serviceId, value) {
+    const service = String(serviceId || "").toLowerCase();
+    if (service === "number.set_value") return { value };
+    if (service === "climate.set_temperature") return { temperature: value };
+    if (service === "light.turn_on") return { brightness: value };
+    if (service === "fan.set_percentage") return { percentage: value };
+    if (service === "cover.set_cover_position") return { position: value };
+    if (service === "select.select_option") return { option: value };
+    if (service === "climate.set_hvac_mode") return { hvac_mode: value };
+    if (service === "fan.set_preset_mode") return { preset_mode: value };
+    if (service === "text.set_value") return { value };
+    if (service.endsWith(".press")) return {};
+    return {};
+  }
+
+  async function dispatchNativeCommand(principal, device, control, value) {
+    const raw = Object.values(device.entities || {}).find((entity) => String(entity.id || entity.sourceId || "") === String(control.controlId));
+    if (!raw) return false;
+    const surface = allProjectedSurfaces(device).find((candidate) => String(candidate.id) === String(control.surfaceId) && (candidate.sourceEntityIds || []).map(String).includes(String(raw.id || raw.sourceId)));
+    if (!surface || surface.capability?.writable === false) return false;
+    const binding = nativeCommandBinding({ ...control, value }, raw);
+    const serviceId = String(binding?.serviceId || "").toLowerCase();
+    const dot = serviceId.indexOf(".");
+    if (!binding || dot < 1 || !appCanCommandDevice(principal, device, { controlId: control.controlId }, raw, serviceId)) return false;
+    await commandEntity(device, raw, serviceId, nativeCommandData(serviceId, value), {});
+    return true;
+  }
+
   function isSupportOperator(principal) {
     return Boolean(principal?.principalType === "operator" && principal.scope?.includes("os:support"));
   }
@@ -1276,14 +1343,20 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     const areaIds = new Set((principal.areaIds || []).map(String));
     if (areaIds.size > 0 && device.areaId && !areaIds.has(String(device.areaId))) return false;
     const ownerMembershipId = String(device.tenantOwnerMembershipId || device.metadata?.tenantOwnerMembershipId || "");
-    const label = String(device.metadata?.label || device.label || device.definition?.analyticsLabel || "").toLowerCase();
-    const privateDevice = label === "tenant_device" || Boolean(ownerMembershipId);
+    const managementClass = String(device.managementClass || device.metadata?.managementClass || "");
+    const privateDevice = managementClass === "tenant_device" || Boolean(ownerMembershipId);
     if (!privateDevice) return true;
     return principal.supportScope === "TENANT_SCOPE" && principal.includesTenantDevices === true && ownerMembershipId === String(principal.targetMembershipId || "");
   }
 
   function supportPathAllowed(pathname) {
     return pathname === "/api/status" || pathname === "/api/areas" || pathname === "/api/devices" || /^\/api\/devices\/[^/]+(?:\/support-bundle|\/capabilities)?$/.test(pathname);
+  }
+
+  function runNativeCommandSerial(task) {
+    const result = nativeCommandQueue.then(task, task);
+    nativeCommandQueue = result.then(() => undefined, () => undefined);
+    return result;
   }
 
   async function handleApi(req, res, url) {
@@ -1317,7 +1390,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       return json(res, 403, { error: "Support sessions are read-only and limited to assigned diagnostics", errorCode: "support_scope_denied" });
     }
     if (scopedPrincipal && !(
-      (req.method === "GET" && (pathname === "/api/status" || pathname === "/api/devices" || pathname.startsWith("/api/devices/"))) ||
+      (req.method === "GET" && (pathname === "/api/status" || pathname === "/api/devices" || pathname.startsWith("/api/devices/") || pathname === "/api/dinodia/v1/devices")) ||
+      (req.method === "POST" && pathname === "/api/dinodia/v1/commands") ||
       (req.method === "POST" && pathname.includes("/entities/") && pathname.endsWith("/service")) ||
       (req.method === "POST" && pathname === "/api/step-up/descriptor-challenge")
     )) {
@@ -1332,6 +1406,112 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         memory: { rssMb: Math.round(memory.rss / 1024 / 1024), heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024) },
         storeSchemaVersion: hubStore.state?.version || 0,
       integrations: { mqtt: mqtt.status(), matter: matter.status(), hive: hive.status(), googleNest: googleNest.status() },
+      });
+    }
+
+    // Canonical Stage 2 read boundary. The bearer remains home- and
+    // membership-bound; internal HA-compatible records are projected to the
+    // versioned Native DTO and never returned from this route.
+    if (pathname === "/api/dinodia/v1/devices" && req.method === "GET") {
+      if (!scopedPrincipal || scopedPrincipal.principalType !== "app" || scopedPrincipal.householdRole !== "TENANT") {
+        return json(res, 403, { error: { code: "INSUFFICIENT_SCOPE", message: "A selected tenant membership is required", requestId: crypto.randomUUID() } });
+      }
+      const now = new Date().toISOString();
+      const areaIds = Array.isArray(scopedPrincipal.areaIds) ? scopedPrincipal.areaIds.map(String) : [];
+      const devices = hubStore.listDevices()
+        .filter((device) => appCanReadDevice(scopedPrincipal, device))
+        .map((device) => serializeNativeDevice({
+          device,
+          homeId: String(scopedPrincipal.homeId),
+          homeMembershipId: String(scopedPrincipal.membershipId),
+          role: String(scopedPrincipal.householdRole),
+          areaIds,
+          surfaces: allProjectedSurfaces(device),
+          revision: Number(device.presentation?.descriptorRevision || 0),
+        }))
+        .filter(Boolean);
+      const revision = devices.reduce((highest, device) => Math.max(highest, device.descriptorRevision), 0);
+      const envelope = makeNativeEnvelope({
+        homeId: String(scopedPrincipal.homeId),
+        streamId: `hub:${String(serial)}:device-catalog`,
+        sequence: Number(clock()),
+        generatedAt: now,
+        revision,
+        data: devices,
+      });
+      if (!envelope) return json(res, 503, { error: { code: "CONTRACT_PROJECTION_UNAVAILABLE", message: "The current device catalogue cannot be represented safely", requestId: crypto.randomUUID() } });
+      return json(res, 200, envelope);
+    }
+
+    if (pathname === "/api/dinodia/v1/commands" && req.method === "POST") {
+      if (!scopedPrincipal || scopedPrincipal.principalType !== "app" || scopedPrincipal.householdRole !== "TENANT" || !scopedPrincipal.scope.includes("tenant:device-command")) {
+        return json(res, 403, { error: { code: "INSUFFICIENT_SCOPE", message: "A selected tenant command permission is required", requestId: crypto.randomUUID() } });
+      }
+      const command = await readBody(req);
+      const headerKey = String(req.headers["idempotency-key"] || "");
+      if (!headerKey || headerKey !== String(command.idempotencyKey || "")) return json(res, 400, { error: { code: "IDEMPOTENCY_KEY_REQUIRED", message: "The command idempotency header must match the command", requestId: crypto.randomUUID() } });
+      if (command.homeId !== String(scopedPrincipal.homeId) || command.homeMembershipId !== String(scopedPrincipal.membershipId)) return json(res, 403, { error: { code: "HOME_SCOPE_DENIED", message: "The command is outside the selected membership", requestId: crypto.randomUUID() } });
+      const device = hubStore.getDevice(String(command.deviceId || ""));
+      if (!device || !appCanReadDevice(scopedPrincipal, device)) return json(res, 404, { error: { code: "DEVICE_NOT_FOUND", message: "The selected device is unavailable", requestId: crypto.randomUUID() } });
+      const surfaces = allProjectedSurfaces(device);
+      const dto = serializeNativeDevice({ device, homeId: String(scopedPrincipal.homeId), homeMembershipId: String(scopedPrincipal.membershipId), role: String(scopedPrincipal.householdRole), areaIds: (scopedPrincipal.areaIds || []).map(String), surfaces, revision: Number(device.presentation?.descriptorRevision || 0) });
+      if (!dto) return json(res, 409, { error: { code: "DESCRIPTOR_UNAVAILABLE", message: "Refresh the current device controls", requestId: crypto.randomUUID() } });
+      if (Number(command.descriptorRevision) !== dto.descriptorRevision) return json(res, 409, { error: { code: "DESCRIPTOR_STALE", message: "Refresh the current device controls", requestId: crypto.randomUUID() } });
+      const control = dto.controls.find((candidate) => candidate.controlId === command.controlId);
+      if (!control || !validateNativeCommand(command, dto, control, String(scopedPrincipal.membershipId))) return json(res, 400, { error: { code: "COMMAND_INVALID", message: "The command does not match the current control descriptor", requestId: crypto.randomUUID() } });
+      const rawEntity = Object.values(device.entities || {}).find((entity) => String(entity.id || entity.sourceId || "") === String(control.controlId));
+      const binding = nativeCommandBinding({ ...control, value: command.value }, rawEntity);
+      const serviceId = String(binding?.serviceId || "").toLowerCase();
+      if (!rawEntity || !binding || !appCanCommandDevice(scopedPrincipal, device, { controlId: control.controlId }, rawEntity, serviceId)) return json(res, 403, { error: { code: "CONTROL_SCOPE_DENIED", message: "The current control is not writable for this membership", requestId: crypto.randomUUID() } });
+
+      return runNativeCommandSerial(async () => {
+        const security = hubStore.getSecurity?.() || {};
+        const commandResults = { ...(security.nativeCommandResults || {}) };
+        const idempotencyHash = crypto.createHash("sha256").update(`${scopedPrincipal.homeMembershipId || scopedPrincipal.membershipId}\n${headerKey}`, "utf8").digest("hex");
+        const commandDigest = crypto.createHash("sha256").update(stableJson(command), "utf8").digest("hex");
+        const prior = commandResults[idempotencyHash];
+        if (prior) {
+          if (prior.commandDigest !== commandDigest) return json(res, 409, { error: { code: "IDEMPOTENCY_CONFLICT", message: "This idempotency key was used for a different command", requestId: crypto.randomUUID() } });
+          if (prior.status !== "accepted") return json(res, 409, { error: { code: "COMMAND_OUTCOME_UNCERTAIN", message: "The prior command outcome requires status reconciliation; it was not resent", requestId: crypto.randomUUID() } });
+          return json(res, 202, prior.result);
+        }
+
+        const requiresStepUp = control.stepUpPolicy === "required" || ["security_lock", "lock_state"].includes(control.semanticRole);
+        if (requiresStepUp) {
+          const proof = String(req.headers["x-dinodia-step-up-proof"] || "");
+          const descriptorDigest = device.presentation?.sourceFingerprint || device.presentation?.descriptorDigest || null;
+          const requestedValue = command.value && typeof command.value === "object" && !Array.isArray(command.value)
+            ? { ...command.value, controlId: control.controlId }
+            : { value: command.value ?? null, controlId: control.controlId };
+          const approved = await stepUpVerifier.verify(proof, {
+            actorId: scopedPrincipal.sub,
+            trustedDeviceId: scopedPrincipal.trustedDeviceId,
+            trustedSessionId: scopedPrincipal.sid,
+            homeId: scopedPrincipal.homeId,
+            membershipId: scopedPrincipal.membershipId,
+            hubInstallId: scopedPrincipal.hubInstallId,
+            operation: "device_sensitive_command",
+            targetIds: [device.id],
+            value: descriptorBoundValue(requestedValue, { [device.id]: descriptorDigest }),
+          });
+          if (!approved || approved.jti !== String(command.stepUpOperationId || "")) return json(res, 403, { error: { code: "STEP_UP_REQUIRED", message: "A fresh confirmation for this exact operation is required", requestId: crypto.randomUUID() } });
+        }
+
+        const result = { commandId: command.commandId, homeId: command.homeId, status: "accepted", acceptedAt: new Date(clock()).toISOString(), completedAt: null, errorCode: null };
+        commandResults[idempotencyHash] = { commandDigest, status: "dispatching", result };
+        const boundedEntries = Object.entries(commandResults).slice(-512);
+        await hubStore.saveSecurity({ nativeCommandResults: Object.fromEntries(boundedEntries) });
+        try {
+          const dispatched = await dispatchNativeCommand(scopedPrincipal, device, control, command.value);
+          if (!dispatched) throw Object.assign(new Error("The current protocol binding is unavailable"), { code: "CONTROL_BINDING_UNAVAILABLE" });
+          commandResults[idempotencyHash] = { commandDigest, status: "accepted", result };
+          await hubStore.saveSecurity({ nativeCommandResults: Object.fromEntries(Object.entries(commandResults).slice(-512)) });
+          return json(res, 202, result);
+        } catch {
+          commandResults[idempotencyHash] = { commandDigest, status: "uncertain", result: { ...result, status: "uncertain", errorCode: "COMMAND_OUTCOME_UNCERTAIN" } };
+          await hubStore.saveSecurity({ nativeCommandResults: Object.fromEntries(Object.entries(commandResults).slice(-512)) }).catch(() => {});
+          return json(res, 502, { error: { code: "COMMAND_OUTCOME_UNCERTAIN", message: "The hub could not confirm whether the device applied the command; it will not resend automatically", requestId: crypto.randomUUID() } });
+        }
       });
     }
 
@@ -2806,6 +2986,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     const nativeAppApi = isDashboardAdminPath(url.pathname) && (
       dashboardUrl.pathname === "/api/status" ||
       dashboardUrl.pathname === "/api/devices" ||
+      dashboardUrl.pathname === "/api/dinodia/v1/devices" ||
+      (req.method === "POST" && dashboardUrl.pathname === "/api/dinodia/v1/commands") ||
       dashboardUrl.pathname.startsWith("/api/devices/") ||
       (req.method === "POST" && dashboardUrl.pathname.startsWith("/api/entities/") && dashboardUrl.pathname.endsWith("/service"))
     );

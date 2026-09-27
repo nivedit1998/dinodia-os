@@ -1,0 +1,874 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dinodiasmartliving.com/contracts/dinodia-v1/contract.json",
+  "contractVersion": "dinodia.v1",
+  "wireRules": {
+    "ids": "opaque non-empty strings; UUID format is not part of the public contract",
+    "timestamps": "RFC3339 UTC timestamps; all freshness comparisons use server time",
+    "unknownFields": "reject security/authority objects; ignore only documented extension maps",
+    "managementClass": ["property_device", "tenant_device"],
+    "freshness": {
+      "heartbeatExpectedSeconds": 120,
+      "onlineThroughSeconds": 420,
+      "stateValidity": "descriptor.expectedReportIntervalSeconds; then quality=unknown"
+    },
+    "customerAppName": "Dinodia Smart Living",
+    "authority": "homeId + homeMembershipId; role is membership-scoped; employee identity is never a household role"
+  },
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "role": { "enum": ["OWNER", "PROPERTY_MANAGER", "TENANT"] },
+    "managementClass": { "enum": ["property_device", "tenant_device"] },
+    "quality": { "enum": ["fresh", "stale", "unknown", "unavailable"] },
+    "envelope": {
+      "type": "object",
+      "required": [
+        "schemaVersion",
+        "homeId",
+        "streamId",
+        "sequence",
+        "generatedAt",
+        "revision",
+        "data"
+      ],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "streamId": { "$ref": "#/$defs/id" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "generatedAt": { "$ref": "#/$defs/timestamp" },
+        "revision": { "type": "integer", "minimum": 0 },
+        "data": {}
+      },
+      "additionalProperties": false
+    },
+    "area": {
+      "type": "object",
+      "required": ["id", "homeId", "originalName", "revision", "lifecycle"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "originalName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "overrideName": { "type": ["string", "null"], "maxLength": 80 },
+        "revision": { "type": "integer", "minimum": 0 },
+        "lifecycle": { "enum": ["active", "retired"] }
+      },
+      "additionalProperties": false
+    },
+    "control": {
+      "type": "object",
+      "required": [
+        "schemaVersion",
+        "deviceId",
+        "controlId",
+        "label",
+        "valueType",
+        "interactionKind",
+        "semanticRole",
+        "readable",
+        "writable",
+        "automatable",
+        "observable",
+        "idempotency",
+        "confirmationPolicy",
+        "riskLevel",
+        "stepUpPolicy",
+        "sortOrder",
+        "catalogRevision"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "deviceId": { "$ref": "#/$defs/id" },
+        "surfaceId": { "type": ["string", "null"] },
+        "controlId": { "$ref": "#/$defs/id" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "group": { "type": ["string", "null"], "maxLength": 80 },
+        "sortOrder": { "type": "integer", "minimum": 0 },
+        "valueType": {
+          "enum": ["boolean", "number", "option", "text", "invoke"]
+        },
+        "interactionKind": {
+          "enum": [
+            "toggle",
+            "slider",
+            "thermostat",
+            "picker",
+            "text_input",
+            "momentary_action",
+            "read_only"
+          ]
+        },
+        "semanticRole": {
+          "enum": [
+            "power",
+            "brightness",
+            "active_heat_demand",
+            "active_heat_production",
+            "target_temperature",
+            "ambient_temperature",
+            "opening_percentage",
+            "connectivity",
+            "security_lock",
+            "lock_state",
+            "operating_mode",
+            "position",
+            "volume",
+            "color",
+            "state",
+            "unknown"
+          ]
+        },
+        "readable": { "type": "boolean" },
+        "writable": { "type": "boolean" },
+        "automatable": { "type": "boolean" },
+        "observable": { "type": "boolean" },
+        "idempotency": { "enum": ["set_value", "invoke_once", "none"] },
+        "confirmationPolicy": {
+          "enum": ["none", "matching_observation", "explicit_user", "step_up"]
+        },
+        "riskLevel": { "enum": ["low", "normal", "sensitive", "critical"] },
+        "stepUpPolicy": { "enum": ["none", "required"] },
+        "constraints": {
+          "type": "object",
+          "properties": {
+            "minimum": { "type": "number" },
+            "maximum": { "type": "number" },
+            "step": { "type": "number", "exclusiveMinimum": 0 },
+            "precision": { "type": "integer", "minimum": 0, "maximum": 12 },
+            "unit": { "type": "string", "maxLength": 32 },
+            "options": {
+              "type": "array",
+              "maxItems": 128,
+              "items": {
+                "type": "object",
+                "required": ["value", "label"],
+                "properties": {
+                  "value": {},
+                  "label": { "type": "string", "maxLength": 80 }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "expectedReportingIntervalSeconds": { "type": "integer", "minimum": 1 },
+        "maxStateValiditySeconds": { "type": "integer", "minimum": 1 },
+        "unsupportedReason": { "type": ["string", "null"], "maxLength": 120 },
+        "catalogRevision": { "type": "integer", "minimum": 0 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "semanticRole": { "enum": ["security_lock", "lock_state"] } }, "required": ["semanticRole"] },
+          "then": { "properties": { "stepUpPolicy": { "const": "required" }, "automatable": { "const": false } } }
+        },
+        {
+          "if": { "properties": { "stepUpPolicy": { "const": "required" } }, "required": ["stepUpPolicy"] },
+          "then": { "properties": { "automatable": { "const": false } } }
+        },
+        {
+          "if": { "properties": { "valueType": { "const": "option" }, "writable": { "const": true } }, "required": ["valueType", "writable"] },
+          "then": { "required": ["constraints"], "properties": { "constraints": { "required": ["options"], "properties": { "options": { "minItems": 1 } } } } }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "device": {
+      "type": "object",
+      "required": [
+        "id",
+        "homeId",
+        "managementClass",
+        "lifecycle",
+        "technicalLabel",
+        "controls",
+        "descriptorRevision"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "managementClass": { "$ref": "#/$defs/managementClass" },
+        "ownerMembershipId": { "type": ["string", "null"] },
+        "lifecycle": {
+          "enum": ["commissioning", "installed", "view_only", "retired"]
+        },
+        "technicalLabel": { "type": "string", "maxLength": 80 },
+        "customerLabel": { "type": ["string", "null"], "maxLength": 40 },
+        "areaIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/id" },
+          "uniqueItems": true
+        },
+        "controls": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/control" },
+          "maxItems": 64
+        },
+        "descriptorRevision": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "controlState": {
+      "type": "object",
+      "required": [
+        "deviceId",
+        "controlId",
+        "homeId",
+        "descriptorRevision",
+        "revision",
+        "observedAt",
+        "receivedAt",
+        "quality",
+        "value",
+        "validUntil",
+        "deviceAvailability",
+        "analyticsActivity"
+      ],
+      "properties": {
+        "deviceId": { "$ref": "#/$defs/id" },
+        "controlId": { "$ref": "#/$defs/id" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "descriptorRevision": { "type": "integer", "minimum": 0 },
+        "revision": { "type": "integer", "minimum": 0 },
+        "observedAt": { "$ref": "#/$defs/timestamp" },
+        "receivedAt": { "$ref": "#/$defs/timestamp" },
+        "quality": { "$ref": "#/$defs/quality" },
+        "value": {},
+        "validUntil": { "$ref": "#/$defs/timestamp" },
+        "deviceAvailability": { "enum": ["online", "offline", "unknown"] },
+        "analyticsActivity": { "enum": ["on", "off", "unknown"] }
+      },
+      "additionalProperties": false
+    },
+    "membership": {
+      "type": "object",
+      "required": [
+        "accountId",
+        "homeId",
+        "homeMembershipId",
+        "role",
+        "status",
+        "areaIds",
+        "revision"
+      ],
+      "properties": {
+        "accountId": { "$ref": "#/$defs/id" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "homeMembershipId": { "$ref": "#/$defs/id" },
+        "role": { "$ref": "#/$defs/role" },
+        "status": { "enum": ["active", "suspended", "removed"] },
+        "areaIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/id" },
+          "uniqueItems": true
+        },
+        "revision": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "accountSessionContext": {
+      "type": "object",
+      "required": ["schemaVersion", "accountId", "memberships", "expiresAt"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "accountId": { "$ref": "#/$defs/id" },
+        "memberships": { "type": "array", "items": { "$ref": "#/$defs/membership" }, "uniqueItems": true },
+        "expiresAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "customerSessionReceipt": {
+      "type": "object",
+      "required": ["ok", "accountId", "sessionId", "trustedDeviceId", "expiresAt"],
+      "properties": {
+        "ok": { "const": true },
+        "accountId": { "$ref": "#/$defs/id" },
+        "sessionId": { "$ref": "#/$defs/id" },
+        "trustedDeviceId": { "$ref": "#/$defs/id" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "customerHubSession": {
+      "type": "object",
+      "required": ["ok", "token", "expiresAt", "homeId", "membershipId"],
+      "properties": {
+        "ok": { "const": true },
+        "token": { "type": "string", "minLength": 1, "maxLength": 8192, "description": "Short-lived bearer. Native client memory only; never persist, log, render or forward to an unverified hub origin." },
+        "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "membershipId": { "$ref": "#/$defs/id" }
+      },
+      "additionalProperties": false
+    },
+    "offlineHomeCandidate": {
+      "type": "object",
+      "required": ["schemaVersion", "grantId", "accountId", "homeId", "homeMembershipId", "trustedDeviceId", "role", "areaIds", "membershipRevision", "issuedAt", "expiresAt"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "grantId": { "$ref": "#/$defs/id" },
+        "accountId": { "$ref": "#/$defs/id" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "homeMembershipId": { "$ref": "#/$defs/id" },
+        "trustedDeviceId": { "$ref": "#/$defs/id" },
+        "role": { "const": "TENANT" },
+        "areaIds": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/id" }, "uniqueItems": true },
+        "membershipRevision": { "type": "integer", "minimum": 0 },
+        "issuedAt": { "$ref": "#/$defs/timestamp" },
+        "expiresAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }
+      },
+      "additionalProperties": false
+    },
+    "offlineHomeSelection": {
+      "type": "object",
+      "required": ["schemaVersion", "accountId", "generatedAt", "state", "candidates"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "accountId": { "$ref": "#/$defs/id" },
+        "generatedAt": { "$ref": "#/$defs/timestamp" },
+        "state": { "const": "offline" },
+        "candidates": { "type": "array", "items": { "$ref": "#/$defs/offlineHomeCandidate" } }
+      },
+      "additionalProperties": false
+    },
+    "accessPolicy": {
+      "type": "object",
+      "required": ["homeId", "homeMembershipId", "role", "scopes", "revision"],
+      "properties": {
+        "homeId": { "$ref": "#/$defs/id" },
+        "homeMembershipId": { "$ref": "#/$defs/id" },
+        "role": { "$ref": "#/$defs/role" },
+        "scopes": {
+          "type": "array",
+          "items": { "type": "string", "maxLength": 100 },
+          "uniqueItems": true
+        },
+        "areaIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/id" },
+          "uniqueItems": true
+        },
+        "revision": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "command": {
+      "type": "object",
+      "required": [
+        "commandId",
+        "homeId",
+        "homeMembershipId",
+        "deviceId",
+        "controlId",
+        "descriptorRevision",
+        "value",
+        "issuedAt",
+        "idempotencyKey"
+      ],
+      "properties": {
+        "commandId": { "$ref": "#/$defs/id" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "homeMembershipId": { "$ref": "#/$defs/id" },
+        "deviceId": { "$ref": "#/$defs/id" },
+        "controlId": { "$ref": "#/$defs/id" },
+        "descriptorRevision": { "type": "integer", "minimum": 0 },
+        "value": {},
+        "issuedAt": { "$ref": "#/$defs/timestamp" },
+        "idempotencyKey": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 160
+        },
+        "stepUpOperationId": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "commandResult": {
+      "type": "object",
+      "required": ["commandId", "homeId", "status", "acceptedAt"],
+      "properties": {
+        "commandId": { "$ref": "#/$defs/id" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "status": {
+          "enum": ["accepted", "succeeded", "rejected", "uncertain", "expired"]
+        },
+        "acceptedAt": { "$ref": "#/$defs/timestamp" },
+        "completedAt": {
+          "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }]
+        },
+        "errorCode": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "analyticsObservation": {
+      "type": "object",
+      "required": [
+        "homeId",
+        "deviceId",
+        "category",
+        "observedAt",
+        "validUntil",
+        "activity",
+        "quality"
+      ],
+      "properties": {
+        "homeId": { "$ref": "#/$defs/id" },
+        "deviceId": { "$ref": "#/$defs/id" },
+        "category": { "enum": ["light", "radiator", "boiler", "none"] },
+        "observedAt": { "$ref": "#/$defs/timestamp" },
+        "validUntil": { "$ref": "#/$defs/timestamp" },
+        "activity": { "enum": ["on", "off", "unknown"] },
+        "quality": { "$ref": "#/$defs/quality" },
+        "temperatureCelsius": { "type": ["number", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "alexaDiscoveryProjection": {
+      "type": "object",
+      "required": [
+        "schemaVersion",
+        "homeId",
+        "membership",
+        "selectedAreaIds",
+        "exposureGeneration",
+        "data"
+      ],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "membership": {
+          "type": "object",
+          "required": ["homeMembershipId", "role"],
+          "properties": {
+            "homeMembershipId": { "$ref": "#/$defs/id" },
+            "role": { "const": "TENANT" }
+          },
+          "additionalProperties": false
+        },
+        "selectedAreaIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/id" }
+        },
+        "exposureGeneration": { "type": "integer", "minimum": 0 },
+        "data": { "type": "array", "items": { "$ref": "#/$defs/device" } }
+      },
+      "additionalProperties": false
+    },
+    "controlCatalog": {
+      "type": "object",
+      "required": [
+        "schemaVersion",
+        "homeId",
+        "deviceId",
+        "catalogRevision",
+        "controls"
+      ],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "deviceId": { "$ref": "#/$defs/id" },
+        "catalogRevision": { "type": "integer", "minimum": 0 },
+        "controls": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/control" },
+          "maxItems": 64
+        },
+        "deletedControlIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/id" },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "controlCatalogEvent": {
+      "type": "object",
+      "required": [
+        "schemaVersion",
+        "homeId",
+        "streamId",
+        "sequence",
+        "generatedAt",
+        "revision",
+        "data"
+      ],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "streamId": { "$ref": "#/$defs/id" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "generatedAt": { "$ref": "#/$defs/timestamp" },
+        "revision": { "type": "integer", "minimum": 0 },
+        "data": { "$ref": "#/$defs/controlCatalog" }
+      },
+      "additionalProperties": false
+    },
+    "stateEvent": {
+      "type": "object",
+      "required": [
+        "schemaVersion",
+        "homeId",
+        "streamId",
+        "sequence",
+        "generatedAt",
+        "revision",
+        "data"
+      ],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "streamId": { "$ref": "#/$defs/id" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "generatedAt": { "$ref": "#/$defs/timestamp" },
+        "revision": { "type": "integer", "minimum": 0 },
+        "data": { "$ref": "#/$defs/controlState" }
+      },
+      "additionalProperties": false
+    },
+    "override": {
+      "type": "object",
+      "required": [
+        "homeId",
+        "targetId",
+        "targetType",
+        "field",
+        "value",
+        "revision"
+      ],
+      "properties": {
+        "homeId": { "$ref": "#/$defs/id" },
+        "targetId": { "$ref": "#/$defs/id" },
+        "targetType": { "enum": ["area", "device"] },
+        "field": { "enum": ["overrideName", "customerLabel"] },
+        "value": { "type": ["string", "null"], "maxLength": 80 },
+        "revision": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "automation": {
+      "type": "object",
+      "required": [
+        "id",
+        "homeId",
+        "revision",
+        "name",
+        "enabled",
+        "trigger",
+        "actions",
+        "status"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "revision": { "type": "integer", "minimum": 0 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "enabled": { "type": "boolean" },
+        "trigger": {
+          "type": "object",
+          "required": ["kind", "schedule"],
+          "properties": {
+            "kind": { "const": "schedule" },
+            "schedule": { "type": "object" }
+          },
+          "additionalProperties": false
+        },
+        "actions": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "required": [
+              "deviceId",
+              "controlId",
+              "descriptorRevision",
+              "value"
+            ],
+            "properties": {
+              "deviceId": { "$ref": "#/$defs/id" },
+              "controlId": { "$ref": "#/$defs/id" },
+              "descriptorRevision": { "type": "integer", "minimum": 0 },
+              "value": {}
+            },
+            "additionalProperties": false
+          }
+        },
+        "status": {
+          "enum": ["active", "disabled", "needs_attention", "deleted"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "commissioning": {
+      "type": "object",
+      "required": [
+        "sessionId",
+        "homeId",
+        "technology",
+        "state",
+        "createdAt",
+        "expiresAt"
+      ],
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/id" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "technology": { "enum": ["zigbee", "matter"] },
+        "state": {
+          "enum": [
+            "discovering",
+            "candidates_available",
+            "committing",
+            "completed",
+            "cancelled",
+            "expired",
+            "failed"
+          ]
+        },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "candidateCount": { "type": "integer", "minimum": 0, "maximum": 32 }
+      },
+      "additionalProperties": false
+    },
+    "supportTicket": {
+      "type": "object",
+      "required": [
+        "ticketId",
+        "customerAccountId",
+        "homeId",
+        "homeMembershipId",
+        "category",
+        "status",
+        "revision",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "ticketId": { "$ref": "#/$defs/id" },
+        "customerAccountId": { "$ref": "#/$defs/id" },
+        "homeId": { "type": ["string", "null"] },
+        "homeMembershipId": { "type": ["string", "null"] },
+        "category": {
+          "enum": [
+            "ACCOUNT_OR_SIGN_IN",
+            "ACCESS_OR_PERMISSIONS",
+            "DEVICE_PROBLEM",
+            "HUB_OR_CONNECTION",
+            "AUTOMATION",
+            "ALEXA",
+            "OTHER"
+          ]
+        },
+        "status": {
+          "enum": [
+            "NEW",
+            "REVIEWING",
+            "WAITING_FOR_CUSTOMER",
+            "ACCESS_REQUESTED",
+            "ACCESS_APPROVED",
+            "INVESTIGATING",
+            "WAITING_FOR_VISIT",
+            "RESOLVED",
+            "CLOSED"
+          ]
+        },
+        "revision": { "type": "integer", "minimum": 0 },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "updatedAt": { "$ref": "#/$defs/timestamp" },
+        "customerVisibleUpdates": {
+          "type": "array",
+          "items": { "type": "object" }
+        }
+      },
+      "allOf": [{
+        "oneOf": [
+          { "properties": { "homeId": { "type": "null" }, "homeMembershipId": { "type": "null" } } },
+          { "properties": { "homeId": { "$ref": "#/$defs/id" }, "homeMembershipId": { "$ref": "#/$defs/id" } } }
+        ]
+      }],
+      "additionalProperties": false
+    },
+    "supportAccessRequest": {
+      "type": "object",
+      "required": [
+        "requestId",
+        "ticketId",
+        "scope",
+        "status",
+        "expiresAt",
+        "revision"
+      ],
+      "properties": {
+        "requestId": { "$ref": "#/$defs/id" },
+        "ticketId": { "$ref": "#/$defs/id" },
+        "scope": { "enum": ["PROPERTY_SCOPE", "TENANT_SCOPE"] },
+        "status": {
+          "enum": [
+            "requested",
+            "approved",
+            "denied",
+            "revoked",
+            "expired",
+            "closed"
+          ]
+        },
+        "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "revision": { "type": "integer", "minimum": 0 },
+        "touchesPropertyInfrastructure": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "supportSession": {
+      "type": "object",
+      "required": [
+        "sessionId",
+        "ticketId",
+        "requestId",
+        "scope",
+        "status",
+        "expiresAt"
+      ],
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/id" },
+        "ticketId": { "$ref": "#/$defs/id" },
+        "requestId": { "$ref": "#/$defs/id" },
+        "scope": { "enum": ["PROPERTY_SCOPE", "TENANT_SCOPE"] },
+        "status": { "enum": ["active", "revoked", "expired", "closed"] },
+        "expiresAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "supportCodeExchange": {
+      "type": "object",
+      "required": ["ticketId", "requestId", "code", "employeeSession"],
+      "properties": {
+        "ticketId": { "$ref": "#/$defs/id" },
+        "requestId": { "$ref": "#/$defs/id" },
+        "code": { "type": "string", "minLength": 6, "maxLength": 64 },
+        "employeeSession": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "notification": {
+      "type": "object",
+      "required": ["notificationId", "homeId", "recipientMembershipId", "kind", "createdAt", "deduplicationKey", "deliveryState"],
+      "properties": {
+        "notificationId": { "$ref": "#/$defs/id" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "recipientMembershipId": { "$ref": "#/$defs/id" },
+        "kind": { "enum": ["security", "access", "support", "device", "automation", "system"] },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "deduplicationKey": { "type": "string", "minLength": 16, "maxLength": 160 },
+        "deliveryState": { "enum": ["queued", "sent", "delivered", "failed", "suppressed_quiet_hours"] },
+        "mandatory": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "membershipInvitation": {
+      "type": "object",
+      "required": ["invitationId", "homeId", "invitedEmailHash", "role", "areaIds", "state", "expiresAt", "revision"],
+      "properties": {
+        "invitationId": { "$ref": "#/$defs/id" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "invitedEmailHash": { "type": "string", "minLength": 32, "maxLength": 128 },
+        "role": { "enum": ["PROPERTY_MANAGER", "TENANT"] },
+        "areaIds": { "type": "array", "items": { "$ref": "#/$defs/id" }, "uniqueItems": true },
+        "state": { "enum": ["pending", "accepted", "expired", "revoked", "replaced"] },
+        "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "revision": { "type": "integer", "minimum": 0 },
+        "membershipId": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "claimReservation": {
+      "type": "object",
+      "required": ["claimId", "homeId", "state", "createdAt", "expiresAt", "revision"],
+      "properties": {
+        "claimId": { "$ref": "#/$defs/id" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "state": { "enum": ["reserved", "completed", "expired", "released", "replaced"] },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "revision": { "type": "integer", "minimum": 0 },
+        "firstWins": { "const": true }
+      },
+      "additionalProperties": false
+    },
+    "hubInstallation": {
+      "type": "object",
+      "required": ["hubInstallationId", "homeId", "serialNumber", "identityGeneration", "state", "provisioningRevision", "cloudUrlState", "lastHeartbeatAt"],
+      "properties": {
+        "hubInstallationId": { "$ref": "#/$defs/id" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "serialNumber": { "$ref": "#/$defs/id" },
+        "identityGeneration": { "type": "integer", "minimum": 1 },
+        "state": { "enum": ["pairing", "provisioning", "active", "suspended", "replacement_pending", "deregistering", "deregistered"] },
+        "provisioningRevision": { "type": "integer", "minimum": 0 },
+        "cloudUrlState": { "enum": ["not_configured", "report_pending", "verified", "failed", "revoked"] },
+        "lastHeartbeatAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+        "onlineState": { "enum": ["online", "stale", "offline", "unknown"] }
+      },
+      "additionalProperties": false
+    },
+    "uiState": { "enum": ["restoring_session", "loading", "ready", "empty", "stale", "offline", "denied", "expired", "uncertain", "maintenance", "error"] },
+    "error": {
+      "type": "object",
+      "required": ["error"],
+      "properties": {
+        "error": {
+          "type": "object",
+          "required": ["code", "message", "requestId"],
+          "properties": {
+            "code": {
+              "enum": [
+                "AUTH_REQUIRED",
+                "TOKEN_EXPIRED",
+                "STEP_UP_REQUIRED",
+                "STEP_UP_FAILED",
+                "SCOPE_DENIED",
+                "HOME_MISMATCH",
+                "AREA_DENIED",
+                "NOT_DEVICE_OWNER",
+                "PERMANENT_DEVICE_IMMUTABLE",
+                "RESOURCE_NOT_FOUND",
+                "REVISION_CONFLICT",
+                "CATALOG_REVISION_MISMATCH",
+                "CONTROL_REMOVED",
+                "VALIDATION_FAILED",
+                "DEVICE_OFFLINE",
+                "CONTROL_UNAVAILABLE",
+                "COMMAND_UNCERTAIN",
+                "HUB_UNAVAILABLE",
+                "UNSUPPORTED_CAPABILITY",
+                "UPDATE_REQUIRED",
+                "RATE_LIMITED",
+                "PAIRING_NOT_ADVERTISED",
+                "PAIRING_EXPIRED",
+                "PAIRING_USED",
+                "HARDWARE_IDENTITY_INVALID",
+                "PAIRING_PROOF_FAILED",
+                "CLOUDURL_NOT_REPORTED",
+                "CLOUDURL_UNVERIFIED",
+                "TUNNEL_IDENTITY_MISMATCH",
+                "SUPPORT_TICKET_CLOSED",
+                "SUPPORT_APPROVAL_REQUIRED",
+                "SUPPORT_CODE_EXPIRED",
+                "SUPPORT_CODE_USED",
+                "SUPPORT_EMPLOYEE_MISMATCH",
+      "SUPPORT_SCOPE_CHANGED",
+      "SUPPORT_REMOTE_UNAVAILABLE",
+      "FEATURE_NOT_ENABLED"
+              ]
+            },
+            "message": { "type": "string", "maxLength": 240 },
+            "requestId": { "$ref": "#/$defs/id" },
+            "retryable": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
