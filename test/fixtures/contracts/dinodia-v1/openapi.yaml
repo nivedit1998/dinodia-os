@@ -861,6 +861,9 @@ components:
         required: true,
         schema: { type: string, minLength: 16, maxLength: 160 },
       }
+  schemas:
+    HubLanEndpointObservation:
+      $ref: "./contract.json#/$defs/lanEndpointObservation"
   responses:
     Unauthorized:
       { description: Missing, malformed, expired or revoked customer session }

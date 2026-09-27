@@ -46,7 +46,7 @@ const { compileTarget, findControl, resolveExecutionRoute } = require("./automat
 const { verifyOperatorSessionToken } = require("./auth/operatorSession");
 const { parsePublicKeys, verifyAppAccessToken } = require("./auth/appTokenVerifier");
 const { ProvisioningPairingService } = require("./auth/provisioningPairing");
-const { SetupDiscovery } = require("./setupDiscovery");
+const { SetupDiscovery, privateInterface } = require("./setupDiscovery");
 const { RevocationCoordinator } = require("./auth/revocationCoordinator");
 const { OfflineLanAuthorisationStore, digestOfflineCommand } = require("./auth/offlineLanAuthorizer");
 const { StepUpProofVerifier, descriptorBoundValue, digestOperation } = require("./auth/stepUpProofVerifier");
@@ -250,7 +250,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   if (!existingIdentity.serial && hubStore.saveIdentity) hubStore.saveIdentity({ serial, instanceId: existingIdentity.instanceId || crypto.randomUUID(), hostname: existingIdentity.hostname || "dinodia" }).catch((error) => logger.error(`[identity] ${error.message}`));
   const revocationCoordinator = new RevocationCoordinator();
   const provisioningPairing = new ProvisioningPairingService({ serial, ttlMs: runtimeConfig.pairingTtlMs, store: hubStore, vault, logger });
-  const setupDiscovery = new SetupDiscovery({ serial, interfaceAddress: runtimeConfig.setupInterface, nodeEnv: runtimeConfig.nodeEnv, logger });
+  const setupDiscovery = new SetupDiscovery({ serial, interfaceName: runtimeConfig.setupInterfaceName, nodeEnv: runtimeConfig.nodeEnv, logger, onEndpointChange: () => pairing?.requestImmediateHeartbeat?.() });
   let operatorPublicKey = null;
   if (runtimeConfig.operatorPublicKey) {
     try { operatorPublicKey = crypto.createPublicKey(runtimeConfig.operatorPublicKey); } catch (error) { logger.error(`[auth] operator public key rejected: ${error.message}`); }
@@ -857,6 +857,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     haPort: runtimeConfig.haPort,
     intervalMs: runtimeConfig.operatorPolicySyncIntervalMs,
     heartbeatIntervalMs: runtimeConfig.heartbeatIntervalMs,
+    getLanEndpoint: () => setupDiscovery.observation(),
     runtime: {
       nodeEnv: runtimeConfig.nodeEnv,
       kind: "dinodia_os",
@@ -2455,7 +2456,9 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       return octets[0] === 10 || (octets[0] === 192 && octets[1] === 168) || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31);
     })();
     if (!privateRemote) return false;
-    if (runtimeConfig.setupInterface && req.socket?.localAddress && String(req.socket.localAddress) !== runtimeConfig.setupInterface) return false;
+    const selectedInterface = privateInterface(runtimeConfig.setupInterfaceName);
+    const localAddress = String(req.socket?.localAddress || "").replace(/^::ffff:/, "");
+    if (host === expected && (!selectedInterface || localAddress !== selectedInterface.address)) return false;
     if ([expected, "localhost", "127.0.0.1", "::1"].includes(host)) return true;
     // A private-IP Host is accepted only when the TCP peer itself is private;
     // an attacker cannot turn a public request into a setup request by merely
@@ -2724,7 +2727,13 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     const attemptId = setupCookie(req, "dinodia_operator_attempt");
     if (!/^[A-Za-z0-9_-]{32,256}$/.test(binding) || !/^[A-Za-z0-9_-]{32,160}$/.test(attemptId)) return json(res, 400, { error: "A hub-created operator browser attempt is required" });
     try {
-      const result = await pairing.requestWithHubIdentity("/api/hub-agent/operator-session/attempt", { setupAttemptId: attemptId, browserBindingHash: crypto.createHash("sha256").update(binding, "utf8").digest("hex") });
+      const operatorOrigin = `${remote ? "https" : "http"}://${req.headers.host}`;
+      const result = await pairing.requestWithHubIdentity("/api/hub-agent/operator-session/attempt", {
+        setupAttemptId: attemptId,
+        browserBindingHash: crypto.createHash("sha256").update(binding, "utf8").digest("hex"),
+        accessMode: remote ? "secure" : "local",
+        operatorOrigin,
+      });
       return json(res, 200, { ok: true, setupAttemptId: result.setupAttemptId, expiresAt: result.expiresAt });
     } catch (error) {
       return json(res, Number(error.statusCode) || 503, { error: "The hub could not register this operator browser", errorCode: error.code || "operator_browser_registration_failed" });

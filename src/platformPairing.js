@@ -1,6 +1,6 @@
 const crypto = require("node:crypto");
-const os = require("node:os");
 const { canonicalCloudChallenge } = require("./auth/identityBroker");
+const { privateInterface, isPrivateIPv4 } = require("./setupDiscovery");
 
 function sign(secret, serial, ts, nonce) {
   return crypto.createHmac("sha256", String(secret)).update(`${serial}.${ts}.${nonce}`).digest("hex");
@@ -37,17 +37,28 @@ function sha256(value) {
 }
 
 function privateLanIp() {
-  const interfaces = os.networkInterfaces();
-  for (const values of Object.values(interfaces)) {
-    for (const item of values || []) {
-      if (item.family === "IPv4" && !item.internal && /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(item.address)) return item.address;
-    }
-  }
-  return "127.0.0.1";
+  return privateInterface()?.address || "";
+}
+
+function validateLanEndpointObservation(value, serial, expectedPort = 8123) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const allowed = new Set(["version", "revision", "state", "baseUrl", "discoveryHost"]);
+  if (Object.keys(value).some((key) => !allowed.has(key)) || value.version !== 1
+    || !Number.isSafeInteger(value.revision) || value.revision < 1
+    || value.discoveryHost !== `dinodia-${String(serial || "").toLowerCase()}.local`) return false;
+  if (value.state === "UNAVAILABLE") return !Object.hasOwn(value, "baseUrl");
+  if (value.state !== "CURRENT" || typeof value.baseUrl !== "string") return false;
+  const match = value.baseUrl.match(/^http:\/\/(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})$/);
+  if (!match || match[2] !== String(expectedPort) || !isPrivateIPv4(match[1])) return false;
+  try {
+    const parsed = new URL(value.baseUrl);
+    return parsed.protocol === "http:" && parsed.hostname === match[1] && parsed.port === String(expectedPort)
+      && parsed.pathname === "/" && !parsed.search && !parsed.hash && !parsed.username && !parsed.password;
+  } catch { return false; }
 }
 
 class PlatformPairing {
-  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, haPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, runtime, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, legacyCompatibilityEnabled = false, clock = () => Date.now() } = {}) {
+  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, haPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, runtime, getLanEndpoint = null, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, legacyCompatibilityEnabled = false, clock = () => Date.now() } = {}) {
     this.store = store;
     this.vault = vault;
     this.identityBroker = identityBroker;
@@ -62,6 +73,14 @@ class PlatformPairing {
     this.heartbeatIntervalMs = Math.max(15000, Number(heartbeatIntervalMs) || 120000);
     this.clock = clock;
     this.lastHeartbeatAt = 0;
+    this.getLanEndpoint = getLanEndpoint || (() => {
+      const selected = privateInterface();
+      return selected
+        ? { state: "CURRENT", address: selected.address, interfaceName: selected.name }
+        : { state: "UNAVAILABLE", address: "", interfaceName: null };
+    });
+    this.pendingEndpointHeartbeat = false;
+    this.queuedImmediateSync = false;
     this.runtime = {
       kind: String(runtime?.kind || "dinodia_os"),
       version: String(runtime?.version || "0.0.0"),
@@ -301,6 +320,46 @@ class PlatformPairing {
     return result;
   }
 
+  async buildLanEndpointObservation(identityGeneration) {
+    const selected = await this.getLanEndpoint();
+    const state = selected?.state === "CURRENT" && isPrivateIPv4(selected.address) ? "CURRENT" : "UNAVAILABLE";
+    // The native HTTP contract has one fixed installer port. Do not derive it
+    // from an ephemeral test listener or a configurable tenant transport.
+    const setupPort = 8123;
+    const discoveryHost = `dinodia-${this.serial.toLowerCase()}.local`;
+    let baseUrl;
+    if (state === "CURRENT") {
+      const candidate = String(selected.address || "");
+      const parsed = new URL(`http://${candidate}:${setupPort}`);
+      if (parsed.hostname !== candidate || parsed.port !== String(setupPort) || parsed.pathname !== "/") throw new Error("The selected physical LAN endpoint is malformed");
+      baseUrl = `http://${candidate}:${setupPort}`;
+    }
+    const previous = this.store?.getPlatform?.()?.lanEndpointObservation || null;
+    if (previous && Number(previous.identityGeneration) !== Number(identityGeneration)) {
+      throw Object.assign(new Error("LAN endpoint revision reset requires reviewed identity-generation recovery"), { code: "lan_endpoint_generation_reset_required" });
+    }
+    const same = previous
+      && previous.state === state
+      && String(previous.baseUrl || "") === String(baseUrl || "")
+      && String(previous.discoveryHost || "") === discoveryHost
+      && String(previous.interfaceName || "") === String(selected?.interfaceName || "");
+    const revision = previous ? Number(previous.revision) + (same ? 0 : 1) : 1;
+    if (!Number.isSafeInteger(revision) || revision < 1) throw new Error("The persisted LAN endpoint revision is invalid");
+    const observation = { version: 1, revision, state, ...(baseUrl ? { baseUrl } : {}), discoveryHost };
+    if (!validateLanEndpointObservation(observation, this.serial, setupPort)) throw new Error("The selected LAN endpoint does not match the canonical dinodia.v1 contract");
+    await this.store.savePlatform({ lanEndpointObservation: { ...observation, interfaceName: selected?.interfaceName || null, identityGeneration: Number(identityGeneration) } });
+    return observation;
+  }
+
+  async requestImmediateHeartbeat() {
+    this.pendingEndpointHeartbeat = true;
+    if (this.syncing) {
+      this.queuedImmediateSync = true;
+      return null;
+    }
+    return this.syncNow();
+  }
+
   async getCloudflareReservation() {
     return this.requestWithHubIdentity("/api/hub-agent/v2/pairing/reservation", { serial: this.serial });
   }
@@ -396,7 +455,6 @@ class PlatformPairing {
       const activityIncidents = this.getActivityIncidents() || undefined;
       const payload = {
         agentSeenVersion: Number(platform.agentSeenVersion || 0),
-        lanBaseUrl: `http://${privateLanIp()}:${this.haPort}`,
         hubRuntime: this.runtime,
         haAreas: this.getAreaSnapshot(),
         heatingUsage,
@@ -411,12 +469,21 @@ class PlatformPairing {
       // platform's approximately two-minute hub availability signal.
       const nativeIdentity = await this.getPublicIdentity();
       const syncStartedAt = this.clock();
-      if (nativeIdentity && syncStartedAt - this.lastHeartbeatAt >= this.heartbeatIntervalMs) {
-        await this.requestWithHubIdentity("/api/hub-agent/v2/heartbeat", {
+      if (nativeIdentity && (this.pendingEndpointHeartbeat || syncStartedAt - this.lastHeartbeatAt >= this.heartbeatIntervalMs)) {
+        const lanEndpoint = await this.buildLanEndpointObservation(nativeIdentity.generation);
+        const heartbeat = await this.requestWithHubIdentity("/api/hub-agent/v2/heartbeat", {
           serial: this.serial,
           hubRuntime: this.runtime,
+          lanEndpoint,
         });
+        if (Number(heartbeat?.lanEndpoint?.revision) !== lanEndpoint.revision || heartbeat?.lanEndpoint?.state !== lanEndpoint.state) {
+          throw Object.assign(new Error("Platform did not acknowledge the current LAN endpoint revision"), { code: "lan_endpoint_ack_mismatch" });
+        }
         this.lastHeartbeatAt = this.clock();
+        // A link change can arrive after this request captured its endpoint.
+        // Keep the immediate-send marker through the queued follow-up; the
+        // first acknowledgement may therefore never clear a newer change.
+        this.pendingEndpointHeartbeat = this.queuedImmediateSync;
       }
       const result = nativeIdentity
         ? await this.requestWithHubIdentity("/api/hub-agent/token-state", payload)
@@ -499,6 +566,10 @@ class PlatformPairing {
       return null;
     } finally {
       this.syncing = false;
+      if (this.queuedImmediateSync) {
+        this.queuedImmediateSync = false;
+        setImmediate(() => this.syncNow().catch(() => {}));
+      }
     }
   }
 
@@ -517,4 +588,4 @@ class PlatformPairing {
   }
 }
 
-module.exports = { PlatformPairing, sign, privateLanIp };
+module.exports = { PlatformPairing, sign, privateLanIp, validateLanEndpointObservation };

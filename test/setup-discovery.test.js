@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 const { SetupDiscovery, privateInterface, privateAddress } = require("../src/setupDiscovery");
 const { configureSetupDiscovery, avahiSetupConfigMatches } = require("../src/avahiSetupConfig");
 const configuredAvahi = configureSetupDiscovery("", { serial: "din-home-001", interfaceName: "eth0" });
@@ -32,18 +33,20 @@ function spawnRecorder() {
 }
 
 test("mDNS discovery prefers the actual Ethernet/Wi-Fi address over RFC1918 container bridges", () => {
-  assert.equal(privateAddress("", interfacesWithBridgeFirst), "192.168.1.76");
-  assert.deepEqual(privateInterface("", interfacesWithBridgeFirst), { name: "eth0", address: "192.168.1.76", physicalPriority: 0 });
-  assert.equal(privateAddress("10.0.0.27", interfacesWithBridgeFirst), "10.0.0.27");
-  assert.deepEqual(privateInterface("10.0.0.27", interfacesWithBridgeFirst), { name: "wlan0", address: "10.0.0.27", physicalPriority: 0 });
-  assert.equal(privateAddress("172.17.0.1", interfacesWithBridgeFirst), "", "configured Docker bridge address is refused");
+  const physical = () => true;
+  assert.equal(privateAddress("", interfacesWithBridgeFirst, physical), "192.168.1.76");
+  assert.deepEqual(privateInterface("", interfacesWithBridgeFirst, physical), { name: "eth0", address: "192.168.1.76", physicalPriority: 0 });
+  assert.equal(privateAddress("192.168.1.76", interfacesWithBridgeFirst, physical), "192.168.1.76", "a stale configured IP is not treated as an interface selector");
+  assert.deepEqual(privateInterface("wlan0", interfacesWithBridgeFirst, physical), { name: "wlan0", address: "10.0.0.27", physicalPriority: -1 });
+  assert.equal(privateAddress("172.17.0.1", interfacesWithBridgeFirst, physical), "192.168.1.76", "a stale Docker address cannot pin or poison selection");
+  assert.equal(privateInterface("", { ...interfacesWithBridgeFirst, eth0: interfacesWithBridgeFirst.eth0 }, (name) => name !== "eth0" && name !== "wlan0"), null, "RFC1918 alone does not prove a physical interface");
 });
 
 test("production setup discovery pins the exact serial alias and setup service to the selected LAN interface", () => {
   const { calls, spawnProcess } = spawnRecorder();
   const discovery = new SetupDiscovery({
     serial: "DIN-HOME-001", nodeEnv: "production", interfaces: () => interfacesWithBridgeFirst,
-    spawnProcess, logger: { warn() {} }, readAvahiConfig: () => configuredAvahi,
+    spawnProcess, logger: { warn() {} }, physicalCheck: () => true, readAvahiConfig: () => configuredAvahi,
   });
   discovery.start(8123);
   assert.equal(discovery.status().running, false, "discovery is not reported ready until both publisher processes spawn");
@@ -60,7 +63,7 @@ test("production setup discovery pins the exact serial alias and setup service t
 
 test("missing Avahi publisher reports discovery unavailable instead of claiming it is running", () => {
   const { calls, spawnProcess } = spawnRecorder();
-  const discovery = new SetupDiscovery({ serial: "din-home-001", nodeEnv: "production", interfaces: () => interfacesWithBridgeFirst, spawnProcess, logger: { warn() {} }, readAvahiConfig: () => configuredAvahi });
+  const discovery = new SetupDiscovery({ serial: "din-home-001", nodeEnv: "production", interfaces: () => interfacesWithBridgeFirst, spawnProcess, logger: { warn() {} }, physicalCheck: () => true, readAvahiConfig: () => configuredAvahi });
   discovery.start(8123);
   calls[0].child.pid = undefined;
   calls[0].child.emit("error", Object.assign(new Error("missing publisher"), { code: "ENOENT" }));
@@ -73,7 +76,7 @@ test("mDNS publisher refuses to run when daemon interface binding differs from t
   const { calls, spawnProcess } = spawnRecorder();
   const discovery = new SetupDiscovery({
     serial: "din-home-001", nodeEnv: "production", interfaces: () => interfacesWithBridgeFirst,
-    spawnProcess, logger: { warn() {} },
+    spawnProcess, logger: { warn() {} }, physicalCheck: () => true,
     readAvahiConfig: () => configureSetupDiscovery("", { serial: "din-home-001", interfaceName: "wlan0" }),
   });
   discovery.start(8123);
@@ -82,9 +85,37 @@ test("mDNS publisher refuses to run when daemon interface binding differs from t
   assert.match(discovery.status().error, /not restricted to the selected setup interface/);
 });
 
+test("a link change waits for Avahi's root-owned interface rebind then republishes without losing the new endpoint", () => {
+  const { calls, spawnProcess } = spawnRecorder();
+  let interfaces = { ...interfacesWithBridgeFirst };
+  let avahiConfig = configuredAvahi;
+  const observations = [];
+  const discovery = new SetupDiscovery({
+    serial: "din-home-001", nodeEnv: "production", interfaces: () => interfaces,
+    spawnProcess, logger: { warn() {} }, physicalCheck: () => true,
+    readAvahiConfig: () => avahiConfig, onEndpointChange: (value) => observations.push(value),
+    networkCheckIntervalMs: 60_000,
+  });
+  discovery.start(8123);
+  calls.slice(0, 2).forEach(({ child }) => child.emit("spawn"));
+  interfaces = { ...interfacesWithBridgeFirst, eth0: [], wlan0: [{ address: "10.0.0.27", family: "IPv4", internal: false }] };
+  discovery.refresh();
+  assert.equal(discovery.status().error, "Avahi is not restricted to the selected setup interface");
+  assert.equal(calls.length, 2, "do not publish until the daemon is bound to the new NIC");
+  assert.equal(observations.at(-1).baseUrl, "http://10.0.0.27:8123");
+
+  avahiConfig = configureSetupDiscovery(avahiConfig, { serial: "din-home-001", interfaceName: "wlan0" });
+  discovery.refresh();
+  assert.equal(calls.length, 4, "same-address poll retries publication after the privileged config switch");
+  calls.slice(2).forEach(({ child }) => child.emit("spawn"));
+  assert.equal(discovery.status().running, true);
+  assert.equal(discovery.status().address, "10.0.0.27");
+  discovery.stop();
+});
+
 test("a publisher that exits during startup prevents the other late publisher from becoming active", () => {
   const { calls, spawnProcess } = spawnRecorder();
-  const discovery = new SetupDiscovery({ serial: "din-home-001", nodeEnv: "production", interfaces: () => interfacesWithBridgeFirst, spawnProcess, logger: { warn() {} }, readAvahiConfig: () => configuredAvahi });
+  const discovery = new SetupDiscovery({ serial: "din-home-001", nodeEnv: "production", interfaces: () => interfacesWithBridgeFirst, spawnProcess, logger: { warn() {} }, physicalCheck: () => true, readAvahiConfig: () => configuredAvahi });
   discovery.start(8123);
   calls[0].child.emit("spawn");
   calls[0].child.exitCode = 0;
@@ -95,7 +126,7 @@ test("a publisher that exits during startup prevents the other late publisher fr
 
 test("a publisher that exits successfully is still reported unavailable", () => {
   const { calls, spawnProcess } = spawnRecorder();
-  const discovery = new SetupDiscovery({ serial: "din-home-001", nodeEnv: "production", interfaces: () => interfacesWithBridgeFirst, spawnProcess, logger: { warn() {} }, readAvahiConfig: () => configuredAvahi });
+  const discovery = new SetupDiscovery({ serial: "din-home-001", nodeEnv: "production", interfaces: () => interfacesWithBridgeFirst, spawnProcess, logger: { warn() {} }, physicalCheck: () => true, readAvahiConfig: () => configuredAvahi });
   discovery.start(8123);
   calls.forEach(({ child }) => child.emit("spawn"));
   calls[0].child.exitCode = 0;
@@ -103,6 +134,40 @@ test("a publisher that exits successfully is still reported unavailable", () => 
   assert.equal(discovery.status().running, false);
   assert.match(discovery.status().error, /exited before discovery/);
   assert.equal(calls[0].child.killed, undefined, "an exited publisher does not need a kill signal");
+});
+
+test("DHCP/subnet changes re-publish the restricted alias and immediately report a new endpoint", () => {
+  const { calls, spawnProcess } = spawnRecorder();
+  let interfaces = { ...interfacesWithBridgeFirst };
+  const observations = [];
+  const discovery = new SetupDiscovery({
+    serial: "din-home-001", nodeEnv: "production", interfaces: () => interfaces,
+    spawnProcess, logger: { warn() {} }, physicalCheck: () => true,
+    readAvahiConfig: () => configuredAvahi, onEndpointChange: (value) => observations.push(value),
+    networkCheckIntervalMs: 60_000,
+  });
+  discovery.start(8123);
+  calls.forEach(({ child }) => child.emit("spawn"));
+  assert.equal(discovery.observation().baseUrl, "http://192.168.1.76:8123");
+  interfaces = { ...interfacesWithBridgeFirst, eth0: [{ address: "192.168.0.110", family: "IPv4", internal: false }] };
+  discovery.refresh();
+  calls.slice(2).forEach(({ child }) => child.emit("spawn"));
+  assert.equal(discovery.status().address, "192.168.0.110");
+  assert.equal(discovery.observation().baseUrl, "http://192.168.0.110:8123");
+  assert.equal(calls[0].child.killed, true);
+  assert.deepEqual(observations.map((value) => value.baseUrl), ["http://192.168.1.76:8123", "http://192.168.0.110:8123"]);
+  assert.equal(calls.slice(2).every(({ args }) => !args.includes("-i")), true);
+  discovery.stop();
+});
+
+test("missing physical LAN interface reports UNAVAILABLE rather than a loopback or virtual address", () => {
+  const { calls, spawnProcess } = spawnRecorder();
+  const discovery = new SetupDiscovery({ serial: "din-home-001", nodeEnv: "production", interfaces: () => interfacesWithBridgeFirst, physicalCheck: () => false, spawnProcess, logger: { warn() {} } });
+  discovery.start(8123);
+  assert.equal(discovery.observation().state, "UNAVAILABLE");
+  assert.equal(discovery.observation().baseUrl, undefined);
+  assert.equal(calls.length, 0);
+  discovery.stop();
 });
 
 test("Pi installer preflights candidate before installing Avahi publisher dependency", () => {
@@ -124,6 +189,63 @@ test("Pi installer preflights candidate before installing Avahi publisher depend
   assert.match(installer, /avahi-resolve-host-name -4/);
   assert.ok(installer.indexOf('if [[ "$discovery_ok" -ne 1 ]]') < installer.indexOf("COMPLETED=1"));
   assert.doesNotMatch(fs.readFileSync(path.join(__dirname, "..", "src", "setupDiscovery.js"), "utf8"), /avahi-publish-(?:address|service).*\[["']-i["']/s);
+  assert.match(installer, /dinodia-setup-discovery-sync\.timer/);
+  assert.match(installer, /disable --now dinodia-setup-discovery-sync\.timer/);
+  assert.match(installer, /install -o root -g root -m 0555 .*reconcile_setup_avahi\.mjs/);
+  assert.match(installer, /DISCOVERY_RELEASE_ROOT="\/usr\/local\/lib\/dinodia-setup-discovery-releases"/);
+  assert.match(installer, /DISCOVERY_CURRENT_LINK="\/usr\/local\/lib\/dinodia-setup-discovery-current"/);
+  assert.match(installer, /DISCOVERY_LINK_SWITCHED/);
+  const serviceUnit = fs.readFileSync(path.join(__dirname, "..", "systemd", "dinodia-setup-discovery-sync.service"), "utf8");
+  const timerUnit = fs.readFileSync(path.join(__dirname, "..", "systemd", "dinodia-setup-discovery-sync.timer"), "utf8");
+  assert.match(serviceUnit, /User=root/);
+  assert.match(serviceUnit, /ReadWritePaths=\/etc\/avahi/);
+  assert.match(serviceUnit, /\/usr\/local\/lib\/dinodia-setup-discovery-current\/scripts\/reconcile_setup_avahi\.mjs/);
+  assert.doesNotMatch(serviceUnit, /\/opt\/dinodia-os(?:-releases)?\/.*reconcile_setup_avahi/);
+  assert.match(timerUnit, /OnUnitActiveSec=10s/);
+  assert.match(timerUnit, /Unit=dinodia-setup-discovery-sync\.service/);
+});
+
+test("root Avahi reconciler tracks the selected interface, atomically rebinds, and withdraws when no private NIC exists", async () => {
+  const os = require("node:os");
+  const osTmp = fs.mkdtempSync(path.join(os.tmpdir(), "dinodia-avahi-reconcile-"));
+  const identityPath = path.join(osTmp, "identity.json");
+  const environmentPath = path.join(osTmp, ".env");
+  const configPath = path.join(osTmp, "avahi-daemon.conf");
+  const events = [];
+  let daemonActive = true;
+  const runSystemctl = (args) => {
+    events.push(args);
+    if (args[0] === "stop") daemonActive = false;
+    if (args[0] === "restart" || args[0] === "start") daemonActive = true;
+  };
+  const replaceConfig = (file, text) => { events.push(["atomic-write", file]); fs.writeFileSync(file, text); };
+  try {
+    fs.writeFileSync(identityPath, JSON.stringify({ serial: "din-home-001" }));
+    fs.writeFileSync(environmentPath, "DINODIA_SETUP_INTERFACE=wlan0\n");
+    fs.writeFileSync(configPath, configuredAvahi);
+    const { reconcileAvahiSetup } = await import(pathToFileURL(path.join(__dirname, "..", "scripts", "reconcile_setup_avahi.mjs")).href);
+    const ethernetAndWifi = {
+      ...interfacesWithBridgeFirst,
+      wlan0: [{ address: "10.0.0.27", family: "IPv4", internal: false }],
+    };
+    const switched = reconcileAvahiSetup({ identityPath, environmentPath, configPath, interfaces: ethernetAndWifi, physicalCheck: () => true, isActive: () => daemonActive, runSystemctl, replaceConfig });
+    assert.deepEqual(switched, { state: "CURRENT", action: "restart", interfaceName: "wlan0" });
+    assert.equal(avahiSetupConfigMatches(fs.readFileSync(configPath, "utf8"), { serial: "din-home-001", interfaceName: "wlan0" }), true);
+    assert.deepEqual(events.slice(-1), [["restart", "avahi-daemon"]]);
+    events.length = 0;
+    const unchanged = reconcileAvahiSetup({ identityPath, environmentPath, configPath, interfaces: ethernetAndWifi, physicalCheck: () => true, isActive: () => true, runSystemctl, replaceConfig });
+    assert.deepEqual(unchanged, { state: "CURRENT", action: "none", interfaceName: "wlan0" });
+    assert.equal(events.length, 0);
+    const unavailable = reconcileAvahiSetup({ identityPath, environmentPath, configPath, interfaces: {}, physicalCheck: () => true, isActive: () => true, runSystemctl, replaceConfig });
+    assert.deepEqual(unavailable, { state: "UNAVAILABLE", action: "stop" });
+    assert.deepEqual(events, [["stop", "avahi-daemon"]]);
+    events.length = 0;
+    const alreadyStopped = reconcileAvahiSetup({ identityPath, environmentPath, configPath, interfaces: {}, physicalCheck: () => true, isActive: () => false, runSystemctl, replaceConfig });
+    assert.deepEqual(alreadyStopped, { state: "UNAVAILABLE", action: "none" });
+    assert.equal(events.length, 0, "no-interface polling does not repeatedly invoke systemctl when Avahi is already stopped");
+  } finally {
+    fs.rmSync(osTmp, { recursive: true, force: true });
+  }
 });
 
 test("Avahi daemon configuration confines alias and service publication to one selected interface", () => {

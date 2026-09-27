@@ -1,0 +1,16 @@
+[Unit]
+Description=Keep locked Dinodia OS setup discovery on the selected private interface
+After=network-online.target avahi-daemon.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=@NODE_BIN@ /usr/local/lib/dinodia-setup-discovery-current/scripts/reconcile_setup_avahi.mjs --identity @IDENTITY_DIR@/identity.json --environment @INSTALL_DIR@/.env --config /etc/avahi/avahi-daemon.conf
+NoNewPrivileges=false
+ProtectSystem=full
+ReadWritePaths=/etc/avahi
+ProtectHome=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=true

@@ -8,11 +8,15 @@ set -Eeuo pipefail
 APP_SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL_DIR="${DINODIA_INSTALL_DIR:-/opt/dinodia-os}"
 RELEASE_ROOT="${DINODIA_RELEASE_ROOT:-/opt/dinodia-os-releases}"
+DISCOVERY_RELEASE_ROOT="/usr/local/lib/dinodia-setup-discovery-releases"
+DISCOVERY_CURRENT_LINK="/usr/local/lib/dinodia-setup-discovery-current"
 DATA_DIR="${DINODIA_DATA_DIR:-/var/lib/dinodia-os}"
 IDENTITY_DIR="${DINODIA_IDENTITY_DIR:-/etc/dinodia-os/identity}"
 IDENTITY_SOCKET="${DINODIA_IDENTITY_SOCKET:-/run/dinodia-identityd.sock}"
 SERVICE_FILE="/etc/systemd/system/dinodia-os.service"
 IDENTITY_SERVICE_FILE="/etc/systemd/system/dinodia-identityd.service"
+DISCOVERY_SERVICE_FILE="/etc/systemd/system/dinodia-setup-discovery-sync.service"
+DISCOVERY_TIMER_FILE="/etc/systemd/system/dinodia-setup-discovery-sync.timer"
 AVAHI_CONFIG="/etc/avahi/avahi-daemon.conf"
 INSTALL_USER="${SUDO_USER:-${USER:-dinodia}}"
 CURRENT_ENV="${DINODIA_ENV_FILE:-$INSTALL_DIR/.env}"
@@ -23,6 +27,13 @@ SERVICES_STOPPED=0
 COMPLETED=0
 OLD_OS_UNIT_PRESENT=0
 OLD_IDENTITY_UNIT_PRESENT=0
+OLD_DISCOVERY_SERVICE_PRESENT=0
+OLD_DISCOVERY_TIMER_PRESENT=0
+OLD_DISCOVERY_TIMER_ENABLED=0
+OLD_DISCOVERY_TIMER_ACTIVE=0
+OLD_DISCOVERY_LINK_PRESENT=0
+OLD_DISCOVERY_LINK_TARGET=""
+DISCOVERY_LINK_SWITCHED=0
 AVAHI_CONFIG_CHANGED=0
 OLD_AVAHI_CONFIG_PRESENT=0
 AVAHI_SETUP_ADDRESS=""
@@ -57,6 +68,15 @@ for relative in "${candidate_files[@]}"; do [[ -e "$APP_SOURCE/$relative" ]] || 
 # value. It rejects Preview/old/fallback origins and malformed multiline PEMs.
 BUILD_ID="$(node "$APP_SOURCE/scripts/install_pi_preflight.mjs" --source "$APP_SOURCE" --env "$CURRENT_ENV" --identity "$IDENTITY_DIR" --print-build-id)"
 [[ "$BUILD_ID" =~ ^native-v2-[a-f0-9]{24}$ ]] || die "candidate build identity is invalid"
+DISCOVERY_RELEASE_DIR="$DISCOVERY_RELEASE_ROOT/$BUILD_ID"
+[[ ! -e "$DISCOVERY_RELEASE_DIR" ]] || die "privileged discovery helper build identity already exists; review the existing release before retrying"
+if [[ -L "$DISCOVERY_CURRENT_LINK" ]]; then
+  OLD_DISCOVERY_LINK_TARGET="$(readlink -f -- "$DISCOVERY_CURRENT_LINK")"
+  [[ -n "$OLD_DISCOVERY_LINK_TARGET" && "$OLD_DISCOVERY_LINK_TARGET" == "$DISCOVERY_RELEASE_ROOT/"* && -d "$OLD_DISCOVERY_LINK_TARGET" ]] || die "existing privileged discovery helper pointer is outside the approved release root"
+  OLD_DISCOVERY_LINK_PRESENT=1
+elif [[ -e "$DISCOVERY_CURRENT_LINK" ]]; then
+  die "privileged discovery helper pointer is not an approved symlink"
+fi
 
 # Both publishers use supported positional CLI syntax. Avahi's daemon-level
 # allow-interfaces setting confines publication to the selected private LAN.
@@ -84,12 +104,28 @@ cleanup_failed_install() {
     return
   fi
   if [[ "$SWITCHED" -eq 1 ]]; then
+    systemctl disable --now dinodia-setup-discovery-sync.timer >/dev/null 2>&1 || true
+    systemctl stop dinodia-setup-discovery-sync.service >/dev/null 2>&1 || true
     systemctl stop dinodia-os dinodia-identityd >/dev/null 2>&1 || true
     rm -f -- "$INSTALL_DIR"
     if [[ -n "$OLD_RELEASE" && -e "$OLD_RELEASE" ]]; then mv -- "$OLD_RELEASE" "$INSTALL_DIR"; fi
     if [[ "$OLD_OS_UNIT_PRESENT" -eq 1 && -f "$BACKUP_DIR/dinodia-os.service" ]]; then install -o root -g root -m 0644 "$BACKUP_DIR/dinodia-os.service" "$SERVICE_FILE"; else rm -f "$SERVICE_FILE"; fi
     if [[ "$OLD_IDENTITY_UNIT_PRESENT" -eq 1 && -f "$BACKUP_DIR/dinodia-identityd.service" ]]; then install -o root -g root -m 0644 "$BACKUP_DIR/dinodia-identityd.service" "$IDENTITY_SERVICE_FILE"; else rm -f "$IDENTITY_SERVICE_FILE"; fi
+    if [[ "$OLD_DISCOVERY_SERVICE_PRESENT" -eq 1 && -f "$BACKUP_DIR/dinodia-setup-discovery-sync.service" ]]; then install -o root -g root -m 0644 "$BACKUP_DIR/dinodia-setup-discovery-sync.service" "$DISCOVERY_SERVICE_FILE"; else rm -f "$DISCOVERY_SERVICE_FILE"; fi
+    if [[ "$OLD_DISCOVERY_TIMER_PRESENT" -eq 1 && -f "$BACKUP_DIR/dinodia-setup-discovery-sync.timer" ]]; then install -o root -g root -m 0644 "$BACKUP_DIR/dinodia-setup-discovery-sync.timer" "$DISCOVERY_TIMER_FILE"; else rm -f "$DISCOVERY_TIMER_FILE"; fi
+    if [[ "$DISCOVERY_LINK_SWITCHED" -eq 1 ]]; then
+      if [[ "$OLD_DISCOVERY_LINK_PRESENT" -eq 1 && -d "$OLD_DISCOVERY_LINK_TARGET" ]]; then
+        discovery_link_tmp="${DISCOVERY_CURRENT_LINK}.rollback-${BASHPID}"
+        ln -s -- "$OLD_DISCOVERY_LINK_TARGET" "$discovery_link_tmp"
+        mv -Tf -- "$discovery_link_tmp" "$DISCOVERY_CURRENT_LINK"
+      else
+        rm -f -- "$DISCOVERY_CURRENT_LINK"
+      fi
+      DISCOVERY_LINK_SWITCHED=0
+    fi
     systemctl daemon-reload >/dev/null 2>&1 || true
+    if [[ "$OLD_DISCOVERY_TIMER_ENABLED" -eq 1 ]]; then systemctl enable dinodia-setup-discovery-sync.timer >/dev/null 2>&1 || true; else systemctl disable dinodia-setup-discovery-sync.timer >/dev/null 2>&1 || true; fi
+    if [[ "$OLD_DISCOVERY_TIMER_ACTIVE" -eq 1 ]]; then systemctl start dinodia-setup-discovery-sync.timer >/dev/null 2>&1 || true; else systemctl stop dinodia-setup-discovery-sync.timer >/dev/null 2>&1 || true; fi
   elif [[ -n "${RELEASE_DIR:-}" && -e "$RELEASE_DIR" ]]; then
     # A copy/install failure before the switch must not strand a partial
     # release identity that blocks a later guarded retry.
@@ -171,7 +207,16 @@ BACKUP_DIR="/var/backups/dinodia-os-pre-native-v2-${timestamp}"
 mkdir -p "$BACKUP_DIR"
 if [[ -e "$SERVICE_FILE" ]]; then cp -p "$SERVICE_FILE" "$BACKUP_DIR/dinodia-os.service"; OLD_OS_UNIT_PRESENT=1; fi
 if [[ -e "$IDENTITY_SERVICE_FILE" ]]; then cp -p "$IDENTITY_SERVICE_FILE" "$BACKUP_DIR/dinodia-identityd.service"; OLD_IDENTITY_UNIT_PRESENT=1; fi
+if [[ -e "$DISCOVERY_SERVICE_FILE" ]]; then cp -p "$DISCOVERY_SERVICE_FILE" "$BACKUP_DIR/dinodia-setup-discovery-sync.service"; OLD_DISCOVERY_SERVICE_PRESENT=1; fi
+if [[ -e "$DISCOVERY_TIMER_FILE" ]]; then cp -p "$DISCOVERY_TIMER_FILE" "$BACKUP_DIR/dinodia-setup-discovery-sync.timer"; OLD_DISCOVERY_TIMER_PRESENT=1; fi
+systemctl is-enabled --quiet dinodia-setup-discovery-sync.timer && OLD_DISCOVERY_TIMER_ENABLED=1 || true
+systemctl is-active --quiet dinodia-setup-discovery-sync.timer && OLD_DISCOVERY_TIMER_ACTIVE=1 || true
 if [[ -f "$AVAHI_CONFIG" ]]; then cp -p "$AVAHI_CONFIG" "$BACKUP_DIR/avahi-daemon.conf"; OLD_AVAHI_CONFIG_PRESENT=1; fi
+if [[ "$OLD_DISCOVERY_LINK_PRESENT" -eq 1 ]]; then
+  printf '%s\n' "$OLD_DISCOVERY_LINK_TARGET" > "$BACKUP_DIR/dinodia-setup-discovery-current.target"
+  chmod 0600 "$BACKUP_DIR/dinodia-setup-discovery-current.target"
+  cp -a "$OLD_DISCOVERY_LINK_TARGET" "$BACKUP_DIR/dinodia-setup-discovery-bundle"
+fi
 if [[ -d "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then
   current_real="$(readlink -f "$INSTALL_DIR")"
   tar --exclude='*/.env*' --exclude='*/node_modules' --exclude='*/.venv-hive' -czf "$BACKUP_DIR/application.tar.gz" -C "$current_real" .
@@ -182,12 +227,23 @@ cp -a "$STAGE_DIR" "$RELEASE_DIR"
 rm -rf -- "$STAGE_DIR"
 STAGE_DIR=""
 
+# Root's periodic interface reconciler must never execute source writable by
+# the Dinodia OS service user. Keep only its tiny dependency bundle in a
+# root-owned, immutable, versioned directory outside /opt/dinodia-os.
+mkdir -p "$DISCOVERY_RELEASE_DIR/scripts" "$DISCOVERY_RELEASE_DIR/src"
+install -o root -g root -m 0555 "$RELEASE_DIR/scripts/reconcile_setup_avahi.mjs" "$DISCOVERY_RELEASE_DIR/scripts/reconcile_setup_avahi.mjs"
+install -o root -g root -m 0444 "$RELEASE_DIR/src/setupDiscovery.js" "$DISCOVERY_RELEASE_DIR/src/setupDiscovery.js"
+install -o root -g root -m 0444 "$RELEASE_DIR/src/avahiSetupConfig.js" "$DISCOVERY_RELEASE_DIR/src/avahiSetupConfig.js"
+install -o root -g root -m 0444 "$RELEASE_DIR/src/avahiSetupSupervisor.js" "$DISCOVERY_RELEASE_DIR/src/avahiSetupSupervisor.js"
+chown root:root "$DISCOVERY_RELEASE_DIR" "$DISCOVERY_RELEASE_DIR/scripts" "$DISCOVERY_RELEASE_DIR/src"
+chmod 0555 "$DISCOVERY_RELEASE_DIR" "$DISCOVERY_RELEASE_DIR/scripts" "$DISCOVERY_RELEASE_DIR/src"
+
 systemctl stop dinodia-os dinodia-identityd >/dev/null 2>&1 || true
 SERVICES_STOPPED=1
 AVAHI_CONFIG_CANDIDATE="$(mktemp /tmp/dinodia-avahi-candidate.XXXXXX)"
 AVAHI_SETUP_ADDRESS="$(node "$RELEASE_DIR/scripts/configure_avahi_setup.mjs" \
   --input "$AVAHI_CONFIG" --output "$AVAHI_CONFIG_CANDIDATE" \
-  --identity "$IDENTITY_DIR/identity.json" --interface-address "${DINODIA_SETUP_INTERFACE:-}")"
+  --identity "$IDENTITY_DIR/identity.json" --interface-name "${DINODIA_SETUP_INTERFACE:-}")"
 AVAHI_CONFIG_ATOMIC_TMP="$(mktemp "${AVAHI_CONFIG}.dinodia.XXXXXX")"
 install -o root -g root -m 0644 "$AVAHI_CONFIG_CANDIDATE" "$AVAHI_CONFIG_ATOMIC_TMP"
 mv -f -- "$AVAHI_CONFIG_ATOMIC_TMP" "$AVAHI_CONFIG"
@@ -200,6 +256,10 @@ OLD_RELEASE="$RELEASE_ROOT/previous-${timestamp}-${BASHPID}"
 if [[ -e "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then mv -- "$INSTALL_DIR" "$OLD_RELEASE"; fi
 SWITCHED=1
 ln -s "$RELEASE_DIR" "$INSTALL_DIR"
+discovery_link_tmp="${DISCOVERY_CURRENT_LINK}.candidate-${BASHPID}"
+ln -s -- "$DISCOVERY_RELEASE_DIR" "$discovery_link_tmp"
+mv -Tf -- "$discovery_link_tmp" "$DISCOVERY_CURRENT_LINK"
+DISCOVERY_LINK_SWITCHED=1
 
 service_tmp="$(mktemp /tmp/dinodia-os.service.XXXXXX)"
 sed -e "s#@INSTALL_USER@#$INSTALL_USER#g" -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" -e "s#@DATA_DIR@#$DATA_DIR#g" -e "s#@IDENTITY_DIR@#$IDENTITY_DIR#g" -e "s#@IDENTITY_SOCKET@#$IDENTITY_SOCKET#g" -e "s#@INSTALL_GID@#$install_gid#g" -e "s#@NODE_BIN@#$(command -v node)#g" "$RELEASE_DIR/systemd/dinodia-os.service" > "$service_tmp"
@@ -209,10 +269,17 @@ identity_service_tmp="$(mktemp /tmp/dinodia-identityd.service.XXXXXX)"
 sed -e "s#@IDENTITY_DIR@#$IDENTITY_DIR#g" -e "s#@IDENTITY_SOCKET@#$IDENTITY_SOCKET#g" -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" -e "s#@INSTALL_GID@#$install_gid#g" -e "s#@NODE_BIN@#$(command -v node)#g" "$RELEASE_DIR/systemd/dinodia-identityd.service" > "$identity_service_tmp"
 install -o root -g root -m 0644 "$identity_service_tmp" "$IDENTITY_SERVICE_FILE"
 rm -f "$identity_service_tmp"
+discovery_service_tmp="$(mktemp /tmp/dinodia-setup-discovery-sync.service.XXXXXX)"
+sed -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" -e "s#@IDENTITY_DIR@#$IDENTITY_DIR#g" -e "s#@NODE_BIN@#$(command -v node)#g" "$RELEASE_DIR/systemd/dinodia-setup-discovery-sync.service" > "$discovery_service_tmp"
+install -o root -g root -m 0644 "$discovery_service_tmp" "$DISCOVERY_SERVICE_FILE"
+rm -f "$discovery_service_tmp"
+install -o root -g root -m 0644 "$RELEASE_DIR/systemd/dinodia-setup-discovery-sync.timer" "$DISCOVERY_TIMER_FILE"
 install -d -o root -g root -m 0700 "$IDENTITY_DIR"
 systemctl daemon-reload
 
 if ! systemctl enable --now dinodia-identityd || ! systemctl enable --now dinodia-os; then die "candidate service failed to start"; fi
+systemctl enable --now dinodia-setup-discovery-sync.timer || die "locked-setup interface reconciliation timer failed to start"
+systemctl start dinodia-setup-discovery-sync.service || die "locked-setup interface reconciliation failed"
 
 health_ok=0
 for attempt in $(seq 1 30); do

@@ -1,0 +1,11 @@
+[Unit]
+Description=Reconcile locked Dinodia OS setup interface after DHCP or link changes
+
+[Timer]
+OnBootSec=5s
+OnUnitActiveSec=10s
+AccuracySec=1s
+Unit=dinodia-setup-discovery-sync.service
+
+[Install]
+WantedBy=timers.target

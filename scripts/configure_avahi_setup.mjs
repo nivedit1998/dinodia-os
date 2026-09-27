@@ -16,18 +16,19 @@ function argument(name) {
 const input = argument("--input");
 const output = argument("--output");
 const identityPath = argument("--identity");
-const interfaceAddress = argument("--interface-address");
+const interfaceName = argument("--interface-name") || argument("--interface-address");
+const printInterfaceName = process.argv.includes("--print-interface-name");
 if (!input || !output || !identityPath) {
-  process.stderr.write("Usage: configure_avahi_setup.mjs --input FILE --output FILE --identity FILE [--interface-address IPV4]\n");
+  process.stderr.write("Usage: configure_avahi_setup.mjs --input FILE --output FILE --identity FILE [--interface-name NAME]\n");
   process.exit(2);
 }
 
 const identity = JSON.parse(fs.readFileSync(identityPath, "utf8"));
 const serial = String(identity.serialNumber || identity.serial || "");
-const selected = privateInterface(interfaceAddress, os.networkInterfaces());
+const selected = privateInterface(interfaceName, os.networkInterfaces());
 if (!selected) throw new Error("No physical private setup interface is available");
 const source = fs.readFileSync(input, "utf8");
 const candidate = configureSetupDiscovery(source, { serial, interfaceName: selected.name });
 fs.mkdirSync(path.dirname(output), { recursive: true });
 fs.writeFileSync(output, candidate, { mode: 0o600 });
-process.stdout.write(selected.address);
+process.stdout.write(printInterfaceName ? selected.name : selected.address);

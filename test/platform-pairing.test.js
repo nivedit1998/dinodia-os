@@ -6,7 +6,8 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { Store } = require("../src/store");
 const { SecretVault } = require("../src/secretVault");
-const { PlatformPairing, sign } = require("../src/platformPairing");
+const { PlatformPairing, sign, validateLanEndpointObservation } = require("../src/platformPairing");
+const { SetupDiscovery } = require("../src/setupDiscovery");
 const { generateManufacturingIdentity, vaultIdentityRecord } = require("../src/auth/manufacturingIdentity");
 
 function encryptedMachineEnvelope(identity, credential, version, purpose = "machine-credential") {
@@ -90,7 +91,7 @@ test("native provisioning completes the outbound challenge, encrypted credential
       assert.equal(body.credentialFingerprint, crypto.createHash("sha256").update(credential).digest("hex"));
       return { ok: true, async json() { return { ok: true, acknowledged: true }; } };
     }
-    if (url.endsWith('/heartbeat')) return { ok: true, async json() { return { ok: true, online: true }; } };
+    if (url.endsWith('/heartbeat')) return { ok: true, async json() { return { ok: true, online: true, lanEndpoint: { revision: body.lanEndpoint.revision, state: body.lanEndpoint.state } }; } };
     assert.match(url, /\/token-state$/);
     return { ok: true, async json() { return { latestVersion: 0, publishedVersion: 0, hubTokenHashes: [], acceptedActivityIncidentIds: [] }; } };
   };
@@ -131,8 +132,11 @@ test("operator credential receipt stays DELIVERED until the hub acknowledgement 
   const credential = "dno_operator_test_credential";
   const envelope = encryptedMachineEnvelope(identity, credential, 2, "operator-credential");
   let acknowledgementAttempts = 0;
-  const fetchImpl = async (url) => {
-    if (url.endsWith("/heartbeat")) return { ok: true, async json() { return { ok: true, online: true }; } };
+  const fetchImpl = async (url, options) => {
+    if (url.endsWith("/heartbeat")) {
+      const body = JSON.parse(options.body);
+      return { ok: true, async json() { return { ok: true, online: true, lanEndpoint: { revision: body.lanEndpoint.revision, state: body.lanEndpoint.state } }; } };
+    }
     if (url.endsWith("/credentials/acknowledge")) {
       acknowledgementAttempts += 1;
       if (acknowledgementAttempts === 1) return { ok: false, status: 503, async json() { return { error: "temporarily_unavailable" }; } };
@@ -174,9 +178,10 @@ test("operator policy sync is at most 30 seconds while the signed operations hea
   const pairing = new PlatformPairing({
     store, vault, apiUrl: "https://platform.test", serial: "DINODIA-POLICY-HUB",
     intervalMs: 30_000, heartbeatIntervalMs: 120_000, clock: () => now,
-    fetchImpl: async (url) => {
+    fetchImpl: async (url, options) => {
       routes.push(new URL(url).pathname);
-      return { ok: true, async json() { return { latestVersion: 0, publishedVersion: 0, operatorCredentialStates: [], offlineAuthorisations: [], acceptedActivityIncidentIds: [] }; } };
+      const body = JSON.parse(options.body || "{}");
+      return { ok: true, async json() { return { latestVersion: 0, publishedVersion: 0, operatorCredentialStates: [], offlineAuthorisations: [], acceptedActivityIncidentIds: [], ...(url.endsWith("/heartbeat") && body.lanEndpoint ? { lanEndpoint: { revision: body.lanEndpoint.revision, state: body.lanEndpoint.state } } : {}) }; } };
     },
   });
   await pairing.syncNow();
@@ -190,6 +195,95 @@ test("operator policy sync is at most 30 seconds while the signed operations hea
   await pairing.syncNow();
   assert.equal(routes.filter((route) => route.endsWith("/heartbeat")).length, 2);
   assert.equal(routes.filter((route) => route.endsWith("/token-state")).length, 4);
+});
+
+test("signed heartbeat persists monotonic LAN endpoint revisions and keeps unavailable addresses out of the report", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-lan-endpoint-heartbeat-"));
+  const store = new Store(path.join(directory, "dinodia.json"));
+  await store.saveIdentity({ serial: "DINODIA-LAN-HUB" });
+  const vault = new SecretVault({ dataDir: directory });
+  const identity = generateManufacturingIdentity({ serial: "DINODIA-LAN-HUB" });
+  const record = vaultIdentityRecord(identity);
+  await vault.set("platform.identityPrivateKey", record.signingPrivateKey);
+  await vault.set("platform.identityPublicKey", record.signingPublicKey);
+  await vault.set("platform.encryptionPrivateKey", record.encryptionPrivateKey);
+  await vault.set("platform.encryptionPublicKey", record.encryptionPublicKey);
+  await vault.set("platform.identityFingerprint", record.publicKeyFingerprint);
+  await vault.set("platform.encryptionFingerprint", record.encryptionKeyFingerprint);
+  await vault.set("platform.identityGeneration", "1");
+  await vault.set("platform.manufacturingCertificateSignature", "test-only-certificate-signature");
+  await store.savePlatform({ paired: true, provisioningCredentialVersion: 1 });
+  let address = "192.168.1.76";
+  const discovery = new SetupDiscovery({
+    serial: "DINODIA-LAN-HUB",
+    nodeEnv: "test",
+    interfaces: () => address ? { eth0: [{ address, family: "IPv4", internal: false }] } : { eth0: [] },
+    physicalCheck: () => true,
+  });
+  const observations = [];
+  let holdHeartbeat = false;
+  let heartbeatStarted;
+  let releaseHeartbeat;
+  const heartbeatStartedPromise = new Promise((resolve) => { heartbeatStarted = resolve; });
+  const pairing = new PlatformPairing({
+    store, vault, apiUrl: "https://platform.test", serial: "DINODIA-LAN-HUB",
+    // Exercise the exact observation object supplied by createHub in
+    // src/server.js; do not handcraft a friendlier address-shaped test value.
+    getLanEndpoint: () => discovery.observation(),
+    fetchImpl: async (url, options) => {
+      const body = JSON.parse(options.body);
+      if (url.endsWith("/heartbeat")) {
+        observations.push(body.lanEndpoint);
+        if (holdHeartbeat) {
+          holdHeartbeat = false;
+          heartbeatStarted();
+          await new Promise((resolve) => { releaseHeartbeat = resolve; });
+        }
+        return { ok: true, async json() { return { ok: true, online: true, lanEndpoint: { revision: body.lanEndpoint.revision, state: body.lanEndpoint.state } }; } };
+      }
+      return { ok: true, async json() { return { latestVersion: 0, publishedVersion: 0, operatorCredentialStates: [], offlineAuthorisations: [], acceptedActivityIncidentIds: [] }; } };
+    },
+  });
+  await pairing.syncNow();
+  assert.deepEqual(observations[0], { version: 1, revision: 1, state: "CURRENT", baseUrl: "http://192.168.1.76:8123", discoveryHost: "dinodia-dinodia-lan-hub.local" });
+  assert.equal(validateLanEndpointObservation(observations[0], "DINODIA-LAN-HUB"), true);
+  const canonicalFixture = JSON.parse(await fs.readFile(path.join(__dirname, "fixtures/contracts/dinodia-v1/fixtures/lan-endpoint-current.json"), "utf8"));
+  assert.equal(validateLanEndpointObservation(canonicalFixture, "din-home-001"), true);
+  for (const invalid of [
+    { ...canonicalFixture, baseUrl: "http://203.0.113.42:8123" },
+    { ...canonicalFixture, baseUrl: "http://192.168.0.110:8124" },
+    { ...canonicalFixture, baseUrl: "http://192.168.000.110:8123" },
+    { ...canonicalFixture, discoveryHost: "dinodia-another-hub.local" },
+    { ...canonicalFixture, installationId: "caller-selected" },
+  ]) assert.equal(validateLanEndpointObservation(invalid, "din-home-001"), false);
+  await pairing.requestImmediateHeartbeat();
+  assert.equal(observations[1].revision, 1, "same endpoint refreshes its signed receipt without incrementing revision");
+  address = "192.168.0.110";
+  await pairing.requestImmediateHeartbeat();
+  assert.equal(observations[2].revision, 2);
+  assert.equal(observations[2].baseUrl, "http://192.168.0.110:8123");
+  address = "";
+  await pairing.requestImmediateHeartbeat();
+  assert.deepEqual(observations[3], { version: 1, revision: 3, state: "UNAVAILABLE", discoveryHost: "dinodia-dinodia-lan-hub.local" });
+  assert.equal(store.getPlatform().lanEndpointObservation.revision, 3);
+  assert.equal(Object.hasOwn(observations[3], "baseUrl"), false);
+
+  // A second network move while the first signed heartbeat is in flight must
+  // survive that request's acknowledgement and be sent immediately afterward.
+  address = "192.168.0.111";
+  holdHeartbeat = true;
+  pairing.lastHeartbeatAt = 0;
+  const firstMove = pairing.syncNow();
+  await heartbeatStartedPromise;
+  address = "192.168.0.112";
+  await pairing.requestImmediateHeartbeat();
+  releaseHeartbeat();
+  await firstMove;
+  for (let attempt = 0; attempt < 50 && observations.length < 6; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(observations.length, 6);
+  assert.equal(observations[4].baseUrl, "http://192.168.0.111:8123");
+  assert.equal(observations[5].baseUrl, "http://192.168.0.112:8123");
+  assert.equal(observations[5].revision, observations[4].revision + 1);
 });
 
 test("CloudURL re-verification is included inside the machine-signed Platform request body", async () => {

@@ -811,6 +811,27 @@
       },
       "additionalProperties": false
     },
+    "lanEndpointObservation": {
+      "type": "object",
+      "required": ["version", "revision", "state", "discoveryHost"],
+      "properties": {
+        "version": { "const": 1 },
+        "revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "state": { "enum": ["CURRENT", "UNAVAILABLE"] },
+        "baseUrl": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^http://(?:(?:10\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))|(?:192\\.168\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))|(?:172\\.(?!(?:17|18)\\.)(?:1[6-9]|2[0-9]|3[01])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))):8123$",
+          "not": { "pattern": "\\.(?:0|255):8123$" }
+        },
+        "discoveryHost": { "type": "string", "maxLength": 80, "pattern": "^dinodia-[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.local$" }
+      },
+      "oneOf": [
+        { "properties": { "state": { "const": "CURRENT" } }, "required": ["baseUrl"] },
+        { "properties": { "state": { "const": "UNAVAILABLE" } }, "not": { "required": ["baseUrl"] } }
+      ],
+      "additionalProperties": false
+    },
     "uiState": { "enum": ["restoring_session", "loading", "ready", "empty", "stale", "offline", "denied", "expired", "uncertain", "maintenance", "error"] },
     "error": {
       "type": "object",

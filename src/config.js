@@ -40,6 +40,14 @@ const platformApiUrl = nodeEnv === "production"
 // Match Platform's exact opt-in semantics. Whitespace or any other malformed
 // value is OFF, avoiding a policy-mode disagreement between the two runtimes.
 const stage1InternalOperatorDaySession = process.env.STAGE1_INTERNAL_OPERATOR_DAY_SESSION === "true";
+const configuredSetupInterface = stringEnv("DINODIA_SETUP_INTERFACE", "");
+// Keep a stable interface selector, never a DHCP address from the previous
+// router. Legacy IPv4 values are ignored and physical-interface discovery
+// deterministically selects the current wired/Wi-Fi adapter instead.
+const setupInterfaceName = /^(eth\d*|en[a-z0-9]*|wl[a-z0-9]*)$/i.test(configuredSetupInterface)
+  && !/^(lo|docker|br-|veth|virbr|cni|flannel|podman|tailscale|wg|tun|tap|zt|vboxnet|vmnet)/i.test(configuredSetupInterface)
+  ? configuredSetupInterface
+  : "";
 
 module.exports = {
   nodeEnv,
@@ -56,7 +64,7 @@ module.exports = {
   legacyCompatibilityEnabled,
   operatorPublicKey: pemEnv("DINODIA_OPERATOR_PUBLIC_KEY", ""),
   appPublicKeys: stringEnv("DINODIA_APP_PUBLIC_KEYS", ""),
-  setupInterface: stringEnv("DINODIA_SETUP_INTERFACE", ""),
+  setupInterfaceName,
   setupAllowedHosts: stringEnv("DINODIA_SETUP_ALLOWED_HOSTS", ""),
   pairingTtlMs: Math.max(60_000, Math.min(numberEnv("DINODIA_PAIRING_TTL_MS", 900_000), 900_000)),
   // Temporary Stage 1 exception; Platform grants must carry the matching

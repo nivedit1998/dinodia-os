@@ -7,6 +7,8 @@ const supportRedeem = document.getElementById("support-redeem");
 const supportRevoke = document.getElementById("support-revoke");
 const supportStatus = document.getElementById("support-status");
 const supportOnly = window.location.pathname === "/support-access";
+const operatorWindow = supportOnly && Boolean(window.opener);
+const supportSection = document.getElementById("support-access");
 let supportExpiryTimer = null;
 let operatorHandoffStarted = false;
 function clearSupportSecrets() {
@@ -47,7 +49,11 @@ async function registerOperatorBrowserAttempt() {
   try {
     const response = await fetch("/_dinodia/setup/operator-attempt", { method: "POST", headers: { "content-type": "application/json", "x-dinodia-setup-csrf": cookie("dinodia_setup_csrf") }, body: "{}", cache: "no-store" });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok || typeof data.setupAttemptId !== "string") throw new Error(data.error || "The hub could not register this browser.");
+    if (!response.ok || typeof data.setupAttemptId !== "string") {
+      const failure = new Error(data.error || "The hub could not register this browser.");
+      failure.errorCode = typeof data.errorCode === "string" ? data.errorCode : "operator_browser_registration_failed";
+      throw failure;
+    }
     // The setup page is opened by Company Portal. Never broadcast its
     // hub-created attempt reference with postMessage("*") when the browser
     // omits Referer; pin delivery to the sole canonical employee Portal.
@@ -58,9 +64,13 @@ async function registerOperatorBrowserAttempt() {
       if (referrerOrigin !== portalOrigin) throw new Error("This setup window was not opened by the canonical Company Portal.");
     }
     window.opener.postMessage({ type: "dinodia-operator-attempt", setupAttemptId: data.setupAttemptId }, portalOrigin);
-    show("This locked browser is ready for the Company Portal handoff.");
+    if (supportSection) supportSection.hidden = true;
+    show("Dinodia OS is waiting for the authenticated Company Portal handoff. Keep this window open.");
   } catch (error) {
-    show(error instanceof Error ? error.message : "The hub could not register this browser.", true);
+    const errorCode = error?.errorCode && /^[a-z0-9_]{1,64}$/.test(error.errorCode) ? error.errorCode : "operator_browser_registration_failed";
+    const message = error instanceof Error ? error.message : "The hub could not register this browser.";
+    show(operatorWindow ? `Company Portal handoff setup failed (${errorCode}). Close this window and launch again from the assigned work.` : message, true);
+    if (operatorWindow) window.opener.postMessage({ type: "dinodia-operator-handoff-failed", phase: "hub", errorCode }, "https://dinodia-platform-v2.vercel.app");
   }
 }
 button.addEventListener("click", async () => {
@@ -76,11 +86,17 @@ button.addEventListener("click", async () => {
   button.disabled = false;
 });
 refresh().catch((error) => show(error.message, true));
-if (supportOnly) {
+if (supportOnly && !operatorWindow) {
   button.hidden = true;
   document.getElementById("qr").hidden = true;
   document.getElementById("support-access").open = true;
   show("Enter the values from an approved Company Portal support ticket.");
+  registerOperatorBrowserAttempt().catch(() => {});
+} else if (operatorWindow) {
+  button.hidden = true;
+  qr.hidden = true;
+  if (supportSection) supportSection.hidden = true;
+  show("Connecting this locked browser to the assigned Company Portal work…");
   registerOperatorBrowserAttempt().catch(() => {});
 }
 
