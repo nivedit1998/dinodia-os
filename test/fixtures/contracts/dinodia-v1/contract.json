@@ -292,13 +292,32 @@
     },
     "customerHubSession": {
       "type": "object",
-      "required": ["ok", "token", "expiresAt", "homeId", "membershipId"],
+      "required": ["ok", "token", "expiresAt", "homeId", "membershipId", "hubEndpoint"],
       "properties": {
         "ok": { "const": true },
         "token": { "type": "string", "minLength": 1, "maxLength": 8192, "description": "Short-lived bearer. Native client memory only; never persist, log, render or forward to an unverified hub origin." },
         "expiresAt": { "$ref": "#/$defs/timestamp" },
         "homeId": { "$ref": "#/$defs/id" },
-        "membershipId": { "$ref": "#/$defs/id" }
+        "membershipId": { "$ref": "#/$defs/id" },
+        "hubEndpoint": {
+          "type": "object",
+          "oneOf": [
+            {
+              "required": ["state", "origin"],
+              "properties": {
+                "state": { "const": "verified_cloud" },
+                "origin": { "type": "string", "pattern": "^https://dinodia-[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.dinodiasmartliving\\.com$" }
+              },
+              "additionalProperties": false
+            },
+            {
+              "required": ["state"],
+              "properties": { "state": { "const": "unavailable" } },
+              "not": { "required": ["origin"] },
+              "additionalProperties": false
+            }
+          ]
+        }
       },
       "additionalProperties": false
     },
@@ -879,7 +898,8 @@
                 "SUPPORT_EMPLOYEE_MISMATCH",
       "SUPPORT_SCOPE_CHANGED",
       "SUPPORT_REMOTE_UNAVAILABLE",
-      "FEATURE_NOT_ENABLED"
+      "FEATURE_NOT_ENABLED",
+      "INTERNAL_ERROR"
               ]
             },
             "message": { "type": "string", "maxLength": 240 },

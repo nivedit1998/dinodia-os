@@ -89,7 +89,7 @@ function effectiveControlQuality(state, now = Date.now()) {
 function serializeDevice({ device, homeId, homeMembershipId, role, areaIds, surfaces, revision = 0 }) {
   if (!isObject(device) || !Array.isArray(surfaces)) return null;
   const metadata = isObject(device.metadata) ? device.metadata : {};
-  const managementClass = device.managementClass === 'tenant_device' || metadata.managementClass === 'tenant_device' ? 'tenant_device' : 'property_device';
+  const managementClass = device.managementClass === 'tenant_device' || metadata.managementClass === 'tenant_device' || Boolean(device.tenantOwnerMembershipId || metadata.tenantOwnerMembershipId) ? 'tenant_device' : 'property_device';
   const ownerMembershipId = managementClass === 'tenant_device'
     ? String(device.tenantOwnerMembershipId || metadata.tenantOwnerMembershipId || '') || null
     : null;

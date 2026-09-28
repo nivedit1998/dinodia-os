@@ -105,7 +105,18 @@ class OfflineLanAuthorisationStore {
   async verify({ grantId, challenge, signature } = {}) {
     const grant = this.records()[String(grantId || "")];
     if (!grant || grant.revokedAt || (grant.expiresAt && Number(grant.expiresAt) <= this.now())) return null;
-    if (String(challenge?.homeId) !== grant.homeId || String(challenge?.hubInstallId) !== grant.hubInstallId || !canUseArea({ areaIds: grant.areaIds, areaId: challenge?.areaId || challenge?.areaIds?.[0] })) return null;
+    const challengeKeys = ["areaId", "controlId", "deviceId", "homeId", "hubInstallId", "issuedAt", "nonce", "v", "valueDigest"];
+    if (!challenge || typeof challenge !== "object" || Array.isArray(challenge)
+      || Object.keys(challenge).sort().join("\n") !== challengeKeys.join("\n")
+      || challenge.v !== 1
+      || ["areaId", "controlId", "deviceId", "homeId", "hubInstallId", "nonce", "valueDigest"].some((key) => typeof challenge[key] !== "string" || !challenge[key])) return null;
+    // The phone signs the public canonical Area UUID. The hub resolves the
+    // target device's private OS alias locally and requires an exact binding.
+    const canonicalAreaId = challenge.areaId;
+    const device = this.store?.getDevice?.(challenge.deviceId);
+    const hubAreaId = String(device?.areaId || device?.metadata?.areaId || "");
+    const bindings = (this.store?.getPlatform?.()?.areaBindings || []).filter((entry) => String(entry?.areaId || "") === canonicalAreaId && String(entry?.hubAreaId || "") === hubAreaId);
+    if (String(challenge.homeId) !== grant.homeId || String(challenge.hubInstallId) !== grant.hubInstallId || !device || !hubAreaId || bindings.length !== 1 || !canUseArea({ areaIds: grant.areaIds, areaId: canonicalAreaId })) return null;
     if (!grant.scope.includes("tenant:device-command") || grant.householdRole !== "TENANT") return null;
     let publicKey;
     try { publicKey = crypto.createPublicKey(grant.publicKey); } catch { return null; }

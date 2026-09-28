@@ -37,6 +37,7 @@ function verifyAppAccessToken(token, { publicKeys = [], hubId, now = Date.now(),
   if (!["OWNER", "PROPERTY_MANAGER", "TENANT"].includes(claims.householdRole)) return null;
   if (typeof claims.homeId !== "string" || !claims.homeId || !Number.isInteger(claims.policyRevision) || claims.policyRevision < Number(policyRevision || 0)) return null;
   if (!Array.isArray(claims.areaIds) || !Array.isArray(claims.scope)) return null;
+  if (claims.areaIds.some((areaId) => typeof areaId !== "string" || !areaId || areaId.length > 160) || new Set(claims.areaIds).size !== claims.areaIds.length) return null;
   return Object.freeze({ ...claims, hubInstallId: claims.hubInstallationId, role: claims.householdRole, areaIds: [...new Set(claims.areaIds.map(String))], scope: [...new Set(claims.scope.map(String))], principalType: "app" });
 }
 

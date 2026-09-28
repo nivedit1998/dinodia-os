@@ -1,0 +1,131 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "identity": {
+    "accountId": "account:decision-fixture",
+    "customerIsEmployee": false,
+    "activeOwnerMembershipIds": ["membership:owner"],
+    "activeManagerMembershipIds": ["membership:manager-one", "membership:manager-two"],
+    "pendingInvitationId": "invitation:pending",
+    "membershipCreatedForPendingInvitation": false
+  },
+  "property": {
+    "homeId": "home:decision-fixture",
+    "areas": [
+      { "id": "area:bedroom-a", "originalName": "Bedroom", "overrideName": "Bedroom", "floorplanShapeId": "shape:a" },
+      { "id": "area:bedroom-b", "originalName": "Spare", "overrideName": "Bedroom", "floorplanShapeId": "shape:b" }
+    ],
+    "fullGrantCombinedAreaIds": ["area:bedroom-a", "area:bedroom-b"],
+    "partialGrantCombinedAreaIds": ["area:bedroom-a"]
+  },
+  "tenantPrivacy": {
+    "deviceId": "device:tenant-private",
+    "ownerMembershipId": "membership:tenant-a",
+    "visibleToMembershipIds": ["membership:tenant-a"],
+    "ownerCanRead": false,
+    "managerCanRead": false,
+    "otherTenantCanRead": false,
+    "labelChangesAuthority": false
+  },
+  "replacement": {
+    "homeIdPreserved": true,
+    "areaIdsPreserved": true,
+    "previousHubInstallationId": "hub:old",
+    "currentHubInstallationId": "hub:new",
+    "previousDeviceId": "device:retired",
+    "replacementDeviceId": "device:replacement",
+    "nameBasedMergeAllowed": false,
+    "previousHistoryRewritten": false,
+    "previousHistoryRetained": true
+  },
+  "support": {
+    "categories": ["ACCOUNT_OR_SIGN_IN", "ACCESS_OR_PERMISSIONS", "DEVICE_PROBLEM", "HUB_OR_CONNECTION", "AUTOMATION", "ALEXA", "OTHER"],
+    "privateTenantDeviceTicketVisibleToOwner": false,
+    "privateTenantDeviceTicketNotifiesOwner": false,
+    "infrastructureTicketNotifiesOwner": true,
+    "infrastructureNoticeContainsTenantPrivateDetails": false,
+    "sameApproverRequiredForSafetyConfirmation": true,
+    "closedTicketRevokesAuthorityImmediately": true,
+    "offlineHubAcknowledgementCanRemainPending": true
+  },
+  "claim": {
+    "firstVerifiedEmailWins": true,
+    "reservationSeconds": 1800,
+    "qualifyingRequiredSaveCanExtend": true,
+    "duplicateOrNoOpCanExtend": false,
+    "transferClaimExpiresByTime": false,
+    "unfinishedPropertyDataDeletedOnRelease": true
+  },
+  "notification": {
+    "mandatorySecurityIgnoresQuietHours": true,
+    "optionalEnabledEventMayDefer": true,
+    "tenantDeviceAudience": "owning_membership_only",
+    "smsEnabled": false,
+    "inboxEnabled": false,
+    "deliveryReceiptGrantsAuthority": false
+  },
+  "controls": {
+    "labelCanCreateCapability": false,
+    "descriptorRevisionRequiredForWrite": true,
+    "staleOrOfflineCommandAllowed": false,
+    "securityControlRequiresAppStepUp": true,
+    "securityControlAutomatable": false,
+    "securityControlAlexaExposed": false
+  },
+  "automation": {
+    "bundleContainsHomeAndRevision": true,
+    "saveRequiresCurrentRevision": true,
+    "staleRevisionIsRejectedWithoutMerge": true,
+    "appOnlySecurityControlEligible": false,
+    "presentationLabelsGrantCapability": false
+  },
+  "alexa": {
+    "activeMembershipRole": "TENANT",
+    "selectedAreaIdsAreAuthoritative": true,
+    "ownTenantDeviceEligible": true,
+    "otherTenantDeviceEligible": false,
+    "appOnlySecurityControlEligible": false,
+    "exposureGenerationMonotonic": true
+  },
+  "trustedDevice": {
+    "removalRevokesAccountInstallation": true,
+    "offlineReenrollmentAllowed": false,
+    "removalAcknowledgementMayRemainPending": true
+  },
+  "provisioning": {
+    "hubOwnsCapabilityDescriptors": true,
+    "platformOwnsMembershipAuthority": true,
+    "cloudUrlIndependentlyVerified": true,
+    "manufacturingRootPrivateKeyOnHub": false
+  },
+  "roomQr": {
+    "oneHomeClaimAuthority": true,
+    "claimReservationFirstWins": true,
+    "installerSetupPresentationIsCustomerClaim": false,
+    "roomQrRetriesCreateAlternativeClaims": false
+  },
+  "notifications": {
+    "audienceRecomputedFromCurrentAuthority": true,
+    "channels": ["push", "verified_email"],
+    "smsEnabled": false,
+    "inboxEnabled": false,
+    "deduplicatedByEventAndRecipient": true,
+    "deliveryReceiptGrantsAuthority": false,
+    "retryHoursMaximum": 24
+  },
+  "offline": {
+    "previouslyEnrolledTrustedInstallationRequired": true,
+    "exactHomeAndMembershipBound": true,
+    "signedExactHomeChallengeRequired": true,
+    "scopeCanWiden": false,
+    "policyAppliedBeforeConnected": true
+  },
+  "analytics": {
+    "validityDeadlineInclusive": false,
+    "expiredQuality": "unknown",
+    "targetTemperatureCountsAsActivity": false,
+    "periodAggregation": "average_contributing_device_samples",
+    "hourAggregation": "sum_selected_devices",
+    "summaryAggregation": "average_displayed_buckets"
+  },
+  "expected": "accept-contract-decisions; reject every authority or privacy mutation above"
+}

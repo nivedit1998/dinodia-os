@@ -147,6 +147,36 @@ test("signed offline grants require the customer account identity and persist ac
   assert.equal(security.offlineAuthorisations[payload.id].revokeReason, "trusted_device_removed");
 });
 
+test("offline LAN proofs use the canonical Area UUID while resolving the target's private hub alias", async () => {
+  const keys = crypto.generateKeyPairSync("ed25519");
+  const security = { offlineAuthorisations: {}, usedLanNonces: {} };
+  const device = { id: "device-1", areaId: "os-kitchen-alias", metadata: {} };
+  const platform = { areaBindings: [{ areaId: "8f3d0000-0000-4000-8000-000000000001", hubAreaId: "os-kitchen-alias" }] };
+  const store = {
+    getSecurity: () => structuredClone(security),
+    getDevice: (id) => id === device.id ? structuredClone(device) : null,
+    getPlatform: () => structuredClone(platform),
+    async saveSecurity(update) { Object.assign(security, structuredClone(update)); },
+  };
+  let now = 1_800_000_000_000;
+  const authorisations = new OfflineLanAuthorisationStore({ store, now: () => now });
+  await authorisations.enroll({ id: "grant-1", homeId: "home-1", hubInstallId: "hub-1", membershipId: "membership-1", trustedDeviceId: "phone-1", userId: "account-1", publicKey: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), areaIds: ["8f3d0000-0000-4000-8000-000000000001"], scope: ["tenant:device-command"], issuedAt: now });
+
+  const makeProof = (areaId, nonce) => {
+    const challenge = createLanChallenge({ homeId: "home-1", hubInstallId: "hub-1", areaId, deviceId: "device-1", controlId: "control-1", valueDigest: "digest-1", nonce, now });
+    return { grantId: "grant-1", challenge, signature: signLanChallenge(challenge, keys.privateKey) };
+  };
+  const accepted = await authorisations.verify(makeProof("8f3d0000-0000-4000-8000-000000000001", "nonce-canonical"));
+  assert.equal(accepted?.principalType, "offline");
+  assert.deepEqual(accepted?.areaIds, ["8f3d0000-0000-4000-8000-000000000001"]);
+  assert.equal(await authorisations.verify(makeProof("8f3d0000-0000-4000-8000-000000000001", "nonce-canonical")), null, "the signed nonce is one-use");
+  assert.equal(await authorisations.verify(makeProof("os-kitchen-alias", "nonce-private-alias")), null, "a private OS alias is not accepted as a public client Area ID");
+  assert.equal(await authorisations.verify(makeProof("8f3d0000-0000-4000-8000-000000000002", "nonce-wrong-area")), null, "a canonical area without an exact device binding is denied");
+  const extraFieldProof = makeProof("8f3d0000-0000-4000-8000-000000000001", "nonce-extra");
+  extraFieldProof.challenge = { ...extraFieldProof.challenge, hubAreaId: "os-kitchen-alias" };
+  assert.equal(await authorisations.verify(extraFieldProof), null, "unknown signed challenge fields are rejected");
+});
+
 test("offline authority is not accepted through forwarded or public transports", () => {
   const source = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "src", "server.js"), "utf8");
   assert.match(source, /function isPrivateLanRequest/);

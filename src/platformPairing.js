@@ -491,6 +491,17 @@ class PlatformPairing {
           ? await this.request("/api/hub-agent/token-state", payload, this.vault.get("platform.syncSecret"))
           : null;
       if (!result) throw new Error("A factory-enrolled hub identity is required for Platform synchronisation");
+      if (result.homeId !== undefined && (typeof result.homeId !== "string" || !result.homeId || result.homeId.length > 160)) throw new Error("Platform returned an invalid Native V1 home binding");
+      const areaBindings = Array.isArray(result.areaBindings)
+        ? result.areaBindings.filter((binding) => binding && typeof binding === "object" && !Array.isArray(binding)
+          && Object.keys(binding).length === 2 && typeof binding.areaId === "string" && binding.areaId.length > 0 && binding.areaId.length <= 160
+          && typeof binding.hubAreaId === "string" && binding.hubAreaId.length > 0 && binding.hubAreaId.length <= 160)
+        : [];
+      if (areaBindings.length !== (Array.isArray(result.areaBindings) ? result.areaBindings.length : 0)
+        || new Set(areaBindings.map((binding) => binding.areaId)).size !== areaBindings.length
+        || new Set(areaBindings.map((binding) => binding.hubAreaId)).size !== areaBindings.length) {
+        throw new Error("Platform returned an invalid Native V1 area binding map");
+      }
       const previousOperatorCredentialStates = Array.isArray(platform.operatorCredentialStates) ? platform.operatorCredentialStates : [];
       let operatorCredentialStates = Array.isArray(result.operatorCredentialStates)
         ? result.operatorCredentialStates.map((entry) => ({ version: Number(entry.version), state: String(entry.state || ''), graceUntil: entry.graceUntil || null }))
@@ -521,6 +532,8 @@ class PlatformPairing {
         agentSeenVersion: nextVersion,
         publishedVersion: Number(result.publishedVersion || platform.publishedVersion || 0),
         acceptedTokenHashes: returnedHashes,
+        homeId: String(result.homeId || platform.homeId || "") || null,
+        areaBindings,
         operatorCredentialStates,
         policyRevision: Number(result.policyRevision ?? platform.policyRevision ?? 0),
         syncIntervalMinutes: Number(result.platformSyncIntervalMinutes || platform.syncIntervalMinutes || 2),

@@ -175,6 +175,14 @@
   "hubTransport": {
     "tenantLiveTransport": "direct-to-selected-OS-BaseURL-or-CloudURL",
     "ownerManagerTransport": "Vercel-Supabase-projection-only",
+    "customerHubSessionEndpoint": {
+      "source": "current HubInstallation cloudUrl plus Platform verification receipt",
+      "wireField": "customerHubSession.hubEndpoint",
+      "disclosure": "verified_cloud origin only when the current reserved hostname and signed CloudURL verification are valid; otherwise state unavailable with no origin",
+      "customerTransport": "HTTPS to the exact verified CloudURL; no customer LAN-IP disclosure in this Stage 2 session DTO",
+      "endpointAuthority": "Platform-owned; clients cannot supply or upgrade an endpoint",
+      "hubAreaAlias": "private OS synchronization metadata only; never a dinodia.v1 public areaId"
+    },
     "runtimeLanEndpointPattern": "https://dinodia-<publicHubId>.local:8123",
     "installerLanEndpointObservation": {
       "schema": "dinodia.v1#/$defs/lanEndpointObservation",

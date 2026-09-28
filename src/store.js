@@ -180,6 +180,8 @@ function initialState() {
       agentSeenVersion: 0,
       publishedVersion: 0,
       acceptedTokenHashes: [],
+      areaBindings: [],
+      homeId: null,
       operatorCredentialStates: [],
       syncIntervalMinutes: 2,
       lastPairAt: null,
@@ -346,6 +348,10 @@ function normalizeState(value) {
     platform: {
       ...base.platform,
       ...persistedPlatform,
+      areaBindings: Array.isArray(persistedPlatform.areaBindings)
+        ? persistedPlatform.areaBindings.filter((binding) => binding && typeof binding.areaId === "string" && binding.areaId.length > 0 && binding.areaId.length <= 160 && typeof binding.hubAreaId === "string" && binding.hubAreaId.length > 0 && binding.hubAreaId.length <= 160)
+        : [],
+      homeId: typeof persistedPlatform.homeId === "string" && persistedPlatform.homeId.length > 0 && persistedPlatform.homeId.length <= 160 ? persistedPlatform.homeId : null,
       operatorCredentialStates: Array.isArray(persistedPlatform.operatorCredentialStates)
         ? persistedPlatform.operatorCredentialStates.filter((entry) => entry && Number.isInteger(Number(entry.version))).map((entry) => ({ version: Number(entry.version), state: String(entry.state || ''), graceUntil: entry.graceUntil ? String(entry.graceUntil) : null }))
         : [],

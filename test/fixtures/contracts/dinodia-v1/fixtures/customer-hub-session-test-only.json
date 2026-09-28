@@ -3,5 +3,9 @@
   "token": "TEST_ONLY_PLACEHOLDER_NOT_A_BEARER",
   "expiresAt": "2026-09-27T10:05:00Z",
   "homeId": "home:fixture-owner",
-  "membershipId": "membership:fixture-owner"
+  "membershipId": "membership:fixture-owner",
+  "hubEndpoint": {
+    "state": "verified_cloud",
+    "origin": "https://dinodia-fixture-hub.dinodiasmartliving.com"
+  }
 }
