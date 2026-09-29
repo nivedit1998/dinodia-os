@@ -16,7 +16,7 @@
     "authority": "homeId + homeMembershipId; role is membership-scoped; employee identity is never a household role"
   },
   "$defs": {
-    "id": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "id": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "\\S" },
     "timestamp": { "type": "string", "format": "date-time" },
     "role": { "enum": ["OWNER", "PROPERTY_MANAGER", "TENANT"] },
     "managementClass": { "enum": ["property_device", "tenant_device"] },
@@ -88,17 +88,7 @@
         "valueType": {
           "enum": ["boolean", "number", "option", "text", "invoke"]
         },
-        "interactionKind": {
-          "enum": [
-            "toggle",
-            "slider",
-            "thermostat",
-            "picker",
-            "text_input",
-            "momentary_action",
-            "read_only"
-          ]
-        },
+        "interactionKind": { "type": "string", "minLength": 1, "maxLength": 64 },
         "semanticRole": {
           "enum": [
             "power",
@@ -159,6 +149,14 @@
         "catalogRevision": { "type": "integer", "minimum": 0 }
       },
       "allOf": [
+        {
+          "if": { "properties": { "writable": { "const": true } }, "required": ["writable"] },
+          "then": { "properties": { "readable": { "const": true } } }
+        },
+        {
+          "if": { "properties": { "interactionKind": { "not": { "enum": ["toggle", "slider", "thermostat", "picker", "text_input", "momentary_action", "read_only"] } } }, "required": ["interactionKind"] },
+          "then": { "properties": { "readable": { "const": true }, "writable": { "const": false }, "automatable": { "const": false }, "idempotency": { "const": "none" }, "confirmationPolicy": { "const": "none" }, "stepUpPolicy": { "const": "none" } } }
+        },
         {
           "if": { "properties": { "semanticRole": { "enum": ["security_lock", "lock_state"] } }, "required": ["semanticRole"] },
           "then": { "properties": { "stepUpPolicy": { "const": "required" }, "automatable": { "const": false } } }
@@ -278,6 +276,21 @@
       },
       "additionalProperties": false
     },
+    "customerSessionLoginRequest": {
+      "type": "object",
+      "required": ["email", "password", "deviceInstallationId", "publicKey", "deviceName"],
+      "properties": {
+        "email": { "type": "string", "format": "email", "minLength": 3, "maxLength": 320 },
+        "password": { "type": "string", "minLength": 1, "maxLength": 1024, "writeOnly": true },
+        "deviceInstallationId": { "$ref": "#/$defs/id" },
+        "publicKey": { "type": "string", "minLength": 1, "maxLength": 4096, "writeOnly": true },
+        "deviceName": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "\\S" },
+        "model": { "type": "string", "maxLength": 160 },
+        "osFamily": { "type": "string", "maxLength": 80 },
+        "osVersion": { "type": "string", "maxLength": 80 }
+      },
+      "additionalProperties": false
+    },
     "customerSessionReceipt": {
       "type": "object",
       "required": ["ok", "accountId", "sessionId", "trustedDeviceId", "expiresAt"],
@@ -288,6 +301,12 @@
         "trustedDeviceId": { "$ref": "#/$defs/id" },
         "expiresAt": { "$ref": "#/$defs/timestamp" }
       },
+      "additionalProperties": false
+    },
+    "customerSessionLogoutReceipt": {
+      "type": "object",
+      "required": ["ok"],
+      "properties": { "ok": { "const": true } },
       "additionalProperties": false
     },
     "customerHubSession": {
@@ -650,6 +669,122 @@
       },
       "additionalProperties": false
     },
+    "supportTicketCreateRequest": {
+      "type": "object",
+      "required": ["category", "description"],
+      "properties": {
+        "category": { "enum": ["ACCOUNT_OR_SIGN_IN", "ACCESS_OR_PERMISSIONS", "DEVICE_PROBLEM", "HUB_OR_CONNECTION", "AUTOMATION", "ALEXA", "OTHER"] },
+        "description": { "type": "string", "minLength": 1, "maxLength": 4000 }
+      },
+      "additionalProperties": false
+    },
+    "supportTicketCreateReceipt": {
+      "type": "object",
+      "required": ["ok", "ticket"],
+      "properties": {
+        "ok": { "const": true },
+        "ticket": {
+          "type": "object",
+          "required": ["id", "publicReference", "status", "createdAt"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" },
+            "publicReference": { "type": "string", "minLength": 1, "maxLength": 20 },
+            "status": { "const": "OPEN" },
+            "createdAt": { "$ref": "#/$defs/timestamp" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "supportAccessRequestCreateRequest": {
+      "type": "object",
+      "required": ["requestedScope", "areaIds", "targetIds"],
+      "properties": {
+        "requestedScope": { "enum": ["TENANT_SCOPE", "PROPERTY_SCOPE"] },
+        "targetMembershipId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "areaIds": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "targetIds": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } }
+      },
+      "additionalProperties": false
+    },
+    "supportAccessRequestCreateReceipt": {
+      "type": "object",
+      "required": ["ok", "accessRequest"],
+      "properties": {
+        "ok": { "const": true },
+        "accessRequest": {
+          "type": "object",
+          "required": ["id", "status", "requestedScope", "touchesPropertyInfrastructure", "createdAt"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" },
+            "status": { "const": "REQUESTED" },
+            "requestedScope": { "enum": ["TENANT_SCOPE", "PROPERTY_SCOPE"] },
+            "touchesPropertyInfrastructure": { "type": "boolean" },
+            "createdAt": { "$ref": "#/$defs/timestamp" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "supportAccessDecisionRequest": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["approve"],
+          "properties": {
+            "approve": { "const": true },
+            "confirmation": { "type": "string", "maxLength": 100 },
+            "proof": { "type": "string", "minLength": 1, "maxLength": 8192 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["approve"],
+          "properties": { "approve": { "const": false } },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "supportAccessDecisionReceipt": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["ok", "requestId", "status", "oneUseCode", "codeExpiresAt"],
+          "properties": {
+            "ok": { "const": true },
+            "requestId": { "$ref": "#/$defs/id" },
+            "status": { "const": "APPROVED" },
+            "oneUseCode": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "codeExpiresAt": { "$ref": "#/$defs/timestamp" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["ok", "requestId", "status"],
+          "properties": {
+            "ok": { "const": true },
+            "requestId": { "$ref": "#/$defs/id" },
+            "status": { "const": "DENIED" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "trustedDeviceRemovalRequest": {
+      "type": "object",
+      "properties": { "proof": { "type": "string", "minLength": 1, "maxLength": 8192 } },
+      "additionalProperties": false
+    },
+    "trustedDeviceRemovalReceipt": {
+      "type": "object",
+      "required": ["ok", "trustedDeviceId", "accountWide"],
+      "properties": { "ok": { "const": true }, "trustedDeviceId": { "$ref": "#/$defs/id" }, "accountWide": { "const": true } },
+      "additionalProperties": false
+    },
     "supportTicket": {
       "type": "object",
       "required": [
@@ -828,6 +963,152 @@
         "lastHeartbeatAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
         "onlineState": { "enum": ["online", "stale", "offline", "unknown"] }
       },
+      "additionalProperties": false
+    },
+    "stepUpOperationKind": {
+      "enum": ["trusted_device_remove", "support_ticket_close", "support_access_approve", "support_access_revoke", "alexa_unlink", "heating_sensitive_command", "device_sensitive_command"]
+    },
+    "stepUpDescriptorAttestation": {
+      "type": "object",
+      "required": ["version", "serial", "identityGeneration", "actorId", "customerSessionId", "trustedDeviceId", "homeId", "membershipId", "hubInstallId", "operationKind", "targetIds", "controlId", "descriptorRevision", "descriptorDigest", "operationDigest", "nonce", "issuedAt", "hubSignature"],
+      "properties": {
+        "version": { "const": 1 },
+        "serial": { "$ref": "#/$defs/id" },
+        "identityGeneration": { "type": "integer", "minimum": 1 },
+        "actorId": { "$ref": "#/$defs/id" },
+        "customerSessionId": { "$ref": "#/$defs/id" },
+        "trustedDeviceId": { "$ref": "#/$defs/id" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "membershipId": { "$ref": "#/$defs/id" },
+        "hubInstallId": { "$ref": "#/$defs/id" },
+        "operationKind": { "$ref": "#/$defs/stepUpOperationKind" },
+        "targetIds": { "type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "controlId": { "$ref": "#/$defs/id" },
+        "descriptorRevision": { "type": "integer", "minimum": 0 },
+        "descriptorDigest": { "anyOf": [{ "type": "string", "pattern": "^[0-9a-f]{64}$" }, { "type": "null" }] },
+        "operationDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "nonce": { "type": "string", "minLength": 20, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$" },
+        "issuedAt": { "type": "integer", "minimum": 1 },
+        "hubSignature": { "type": "string", "minLength": 32, "maxLength": 2048, "pattern": "^[A-Za-z0-9_-]+$" }
+      },
+      "additionalProperties": false
+    },
+    "stepUpChallengeRequest": {
+      "type": "object",
+      "required": ["operationKind", "targetIds"],
+      "properties": {
+        "operationKind": { "$ref": "#/$defs/stepUpOperationKind" },
+        "targetIds": { "type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "value": {},
+        "descriptorAttestation": { "$ref": "#/$defs/stepUpDescriptorAttestation" }
+      },
+      "additionalProperties": false
+    },
+    "stepUpChallengeReceipt": {
+      "type": "object",
+      "required": ["ok", "challengeId", "nonce", "operationDigest", "expiresAt"],
+      "properties": {
+        "ok": { "const": true },
+        "challengeId": { "$ref": "#/$defs/id" },
+        "nonce": { "type": "string", "minLength": 20, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$" },
+        "operationDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "stepUpCancellationRequest": {
+      "type": "object",
+      "required": ["challengeId"],
+      "properties": { "challengeId": { "$ref": "#/$defs/id" } },
+      "additionalProperties": false
+    },
+    "stepUpCancellationReceipt": {
+      "type": "object",
+      "required": ["ok", "cancelled"],
+      "properties": { "ok": { "const": true }, "cancelled": { "const": true } },
+      "additionalProperties": false
+    },
+    "stepUpIssueRequest": {
+      "type": "object",
+      "required": ["challengeId", "nonce", "deviceSignature"],
+      "properties": {
+        "challengeId": { "$ref": "#/$defs/id" },
+        "nonce": { "type": "string", "minLength": 20, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$" },
+        "deviceSignature": { "type": "string", "minLength": 32, "maxLength": 2048, "pattern": "^[A-Za-z0-9_-]+$" }
+      },
+      "additionalProperties": false
+    },
+    "stepUpProofReceipt": {
+      "type": "object",
+      "required": ["ok", "proof", "proofId", "operationId", "expiresAt"],
+      "properties": {
+        "ok": { "const": true },
+        "proof": { "type": "string", "minLength": 1, "maxLength": 8192 },
+        "proofId": { "$ref": "#/$defs/id" },
+        "operationId": { "$ref": "#/$defs/id" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "stepUpConsumeRequest": {
+      "type": "object",
+      "required": ["operationKind", "targetIds"],
+      "properties": {
+        "operationKind": { "$ref": "#/$defs/stepUpOperationKind" },
+        "targetIds": { "type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "proof": { "type": "string", "minLength": 1, "maxLength": 8192, "writeOnly": true },
+        "value": {},
+        "descriptorDigests": { "type": "object", "maxProperties": 20, "propertyNames": { "$ref": "#/$defs/id" }, "additionalProperties": { "anyOf": [{ "type": "string", "pattern": "^[0-9a-f]{64}$" }, { "type": "null" }] } }
+      },
+      "additionalProperties": false
+    },
+    "stepUpConsumeReceipt": { "type": "object", "required": ["ok"], "properties": { "ok": { "const": true } }, "additionalProperties": false },
+    "offlineAuthorisationRequest": {
+      "type": "object",
+      "required": ["trustedDeviceId", "publicKey"],
+      "properties": { "trustedDeviceId": { "$ref": "#/$defs/id" }, "publicKey": { "type": "string", "minLength": 1, "maxLength": 4096 } },
+      "additionalProperties": false
+    },
+    "offlineAuthorisationReceipt": {
+      "type": "object",
+      "required": ["ok", "authorisation"],
+      "properties": {
+        "ok": { "const": true },
+        "authorisation": {
+          "type": "object",
+          "required": ["id", "homeId", "membershipId", "trustedDeviceId", "areaIds", "scopes", "policyRevision"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" }, "homeId": { "$ref": "#/$defs/id" },
+            "membershipId": { "$ref": "#/$defs/id" }, "trustedDeviceId": { "$ref": "#/$defs/id" },
+            "areaIds": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+            "scopes": { "const": ["tenant:device-command"] }, "policyRevision": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "offlineRevocationReceipt": {
+      "type": "object", "required": ["ok", "revoked"],
+      "properties": { "ok": { "const": true }, "revoked": { "type": "integer", "minimum": 0 } },
+      "additionalProperties": false
+    },
+    "supportNotificationProjection": {
+      "type": "object", "required": ["ok", "notifications"],
+      "properties": {
+        "ok": { "const": true },
+        "notifications": { "type": "array", "maxItems": 100, "items": { "type": "object", "required": ["id", "ticketId", "eventType", "createdAt"], "properties": { "id": { "$ref": "#/$defs/id" }, "ticketId": { "$ref": "#/$defs/id" }, "eventType": { "enum": ["STARTED", "REVOKED", "ENDED", "EXPIRED"] }, "createdAt": { "$ref": "#/$defs/timestamp" } }, "additionalProperties": false } }
+      },
+      "additionalProperties": false
+    },
+    "supportTicketCloseRequest": {
+      "type": "object", "required": ["action"],
+      "properties": { "action": { "const": "close" }, "proof": { "type": "string", "minLength": 1, "maxLength": 8192, "writeOnly": true } },
+      "additionalProperties": false
+    },
+    "supportTicketCloseReceipt": {
+      "type": "object", "required": ["ok", "ticketId", "status", "message"],
+      "properties": { "ok": { "const": true }, "ticketId": { "$ref": "#/$defs/id" }, "status": { "const": "CLOSED" }, "message": { "type": "string", "maxLength": 240 } },
       "additionalProperties": false
     },
     "lanEndpointObservation": {

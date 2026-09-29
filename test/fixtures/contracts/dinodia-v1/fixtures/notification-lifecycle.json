@@ -1,0 +1,40 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "defaults": {
+    "quietHoursEnabled": false,
+    "ownerEnabledFamilies": [],
+    "tenantEnabledFamilies": [],
+    "mandatoryEventsDisableable": false
+  },
+  "roleCatalogues": {
+    "owner": ["hub_availability", "permanent_device_outages", "new_permanent_devices", "tenant_access_requests", "installation_updates", "automation_activity"],
+    "propertyManager": ["hub_availability", "permanent_device_outages", "new_permanent_devices", "tenant_access_requests", "installation_updates", "automation_activity"],
+    "tenant": ["hub_availability", "permanent_device_outages_in_authorized_areas", "own_tenant_device_outages", "new_permanent_devices_in_authorized_areas", "automation_failure_or_skipped_run", "access_request_decisions"]
+  },
+  "nonDisableableFamilies": ["security", "support", "ownership", "removal", "owner_or_manager_disables_tenant_automation"],
+  "propertyManagerPreferenceAuthority": "original_homeowner_final_selection",
+  "cases": [
+    { "id": "optional-during-quiet-hours", "eventId": "event:optional-1", "family": "automation_activity", "mandatory": false, "enabled": true, "quietHoursEnabled": true, "localTime": "01:00", "expected": "deferred-individually-until-quiet-hours-end" },
+    { "id": "optional-at-quiet-hours-end", "eventId": "event:optional-1", "family": "automation_activity", "mandatory": false, "enabled": true, "quietHoursEnabled": true, "localTime": "07:00", "expected": "delivered-once" },
+    { "id": "mandatory-during-quiet-hours", "eventId": "event:security-1", "family": "security", "mandatory": true, "enabled": false, "quietHoursEnabled": true, "localTime": "01:00", "expected": "delivered-immediately" },
+    { "id": "disabled-optional", "eventId": "event:optional-disabled", "family": "hub_availability", "mandatory": false, "enabled": false, "quietHoursEnabled": false, "localTime": "12:00", "expected": "not-sent" }
+  ],
+  "audienceCases": [
+    { "id": "private-tenant-device", "scope": "tenant_device_only", "currentMembershipId": "membership:tenant-property", "candidates": ["membership:tenant-property", "membership:owner-property", "membership:manager-property"], "expectedRecipients": ["membership:tenant-property"], "privateDetailsInOwnerNotice": false },
+    { "id": "property-infrastructure", "scope": "permanent_device_or_hub", "homeId": "home:decision-fixture", "candidates": ["membership:owner", "membership:manager-one", "membership:manager-two", "membership:tenant-property"], "expectedGenericRecipients": ["membership:owner", "membership:manager-one", "membership:manager-two"], "tenantPrivateDetailsIncluded": false }
+  ],
+  "deduplication": {
+    "keyFields": ["eventId", "recipientId", "channel"],
+    "channels": ["push", "verified_email"],
+    "sameEventRecipientChannelDeliveries": [
+      { "deliveryId": "delivery:one", "eventId": "event:accepted-invitation", "recipientId": "membership:owner-property", "channel": "push" },
+      { "deliveryId": "delivery:retry", "eventId": "event:accepted-invitation", "recipientId": "membership:owner-property", "channel": "push" },
+      { "deliveryId": "delivery:email", "eventId": "event:accepted-invitation", "recipientId": "membership:owner-property", "channel": "verified_email" },
+      { "deliveryId": "delivery:manager", "eventId": "event:accepted-invitation", "recipientId": "membership:manager-one", "channel": "push" }
+    ],
+    "expectedDeliveryCount": 3,
+    "expectedRetrySuppressionCount": 1,
+    "receiptCreatesAuthority": false,
+    "receiptCreatesMembership": false
+  }
+}

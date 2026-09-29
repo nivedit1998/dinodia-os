@@ -1,0 +1,113 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "flows": {
+    "support": {
+      "initialOutcome": "No support transition selected.",
+      "actions": [
+        { "id": "private-request", "label": "Simulate private tenant-device request", "outcome": "Only the owning tenant sees this ticket; property owner is not notified." },
+        { "id": "infrastructure-approval", "label": "Simulate infrastructure approval", "outcome": "Approved scope notifies the owner with a generic event and no tenant-device details." },
+        { "id": "wrong-approver", "label": "Simulate different approver confirmation", "outcome": "Denied; the required same-approver safety confirmation is missing." },
+        { "id": "close-expire", "label": "Simulate close or expiry", "outcome": "Support authority is revoked immediately; no new command is allowed." }
+      ]
+    },
+    "invitation": {
+      "initialOutcome": "Invitation is pending; no membership exists.",
+      "actions": [
+        { "id": "accept", "label": "Simulate accept invitation", "outcome": "Acceptance is recorded only for the authenticated recipient; membership must then be revalidated." },
+        { "id": "wrong-recipient", "label": "Simulate another account accepting", "outcome": "Denied without revealing property details or creating a membership." },
+        { "id": "unverified-recipient", "label": "Simulate unverified email", "outcome": "Acceptance is denied until the invitation destination is verified." },
+        { "id": "decline", "label": "Simulate decline", "outcome": "Declined; no membership is created." },
+        { "id": "expire", "label": "Simulate exact seven-day expiry", "outcome": "At the exact deadline the invitation is removed from both projections without notification; no membership is created and home data remains hidden." },
+        { "id": "resend", "label": "Simulate resend", "outcome": "A new seven-day generation is issued; the old link and projection are invalidated immediately." }
+      ]
+    },
+    "room-qr": {
+      "initialOutcome": "No QR result selected.",
+      "actions": [
+        { "id": "active-home", "label": "Simulate active existing Home", "outcome": "An access request may be submitted for this room only." },
+        { "id": "unclaimed-home", "label": "Simulate unclaimed Home", "outcome": "NOT_YET_CLAIMED; no access request or membership is created." },
+        { "id": "expired-replay", "label": "Simulate expired or replayed QR", "outcome": "Denied; no alternate claim or membership is created." }
+      ]
+    },
+    "property-actions": {
+      "initialOutcome": "No property mutation selected.",
+      "actions": [
+        { "id": "cancel", "label": "Simulate cancel confirmation", "outcome": "Cancelled; current owner and grants remain unchanged.", "allowedRoles": ["Homeowner"] },
+        { "id": "active-tenant-successor", "label": "Simulate active-tenant successor", "outcome": "Denied before mutation; the current tenant relationship must be removed through its own authorized lifecycle first.", "allowedRoles": ["Homeowner"] },
+        { "id": "transfer", "label": "Simulate confirmed transfer", "outcome": "Transfer commits at the expected revision; prior grants are revoked.", "allowedRoles": ["Homeowner"] },
+        { "id": "verified-staff-replace", "label": "Simulate verified staff replacement", "outcome": "Only verified CXO or Senior Operations Manager may replace the non-expiring transfer claim after audited offline identity/property verification.", "allowedRoles": ["Homeowner"] },
+        { "id": "alternate-replay", "label": "Simulate another transfer presentation after consume", "outcome": "The other QR/code route is already consumed and cannot complete a second transfer.", "allowedRoles": ["Homeowner"] },
+        { "id": "offline-deregister", "label": "Simulate offline deregistration", "outcome": "Revocation remains pending hub acknowledgement; completion is not reported early.", "allowedRoles": ["Homeowner"] }
+      ]
+    },
+    "area-edit": {
+      "initialOutcome": "Current area revisions are shown.",
+      "actions": [
+        { "id": "stale", "label": "Simulate stale revision", "outcome": "Conflict; no change is saved and current area data is reloaded.", "allowedRoles": ["Homeowner", "Property manager"] },
+        { "id": "current", "label": "Simulate current revision", "outcome": "A permitted edit applies to this area ID only.", "allowedRoles": ["Homeowner", "Property manager"] }
+      ]
+    },
+    "quiet-hours": {
+      "initialOutcome": "No delivery scenario selected.",
+      "actions": [
+        { "id": "mandatory", "label": "Simulate mandatory security event", "outcome": "Delivered immediately; mandatory security notices ignore quiet hours." },
+        { "id": "optional", "label": "Simulate optional event during quiet hours", "outcome": "Deferred until quiet hours end; authority is unchanged." },
+        { "id": "receipt", "label": "Simulate delivery receipt", "outcome": "Delivery recorded only; the receipt grants no membership or permission." }
+      ]
+    },
+    "trusted-device": {
+      "initialOutcome": "Installation remains trusted until an authorized removal.",
+      "actions": [
+        { "id": "online-remove", "label": "Simulate online removal", "outcome": "Account-wide sessions are revoked; this installation must authenticate again." },
+        { "id": "offline-remove", "label": "Simulate offline removal", "outcome": "Revocation is pending acknowledgement; cached authority is not renewed." }
+      ]
+    },
+    "access-request": {
+      "initialOutcome": "Request is pending; it grants no home access.",
+      "actions": [
+        { "id": "approve", "label": "Simulate approval", "outcome": "Approval is revision-checked; membership is required before protected data is returned.", "allowedRoles": ["Homeowner", "Property manager"] },
+        { "id": "reject", "label": "Simulate rejection", "outcome": "Rejected; no membership or protected data is created.", "allowedRoles": ["Homeowner", "Property manager"] },
+        { "id": "expire", "label": "Simulate expiry", "outcome": "Expired; the request can no longer be approved." }
+      ]
+    },
+    "descriptor-change": {
+      "initialOutcome": "A current descriptor is required for every write.",
+      "actions": [
+        { "id": "removed", "label": "Simulate control removed", "outcome": "Old control reference denied; no command is sent." },
+        { "id": "read-only", "label": "Simulate control becomes read-only", "outcome": "Write denied against the current descriptor." },
+        { "id": "replacement", "label": "Simulate device replacement", "outcome": "Replacement has a new identity; previous history remains separate." }
+      ]
+    },
+    "claim": {
+      "initialOutcome": "The first verified claimant holds the reservation until expiry.",
+      "actions": [
+        { "id": "competing", "label": "Simulate competing claimant", "outcome": "First claimant wins; the competing reservation is denied." },
+        { "id": "required-save", "label": "Simulate required setup save", "outcome": "A successful required save resets expiry to exactly 30 minutes after that save; failed, no-op, view and replay do not extend." },
+        { "id": "noop-save", "label": "Simulate duplicate/no-op save", "outcome": "No extension; the original expiry is unchanged." },
+        { "id": "release", "label": "Simulate release after expiry", "outcome": "Unfinished draft and resume authority are removed; a fresh claim may begin." }
+      ]
+    },
+    "recovery": {
+      "initialOutcome": "A generic response is returned without confirming account existence.",
+      "actions": [
+        { "id": "valid-proof", "label": "Simulate valid one-use proof", "outcome": "Recovery may continue; it does not create a Home membership." },
+        { "id": "expired-proof", "label": "Simulate expired or replayed proof", "outcome": "Denied; no customer session is issued." }
+      ]
+    },
+    "management-activity": {
+      "initialOutcome": "No authority event selected.",
+      "actions": [
+        { "id": "newer", "label": "Simulate newer revision", "outcome": "Newer authorized event is applied." },
+        { "id": "duplicate", "label": "Simulate duplicate or older event", "outcome": "Ignored; current authority is unchanged." },
+        { "id": "receipt", "label": "Simulate delivery receipt only", "outcome": "Delivery status changes; authority does not." }
+      ]
+    },
+    "installation-request": {
+      "initialOutcome": "Request is not submitted.",
+      "actions": [
+        { "id": "submit", "label": "Simulate submitted request", "outcome": "Request is pending; no installation or completed property is inferred.", "allowedRoles": ["Homeowner", "Property manager"] },
+        { "id": "expire", "label": "Simulate expired request", "outcome": "Expired request offers an authorized retry; no installation is inferred.", "allowedRoles": ["Homeowner", "Property manager"] }
+      ]
+    }
+  }
+}

@@ -1500,17 +1500,34 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         const prior = commandResults[idempotencyHash];
         if (prior) {
           if (prior.commandDigest !== commandDigest) return nativeContractError(res, 409, "REVISION_CONFLICT", "This idempotency key was used for a different command");
+          if (prior.status === "rejected") return nativeContractError(res, 409, "CATALOG_REVISION_MISMATCH", "The original command was not dispatched because authority changed; refresh and confirm again");
           if (prior.status !== "accepted") return nativeContractError(res, 409, "COMMAND_UNCERTAIN", "The prior command outcome requires status reconciliation; it was not resent");
           return json(res, 202, prior.result);
         }
 
-        const requiresStepUp = control.stepUpPolicy === "required" || ["security_lock", "lock_state"].includes(control.semanticRole);
+        // Re-read authority after entering the serial queue. The DTO checked
+        // above may have been retired, moved, made read-only, or replaced
+        // while this request waited behind another command.
+        const liveDevice = hubStore.getDevice(String(command.deviceId || ""));
+        if (!liveDevice || !appCanReadDevice(scopedPrincipal, liveDevice)) return nativeContractError(res, 404, "RESOURCE_NOT_FOUND", "The selected device is unavailable");
+        const liveDto = serializeNativeDevice({ device: nativeDeviceView(scopedPrincipal, liveDevice), homeId: String(scopedPrincipal.homeId), homeMembershipId: String(scopedPrincipal.membershipId), role: String(scopedPrincipal.householdRole), areaIds: (scopedPrincipal.areaIds || []).map(String), surfaces: allProjectedSurfaces(liveDevice), revision: Number(liveDevice.presentation?.descriptorRevision || 0) });
+        const liveControl = liveDto?.controls.find((candidate) => candidate.controlId === command.controlId);
+        if (!liveDto || liveDto.lifecycle !== "installed" || liveDto.descriptorRevision !== command.descriptorRevision || !liveControl || stableJson(liveControl) !== stableJson(control) || !validateNativeCommand(command, liveDto, liveControl, String(scopedPrincipal.membershipId))) {
+          return nativeContractError(res, 409, "CATALOG_REVISION_MISMATCH", "The current device or control authority changed; refresh before retrying");
+        }
+        const liveEntity = Object.values(liveDevice.entities || {}).find((entity) => String(entity.id || entity.sourceId || "") === String(liveControl.controlId));
+        const liveBinding = nativeCommandBinding({ ...liveControl, value: command.value }, liveEntity);
+        if (!liveEntity || !liveBinding || !appCanCommandDevice(scopedPrincipal, liveDevice, { controlId: liveControl.controlId }, liveEntity, String(liveBinding.serviceId || "").toLowerCase())) {
+          return nativeContractError(res, 403, "SCOPE_DENIED", "The current control is no longer writable for this membership");
+        }
+
+        const requiresStepUp = liveControl.stepUpPolicy === "required" || ["security_lock", "lock_state"].includes(liveControl.semanticRole);
         if (requiresStepUp) {
           const proof = String(req.headers["x-dinodia-step-up-proof"] || "");
-          const descriptorDigest = device.presentation?.sourceFingerprint || device.presentation?.descriptorDigest || null;
+          const descriptorDigest = liveDevice.presentation?.sourceFingerprint || liveDevice.presentation?.descriptorDigest || null;
           const requestedValue = command.value && typeof command.value === "object" && !Array.isArray(command.value)
-            ? { ...command.value, controlId: control.controlId }
-            : { value: command.value ?? null, controlId: control.controlId };
+            ? { ...command.value, controlId: liveControl.controlId }
+            : { value: command.value ?? null, controlId: liveControl.controlId };
           const approved = await stepUpVerifier.verify(proof, {
             actorId: scopedPrincipal.sub,
             trustedDeviceId: scopedPrincipal.trustedDeviceId,
@@ -1519,8 +1536,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
             membershipId: scopedPrincipal.membershipId,
             hubInstallId: scopedPrincipal.hubInstallId,
             operation: "device_sensitive_command",
-            targetIds: [device.id],
-            value: descriptorBoundValue(requestedValue, { [device.id]: descriptorDigest }),
+            targetIds: [liveDevice.id],
+            value: descriptorBoundValue(requestedValue, { [liveDevice.id]: descriptorDigest }),
           });
           if (!approved || approved.jti !== String(command.stepUpOperationId || "")) return nativeContractError(res, 403, "STEP_UP_REQUIRED", "A fresh confirmation for this exact operation is required");
         }
@@ -1530,7 +1547,49 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         const boundedEntries = Object.entries(commandResults).slice(-512);
         await hubStore.saveSecurity({ nativeCommandResults: Object.fromEntries(boundedEntries) });
         try {
-          const dispatched = await dispatchNativeCommand(scopedPrincipal, device, control, command.value);
+          // Persisting the dispatch claim is asynchronous. Re-resolve both
+          // session authority and the live descriptor after that await, at
+          // the final effect boundary; otherwise a grant revocation or a
+          // control becoming read-only during persistence could still
+          // dispatch the stale snapshot captured above.
+          const currentPrincipal = appSessionAuth(bearerToken(req));
+          const principalStillMatches = currentPrincipal &&
+            currentPrincipal.sub === scopedPrincipal.sub &&
+            currentPrincipal.sid === scopedPrincipal.sid &&
+            currentPrincipal.membershipId === scopedPrincipal.membershipId &&
+            currentPrincipal.homeId === scopedPrincipal.homeId &&
+            currentPrincipal.hubInstallId === scopedPrincipal.hubInstallId &&
+            currentPrincipal.householdRole === "TENANT" &&
+            currentPrincipal.scope.includes("tenant:device-command");
+          const dispatchDevice = principalStillMatches ? hubStore.getDevice(String(command.deviceId || "")) : null;
+          const dispatchDto = dispatchDevice && appCanReadDevice(currentPrincipal, dispatchDevice)
+            ? serializeNativeDevice({ device: nativeDeviceView(currentPrincipal, dispatchDevice), homeId: String(currentPrincipal.homeId), homeMembershipId: String(currentPrincipal.membershipId), role: String(currentPrincipal.householdRole), areaIds: (currentPrincipal.areaIds || []).map(String), surfaces: allProjectedSurfaces(dispatchDevice), revision: Number(dispatchDevice.presentation?.descriptorRevision || 0) })
+            : null;
+          const dispatchControl = dispatchDto?.controls.find((candidate) => candidate.controlId === command.controlId);
+          const dispatchEntity = dispatchDevice && dispatchControl
+            ? Object.values(dispatchDevice.entities || {}).find((entity) => String(entity.id || entity.sourceId || "") === String(dispatchControl.controlId))
+            : null;
+          const dispatchBinding = dispatchControl && dispatchEntity
+            ? nativeCommandBinding({ ...dispatchControl, value: command.value }, dispatchEntity)
+            : null;
+          const dispatchAuthorized = Boolean(
+            principalStillMatches && dispatchDevice && dispatchDto?.lifecycle === "installed" &&
+            dispatchDto.descriptorRevision === command.descriptorRevision &&
+            dispatchControl && stableJson(dispatchControl) === stableJson(control) &&
+            validateNativeCommand(command, dispatchDto, dispatchControl, String(currentPrincipal.membershipId)) &&
+            dispatchEntity && dispatchBinding &&
+            appCanCommandDevice(currentPrincipal, dispatchDevice, { controlId: dispatchControl.controlId }, dispatchEntity, String(dispatchBinding.serviceId || "").toLowerCase())
+          );
+          if (!dispatchAuthorized) {
+            commandResults[idempotencyHash] = {
+              commandDigest,
+              status: "rejected",
+              result: { commandId: command.commandId, homeId: command.homeId, status: "denied", acceptedAt: null, completedAt: null, errorCode: "AUTHORITY_CHANGED_BEFORE_DISPATCH" },
+            };
+            await hubStore.saveSecurity({ nativeCommandResults: Object.fromEntries(Object.entries(commandResults).slice(-512)) });
+            return nativeContractError(res, 409, "CATALOG_REVISION_MISMATCH", "The current session or control authority changed before dispatch; refresh and confirm again");
+          }
+          const dispatched = await dispatchNativeCommand(currentPrincipal, dispatchDevice, dispatchControl, command.value);
           if (!dispatched) throw Object.assign(new Error("The current protocol binding is unavailable"), { code: "CONTROL_BINDING_UNAVAILABLE" });
           commandResults[idempotencyHash] = { commandDigest, status: "accepted", result };
           await hubStore.saveSecurity({ nativeCommandResults: Object.fromEntries(Object.entries(commandResults).slice(-512)) });

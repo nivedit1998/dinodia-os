@@ -1,0 +1,21 @@
+{
+  "context": {
+    "accountId": "account:multi-home",
+    "homeId": "home:tenant-property",
+    "homeMembershipId": "membership:tenant-property",
+    "role": "TENANT",
+    "areaIds": ["area:kitchen"]
+  },
+  "device": {
+    "id": "device:tenant-private-kitchen-sensor",
+    "homeId": "home:tenant-property",
+    "managementClass": "tenant_device",
+    "ownerMembershipId": "membership:tenant-property",
+    "lifecycle": "installed",
+    "technicalLabel": "sensor",
+    "customerLabel": "Private kitchen sensor",
+    "areaIds": ["area:kitchen"],
+    "descriptorRevision": 1,
+    "controls": []
+  }
+}

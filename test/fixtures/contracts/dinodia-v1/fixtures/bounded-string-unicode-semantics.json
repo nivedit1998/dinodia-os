@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "lengthUnit": "unicode_code_points",
+  "boundaryCases": [
+    { "id": "opaque-id", "field": "opaqueId", "maximum": 160, "repeat": "💡", "validRepeatCount": 160, "invalidRepeatCount": 161 },
+    { "id": "area-name", "field": "areaName", "maximum": 80, "repeat": "💡", "validRepeatCount": 80, "invalidRepeatCount": 81 },
+    { "id": "control-label", "field": "controlLabel", "maximum": 80, "repeat": "💡", "validRepeatCount": 80, "invalidRepeatCount": 81 },
+    { "id": "constraint-unit", "field": "constraintUnit", "maximum": 32, "repeat": "💡", "validRepeatCount": 32, "invalidRepeatCount": 33 },
+    { "id": "option-label", "field": "optionLabel", "maximum": 80, "repeat": "💡", "validRepeatCount": 80, "invalidRepeatCount": 81 },
+    { "id": "text-command", "field": "textCommand", "maximum": 128, "repeat": "💡", "validRepeatCount": 128, "invalidRepeatCount": 129 },
+    { "id": "idempotency-key", "field": "idempotencyKey", "minimum": 16, "maximum": 160, "repeat": "💡", "validRepeatCount": 160, "invalidRepeatCount": 161, "invalidMinimumRepeatCount": 15 }
+  ],
+  "combiningSequenceCases": [
+    { "id": "opaque-id-combining", "field": "opaqueId", "maximum": 160, "repeat": "é", "validRepeatCount": 80, "invalidRepeatCount": 81 },
+    { "id": "area-name-combining", "field": "areaName", "maximum": 80, "repeat": "é", "validRepeatCount": 40, "invalidRepeatCount": 41 },
+    { "id": "control-label-combining", "field": "controlLabel", "maximum": 80, "repeat": "é", "validRepeatCount": 40, "invalidRepeatCount": 41 },
+    { "id": "constraint-unit-combining", "field": "constraintUnit", "maximum": 32, "repeat": "é", "validRepeatCount": 16, "invalidRepeatCount": 17 },
+    { "id": "option-label-combining", "field": "optionLabel", "maximum": 80, "repeat": "é", "validRepeatCount": 40, "invalidRepeatCount": 41 },
+    { "id": "text-command-combining", "field": "textCommand", "maximum": 128, "repeat": "é", "validRepeatCount": 64, "invalidRepeatCount": 65 },
+    { "id": "idempotency-key-combining", "field": "idempotencyKey", "minimum": 16, "maximum": 160, "repeat": "é", "validRepeatCount": 80, "invalidRepeatCount": 81, "invalidMinimumRepeatCount": 7 }
+  ],
+  "expectation": "All string bounds in the dinodia.v1 JSON Schemas count Unicode code points. UTF-16 code units and grapheme clusters are not the wire length unit."
+}

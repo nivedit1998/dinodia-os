@@ -1,0 +1,11 @@
+{
+  "ticket": {
+    "ticketId": "ticket:tenant-private",
+    "homeId": "home:opaque-a",
+    "homeMembershipId": "membership:tenant-a",
+    "category": "DEVICE_PROBLEM",
+    "scope": "TENANT_DEVICE"
+  },
+  "recipientCandidates": ["membership:owner-a", "membership:tenant-a"],
+  "expectedPrivateRecipients": ["membership:tenant-a"]
+}

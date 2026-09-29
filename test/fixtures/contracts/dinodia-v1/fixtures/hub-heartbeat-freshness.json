@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "now": "2026-09-29T12:00:00.000Z",
+  "heartbeatCadenceSeconds": 120,
+  "onlineThroughSeconds": 420,
+  "cases": [
+    { "id": "current-heartbeat", "lastHeartbeatAt": "2026-09-29T12:00:00.000Z", "ageSeconds": 0, "expected": "online" },
+    { "id": "expected-cadence-boundary", "lastHeartbeatAt": "2026-09-29T11:58:00.000Z", "ageSeconds": 120, "expected": "online" },
+    { "id": "just-before-offline-boundary", "lastHeartbeatAt": "2026-09-29T11:53:00.001Z", "ageSeconds": 419.999, "expected": "online" },
+    { "id": "inclusive-offline-boundary", "lastHeartbeatAt": "2026-09-29T11:53:00.000Z", "ageSeconds": 420, "expected": "online" },
+    { "id": "first-offline-millisecond", "lastHeartbeatAt": "2026-09-29T11:52:59.999Z", "ageSeconds": 420.001, "expected": "offline" },
+    { "id": "missing-heartbeat", "lastHeartbeatAt": null, "ageSeconds": null, "expected": "unknown" },
+    { "id": "future-heartbeat-clock-skew", "lastHeartbeatAt": "2026-09-29T12:00:00.001Z", "ageSeconds": -0.001, "expected": "unknown" },
+    { "id": "malformed-heartbeat", "lastHeartbeatAt": "not-a-timestamp", "ageSeconds": null, "expected": "unknown" },
+    { "id": "invalid-calendar-heartbeat", "lastHeartbeatAt": "2026-02-31T12:00:00Z", "ageSeconds": null, "expected": "unknown" }
+  ]
+}

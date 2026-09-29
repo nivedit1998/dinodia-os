@@ -20,6 +20,7 @@ tags:
 paths:
   /api/v2/auth/session:
     get:
+      summary: "Restore Customer Session"
       operationId: restoreCustomerSession
       tags: [Session]
       security: [{ CustomerSessionCookie: [] }]
@@ -35,6 +36,7 @@ paths:
           }
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
+      summary: "Create Customer Session"
       operationId: createCustomerSession
       tags: [Session]
       security: []
@@ -44,23 +46,7 @@ paths:
           {
             application/json:
               {
-                schema:
-                  {
-                    type: object,
-                    required: [email, password, deviceInstallationId, publicKey, deviceName],
-                    properties:
-                      {
-                        email: { type: string, format: email },
-                        password: { type: string, writeOnly: true },
-                        deviceInstallationId: { type: string, minLength: 1, maxLength: 160 },
-                        publicKey: { type: string, minLength: 1, maxLength: 4096, writeOnly: true },
-                        deviceName: { type: string, minLength: 1, maxLength: 160 },
-                        model: { type: string, maxLength: 160 },
-                        osFamily: { type: string, maxLength: 80 },
-                        osVersion: { type: string, maxLength: 80 },
-                      },
-                    additionalProperties: false,
-                  },
+                schema: { $ref: "./contract.json#/$defs/customerSessionLoginRequest" },
               },
           }
       responses:
@@ -69,14 +55,25 @@ paths:
           content:
             application/json:
               schema: { $ref: "./contract.json#/$defs/customerSessionReceipt" }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
     delete:
+      summary: "End Compatibility Customer Session"
       operationId: endCompatibilityCustomerSession
       tags: [Session]
       security: [{ CustomerSessionCookie: [] }]
-      responses: { "200": { description: Durable customer-session revocation and cookie clearing } }
+      responses:
+        "200":
+          description: Durable customer-session revocation and cookie clearing.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/customerSessionLogoutReceipt" }
   /api/v2/session:
     get:
+      summary: "Restore Canonical Account Session"
       operationId: restoreCanonicalAccountSession
       tags: [Session]
       security: [{ CustomerSessionCookie: [] }]
@@ -89,6 +86,7 @@ paths:
           }
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
+      summary: "Create Canonical Customer Session"
       operationId: createCanonicalCustomerSession
       tags: [Session]
       security: []
@@ -96,40 +94,44 @@ paths:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              required: [email, password, deviceInstallationId, publicKey, deviceName]
-              properties:
-                email: { type: string, format: email }
-                password: { type: string, writeOnly: true }
-                deviceInstallationId: { type: string, minLength: 1, maxLength: 160 }
-                publicKey: { type: string, minLength: 1, maxLength: 4096, writeOnly: true }
-                deviceName: { type: string, minLength: 1, maxLength: 160 }
-                model: { type: string, maxLength: 160 }
-                osFamily: { type: string, maxLength: 80 }
-                osVersion: { type: string, maxLength: 80 }
-              additionalProperties: false
+            schema: { $ref: "./contract.json#/$defs/customerSessionLoginRequest" }
       responses:
         "200":
           description: Customer session established with an HttpOnly session cookie; receipt contains no reusable bearer.
           content:
             application/json:
               schema: { $ref: "./contract.json#/$defs/customerSessionReceipt" }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
     delete:
+      summary: "End Canonical Customer Session"
       operationId: endCanonicalCustomerSession
       tags: [Session]
       security: [{ CustomerSessionCookie: [] }]
-      responses: { "200": { description: Durable customer-session revocation } }
+      responses:
+        "200":
+          description: Durable customer-session revocation.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/customerSessionLogoutReceipt" }
   /api/v2/session/logout:
     post:
+      summary: "End Customer Session"
       operationId: endCustomerSession
       tags: [Session]
       security: [{ CustomerSessionCookie: [] }]
       responses:
-        "200": { description: Session revoked and cookie cleared }
+        "200":
+          description: Session revoked and cookie cleared.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/customerSessionLogoutReceipt" }
   /api/v2/hub-sessions:
     post:
+      summary: "Issue Selected Home Hub Session"
       operationId: issueSelectedHomeHubSession
       tags: [Session]
       security: [{ CustomerSessionCookie: [] }]
@@ -153,8 +155,133 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "400": { description: Invalid or missing selected-home request }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/offline-authorisations:
+    post:
+      summary: "Create Exact Membership Offline Authorisation"
+      operationId: createOfflineMembershipAuthorisation
+      tags: [Session]
+      security: [{ CustomerBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./contract.json#/$defs/offlineAuthorisationRequest" }
+      responses:
+        "200":
+          description: Tenant-only local authority for the already selected home, membership and enrolled trusted device.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/offlineAuthorisationReceipt" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "400": { description: Trusted device public key or request fields are invalid. }
+    delete:
+      summary: "Revoke Current Membership Offline Authorisation"
+      operationId: revokeOfflineMembershipAuthorisation
+      tags: [Session]
+      security: [{ CustomerBearer: [] }]
+      responses:
+        "200":
+          description: Current trusted-device authority is revoked for the selected membership.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/offlineRevocationReceipt" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/v2/security/step-up/challenge:
+    post:
+      summary: "Create Operation-Bound Step-Up Challenge"
+      operationId: createStepUpChallenge
+      tags: [Session]
+      security: [{ CustomerBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./contract.json#/$defs/stepUpChallengeRequest" }
+      responses:
+        "200":
+          description: Single-use challenge bound to the authenticated customer session, selected membership, target and operation digest.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/stepUpChallengeReceipt" }
+        "400": { description: Operation or target is malformed or unsupported. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      summary: "Cancel Unconsumed Step-Up Challenge"
+      operationId: cancelStepUpChallenge
+      tags: [Session]
+      security: [{ CustomerBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./contract.json#/$defs/stepUpCancellationRequest" }
+      responses:
+        "200":
+          description: Only the current customer session may cancel its own unused challenge.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/stepUpCancellationReceipt" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/security/step-up/issue:
+    post:
+      summary: "Issue One-Use Step-Up Proof"
+      operationId: issueStepUpProof
+      tags: [Session]
+      security: [{ CustomerBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./contract.json#/$defs/stepUpIssueRequest" }
+      responses:
+        "200":
+          description: A proof bound to one actor/session/home/membership/operation/target and consumed challenge; clients must keep it in memory only.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/stepUpProofReceipt" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/security/step-up/consume:
+    post:
+      summary: "Consume Step-Up Proof For Exact Operation"
+      operationId: consumeStepUpProof
+      tags: [Session]
+      security: [{ CustomerBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./contract.json#/$defs/stepUpConsumeRequest" }
+      responses:
+        "200":
+          description: Proof consumed atomically; no reusable proof is returned.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/stepUpConsumeReceipt" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/support/notifications:
+    get:
+      summary: "List Selected Membership Support Notifications"
+      operationId: listSelectedSupportNotifications
+      tags: [Notifications, Support]
+      security: [{ CustomerBearer: [] }]
+      responses:
+        "200":
+          description: Only the authenticated account and selected home notification projection; no private support details are included.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/supportNotificationProjection" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /api/v2/homes/{homeId}/context:
     get:
+      summary: "Get Membership Scoped Home Context"
       operationId: getMembershipScopedHomeContext
       tags: [Home]
       parameters: [{ $ref: "#/components/parameters/HomeId" }]
@@ -172,6 +299,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/v2/homes/{homeId}/access-policy:
     get:
+      summary: "Get Current Home Access Policy"
       operationId: getCurrentHomeAccessPolicy
       tags: [Home]
       parameters: [{ $ref: "#/components/parameters/HomeId" }]
@@ -188,6 +316,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/v2/homes/{homeId}/overrides:
     get:
+      summary: "List Home Display Overrides"
       operationId: listHomeDisplayOverrides
       tags: [Home]
       parameters: [{ $ref: "#/components/parameters/HomeId" }]
@@ -202,6 +331,7 @@ paths:
               },
           }
     put:
+      summary: "Replace Home Display Overrides"
       operationId: replaceHomeDisplayOverrides
       tags: [Home]
       parameters:
@@ -224,12 +354,14 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
   /api/v2/homes/{homeId}/preferences:
     get:
+      summary: "Get Home Preferences"
       operationId: getHomePreferences
       tags: [Home]
       parameters: [{ $ref: "#/components/parameters/HomeId" }]
       responses:
         { "200": { description: Revisioned selected-home preferences } }
     put:
+      summary: "Update Home Preferences"
       operationId: updateHomePreferences
       tags: [Home]
       parameters:
@@ -242,6 +374,7 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
   /api/v2/homes/{homeId}/analytics/{period}:
     get:
+      summary: "Get Home Analytics"
       operationId: getHomeAnalytics
       tags: [Home]
       parameters:
@@ -266,12 +399,14 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/v2/homes/{homeId}/property-managers:
     get:
+      summary: "List Property Managers"
       operationId: listPropertyManagers
       tags: [Home]
       parameters: [{ $ref: "#/components/parameters/HomeId" }]
       responses:
         { "200": { description: Current active manager memberships only } }
     post:
+      summary: "Invite Property Manager"
       operationId: invitePropertyManager
       tags: [Home]
       parameters:
@@ -287,6 +422,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/v2/homes/{homeId}/tenant/devices:
     get:
+      summary: "List Authorized Native Devices"
       operationId: listAuthorizedNativeDevices
       tags: [Devices]
       parameters: [{ $ref: "#/components/parameters/HomeId" }]
@@ -303,6 +439,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/v2/homes/{homeId}/tenant/devices/{deviceId}:
     get:
+      summary: "Get Authorized Native Device"
       operationId: getAuthorizedNativeDevice
       tags: [Devices]
       parameters:
@@ -324,13 +461,14 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/dinodia/v1/devices:
     get:
+      summary: "Read Selected Home Hub Device Descriptors"
       operationId: readSelectedHomeHubDeviceDescriptors
       tags: [Devices]
       description: Direct authenticated request to the selected hub over pinned HTTPS LAN BaseURL or the independently verified CloudURL. The home and membership are taken from the signed app token, never from query parameters.
       servers:
         - url: https://dinodia-{hubId}.local:8123
           variables:
-            hubId: { default: hub-identifier, description: Public hub DNS label, not an authority claim }
+            hubId: { default: hub-identifier, description: "Public hub DNS label, not an authority claim" }
       responses:
         "200":
           description: Current membership/area filtered canonical Native v1 device envelope
@@ -355,6 +493,7 @@ paths:
         "503": { description: Current catalogue cannot be represented without losing safety or authority fields }
   /api/v2/alexa/discovery:
     get:
+      summary: "Get Native Alexa Discovery Projection"
       operationId: getNativeAlexaDiscoveryProjection
       tags: [Devices]
       security: [{ AlexaBearer: [] }]
@@ -370,6 +509,7 @@ paths:
         "501": { description: Alexa account-linking/projection feature is not enabled in this stage; no fallback is permitted }
   /api/v2/alexa/directives:
     post:
+      summary: "Dispatch Native Alexa Directive"
       operationId: dispatchNativeAlexaDirective
       tags: [Devices]
       security: [{ AlexaBearer: [] }]
@@ -386,6 +526,7 @@ paths:
         "501": { description: Alexa directive execution is not enabled in this stage; no HA/entity fallback is permitted }
   /api/v2/alexa/report-state:
     post:
+      summary: "Report Native Alexa State"
       operationId: reportNativeAlexaState
       tags: [Devices]
       security: [{ AlexaBearer: [] }]
@@ -401,6 +542,7 @@ paths:
         "501": { description: Alexa report-state projection is not enabled in this stage; no static fallback is permitted }
   /api/dinodia/v1/commands:
     post:
+      summary: "Issue Dinodia OSCommand"
       operationId: issueDinodiaOSCommand
       tags: [Devices]
       description: Tenant live command is sent directly to the selected hub's pinned HTTPS BaseURL or verified CloudURL. Platform does not proxy device commands; HA/AWS transports are forbidden.
@@ -411,8 +553,7 @@ paths:
             hubId:
               {
                 default: hub-identifier,
-                description: Public hub DNS label,
-                not an authority claim,
+                description: "Public hub DNS label, not an authority claim",
               }
       parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
@@ -435,6 +576,7 @@ paths:
           }
   /api/v2/tenant/account/delete:
     post:
+      summary: "Delete Customer Account"
       operationId: deleteCustomerAccount
       tags: [Account]
       parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
@@ -446,12 +588,14 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
   /api/v2/notifications:
     get:
+      summary: "List Authorized Notifications"
       operationId: listAuthorizedNotifications
       tags: [Notifications]
       responses:
         { "200": { description: Current audience-scoped notification items } }
   /api/v2/notifications/{notificationId}/acknowledgement:
     put:
+      summary: "Acknowledge Notification"
       operationId: acknowledgeNotification
       tags: [Notifications]
       parameters:
@@ -467,6 +611,7 @@ paths:
         { "204": { description: Notification acknowledgement recorded } }
   /api/v2/homes/{homeId}/activity:
     get:
+      summary: "List Home Activity"
       operationId: listHomeActivity
       tags: [Home]
       parameters: [{ $ref: "#/components/parameters/HomeId" }]
@@ -474,11 +619,13 @@ paths:
         { "200": { description: Role-filtered activity for selected home } }
   /api/v2/trusted-devices:
     get:
+      summary: "List Trusted Customer Devices"
       operationId: listTrustedCustomerDevices
       tags: [Account]
       responses: { "200": { description: Current account's trusted devices } }
   /api/v2/trusted-devices/{trustedDeviceId}:
     delete:
+      summary: "Revoke Trusted Customer Device"
       operationId: revokeTrustedCustomerDevice
       tags: [Account]
       parameters:
@@ -489,16 +636,22 @@ paths:
             required: true,
             schema: { type: string },
           },
+          { $ref: "#/components/parameters/StepUpProof" },
         ]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "./contract.json#/$defs/trustedDeviceRemovalRequest" }
       responses:
-        {
-          "204":
-            {
-              description: Device revoked account-wide and connected authority invalidated,
-            },
-        }
+        "200":
+          description: Device revoked account-wide and connected authority invalidated.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/trustedDeviceRemovalReceipt" }
   /api/v2/support/tickets:
     get:
+      summary: "List Role Scoped Support Tickets"
       operationId: listRoleScopedSupportTickets
       tags: [Support]
       responses:
@@ -509,16 +662,16 @@ paths:
             },
         }
     post:
+      summary: "Create Support Ticket"
       operationId: createSupportTicket
       tags: [Support]
-      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         {
           required: true,
           content:
             {
               application/json:
-                { schema: { $ref: "./contract.json#/$defs/supportTicket" } },
+                { schema: { $ref: "./contract.json#/$defs/supportTicketCreateRequest" } },
             },
         }
       responses:
@@ -526,39 +679,12 @@ paths:
           "201":
             {
               description: Support ticket created without expanding account authority,
+              content: { application/json: { schema: { $ref: "./contract.json#/$defs/supportTicketCreateReceipt" } } },
             },
         }
-  /api/v2/support/tickets/{ticketId}/access-request:
-    post:
-      operationId: requestScopedSupportAccess
-      tags: [Support]
-      parameters:
-        [
-          {
-            name: ticketId,
-            in: path,
-            required: true,
-            schema: { type: string },
-          },
-          { $ref: "#/components/parameters/IdempotencyKey" },
-        ]
-      requestBody:
-        {
-          required: true,
-          content:
-            {
-              application/json:
-                {
-                  schema:
-                    { $ref: "./contract.json#/$defs/supportAccessRequest" },
-                },
-            },
-        }
-      responses:
-        "201": { description: Scope-bound request awaiting required approvals }
-        "403": { $ref: "#/components/responses/Forbidden" }
   /api/v2/support/tickets/{ticketId}/code-exchange:
     post:
+      summary: "Exchange Approved Support Code"
       operationId: exchangeApprovedSupportCode
       tags: [Support]
       parameters:
@@ -584,6 +710,7 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
   /api/v2/support/tickets/{ticketId}:
     get:
+      summary: "Get Customer Support Ticket"
       operationId: getCustomerSupportTicket
       tags: [Support]
       parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }]
@@ -592,6 +719,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { description: Ticket is not visible to this principal. }
     patch:
+      summary: "Update Customer Support Ticket"
       operationId: updateCustomerSupportTicket
       tags: [Support]
       parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/IdempotencyKey" }]
@@ -599,8 +727,31 @@ paths:
       responses:
         "200": { description: Revisioned customer-visible ticket update. }
         "409": { $ref: "#/components/responses/Conflict" }
+    post:
+      summary: "Close Customer Support Ticket"
+      operationId: closeCustomerSupportTicket
+      tags: [Support]
+      security: [{ CustomerBearer: [] }]
+      parameters:
+        - { name: ticketId, in: path, required: true, schema: { $ref: "./contract.json#/$defs/id" } }
+        - { $ref: "#/components/parameters/StepUpProof" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./contract.json#/$defs/supportTicketCloseRequest" }
+      responses:
+        "200":
+          description: Current customer's ticket closed after exact single-use step-up; cloud access is revoked immediately and hub acknowledgement may remain pending.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/supportTicketCloseReceipt" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /api/v2/support/tickets/{ticketId}/access-requests:
     get:
+      summary: "List Ticket Support Access Requests"
       operationId: listTicketSupportAccessRequests
       tags: [Support]
       parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }]
@@ -608,33 +759,36 @@ paths:
         "200": { description: Access requests visible to the current customer or assigned employee. }
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
+      summary: "Request Ticket Support Access"
       operationId: requestTicketSupportAccess
       tags: [Support]
-      parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IdempotencyKey" }]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/supportAccessRequest" } } } }
+      parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/supportAccessRequestCreateRequest" } } } }
       responses:
-        "201": { description: Scope-bound access request; no support authority is granted. }
+        "201":
+          description: Scope-bound access request; no support authority is granted.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/supportAccessRequestCreateReceipt" }
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/v2/support/tickets/{ticketId}/access-requests/{requestId}/approve:
     post:
-      operationId: approveTicketSupportAccess
+      summary: "Record Ticket Support Access Decision"
+      operationId: decideTicketSupportAccess
       tags: [Support]
-      parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }, { name: requestId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/IdempotencyKey" }]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [stepUpOperationId], properties: { stepUpOperationId: { type: string } }, additionalProperties: false } } } }
+      parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }, { name: requestId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/StepUpProof" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/supportAccessDecisionRequest" } } } }
       responses:
-        "200": { description: Exact-approver, exact-scope approval; issuance remains a separate operation. }
+        "200":
+          description: Approval returns a one-use code only to the approving customer; denial returns no code.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/supportAccessDecisionReceipt" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/Conflict" }
-  /api/v2/support/tickets/{ticketId}/access-requests/{requestId}/deny:
-    post:
-      operationId: denyTicketSupportAccess
-      tags: [Support]
-      parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }, { name: requestId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IdempotencyKey" }]
-      responses:
-        "200": { description: Denial is terminal for this request revision and creates no code. }
-        "403": { $ref: "#/components/responses/Forbidden" }
   /api/v2/support/tickets/{ticketId}/access-requests/{requestId}/issue:
     post:
+      summary: "Issue Ticket Support Code"
       operationId: issueTicketSupportCode
       tags: [Support]
       parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }, { name: requestId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IdempotencyKey" }]
@@ -643,6 +797,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/v2/support/tickets/{ticketId}/access-requests/{requestId}/revoke:
     post:
+      summary: "Revoke Ticket Support Access"
       operationId: revokeTicketSupportAccess
       tags: [Support]
       parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }, { name: requestId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IdempotencyKey" }]
@@ -651,6 +806,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/v2/homes/{homeId}/reset-property-ownership:
     post:
+      summary: "Reset Property Ownership"
       operationId: resetPropertyOwnership
       tags: [Home]
       parameters: [{ $ref: "#/components/parameters/HomeId" }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/IdempotencyKey" }]
@@ -661,6 +817,7 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
   /api/automations:
     get:
+      summary: "List Home Automations"
       operationId: listHomeAutomations
       tags: [Home]
       parameters: [{ name: homeId, in: query, required: true, schema: { type: string } }, { name: homeMembershipId, in: query, required: true, schema: { type: string } }]
@@ -668,6 +825,7 @@ paths:
         "200": { description: Current membership-authorized full automation bundle and revision. }
         "403": { $ref: "#/components/responses/Forbidden" }
     put:
+      summary: "Replace Home Automations"
       operationId: replaceHomeAutomations
       tags: [Home]
       parameters: [{ name: homeId, in: query, required: true, schema: { type: string } }, { name: homeMembershipId, in: query, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/IdempotencyKey" }]
@@ -678,6 +836,7 @@ paths:
   /api/dinodia/v1/snapshot:
     servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
     get:
+      summary: "Read Selected Home Snapshot"
       operationId: readSelectedHomeSnapshot
       tags: [Devices]
       security: [{ CustomerBearer: [] }]
@@ -689,13 +848,15 @@ paths:
   /api/dinodia/v1/areas:
     servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
     get:
+      summary: "List Canonical Areas"
       operationId: listCanonicalAreas
       tags: [Home]
       security: [{ CustomerBearer: [] }]
-      responses: { "200": { description: Canonical original/override area DTOs, including empty active areas. }, "401": { $ref: "#/components/responses/Unauthorized" } }
+      responses: { "200": { description: "Canonical original/override area DTOs, including empty active areas." }, "401": { $ref: "#/components/responses/Unauthorized" } }
   /api/dinodia/v1/devices/{deviceId}:
     servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
     get:
+      summary: "Get Current Native Device"
       operationId: getCurrentNativeDevice
       tags: [Devices]
       security: [{ CustomerBearer: [] }]
@@ -704,6 +865,7 @@ paths:
   /api/dinodia/v1/control-catalog:
     servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
     get:
+      summary: "Get Current Control Catalog"
       operationId: getCurrentControlCatalog
       tags: [Devices]
       security: [{ CustomerBearer: [] }]
@@ -712,6 +874,7 @@ paths:
   /api/dinodia/v1/events:
     servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
     get:
+      summary: "Subscribe Home Events"
       operationId: subscribeHomeEvents
       tags: [Devices]
       security: [{ CustomerBearer: [] }]
@@ -720,14 +883,16 @@ paths:
   /api/dinodia/v1/commands/{commandId}:
     servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
     get:
+      summary: "Get Command Receipt"
       operationId: getCommandReceipt
       tags: [Devices]
       security: [{ CustomerBearer: [] }]
       parameters: [{ name: commandId, in: path, required: true, schema: { type: string } }]
-      responses: { "200": { description: Accepted, completed, rejected, uncertain or expired command receipt. }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { description: Receipt is not visible in the current home/membership scope. } }
+      responses: { "200": { description: "Accepted, completed, rejected, uncertain or expired command receipt." }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { description: "Receipt is not visible in the current home/membership scope." } }
   /api/dinodia/v1/commissioning/sessions:
     servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
     post:
+      summary: "Create Commissioning Session"
       operationId: createCommissioningSession
       tags: [Devices]
       security: [{ CustomerBearer: [] }]
@@ -737,12 +902,14 @@ paths:
   /api/dinodia/v1/commissioning/sessions/{sessionId}:
     servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
     get:
+      summary: "Get Commissioning Session"
       operationId: getCommissioningSession
       tags: [Devices]
       security: [{ CustomerBearer: [] }]
       parameters: [{ name: sessionId, in: path, required: true, schema: { type: string } }]
       responses: { "200": { description: Current bounded commissioning candidates and terminal state. }, "404": { description: Session is unavailable or outside current membership scope. } }
     delete:
+      summary: "Cancel Commissioning Session"
       operationId: cancelCommissioningSession
       tags: [Devices]
       security: [{ CustomerBearer: [] }]
@@ -751,6 +918,7 @@ paths:
   /api/dinodia/v1/support/exchange:
     servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
     post:
+      summary: "Exchange Support Code At Hub"
       operationId: exchangeSupportCodeAtHub
       tags: [Support]
       security: [{ EmployeeBearer: [] }]
@@ -760,6 +928,7 @@ paths:
   /api/dinodia/v1/support/session/status:
     servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
     get:
+      summary: "Get Support Session Status"
       operationId: getSupportSessionStatus
       tags: [Support]
       security: [{ SupportSession: [] }]
@@ -767,12 +936,14 @@ paths:
   /api/dinodia/v1/support/session/end:
     servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
     post:
+      summary: "End Support Session"
       operationId: endSupportSession
       tags: [Support]
       security: [{ SupportSession: [] }]
       responses: { "204": { description: Local support authority and sockets revoked. }, "401": { $ref: "#/components/responses/Unauthorized" } }
   /api/installer/hubs/provision:
     post:
+      summary: "Provision Certified Hub"
       operationId: provisionCertifiedHub
       tags: [Home]
       security: [{ EmployeeBearer: [] }]
@@ -781,6 +952,7 @@ paths:
       responses: { "200": { description: Assigned-workflow-bound Home and HubInstallation result; pairing secret is not returned. }, "401": { description: Employee session required. }, "409": { $ref: "#/components/responses/Conflict" } }
   /api/installer/hubs/{hubInstallationId}/provisioning-status:
     get:
+      summary: "Get Hub Provisioning Status"
       operationId: getHubProvisioningStatus
       tags: [Home]
       parameters: [{ name: hubInstallationId, in: path, required: true, schema: { type: string } }]
@@ -788,6 +960,7 @@ paths:
       responses: { "200": { description: Authorized redacted installation and machine-credential lifecycle state. }, "403": { $ref: "#/components/responses/Forbidden" } }
   /api/installer/hubs/{hubInstallationId}/cloudflare-status:
     get:
+      summary: "Get Reserved Cloudflare Status"
       operationId: getReservedCloudflareStatus
       tags: [Home]
       parameters: [{ name: hubInstallationId, in: path, required: true, schema: { type: string } }]
@@ -795,6 +968,7 @@ paths:
       responses: { "200": { description: Current reservation and independently verified CloudURL state. }, "403": { $ref: "#/components/responses/Forbidden" } }
   /api/hub-provisioning/pairings/advertise:
     post:
+      summary: "Advertise Certified Pairing Attempt"
       operationId: advertiseCertifiedPairingAttempt
       tags: [Home]
       security: [{ HubSignature: [] }]
@@ -802,6 +976,7 @@ paths:
       responses: { "201": { description: Durable pairing attempt with one-way presentation-code hash. }, "401": { $ref: "#/components/responses/Unauthorized" } }
   /api/hub-provisioning/pairings/{attemptId}/poll:
     post:
+      summary: "Poll Pairing Attempt"
       operationId: pollPairingAttempt
       tags: [Home]
       security: [{ HubSignature: [] }]
@@ -809,6 +984,7 @@ paths:
       responses: { "200": { description: Current signed challenge or machine-credential delivery envelope. }, "401": { $ref: "#/components/responses/Unauthorized" } }
   /api/hub-provisioning/pairings/{attemptId}/prove:
     post:
+      summary: "Prove Pairing Challenge"
       operationId: provePairingChallenge
       tags: [Home]
       security: [{ HubSignature: [] }]
@@ -817,6 +993,7 @@ paths:
       responses: { "200": { description: Challenge proof accepted for the registered generation and key. }, "401": { $ref: "#/components/responses/Unauthorized" }, "409": { $ref: "#/components/responses/Conflict" } }
   /api/hub-provisioning/pairings/{attemptId}/ack:
     post:
+      summary: "Acknowledge Pairing Credential"
       operationId: acknowledgePairingCredential
       tags: [Home]
       security: [{ HubSignature: [] }]
@@ -861,19 +1038,38 @@ components:
         required: true,
         schema: { type: string, minLength: 16, maxLength: 160 },
       }
+    StepUpProof:
+      { name: X-Dinodia-Step-Up-Proof, in: header, required: false, schema: { type: string, minLength: 1, maxLength: 8192 } }
   schemas:
     HubLanEndpointObservation:
       $ref: "./contract.json#/$defs/lanEndpointObservation"
+    NativeError:
+      $ref: "./contract.json#/$defs/error"
   responses:
+    BadRequest:
+      description: The canonical request DTO is malformed or violates a bounded field constraint.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/NativeError" }
     Unauthorized:
-      { description: Missing, malformed, expired or revoked customer session }
+      description: Missing, malformed, expired or revoked customer session.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/NativeError" }
     Forbidden:
-      {
-        description: Authenticated principal lacks current membership,
-        role,
-        area or device authority,
-      }
+      description: Authenticated principal lacks current membership, role, area or device authority.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/NativeError" }
     Conflict:
-      { description: Revision, descriptor, idempotency or lifecycle conflict }
+      description: Revision, descriptor, idempotency, trusted-device identity or lifecycle conflict.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/NativeError" }
+    RateLimited:
+      description: The durable account or device rate limit was reached.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/NativeError" }
     ServiceUnavailable:
       { description: The selected home hub or required Native V2 authority is unavailable; no alternate backend is attempted }

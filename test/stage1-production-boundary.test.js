@@ -25,6 +25,14 @@ async function request(base, route, options = {}) {
   return { response, body: await response.json().catch(() => ({})) };
 }
 
+function websocketMessage(socket) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("OS WebSocket response timed out")), 2000);
+    socket.once("message", (data) => { clearTimeout(timer); resolve(JSON.parse(data.toString())); });
+    socket.once("error", (error) => { clearTimeout(timer); reject(error); });
+  });
+}
+
 test("production rejects legacy admin, HA, bootstrap and dashboard credentials", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-stage1-production-boundary-"));
   const hub = createHub({
@@ -144,7 +152,7 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
   await hub.store.savePlatform({ homeId: "home-command", areaBindings: [{ areaId: "area-uuid-command-kitchen", hubAreaId: area.id }] });
   const deviceId = "device-native-command";
   await hub.store.upsertDevice({
-    id: deviceId, name: "Kitchen switch", protocol: "virtual", areaId: area.id,
+    id: deviceId, name: "Kitchen switch legacy display name exceeding the forty character public limit", protocol: "virtual", areaId: area.id,
     managementClass: "tenant_device", tenantOwnerMembershipId: "membership-command-tenant",
     entities: { [`${deviceId}:0:state`]: {
       id: `${deviceId}:0:state`, sourceId: `${deviceId}:0:state`, deviceId, endpointId: "0", logicalKey: "state", stateKey: "state", domain: "switch", state: "OFF",
@@ -157,18 +165,68 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
   await hub.store.completeDeviceSetup(deviceId, { areaId: area.id, labelId: "light" });
   await hub.start();
   const base = `http://127.0.0.1:${hub.server.address().port}`;
+  let socket;
+  let releaseQueuedCommand = () => {};
+  let restoreSaveSecurity = () => {};
   try {
     const now = Math.floor(Date.now() / 1000);
     const token = appToken({ iss: "dinodia-platform-v2", aud: "dinodia-hub:native-command-hub", sub: "account-command-tenant", sid: "sid-command", jti: "jti-command", membershipId: "membership-command-tenant", trustedDeviceId: "trusted-command", hubInstallationId: "native-command-hub", iat: now, exp: now + 300, homeId: "home-command", householdRole: "TENANT", areaIds: ["area-uuid-command-kitchen"], policyRevision: 0, scope: ["tenant:device-command"] }, keys.privateKey);
     const headers = { authorization: `Bearer ${token}` };
+    socket = new WebSocket(`${base.replace("http", "ws")}/api/websocket`);
+    assert.equal((await websocketMessage(socket)).type, "auth_required");
+    socket.send(JSON.stringify({ type: "auth", access_token: token }));
+    assert.equal((await websocketMessage(socket)).type, "auth_ok");
     const catalog = await request(base, "/api/dinodia/v1/devices", { headers });
     assert.equal(catalog.response.status, 200);
     const dto = catalog.body.data.find((item) => item.id === deviceId);
     assert.ok(dto);
+    assert.equal(dto.customerLabel.length, 40, "an over-bound legacy label is safely bounded without dropping the device");
+    assert.equal(dto.controls.length, 2, "label projection must preserve the device's control descriptors");
+    const storedDevice = hub.store.getDevice(deviceId);
+    for (const [length, expectedLength] of [[0, deviceId.length], [1, 1], [40, 40], [41, 40], [80, 40]]) {
+      await hub.store.upsertDevice({ ...storedDevice, name: "L".repeat(length) || deviceId });
+      const labelRead = await request(base, "/api/dinodia/v1/devices", { headers });
+      const labelDto = labelRead.body.data.find((item) => item.id === deviceId);
+      assert.ok(labelDto, `label length ${length} must not drop device identity`);
+      assert.equal(labelDto.customerLabel?.length ?? null, expectedLength, `public label length ${length} must map to the canonical bound`);
+      assert.equal(labelDto.controls.length, 2, `label length ${length} must not remove controls`);
+      assert.equal(labelDto.managementClass, "tenant_device", `label length ${length} must not change ownership class`);
+    }
+    const labelFixture = JSON.parse(await fs.readFile(path.join(__dirname, "fixtures/contracts/dinodia-v1/fixtures/customer-label-unicode-boundaries.json"), "utf8"));
+    for (const item of labelFixture.cases) {
+      const raw = typeof item.value === "string" ? item.value : String(item.repeat || "").repeat(Number(item.repeatCount || 0));
+      if (raw.length === 0) continue; // The store deliberately preserves an existing label on an empty update; serializer-null is covered below in the contract unit.
+      await hub.store.upsertDevice({ ...storedDevice, name: raw });
+      const labelRead = await request(base, "/api/dinodia/v1/devices", { headers });
+      const labelDto = labelRead.body.data.find((candidate) => candidate.id === deviceId);
+      assert.ok(labelDto, `Unicode label ${item.id} must not remove device identity`);
+      const expected = raw.length === 0 ? null : Array.from(raw).slice(0, 40).join("");
+      assert.equal(labelDto.customerLabel, expected, `OS Unicode projection ${item.id}`);
+      assert.equal(Array.from(labelDto.customerLabel || "").length, item.projectedCodePoints, `OS code-point bound ${item.id}`);
+      assert.equal(labelDto.controls.length, 2, `Unicode label ${item.id} must preserve current descriptors`);
+      assert.equal(labelDto.managementClass, "tenant_device", `Unicode label ${item.id} must not change ownership`);
+    }
     const power = dto.controls.find((control) => control.semanticRole === "power");
     const lock = dto.controls.find((control) => control.semanticRole === "security_lock");
     assert.ok(power && lock);
     assert.equal(power.valueType, "boolean");
+    const wsPowerEntity = hub.model.entities().find((entity) => entity.device.id === deviceId && entity.entity?.capability?.semanticRole === "power");
+    const wsLockEntity = hub.model.entities().find((entity) => entity.device.id === deviceId && entity.entity?.capability?.semanticRole === "security_lock");
+    assert.ok(wsPowerEntity?.haId && wsLockEntity?.haId, "test device has current WebSocket entity bindings");
+    const beforeMixedTarget = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
+    socket.send(JSON.stringify({ id: 101, type: "call_service", domain: "switch", service: "turn_on", target: { entity_id: wsPowerEntity.haId, device_id: "device-outside-scope" } }));
+    const mixedTargetResult = await websocketMessage(socket);
+    assert.equal(mixedTargetResult.success, false);
+    assert.equal(mixedTargetResult.error.code, "insufficient_scope");
+    assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, beforeMixedTarget, "mixed selectors must have no WebSocket dispatch event");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "OFF", "mixed selectors must have no WebSocket fake-device effect");
+    const beforeSensitiveWithoutProof = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
+    socket.send(JSON.stringify({ id: 102, type: "call_service", domain: "lock", service: "unlock", target: { entity_id: wsLockEntity.haId }, descriptorDigests: { [deviceId]: hub.store.getDevice(deviceId).presentation.sourceFingerprint || hub.store.getDevice(deviceId).presentation.descriptorDigest || null } }));
+    const sensitiveResult = await websocketMessage(socket);
+    assert.equal(sensitiveResult.success, false);
+    assert.equal(sensitiveResult.error.code, "insufficient_scope");
+    assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, beforeSensitiveWithoutProof, "sensitive denial must have no WebSocket dispatch event");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:lock`].state, "LOCKED", "sensitive denial must have no fake-device effect");
     const key = "native-command-idempotency-0001";
     const command = { commandId: "command-native-1", homeId: "home-command", homeMembershipId: "membership-command-tenant", deviceId, controlId: power.controlId, descriptorRevision: dto.descriptorRevision, value: true, issuedAt: new Date().toISOString(), idempotencyKey: key };
     assert.equal(validateNativeCommand(command, dto, power, "membership-command-tenant"), true);
@@ -212,7 +270,70 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     const replay = await sendLock({ ...lockCommand, commandId: "command-native-lock-replay", idempotencyKey: "native-lock-command-idempotency-0002" }, proof);
     assert.equal(replay.response.status, 403);
     assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:lock`].state, "UNLOCKED");
-  } finally { await hub.stop(); }
+
+    const beforeReadOnlyProbe = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
+    const currentDevice = hub.store.getDevice(deviceId);
+    const readOnlyEntity = currentDevice.entities[`${deviceId}:0:state`];
+    const originalSaveSecurity = hub.store.saveSecurity.bind(hub.store);
+    restoreSaveSecurity = () => { hub.store.saveSecurity = originalSaveSecurity; };
+    let signalDispatchClaim;
+    const dispatchClaimSaved = new Promise((resolve) => { signalDispatchClaim = resolve; });
+    const dispatchClaimGate = new Promise((resolve) => { releaseQueuedCommand = resolve; });
+    hub.store.saveSecurity = async (patch) => {
+      const result = await originalSaveSecurity(patch);
+      if (Object.values(patch.nativeCommandResults || {}).some((entry) => entry?.status === "dispatching")) {
+        signalDispatchClaim();
+        await dispatchClaimGate;
+      }
+      return result;
+    };
+    const queuedCommand = { ...command, commandId: "command-native-queued-descriptor-change", idempotencyKey: "native-command-idempotency-queued-change", value: false };
+    const queuedRequest = send(queuedCommand);
+    await dispatchClaimSaved;
+    await hub.store.upsertDevice({
+      ...currentDevice,
+      entities: {
+        ...currentDevice.entities,
+        [`${deviceId}:0:state`]: {
+          ...readOnlyEntity,
+          capability: { ...readOnlyEntity.capability, writable: false },
+        },
+      },
+    });
+    releaseQueuedCommand();
+    const queuedDenied = await queuedRequest;
+    restoreSaveSecurity();
+    assert.equal(queuedDenied.response.status, 409, JSON.stringify(queuedDenied.body));
+    assert.equal(queuedDenied.body.error.code, "CATALOG_REVISION_MISMATCH");
+    assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, beforeReadOnlyProbe, "a control made read-only while its dispatch claim was being persisted has no event");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON", "a control made read-only while queued has no fake-device effect");
+    const queuedRetry = await send(queuedCommand);
+    assert.ok([400, 409].includes(queuedRetry.response.status), "an exact retry of a known pre-dispatch denial remains denied");
+    assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, beforeReadOnlyProbe, "an exact denied retry cannot dispatch later");
+    const changedCatalog = await request(base, "/api/dinodia/v1/devices", { headers });
+    const changedDto = changedCatalog.body.data.find((item) => item.id === deviceId);
+    const changedPower = changedDto?.controls.find((control) => control.semanticRole === "power");
+    assert.ok(changedPower, "a newly read-only descriptor remains visible for read-only use");
+    assert.equal(changedPower.writable, false);
+    const readOnlyAttempt = await send({ ...command, commandId: "command-native-read-only", idempotencyKey: "native-command-idempotency-read-only", descriptorRevision: changedDto.descriptorRevision });
+    assert.ok([400, 409].includes(readOnlyAttempt.response.status), JSON.stringify(readOnlyAttempt.body));
+    assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, beforeReadOnlyProbe, "a newly read-only control has no dispatch event");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON", "a newly read-only control has no fake-device effect");
+    socket.send(JSON.stringify({ id: 103, type: "call_service", domain: "switch", service: "turn_off", target: { entity_id: wsPowerEntity.haId } }));
+    const readOnlySocketResult = await websocketMessage(socket);
+    assert.equal(readOnlySocketResult.success, false);
+    assert.equal(readOnlySocketResult.error.code, "insufficient_scope");
+    assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, beforeReadOnlyProbe, "a changed-to-read-only descriptor has no WebSocket dispatch event");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON", "a changed-to-read-only descriptor has no WebSocket fake-device effect");
+
+    const beforeRetiredProbe = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
+    const retiredDevice = { ...hub.store.getDevice(deviceId), retired: true };
+    await hub.store.upsertDevice(retiredDevice);
+    const retiredAttempt = await send({ ...command, commandId: "command-native-retired", idempotencyKey: "native-command-idempotency-retired" });
+    assert.ok([400, 409].includes(retiredAttempt.response.status), JSON.stringify(retiredAttempt.body));
+    assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, beforeRetiredProbe, "retired command denial has no dispatch event");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON", "retired command denial has no fake-device effect");
+  } finally { releaseQueuedCommand(); restoreSaveSecurity(); socket?.close(); await hub.stop(); }
 });
 
 test("support operator sessions are read-only and cannot leak private tenant devices", async () => {

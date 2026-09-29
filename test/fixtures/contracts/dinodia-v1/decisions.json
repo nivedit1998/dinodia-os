@@ -63,7 +63,8 @@
     "dispatcherExecutionSeconds": 45,
     "taskRowsMaximum": 500,
     "taskTurnSeconds": 8,
-    "taskLeaseSeconds": 120,
+    "taskLeaseSeconds": 180,
+    "taskFailureIsolation": true,
     "vercelScheduledMechanisms": [
       "supabase_pg_cron_pg_net_every_2_minutes_to_vercel_native_operations",
       "vercel_hobby_daily_native_maintenance"
@@ -244,6 +245,9 @@
   },
   "controlPolicy": {
     "labelAuthority": false,
+    "boundedStringLengthUnit": "unicode_code_points",
+    "customerLabelLengthUnit": "unicode_code_points",
+    "customerLabelMaximumCodePoints": 40,
     "displayNameAuthority": false,
     "protocolGuessAuthority": false,
     "currentDescriptorRequiredForWrites": true,
@@ -271,7 +275,8 @@
     "tenantDeviceEventAudience": "owning_membership_only",
     "hubIncidentSuppressesCausedDeviceAlerts": true,
     "mandatorySecurityEventsIgnoreQuietHours": true,
-    "deduplicateByEventAndRecipient": true,
+    "deduplicateByEventRecipientAndChannel": true,
+    "deduplicationKeyFields": ["eventId", "recipientId", "channel"],
     "deliveryReceiptIsNotAuthority": true
   },
   "provisioning": {

@@ -1,0 +1,78 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "categories": [
+    "ACCOUNT_OR_SIGN_IN",
+    "ACCESS_OR_PERMISSIONS",
+    "DEVICE_PROBLEM",
+    "HUB_OR_CONNECTION",
+    "AUTOMATION",
+    "ALEXA",
+    "OTHER"
+  ],
+  "privateTenantOnly": {
+    "scope": "tenant_device_only",
+    "homeId": "home:tenant-property",
+    "ticketId": "ticket:tenant-private",
+    "ticketMembershipId": "membership:tenant-property",
+    "recipientCandidates": ["membership:tenant-property", "membership:owner-property", "membership:manager-property"],
+    "expectedRecipients": ["membership:tenant-property"],
+    "ownerNotice": false,
+    "tenantPrivateDetailsInOwnerNotice": false
+  },
+  "propertyInfrastructure": {
+    "scope": "permanent_device_and_hub_diagnostics",
+    "touchesPropertyInfrastructure": true,
+    "homeId": "home:decision-fixture",
+    "recipientCandidates": ["membership:owner", "membership:manager-one", "membership:manager-two", "membership:tenant-property"],
+    "expectedGenericLifecycleRecipients": ["membership:owner", "membership:manager-one", "membership:manager-two"],
+    "noticeContainsTenantPrivateDeviceId": false,
+    "noticeContainsTenantPrivateTicketText": false
+  },
+  "approval": {
+    "requestId": "support-request:one-use",
+    "ticketId": "ticket:scoped",
+    "employeeId": "employee:assigned",
+    "homeId": "home:tenant-property",
+    "hubInstallationId": "hub:tenant-property",
+    "identityGeneration": 4,
+    "nonce": "nonce:one-use-support-proof",
+    "bodyDigest": "sha256:fixture-body-digest",
+    "codeIssuedAt": "2026-09-28T12:00:00Z",
+    "codeExpiresAt": "2026-09-28T12:10:00Z",
+    "approvedAt": "2026-09-28T12:09:59Z",
+    "sessionExpiresAt": "2026-09-28T12:39:59Z",
+    "maxSessionSeconds": 1800,
+    "codeLifetimeSeconds": 600,
+    "proofBoundFields": ["employeeId", "ticketId", "requestId", "homeId", "hubInstallationId", "identityGeneration", "nonce", "codeExpiresAt", "bodyDigest"],
+    "proofMustBeDerivedFromStoredHash": false,
+    "oneUseCodeAndProofConsumedAtomically": true,
+    "wrongEmployeeDenied": true,
+    "wrongTicketDenied": true,
+    "wrongHomeDenied": true,
+    "wrongHubDenied": true,
+    "wrongGenerationDenied": true,
+    "replayDenied": true
+  },
+  "approvalBoundaryCases": [
+    { "id": "before-code-expiry", "at": "2026-09-28T12:09:59Z", "expected": "eligible-for-customer-approval" },
+    { "id": "exact-code-expiry", "at": "2026-09-28T12:10:00Z", "expected": "SUPPORT_CODE_EXPIRED" },
+    { "id": "after-code-expiry", "at": "2026-09-28T12:10:01Z", "expected": "SUPPORT_CODE_EXPIRED" }
+  ],
+  "safetyAction": {
+    "firstApproverMembershipId": "membership:tenant-property",
+    "secondConfirmationMembershipId": "membership:tenant-property",
+    "differentApproverDenied": true,
+    "sameApproverRequired": true,
+    "missingSecondConfirmationDenied": true
+  },
+  "closure": {
+    "closedAt": "2026-09-28T12:20:00Z",
+    "ticketState": "CLOSED",
+    "cloudAuthorityRevokedImmediately": true,
+    "hubReachable": false,
+    "hubAcknowledgement": "pending",
+    "pendingHubAcknowledgementPermitsRenewal": false,
+    "closedTimelineRetentionMonths": 12,
+    "ticketPreservesOtherwiseRelationshipFreeAccount": false
+  }
+}

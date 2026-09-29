@@ -1,0 +1,16 @@
+{
+  "grant": {
+    "accountId": "account:offline-demo",
+    "homeId": "home:tenant-one",
+    "homeMembershipId": "membership:tenant-one",
+    "trustedDeviceId": "trusted-device:phone-one",
+    "areaIds": ["area:kitchen"]
+  },
+  "requested": {
+    "accountId": "account:offline-demo",
+    "homeId": "home:tenant-one",
+    "homeMembershipId": "membership:tenant-one",
+    "trustedDeviceId": "trusted-device:phone-one",
+    "areaIds": ["area:kitchen", "area:private-bedroom"]
+  }
+}

@@ -21,6 +21,13 @@
       { "bucket": "day-a", "onMinutes": 30, "offMinutes": 40, "unknownMinutes": 50 },
       { "bucket": "day-b", "onMinutes": 9, "offMinutes": 8, "unknownMinutes": 7 }
     ],
+    "periodFilterBuckets": { "Day": ["day-a"], "Week": ["day-a", "day-b"], "Month": ["day-b"], "Year": ["day-a", "day-b"] },
+    "periodSelectionExpected": {
+      "Day": [{ "bucket": "day-a", "onMinutes": 20, "offMinutes": 30, "unknownMinutes": 40 }],
+      "Week": [{ "bucket": "day-a", "onMinutes": 20, "offMinutes": 30, "unknownMinutes": 40 }, { "bucket": "day-b", "onMinutes": 9, "offMinutes": 8, "unknownMinutes": 7 }],
+      "Month": [{ "bucket": "day-b", "onMinutes": 9, "offMinutes": 8, "unknownMinutes": 7 }],
+      "Year": [{ "bucket": "day-a", "onMinutes": 20, "offMinutes": 30, "unknownMinutes": 40 }, { "bucket": "day-b", "onMinutes": 9, "offMinutes": 8, "unknownMinutes": 7 }]
+    },
     "periodExpected": [
       { "bucket": "day-a", "onMinutes": 20, "offMinutes": 30, "unknownMinutes": 40 },
       { "bucket": "day-b", "onMinutes": 9, "offMinutes": 8, "unknownMinutes": 7 }

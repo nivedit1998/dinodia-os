@@ -126,6 +126,5 @@
     "periodAggregation": "average_contributing_device_samples",
     "hourAggregation": "sum_selected_devices",
     "summaryAggregation": "average_displayed_buckets"
-  },
-  "expected": "accept-contract-decisions; reject every authority or privacy mutation above"
+  }
 }

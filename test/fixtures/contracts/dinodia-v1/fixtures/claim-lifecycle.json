@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "initial": {
+    "claimId": "claim:reservation-lifecycle",
+    "homeId": "home:claim-lifecycle",
+    "claimGeneration": 2,
+    "claimantAccountId": "account:first-verified",
+    "emailVerified": true,
+    "state": "reserved",
+    "createdAt": "2026-09-28T10:00:00Z",
+    "expiresAt": "2026-09-28T10:30:00Z",
+    "revision": 1
+  },
+  "competingClaim": {
+    "accountId": "account:competing",
+    "at": "2026-09-28T10:05:00Z",
+    "expectedOutcome": "non_identifying_unavailable",
+    "winnerRemains": "account:first-verified"
+  },
+  "events": [
+    { "eventId": "event:view", "kind": "view", "at": "2026-09-28T10:10:00Z", "expectedExpiresAt": "2026-09-28T10:30:00Z", "expectedRevision": 1 },
+    { "eventId": "event:failed-save", "kind": "required_save", "at": "2026-09-28T10:15:00Z", "success": false, "changed": false, "idempotencyKey": "claim-save-failed-0001", "expectedExpiresAt": "2026-09-28T10:30:00Z", "expectedRevision": 1 },
+    { "eventId": "event:address-save", "kind": "required_save", "at": "2026-09-28T10:21:00Z", "success": true, "changed": true, "idempotencyKey": "claim-save-address-0001", "expectedExpiresAt": "2026-09-28T10:51:00Z", "expectedRevision": 2 },
+    { "eventId": "event:required-save-again", "kind": "required_save", "at": "2026-09-28T10:35:00Z", "success": true, "changed": true, "idempotencyKey": "claim-save-policy-0001", "expectedExpiresAt": "2026-09-28T11:05:00Z", "expectedRevision": 3 },
+    { "eventId": "event:required-save-replay", "kind": "required_save", "at": "2026-09-28T10:36:00Z", "success": true, "changed": true, "idempotencyKey": "claim-save-policy-0001", "expectedExpiresAt": "2026-09-28T11:05:00Z", "expectedRevision": 3 },
+    { "eventId": "event:noop-save", "kind": "required_save", "at": "2026-09-28T10:50:00Z", "success": true, "changed": false, "idempotencyKey": "claim-save-noop-0001", "expectedExpiresAt": "2026-09-28T11:05:00Z", "expectedRevision": 3 },
+    { "eventId": "event:before-expiry", "kind": "view", "at": "2026-09-28T11:04:59Z", "expectedState": "reserved", "expectedExpiresAt": "2026-09-28T11:05:00Z" },
+    { "eventId": "event:exact-expiry", "kind": "view", "at": "2026-09-28T11:05:00Z", "expectedState": "expired", "expectedExpiresAt": "2026-09-28T11:05:00Z" },
+    { "eventId": "event:late-save", "kind": "required_save", "at": "2026-09-28T11:05:01Z", "success": true, "changed": true, "idempotencyKey": "claim-save-late-0001", "expectedState": "expired", "expectedExpiresAt": "2026-09-28T11:05:00Z" }
+  ],
+  "cleanupCases": [
+    { "relationships": { "activeMemberships": 1, "unexpiredInvitations": 0, "validPendingAccessRequests": 0, "otherPendingPropertySetups": 0 }, "expected": { "account": "retained", "sessionsRevoked": false, "trustedDevicesRevoked": false } },
+    { "relationships": { "activeMemberships": 0, "unexpiredInvitations": 0, "validPendingAccessRequests": 0, "otherPendingPropertySetups": 0 }, "expected": { "account": "deleted", "sessionsRevoked": true, "trustedDevicesRevoked": true } }
+  ]
+}

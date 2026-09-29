@@ -1,0 +1,12 @@
+{
+  "receipt": {
+    "notificationId": "notification:invite-delivery",
+    "recipientMembershipId": "membership:invitee",
+    "deliveryState": "sent"
+  },
+  "invitation": {
+    "invitationId": "invitation:pending-a",
+    "state": "pending",
+    "membershipId": null
+  }
+}

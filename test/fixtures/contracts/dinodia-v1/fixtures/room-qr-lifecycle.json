@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "credential": {
+    "onePerCanonicalOriginalArea": true,
+    "emptyAreaAllowed": true,
+    "lifetime": "until_disabled_or_replaced",
+    "replacementInvalidatesOldPresentation": true,
+    "replacementChangesExistingGrants": false
+  },
+  "request": {
+    "emailVerificationRequiredBeforeOwnerVisibility": true,
+    "lifetimeSeconds": 604800,
+    "latestValidPendingRequestWins": true,
+    "grantIsExactlyRequestedCanonicalArea": true,
+    "rejectionIsTerminalForRequest": true,
+    "rejectionCooldownSeconds": 0,
+    "ownerlessQrRequestPersists": false,
+    "retiredAreaQrEnabled": false
+  },
+  "cases": [
+    { "id": "unverified-email-not-owner-visible", "emailVerified": false, "activeOwnerExists": true, "expected": "WAITING_FOR_EMAIL_VERIFICATION", "ownerVisible": false, "membershipCreated": false },
+    { "id": "verified-request-exact-area", "emailVerified": true, "activeOwnerExists": true, "requestedAreaId": "area:room-a", "expected": "PENDING_OWNER_DECISION", "ownerVisible": true, "grantedAreaIds": [], "membershipCreated": false },
+    { "id": "latest-valid-request-replaces-older-pending", "emailVerified": true, "activeOwnerExists": true, "previousState": "PENDING", "expected": "PENDING_OWNER_DECISION", "olderPendingVisible": false, "latestPendingVisible": true, "membershipCreated": false },
+    { "id": "approve-grants-only-requested-area", "emailVerified": true, "activeOwnerExists": true, "requestedAreaId": "area:room-a", "otherCanonicalAreaIds": ["area:room-b"], "approved": true, "expected": "MEMBERSHIP_ACTIVE", "membershipCreated": true, "grantedAreaIds": ["area:room-a"] },
+    { "id": "reject-then-resubmit-immediately", "emailVerified": true, "activeOwnerExists": true, "previousState": "REJECTED", "elapsedSeconds": 0, "expected": "NEW_REQUEST_ALLOWED", "cooldownSeconds": 0 },
+    { "id": "exact-seven-day-expiry", "emailVerified": true, "activeOwnerExists": true, "elapsedSeconds": 604800, "expected": "REQUEST_EXPIRED", "membershipCreated": false },
+    { "id": "ownerless-request-persists-nothing", "emailVerified": true, "activeOwnerExists": false, "expected": "NO_DURABLE_REQUEST", "persistedRequest": false, "membershipCreated": false },
+    { "id": "retired-area-presentation-denied", "emailVerified": true, "activeOwnerExists": true, "areaLifecycle": "retired", "expected": "AREA_NOT_AVAILABLE", "membershipCreated": false }
+  ]
+}

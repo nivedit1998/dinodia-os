@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "countingUnit": "unicode_code_points",
+  "maximumPublicCodePoints": 40,
+  "cases": [
+    { "id": "empty", "value": "", "projected": null, "projectedCodePoints": 0, "wireValid": true },
+    { "id": "ascii-one", "value": "A", "projected": "A", "projectedCodePoints": 1, "wireValid": true },
+    { "id": "ascii-forty", "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "projected": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "projectedCodePoints": 40, "wireValid": true },
+    { "id": "ascii-forty-one", "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "projected": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "projectedCodePoints": 40, "wireValid": false },
+    { "id": "astral-forty", "repeat": "💡", "repeatCount": 40, "projectedRepeatCount": 40, "projectedCodePoints": 40, "wireValid": true },
+    { "id": "astral-forty-one", "repeat": "💡", "repeatCount": 41, "projectedRepeatCount": 40, "projectedCodePoints": 40, "wireValid": false },
+    { "id": "combining-forty", "repeat": "é", "repeatCount": 20, "projectedRepeatCount": 20, "projectedCodePoints": 40, "wireValid": true }
+  ],
+  "authority": "presentation_only"
+}

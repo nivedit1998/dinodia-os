@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "activeClaim": {
+    "claimId": "transfer-claim:one",
+    "homeId": "home:decision-fixture",
+    "outgoingOwnerMembershipId": "membership:owner",
+    "proposedSuccessorAccountId": "account:successor",
+    "state": "active",
+    "createdAt": "2026-09-28T12:00:00Z",
+    "expiresAt": null,
+    "validatedAt": "2036-09-28T12:00:00Z",
+    "concurrentTransferAllowed": false
+  },
+  "presentations": ["transfer_home_qr", "emailed_claim_code", "permanent_hub_qr_with_live_lan_challenge"],
+  "cases": [
+    { "id": "active-tenant-successor", "actorMembershipId": "membership:owner", "successorIsActiveTenant": true, "action": "consume", "expected": "ACTIVE_TENANT_SUCCESSOR_DENIED", "mutation": false },
+    { "id": "manager-cancel", "actorMembershipId": "membership:manager-one", "successorIsActiveTenant": false, "action": "cancel", "expected": "SCOPE_DENIED", "mutation": false },
+    { "id": "owner-cancel", "actorMembershipId": "membership:owner", "successorIsActiveTenant": false, "action": "cancel", "expected": "CANCELLED", "mutation": true },
+    { "id": "verified-staff-replace", "actorMembershipId": "employee:senior-ops", "verifiedStaff": true, "successorIsActiveTenant": false, "action": "replace", "expected": "REPLACED", "mutation": true },
+    { "id": "consume-one-presentation", "actorMembershipId": "membership:owner", "successorIsActiveTenant": false, "action": "consume:emailed_claim_code", "expected": "TRANSFERRED", "mutation": true },
+    { "id": "retry-other-presentation", "actorMembershipId": "membership:owner", "successorIsActiveTenant": false, "action": "consume:transfer_home_qr", "after": "consume-one-presentation", "expected": "CLAIM_ALREADY_CONSUMED", "mutation": false }
+  ],
+  "completion": {
+    "formerOwnerRemoved": true,
+    "allPreExistingManagersRemoved": true,
+    "activeTenantMembershipIdsPreserved": ["membership:tenant-one"],
+    "canonicalAreaIdsPreserved": ["area:living", "area:kitchen"],
+    "permanentDeviceIdsPreserved": ["device:permanent-light"],
+    "inProgressPermanentInstallationRequestPreserved": true,
+    "pendingTenantAndManagerInvitationsCancelled": true,
+    "pendingRoomQrRequestsCancelled": true,
+    "pendingAndActivePropertySupportRevoked": true,
+    "proposedSuccessorNotifiedBeforeCompletion": false,
+    "outgoingOwnerAndRemovedManagersNotified": true,
+    "historyRewritten": false
+  }
+}

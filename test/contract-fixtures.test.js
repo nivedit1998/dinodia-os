@@ -8,6 +8,45 @@ const analytics = require('../src/contracts/analyticsV1');
 const root = path.join(__dirname, 'fixtures/contracts/dinodia-v1');
 const good = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/multi-control-device.json')));
 const wrongOwner = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/invalid/tenant-device-wrong-owner.json')));
+test('OS applies shared Unicode-code-point bounds to descriptor strings and command values', () => {
+  const fixture = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/bounded-string-unicode-semantics.json')));
+  const device = good.device;
+  const repeat = (item, count) => item.repeat.repeat(count);
+  assert.equal(fixture.lengthUnit, 'unicode_code_points');
+  for (const item of [...fixture.boundaryCases, ...fixture.combiningSequenceCases]) {
+    const at = repeat(item, item.validRepeatCount);
+    const over = repeat(item, item.invalidRepeatCount);
+    if (item.field === 'opaqueId') {
+      const withId = (id) => ({ ...device, id, controls: device.controls.map((control) => ({ ...control, deviceId: id })) });
+      assert.equal(c.validateDevice(withId(at)), true, `${item.id} at limit`);
+      assert.equal(c.validateDevice(withId(over)), false, `${item.id} over limit`);
+    } else if (item.field === 'areaName') {
+      const area = { id: 'area:living', homeId: device.homeId, originalName: at, overrideName: null, revision: 1, lifecycle: 'active' };
+      assert.equal(c.validateArea(area, device.homeId), true, `${item.id} at limit`);
+      assert.equal(c.validateArea({ ...area, originalName: over }, device.homeId), false, `${item.id} over limit`);
+    } else if (item.field === 'controlLabel') {
+      const withLabel = (label) => ({ ...device, controls: device.controls.map((control, index) => index ? control : { ...control, label }) });
+      assert.equal(c.validateDevice(withLabel(at)), true, `${item.id} at limit`);
+      assert.equal(c.validateDevice(withLabel(over)), false, `${item.id} over limit`);
+    } else if (item.field === 'constraintUnit' || item.field === 'optionLabel') {
+      const withConstraintText = (value) => ({ ...device, controls: [{ ...device.controls[0], valueType: 'option', interactionKind: 'picker', constraints: { unit: item.field === 'constraintUnit' ? value : 'mode', options: [{ value: 'on', label: item.field === 'optionLabel' ? value : 'On' }] } }] });
+      assert.equal(c.validateDevice(withConstraintText(at)), true, `${item.id} at limit`);
+      assert.equal(c.validateDevice(withConstraintText(over)), false, `${item.id} over limit`);
+    } else if (item.field === 'textCommand' || item.field === 'idempotencyKey') {
+      const commandFixture = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/command-valid.json')));
+      const control = { ...device.controls[0], valueType: item.field === 'textCommand' ? 'text' : 'boolean', interactionKind: item.field === 'textCommand' ? 'text_input' : 'toggle' };
+      const candidate = { ...device, controls: [control] };
+      const command = (value, idempotencyKey) => ({ ...commandFixture, homeId: candidate.homeId, deviceId: candidate.id, controlId: control.controlId, descriptorRevision: candidate.descriptorRevision, value, idempotencyKey });
+      const valueAt = item.field === 'textCommand' ? at : true;
+      const valueOver = item.field === 'textCommand' ? over : true;
+      const keyAt = item.field === 'idempotencyKey' ? at : commandFixture.idempotencyKey;
+      const keyOver = item.field === 'idempotencyKey' ? over : commandFixture.idempotencyKey;
+      assert.equal(c.validateCommand(command(valueAt, keyAt), candidate, control, commandFixture.homeMembershipId), true, `${item.id} at limit`);
+      assert.equal(c.validateCommand(command(valueOver, keyOver), candidate, control, commandFixture.homeMembershipId), false, `${item.id} over limit`);
+      if (item.invalidMinimumRepeatCount) assert.equal(c.validateCommand(command(true, repeat(item, item.invalidMinimumRepeatCount)), candidate, control, commandFixture.homeMembershipId), false, `${item.id} below minimum`);
+    }
+  }
+});
 test('OS activity and aggregation semantics match the shared dinodia.v1 fixture', () => {
   const fixture = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/analytics-semantics.json')));
   const now = Date.parse(fixture.now);
@@ -55,6 +94,40 @@ test('OS reads the shared Stage 2 decision fixture and preserves membership, pri
   assert.equal(fixture.offline.policyAppliedBeforeConnected, true);
 });
 test('OS accepts canonical current-home permanent device descriptors', () => assert.equal(c.validateDevice(good.device, { ...good.context }), true));
+test('OS rejects negative area revisions and unsafe writable descriptor combinations', () => {
+  assert.equal(c.validateArea({ id: 'area:test', homeId: 'home:opaque-a', originalName: 'Kitchen', overrideName: null, revision: -1, lifecycle: 'active' }, 'home:opaque-a'), false);
+  const unreadableWritable = structuredClone(good.device);
+  unreadableWritable.controls[0].readable = false;
+  assert.equal(c.validateDevice(unreadableWritable), false);
+  const safeUnknown = structuredClone(good.device);
+  Object.assign(safeUnknown.controls[0], { interactionKind: 'vendor_future', writable: false, automatable: false, idempotency: 'none', confirmationPolicy: 'none', stepUpPolicy: 'none' });
+  assert.equal(c.validateDevice(safeUnknown), true, 'unknown controls may remain only safe read-only metadata');
+  safeUnknown.controls[0].writable = true;
+  assert.equal(c.validateDevice(safeUnknown), false);
+});
+test('OS consumes the canonical unknown-interaction positive and commandable negative fixtures', () => {
+  const safeFixture = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/unknown-interaction-kind.json')));
+  assert.equal(c.validateDevice(safeFixture.device, { homeId: safeFixture.device.homeId, homeMembershipId: 'membership:owner-a', role: 'OWNER', areaIds: safeFixture.device.areaIds }), true);
+  const negative = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/invalid/unknown-interaction-commandable.json')));
+  const source = JSON.parse(fs.readFileSync(path.join(root, negative.sourceFixture)));
+  const device = structuredClone(source.device);
+  const control = device.controls.find((item) => item.controlId === negative.controlId);
+  Object.assign(control, negative.mutation);
+  assert.equal(c.validateDevice(device, { homeId: device.homeId, homeMembershipId: 'membership:owner-a', role: 'OWNER', areaIds: device.areaIds }), false, negative.expected);
+});
+test('OS consumes the shared negative area/state/control fixtures with strict descriptor semantics', () => {
+  const negativeArea = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/invalid/area-negative-revision.json')));
+  assert.equal(c.validateArea(negativeArea), false);
+  const invalidState = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/invalid/control-state-boolean-string.json'))).data;
+  const booleanControl = good.device.controls.find((control) => control.valueType === 'boolean');
+  assert.equal(c.validateControlState(invalidState, good.device, booleanControl), false);
+  const mutationFixture = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/invalid/writable-unreadable-control.json')));
+  const device = structuredClone(JSON.parse(fs.readFileSync(path.join(root, mutationFixture.sourceFixture)))).device;
+  const target = device.controls.find((control) => control.controlId === mutationFixture.mutation.controlId);
+  Object.assign(target, mutationFixture.mutation);
+  assert.equal(c.validateDevice(device), false);
+  assert.equal(mutationFixture.expectedOutcome, 'reject_before_dispatch');
+});
 test('OS rejects tenant-owned data for the wrong membership and wrong-home replay', () => {
   assert.equal(c.validateDevice(wrongOwner.device, { ...wrongOwner.context, role: 'TENANT' }), false);
   const ownTenantDevice = { ...wrongOwner.device, ownerMembershipId: wrongOwner.context.homeMembershipId };
@@ -69,6 +142,7 @@ test('OS control state is descriptor-bound and expires to Unknown at the exact d
   assert.equal(c.effectiveControlQuality(state, Date.parse(state.validUntil) - 1), 'fresh');
   assert.equal(c.effectiveControlQuality(state, Date.parse(state.validUntil)), 'unknown');
   assert.equal(c.validateControlState({ ...state, descriptorRevision: 3 }, device, control), false);
+  assert.equal(c.validateControlState({ ...state, value: 'true' }, device, control), false, 'string is not a boolean reading');
 });
 test('OS rejects stale descriptor command and unsupported envelope version', () => {
   assert.equal(c.validateEnvelope({ schemaVersion: 'dinodia.v0', homeId: 'home:a', generatedAt: new Date().toISOString(), revision: 1, data: [] }), false);
@@ -84,6 +158,8 @@ test('OS command validation enforces typed bounds, increments and sensitive proo
   assert.equal(c.validateCommand(command(lock, true), good.device, lock, good.context.homeMembershipId), false);
   assert.equal(c.validateCommand(command(lock, true, { stepUpOperationId: 'step-up:one-use' }), good.device, lock, good.context.homeMembershipId), true);
   assert.equal(c.validateCommand(command(brightness, 25), good.device, { ...brightness, constraints: { ...brightness.constraints, maximum: 1000000 } }, good.context.homeMembershipId), false);
+  assert.equal(c.validateCommand(command(brightness, 25), { ...good.device, lifecycle: 'retired' }, brightness, good.context.homeMembershipId), false);
+  assert.equal(c.validateCommand(command(brightness, 25), { ...good.device, lifecycle: 'view_only' }, brightness, good.context.homeMembershipId), false);
   const downgradedLock = { ...good.device, controls: good.device.controls.map((item) => item.controlId === lock.controlId ? { ...item, stepUpPolicy: 'none' } : item) };
   assert.equal(c.validateDevice(downgradedLock), false);
 });
@@ -109,6 +185,27 @@ test('OS serializes option controls with no declared choices as read-only', () =
   assert.equal(projected.controls[0].valueType, 'option');
   assert.equal(projected.controls[0].writable, false);
   assert.equal(projected.controls[0].interactionKind, 'read_only');
+});
+test('OS serializer projects customer labels at the shared Unicode code-point boundary', () => {
+  const fixture = JSON.parse(require('node:fs').readFileSync(require('node:path').join(__dirname, 'fixtures/contracts/dinodia-v1/fixtures/customer-label-unicode-boundaries.json'), 'utf8'));
+  for (const item of fixture.cases) {
+    const raw = typeof item.value === 'string' ? item.value : String(item.repeat || '').repeat(Number(item.repeatCount || 0));
+    const controlId = 'control:label-fixture';
+    const projected = c.serializeDevice({
+      device: {
+        id: 'device:label-fixture', areaId: 'area:one', name: raw, protocol: 'virtual', setup: { status: 'complete' },
+        presentation: { descriptorRevision: 1 },
+        entities: { [controlId]: { id: controlId, name: 'Power', capability: { kind: 'binary', controlId, semanticRole: 'power', readable: true, writable: false, observable: true } } },
+      },
+      homeId: 'home:one', homeMembershipId: 'membership:owner', role: 'OWNER', areaIds: ['area:one'],
+      surfaces: [{ id: 'surface:one', sourceEntityIds: [controlId], name: 'Main' }],
+    });
+    const expected = raw.length === 0 ? null : Array.from(raw).slice(0, fixture.maximumPublicCodePoints).join('');
+    assert.ok(projected, `serializer must preserve device identity for ${item.id}`);
+    assert.equal(projected.customerLabel, expected, item.id);
+    assert.equal(Array.from(projected.customerLabel || '').length, item.projectedCodePoints, item.id);
+    assert.equal(projected.controls.length, 1, `label ${item.id} cannot remove controls`);
+  }
 });
 test('custom presentation labels never infer control semantics and descriptor constraints are bounded', () => {
   const { serializeDevice } = c;

@@ -123,6 +123,15 @@ function choosePrimary(group, groupDomain) {
   })[0] || null;
 }
 
+function readableFallback(group) {
+  return group.find((entity) => {
+    const capability = entity?.capability || {};
+    const domain = semanticDomain(entity);
+    return capability.readable === true && capability.category === "control" &&
+      CONTROL_DOMAINS.has(domain) && !isDiagnostic(entity) && !isConfig(entity);
+  }) || null;
+}
+
 function groupKey(entity) {
   const endpoint = endpointOf(entity);
   const domain = semanticDomain(entity);
@@ -289,7 +298,11 @@ function initialStateFor(group, primary, domain) {
 }
 
 function buildSurface(device, group, endpoint, domain, index, total) {
-  const primary = choosePrimary(group, domain);
+  // Retain a safe read-only projection when an otherwise readable control
+  // loses its write binding. Dropping the entire surface would turn a
+  // descriptor change into missing identity/data instead of a truthful
+  // read-only state. The serializer emits no command route for this fallback.
+  const primary = choosePrimary(group, domain) || readableFallback(group);
   if (!primary) return null;
   const surfaceId = safeSurfaceId(device, endpoint, domain);
   const sourceEntityIds = [...new Set(group.map(sourceKey).filter(Boolean))];
@@ -388,7 +401,7 @@ function buildPresentation(device, now = new Date().toISOString()) {
   const values = [];
   const renderableGroups = [...groups.entries()].filter(([key, group]) => {
     const [endpoint, domain] = key.split("::");
-    return Boolean(choosePrimary(group, domain || "switch"));
+    return Boolean(choosePrimary(group, domain || "switch") || readableFallback(group));
   });
   for (const [[key, group], index] of renderableGroups.map((entry, position) => [entry, position])) {
     const [endpoint, domain] = key.split("::");

@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "lifetimeSeconds": 604800,
+  "initial": {
+    "invitationId": "invitation:property-member",
+    "generation": 1,
+    "recipientAccountId": "account:recipient",
+    "recipientEmailVerified": false,
+    "state": "pending",
+    "homeId": "home:owner-property",
+    "proposedRole": "TENANT",
+    "areaIds": ["area:kitchen"],
+    "membershipId": null,
+    "issuedAt": "2026-09-28T12:00:00Z",
+    "expiresAt": "2026-10-05T12:00:00Z"
+  },
+  "recipientProjection": {
+    "fullPostcode": "AB1 2CD",
+    "proposedRole": "TENANT",
+    "inviterDisplayLabel": "Dinodia invitation",
+    "issuedAt": "2026-09-28T12:00:00Z",
+    "expiresAt": "2026-10-05T12:00:00Z",
+    "forbiddenKeys": ["streetAddress", "rooms", "devices", "users", "floorplan", "analytics"]
+  },
+  "cases": [
+    { "id": "wrong-recipient", "at": "2026-09-28T12:01:00Z", "authenticatedAccountId": "account:other", "emailVerified": true, "explicitAccept": true, "expected": "INVITATION_RECIPIENT_MISMATCH", "membershipId": null },
+    { "id": "unverified-recipient", "at": "2026-09-28T12:01:00Z", "authenticatedAccountId": "account:recipient", "emailVerified": false, "explicitAccept": true, "expected": "EMAIL_VERIFICATION_REQUIRED", "membershipId": null },
+    { "id": "no-explicit-accept", "at": "2026-09-28T12:01:00Z", "authenticatedAccountId": "account:recipient", "emailVerified": true, "explicitAccept": false, "expected": "INVITATION_PENDING", "membershipId": null },
+    { "id": "accepted-before-expiry", "at": "2026-10-05T11:59:59Z", "authenticatedAccountId": "account:recipient", "emailVerified": true, "explicitAccept": true, "authorityRevalidated": true, "expected": "MEMBERSHIP_ACTIVE", "membershipId": "membership:recipient-home" },
+    { "id": "exact-expiry", "at": "2026-10-05T12:00:00Z", "authenticatedAccountId": "account:recipient", "emailVerified": true, "explicitAccept": true, "authorityRevalidated": true, "expected": "INVITATION_EXPIRED", "membershipId": null },
+    { "id": "after-expiry", "at": "2026-10-05T12:00:01Z", "authenticatedAccountId": "account:recipient", "emailVerified": true, "explicitAccept": true, "authorityRevalidated": true, "expected": "INVITATION_EXPIRED", "membershipId": null }
+  ],
+  "resend": {
+    "resentAt": "2026-10-01T09:00:00Z",
+    "oldGeneration": 1,
+    "newGeneration": 2,
+    "newExpiresAt": "2026-10-08T09:00:00Z",
+    "oldLinkOutcome": "INVITATION_REPLACED",
+    "oldRecipientProjectionVisible": false,
+    "oldMembershipCreated": false,
+    "newCommunicationOnly": true
+  },
+  "roleRules": {
+    "tenantRequiresAtLeastOneCanonicalArea": true,
+    "managerAreaIds": [],
+    "managerRequiresAreaGrant": false
+  },
+  "credentialDelivery": {
+    "tenantInitialPasswordServerGenerated": true,
+    "homeownerReceivesPlaintextTenantPassword": false,
+    "deliveryReceiptCreatesMembership": false
+  },
+  "resultCommunication": {
+    "acceptAndDeclineDeduplicatedPush": true,
+    "acceptAndDeclineVerifiedEmail": true,
+    "expiryNotificationSent": false,
+    "resendSendsOnlyNewGeneration": true
+  }
+}

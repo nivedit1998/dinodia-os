@@ -1,0 +1,67 @@
+{
+  "context": {
+    "accountId": "account:multi-home",
+    "homeId": "home:tenant-property",
+    "homeMembershipId": "membership:tenant-property",
+    "role": "TENANT",
+    "areaIds": ["area:kitchen"]
+  },
+  "device": {
+    "id": "device:tenant-property-light",
+    "homeId": "home:tenant-property",
+    "managementClass": "property_device",
+    "ownerMembershipId": null,
+    "lifecycle": "installed",
+    "technicalLabel": "light",
+    "customerLabel": "Kitchen light",
+    "areaIds": ["area:kitchen"],
+    "descriptorRevision": 4,
+    "controls": [
+      {
+        "schemaVersion": 1,
+        "deviceId": "device:tenant-property-light",
+        "controlId": "control:tenant-property-power",
+        "label": "Power",
+        "group": "Lighting",
+        "sortOrder": 0,
+        "valueType": "boolean",
+        "interactionKind": "toggle",
+        "semanticRole": "power",
+        "readable": true,
+        "writable": true,
+        "automatable": true,
+        "observable": true,
+        "idempotency": "set_value",
+        "confirmationPolicy": "matching_observation",
+        "riskLevel": "low",
+        "stepUpPolicy": "none",
+        "catalogRevision": 4,
+        "expectedReportingIntervalSeconds": 120,
+        "maxStateValiditySeconds": 240
+      },
+      {
+        "schemaVersion": 1,
+        "deviceId": "device:tenant-property-light",
+        "controlId": "control:tenant-property-brightness",
+        "label": "Brightness",
+        "group": "Lighting",
+        "sortOrder": 1,
+        "valueType": "number",
+        "interactionKind": "slider",
+        "semanticRole": "brightness",
+        "readable": true,
+        "writable": true,
+        "automatable": true,
+        "observable": true,
+        "idempotency": "set_value",
+        "confirmationPolicy": "matching_observation",
+        "riskLevel": "normal",
+        "stepUpPolicy": "none",
+        "constraints": { "minimum": 0, "maximum": 100, "step": 1, "precision": 0, "unit": "percent" },
+        "catalogRevision": 4,
+        "expectedReportingIntervalSeconds": 120,
+        "maxStateValiditySeconds": 240
+      }
+    ]
+  }
+}

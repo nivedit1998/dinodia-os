@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "sourceFixture": "fixtures/unknown-interaction-kind.json",
+  "controlId": "control:future",
+  "mutation": {
+    "writable": true,
+    "automatable": true,
+    "idempotency": "set_value",
+    "confirmationPolicy": "explicit_user"
+  },
+  "expected": "reject; an unknown interaction never gains inferred write authority"
+}

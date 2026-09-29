@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "retainedRelationshipKinds": ["active_membership", "unexpired_invitation", "valid_pending_access_request", "durable_pending_property_setup"],
+  "nonRetainingKinds": ["expired_invitation", "rejected_invitation", "cancelled_request", "expired_claim_reservation", "open_support_ticket", "closed_support_ticket"],
+  "tenantSelfRemoval": {
+    "removesOnlySelectedMembership": true,
+    "removesMembershipAreaGrants": true,
+    "removesMembershipAutomationsAndLayout": true,
+    "removesOwnedTenantDevices": true,
+    "preservesOtherHomeMemberships": true,
+    "preservesOtherTrustedInstallations": true
+  },
+  "cases": [
+    { "id": "selected-tenant-removal-other-home-active", "remainingRelationships": ["active_membership"], "expected": "ACCOUNT_RETAINED" },
+    { "id": "valid-invitation-retains-account", "remainingRelationships": ["unexpired_invitation"], "expected": "ACCOUNT_RETAINED" },
+    { "id": "valid-access-request-retains-account", "remainingRelationships": ["valid_pending_access_request"], "expected": "ACCOUNT_RETAINED" },
+    { "id": "durable-property-setup-retains-account", "remainingRelationships": ["durable_pending_property_setup"], "expected": "ACCOUNT_RETAINED" },
+    { "id": "final-valid-relationship-terminal", "remainingRelationships": [], "expected": "ACCOUNT_AND_ACCOUNT_SCOPED_STATE_DELETED" },
+    { "id": "open-support-ticket-does-not-retain-account", "remainingRelationships": ["open_support_ticket"], "expected": "ACCOUNT_AND_ACCOUNT_SCOPED_STATE_DELETED" },
+    { "id": "expired-claim-does-not-retain-account", "remainingRelationships": ["expired_claim_reservation"], "expected": "ACCOUNT_AND_ACCOUNT_SCOPED_STATE_DELETED" },
+    { "id": "terminal-relations-do-not-retain-account", "remainingRelationships": ["expired_invitation", "rejected_invitation", "cancelled_request", "closed_support_ticket"], "expected": "ACCOUNT_AND_ACCOUNT_SCOPED_STATE_DELETED" }
+  ],
+  "finalCleanup": {
+    "deleteSessions": true,
+    "deleteTrustedDeviceCredentials": true,
+    "deleteAccountScopedCachesAndPreferences": true,
+    "closeBoundOpenSupportTickets": true,
+    "retainOnlyRedactedReceiptMonths": 12,
+    "supportTicketKeepsAccountAlive": false,
+    "freshReentryRequiresRegistrationAndEmailVerification": true,
+    "reuseDeletedIdentityWithoutRegistration": false
+  }
+}

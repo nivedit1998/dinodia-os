@@ -1,0 +1,1 @@
+{"sourceFixture":"fixtures/multi-control-device.json","mutation":{"controlId":"control:brightness","readable":false,"writable":true},"expectedOutcome":"reject_before_dispatch"}
