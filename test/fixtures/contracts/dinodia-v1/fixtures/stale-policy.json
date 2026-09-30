@@ -1,0 +1,1 @@
+{"schemaVersion":"dinodia.v1","accountId":"account:fixture","homeId":"home:fixture","homeMembershipId":"membership:fixture","cachedPolicyRevision":4,"currentPolicyRevision":5,"expected":{"canReadCachedCloudProjection":true,"canMutate":false,"canWidenOfflineScope":false,"clearStaleAuthorityBeforeReconnect":true}}

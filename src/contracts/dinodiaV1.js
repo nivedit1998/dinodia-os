@@ -7,7 +7,18 @@ function isObject(x) { return !!x && typeof x === 'object' && !Array.isArray(x);
 function codePointLength(value) { return Array.from(value).length; }
 function isId(x) { return typeof x === 'string' && x.trim().length > 0 && codePointLength(x) <= 160; }
 function truncateCodePoints(value, maximum) { return Array.from(value).slice(0, maximum).join(''); }
-function isUtcTimestamp(x) { return typeof x === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(x) && Number.isFinite(Date.parse(x)); }
+function isUtcTimestamp(x) {
+  if (typeof x !== 'string') return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/.exec(x);
+  if (!match) return false;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match;
+  const year = Number(yearText); const month = Number(monthText); const day = Number(dayText);
+  const hour = Number(hourText); const minute = Number(minuteText); const second = Number(secondText);
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return false;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  return day >= 1 && day <= daysInMonth && Number.isFinite(Date.parse(x));
+}
 function hasOnlyKeys(value, allowed) { return Object.keys(value).every((key) => allowed.includes(key)); }
 const deviceKeys = ['id','homeId','managementClass','ownerMembershipId','lifecycle','technicalLabel','customerLabel','areaIds','controls','descriptorRevision'];
 const controlKeys = ['schemaVersion','deviceId','surfaceId','controlId','label','group','sortOrder','valueType','interactionKind','semanticRole','readable','writable','automatable','observable','idempotency','confirmationPolicy','riskLevel','stepUpPolicy','constraints','expectedReportingIntervalSeconds','maxStateValiditySeconds','unsupportedReason','catalogRevision'];

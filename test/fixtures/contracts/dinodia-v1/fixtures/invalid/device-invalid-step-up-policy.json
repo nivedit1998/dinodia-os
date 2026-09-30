@@ -1,0 +1,1 @@
+{"sourceFixture":"fixtures/multi-control-device.json","controlId":"control:power","field":"stepUpPolicy","invalidValue":"optional","expectedOutcome":"reject descriptor before projection or command authority"}

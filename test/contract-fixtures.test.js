@@ -146,8 +146,28 @@ test('OS control state is descriptor-bound and expires to Unknown at the exact d
 });
 test('OS rejects stale descriptor command and unsupported envelope version', () => {
   assert.equal(c.validateEnvelope({ schemaVersion: 'dinodia.v0', homeId: 'home:a', generatedAt: new Date().toISOString(), revision: 1, data: [] }), false);
+  const impossibleDate = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/invalid/impossible-calendar-date-envelope.json')));
+  assert.equal(c.validateEnvelope(impossibleDate), false, 'impossible Gregorian dates are not normalized into accepted timestamps');
   const device = good.device; const control = device.controls[0];
   assert.equal(c.validateCommand({ homeId: device.homeId, homeMembershipId: good.context.homeMembershipId, deviceId: device.id, controlId: control.id, descriptorRevision: 3, idempotencyKey: '1234567890123456' }, device, control, good.context.homeMembershipId), false);
+});
+test('OS rejects descriptors missing the required step-up policy field', () => {
+  const mutation = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/invalid/device-missing-step-up-policy.json')));
+  const source = JSON.parse(fs.readFileSync(path.join(root, mutation.sourceFixture)));
+  const device = structuredClone(source.device);
+  const control = device.controls.find((item) => item.controlId === mutation.controlId);
+  assert.ok(control);
+  delete control[mutation.removeField];
+  assert.equal(c.validateDevice(device), false);
+});
+test('OS rejects a step-up policy outside the canonical enum', () => {
+  const mutation = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/invalid/device-invalid-step-up-policy.json')));
+  const source = JSON.parse(fs.readFileSync(path.join(root, mutation.sourceFixture)));
+  const device = structuredClone(source.device);
+  const control = device.controls.find((item) => item.controlId === mutation.controlId);
+  assert.ok(control);
+  control[mutation.field] = mutation.invalidValue;
+  assert.equal(c.validateDevice(device), false);
 });
 test('OS command validation enforces typed bounds, increments and sensitive proof references', () => {
   const brightness = good.device.controls.find((control) => control.controlId === 'control:brightness');
