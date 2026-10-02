@@ -800,10 +800,19 @@ paths:
       summary: "Revoke Ticket Support Access"
       operationId: revokeTicketSupportAccess
       tags: [Support]
-      parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }, { name: requestId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      description: "Requires the current OWNER or PROPERTY_MANAGER membership that approved the active property-scoped request, plus fresh step-up bound to support_access_revoke and these exact ticket/request IDs. The proof may be carried in the optional header or the request body."
+      parameters: [{ name: ticketId, in: path, required: true, schema: { type: string } }, { name: requestId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/StepUpProof" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/supportAccessRevokeRequest" } } } }
       responses:
-        "200": { description: Revocation is immediate in cloud authority; hub acknowledgement may remain pending. }
+        "200":
+          description: Cloud support authority is revoked immediately; hub acknowledgement may remain pending.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/supportAccessRevokeReceipt" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /api/v2/homes/{homeId}/reset-property-ownership:
     post:
       summary: "Reset Property Ownership"

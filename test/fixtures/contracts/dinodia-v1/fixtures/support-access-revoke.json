@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "request": {
+    "confirmation": "I revoke this support access for my property",
+    "proof": "FIXTURE_ONLY_STEP_UP_PROOF_NOT_A_CREDENTIAL"
+  },
+  "receipt": {
+    "ok": true,
+    "requestId": "support-request:fixture",
+    "status": "REVOKED",
+    "message": "Property support access revoked — waiting for hub confirmation"
+  },
+  "decision": {
+    "actorRole": "PROPERTY_MANAGER",
+    "approvedBySameMembership": true,
+    "operationKind": "support_access_revoke",
+    "targetTypes": ["ticket", "request"],
+    "cloudAuthority": "revoked_immediately",
+    "hubAcknowledgement": "pending"
+  }
+}

@@ -774,6 +774,26 @@
         }
       ]
     },
+    "supportAccessRevokeRequest": {
+      "type": "object",
+      "required": ["confirmation"],
+      "properties": {
+        "confirmation": { "const": "I revoke this support access for my property" },
+        "proof": { "type": "string", "minLength": 1, "maxLength": 8192, "writeOnly": true }
+      },
+      "additionalProperties": false
+    },
+    "supportAccessRevokeReceipt": {
+      "type": "object",
+      "required": ["ok", "requestId", "status", "message"],
+      "properties": {
+        "ok": { "const": true },
+        "requestId": { "$ref": "#/$defs/id" },
+        "status": { "const": "REVOKED" },
+        "message": { "const": "Property support access revoked — waiting for hub confirmation" }
+      },
+      "additionalProperties": false
+    },
     "trustedDeviceRemovalRequest": {
       "type": "object",
       "properties": { "proof": { "type": "string", "minLength": 1, "maxLength": 8192 } },

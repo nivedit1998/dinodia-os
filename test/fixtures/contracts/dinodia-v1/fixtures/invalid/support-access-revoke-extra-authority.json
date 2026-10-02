@@ -1,0 +1,5 @@
+{
+  "confirmation": "I revoke this support access for my property",
+  "proof": "FIXTURE_ONLY_STEP_UP_PROOF_NOT_A_CREDENTIAL",
+  "homeId": "home:must-not-be-client-authority"
+}
