@@ -605,6 +605,22 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     assert.ok([400, 409].includes(retiredAttempt.response.status), JSON.stringify(retiredAttempt.body));
     assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, beforeRetiredProbe, "retired command denial has no dispatch event");
     assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON", "retired command denial has no fake-device effect");
+
+    // Policy revocation must be checked again at the command boundary, not
+    // inferred from an earlier successful catalog read or WebSocket auth.
+    await hub.store.savePlatform({ ...(hub.store.getPlatform() || {}), policyRevision: 1 });
+    const beforeRevokedPolicyCommand = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
+    const revokedPolicyCommand = await send({
+      ...command,
+      commandId: "command-native-revoked-policy",
+      idempotencyKey: "native-command-idempotency-revoked-policy",
+    });
+    assert.equal(revokedPolicyCommand.response.status, 401, JSON.stringify(revokedPolicyCommand.body));
+    assert.equal(revokedPolicyCommand.body.error?.code, "AUTH_REQUIRED");
+    assert.equal(Object.hasOwn(revokedPolicyCommand.body, "data"), false, "revoked command denial returns no protected DTO");
+    assert.equal(JSON.stringify(revokedPolicyCommand.body).includes(deviceId), false, "revoked command denial does not reveal the device identity");
+    assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, beforeRevokedPolicyCommand, "a stale policy token creates no command event");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON", "a stale policy token has zero fake-device effect");
   } finally { releaseQueuedCommand(); restoreSaveSecurity(); socket?.close(); await hub.stop(); }
 });
 
