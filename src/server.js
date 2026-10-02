@@ -50,6 +50,7 @@ const { SetupDiscovery, privateInterface } = require("./setupDiscovery");
 const { RevocationCoordinator } = require("./auth/revocationCoordinator");
 const { OfflineLanAuthorisationStore, digestOfflineCommand } = require("./auth/offlineLanAuthorizer");
 const { StepUpProofVerifier, descriptorBoundValue, digestOperation } = require("./auth/stepUpProofVerifier");
+const { stepUpDescriptorDigest } = require("./auth/stepUpDescriptorDigest");
 const { IdentityBrokerClient, canonicalCloudChallengeUnsigned } = require("./auth/identityBroker");
 const { createSupportProofOfPossession } = require("./auth/supportProofOfPossession");
 const { validateMembership: validateNativeMembership, serializeDevice: serializeNativeDevice, validateCommand: validateNativeCommand, makeEnvelope: makeNativeEnvelope } = require("./contracts/dinodiaV1");
@@ -1031,10 +1032,10 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         const descriptorDigests = message.descriptorDigests && typeof message.descriptorDigests === "object" && !Array.isArray(message.descriptorDigests)
           ? message.descriptorDigests
           : {};
-        const currentDescriptor = entity.device.presentation?.sourceFingerprint || entity.device.presentation?.descriptorDigest || null;
+        const currentDescriptor = stepUpDescriptorDigest(entity.device);
         const suppliedDescriptor = descriptorDigests[entity.device.id] == null ? null : String(descriptorDigests[entity.device.id]);
         const controlId = String(target.controlId || target.control_id || entity.entity?.controlId || entity.entity?.capability?.controlId || entity.entity?.id || "");
-        if (!controlId || !Object.prototype.hasOwnProperty.call(descriptorDigests, entity.device.id) || suppliedDescriptor !== (currentDescriptor == null ? null : String(currentDescriptor))) return false;
+        if (!controlId || !currentDescriptor || !Object.prototype.hasOwnProperty.call(descriptorDigests, entity.device.id) || suppliedDescriptor !== currentDescriptor) return false;
         const serviceData = { ...target };
         for (const key of ["entity_id", "entityId", "controlId", "control_id", "stepUpProof", "step_up_proof", "descriptorDigests", "descriptor_digests"]) delete serviceData[key];
         const requestedValue = { ...serviceData, controlId };
@@ -1524,7 +1525,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         const requiresStepUp = liveControl.stepUpPolicy === "required" || ["security_lock", "lock_state"].includes(liveControl.semanticRole);
         if (requiresStepUp) {
           const proof = String(req.headers["x-dinodia-step-up-proof"] || "");
-          const descriptorDigest = liveDevice.presentation?.sourceFingerprint || liveDevice.presentation?.descriptorDigest || null;
+          const descriptorDigest = stepUpDescriptorDigest(liveDevice);
+          if (!descriptorDigest) return nativeContractError(res, 409, "CATALOG_REVISION_MISMATCH", "Refresh the current device controls before confirming this operation");
           const requestedValue = command.value && typeof command.value === "object" && !Array.isArray(command.value)
             ? { ...command.value, controlId: liveControl.controlId }
             : { value: command.value ?? null, controlId: liveControl.controlId };
@@ -1652,7 +1654,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         || !appCanCommandDevice(scopedPrincipal, device, { controlId: requestedControlId }, rawEntity, String(binding.serviceId || ""))) {
         return json(res, 403, { error: "The requested sensitive control is not currently authorised", errorCode: "step_up_control_denied" });
       }
-      const descriptorDigest = device.presentation?.sourceFingerprint || device.presentation?.descriptorDigest || null;
+      const descriptorDigest = stepUpDescriptorDigest(device);
+      if (!descriptorDigest) return json(res, 409, { error: "The current device descriptor is unavailable", errorCode: "step_up_descriptor_unavailable" });
       const requestedValue = body.value && typeof body.value === "object" && !Array.isArray(body.value) ? { ...body.value, controlId: requestedControlId } : { value: body.value ?? null, controlId: requestedControlId };
       const operationDigest = digestOperation({ actorId: scopedPrincipal.sub, trustedDeviceId: scopedPrincipal.trustedDeviceId, customerSessionId: scopedPrincipal.sid, homeId: scopedPrincipal.homeId, membershipId: scopedPrincipal.membershipId, hubInstallId: scopedPrincipal.hubInstallId, operationKind: "device_sensitive_command", targetIds: [deviceId], value: descriptorBoundValue(requestedValue, { [deviceId]: descriptorDigest }) });
       const identity = await pairing.getPublicIdentity();
@@ -2189,9 +2192,9 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
           const descriptorDigests = body.descriptorDigests && typeof body.descriptorDigests === "object" && !Array.isArray(body.descriptorDigests)
             ? body.descriptorDigests
             : {};
-          const currentDescriptor = item.device.presentation?.sourceFingerprint || item.device.presentation?.descriptorDigest || null;
+          const currentDescriptor = stepUpDescriptorDigest(item.device);
           const suppliedDescriptor = descriptorDigests[item.device.id] == null ? null : String(descriptorDigests[item.device.id]);
-          if (!Object.prototype.hasOwnProperty.call(descriptorDigests, item.device.id) || suppliedDescriptor !== (currentDescriptor == null ? null : String(currentDescriptor))) {
+          if (!currentDescriptor || !Object.prototype.hasOwnProperty.call(descriptorDigests, item.device.id) || suppliedDescriptor !== currentDescriptor) {
             return json(res, 409, { error: "Refresh the device controls before confirming this operation", errorCode: "step_up_descriptor_stale" });
           }
           const approved = await stepUpVerifier.verify(proof, {

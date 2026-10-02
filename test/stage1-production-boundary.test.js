@@ -408,25 +408,60 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     const lockKey = "native-lock-command-idempotency-0001";
     const lockCommand = { ...command, commandId: "command-native-lock", controlId: lock.controlId, value: true, idempotencyKey: lockKey };
     const sendLock = (payload, proof = "") => request(base, "/api/dinodia/v1/commands", { method: "POST", headers: { ...headers, "idempotency-key": payload.idempotencyKey, ...(proof ? { "x-dinodia-step-up-proof": proof } : {}) }, body: JSON.stringify(payload) });
+    const stepUpDispatchEvents = () => hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
+    const beforeStepUpDenials = stepUpDispatchEvents();
     assert.equal((await sendLock(lockCommand)).response.status, 400);
     assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:lock`].state, "LOCKED");
     const jti = "stepup-operation-native-1";
     const issuedAt = Math.floor(Date.now() / 1000);
-    const descriptorDigest = hub.store.getDevice(deviceId).presentation.sourceFingerprint || hub.store.getDevice(deviceId).presentation.descriptorDigest || null;
+    const descriptorDigest = require('../src/auth/stepUpDescriptorDigest').stepUpDescriptorDigest(hub.store.getDevice(deviceId));
+    assert.match(descriptorDigest, /^[0-9a-f]{64}$/, 'the operation proof uses the canonical raw-hex descriptor digest');
     const signedValue = descriptorBoundValue({ value: true, controlId: lock.controlId }, { [deviceId]: descriptorDigest });
     const operationDigest = digestOperation({ actorId: "account-command-tenant", trustedDeviceId: "trusted-command", customerSessionId: "sid-command", homeId: "home-command", membershipId: "membership-command-tenant", hubInstallId: "native-command-hub", operationKind: "device_sensitive_command", targetIds: [deviceId], value: signedValue });
     const unsignedProof = { jti, actorId: "account-command-tenant", trustedDeviceId: "trusted-command", customerSessionId: "sid-command", homeId: "home-command", membershipId: "membership-command-tenant", hubInstallId: "native-command-hub", operationDigest, issuedAt, expiresAt: issuedAt + 60 };
     const encodedProof = Buffer.from(JSON.stringify(unsignedProof)).toString("base64url");
     const proof = `${encodedProof}.${crypto.sign(null, Buffer.from(JSON.stringify(unsignedProof)), keys.privateKey).toString("base64url")}`;
+    const encodeProof = (payload) => `${Buffer.from(JSON.stringify(payload)).toString("base64url")}.${crypto.sign(null, Buffer.from(JSON.stringify(payload)), keys.privateKey).toString("base64url")}`;
     lockCommand.stepUpOperationId = jti;
     const proofCheck = await new StepUpProofVerifier({ publicKeys: [keys.publicKey] }).verify(proof, { actorId: "account-command-tenant", trustedDeviceId: "trusted-command", trustedSessionId: "sid-command", homeId: "home-command", membershipId: "membership-command-tenant", hubInstallId: "native-command-hub", operation: "device_sensitive_command", targetIds: [deviceId], value: signedValue });
     assert.ok(proofCheck, "test proof must verify under the Platform/OS step-up contract");
+    const expiredProofPayload = { ...unsignedProof, jti: "stepup-operation-native-expired", expiresAt: issuedAt - 1 };
+    const expiredProof = encodeProof(expiredProofPayload);
+    const expiredAttempt = await sendLock({ ...lockCommand, commandId: "command-native-lock-expired-proof", idempotencyKey: "native-lock-command-expired-proof-0001", stepUpOperationId: expiredProofPayload.jti }, expiredProof);
+    assert.equal(expiredAttempt.response.status, 403, JSON.stringify(expiredAttempt.body));
+    assert.equal(expiredAttempt.body.error?.code, "STEP_UP_REQUIRED");
+    assert.equal(stepUpDispatchEvents(), beforeStepUpDenials, "an expired operation proof creates no command event");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:lock`].state, "LOCKED", "an expired operation proof has no fake-device effect");
+    const wrongValue = descriptorBoundValue({ value: false, controlId: lock.controlId }, { [deviceId]: descriptorDigest });
+    const mismatchedOperationPayload = {
+      ...unsignedProof,
+      jti: "stepup-operation-native-wrong-value",
+      operationDigest: digestOperation({ actorId: "account-command-tenant", trustedDeviceId: "trusted-command", customerSessionId: "sid-command", homeId: "home-command", membershipId: "membership-command-tenant", hubInstallId: "native-command-hub", operationKind: "device_sensitive_command", targetIds: [deviceId], value: wrongValue }),
+    };
+    const mismatchedOperationProof = encodeProof(mismatchedOperationPayload);
+    const mismatchedOperationAttempt = await sendLock({ ...lockCommand, commandId: "command-native-lock-wrong-proof-value", idempotencyKey: "native-lock-command-wrong-proof-value-0001", stepUpOperationId: mismatchedOperationPayload.jti }, mismatchedOperationProof);
+    assert.equal(mismatchedOperationAttempt.response.status, 403, JSON.stringify(mismatchedOperationAttempt.body));
+    assert.equal(mismatchedOperationAttempt.body.error?.code, "STEP_UP_REQUIRED");
+    assert.equal(stepUpDispatchEvents(), beforeStepUpDenials, "a proof for a different exact value creates no command event");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:lock`].state, "LOCKED", "a proof for a different exact value has no fake-device effect");
     const unlocked = await sendLock(lockCommand, proof);
     assert.equal(unlocked.response.status, 202, JSON.stringify(unlocked.body));
     assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:lock`].state, "UNLOCKED");
     const replay = await sendLock({ ...lockCommand, commandId: "command-native-lock-replay", idempotencyKey: "native-lock-command-idempotency-0002" }, proof);
     assert.equal(replay.response.status, 403);
     assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:lock`].state, "UNLOCKED");
+
+    const beforeMalformedDigest = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
+    const descriptorBeforeMalformedDigest = hub.store.getDevice(deviceId);
+    const validFingerprint = descriptorBeforeMalformedDigest.presentation.sourceFingerprint;
+    hub.store.state.devices[deviceId].presentation.sourceFingerprint = "sha256:malformed";
+    const malformedDigestCommand = { ...lockCommand, commandId: "command-native-lock-malformed-digest", idempotencyKey: "native-command-malformed-descriptor-digest-0001", stepUpOperationId: "operation-malformed-descriptor-digest" };
+    const malformedDigestResponse = await sendLock(malformedDigestCommand, proof);
+    assert.equal(malformedDigestResponse.response.status, 409, JSON.stringify(malformedDigestResponse.body));
+    assert.equal(malformedDigestResponse.body.error?.code, "CATALOG_REVISION_MISMATCH");
+    assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, beforeMalformedDigest, "an invalid descriptor fingerprint is denied before a command event");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:lock`].state, "UNLOCKED", "an invalid descriptor fingerprint has zero fake-device effect");
+    hub.store.state.devices[deviceId].presentation.sourceFingerprint = validFingerprint;
 
     const beforeReadOnlyProbe = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
     const currentDevice = hub.store.getDevice(deviceId);
