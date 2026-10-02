@@ -1,0 +1,8 @@
+{
+  "sourceFixture": "fixtures/multi-control-device.json",
+  "deviceId": "device:opaque-1",
+  "targetControlId": "control:brightness",
+  "duplicateControlId": "control:power",
+  "schemaExpected": "structurally_valid_distinct_objects",
+  "expected": "reject_descriptor_before_projection_or_dispatch"
+}

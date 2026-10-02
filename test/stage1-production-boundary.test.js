@@ -170,6 +170,43 @@ test("Native v1 device route emits a home-bound contract envelope and never retu
       assert.equal(JSON.stringify(hidden.body).includes("Private lamp"), false, `${scenario.name} must not receive the private device label`);
     }
 
+    // The older scoped HTTP capability and support-bundle projections are
+    // separate routes from the Native inventory. Exercise their real handlers
+    // so a future omission of appCanReadDevice cannot leak tenant-private
+    // identity through an adjacent GET endpoint.
+    const tenantOwnsPrivateDevice = appToken({
+      iss: "dinodia-platform-v2", aud: "dinodia-hub:native-v1-hub", sub: "account-tenant-a",
+      sid: "sid-private-subroute-owner", jti: "jti-private-subroute-owner", membershipId: "membership-tenant-a",
+      trustedDeviceId: "trusted-private-subroute-owner", hubInstallationId: "native-v1-hub",
+      iat: now, exp: now + 300, homeId: "home-a", householdRole: "TENANT",
+      areaIds: ["area-uuid-kitchen"], policyRevision: 0, scope: ["tenant:device-command"],
+    }, keys.privateKey);
+    const privateSubroutes = [
+      "/_dinodia/admin/api/devices/tenant-owned-light/capabilities",
+      "/_dinodia/admin/api/devices/tenant-owned-light/support-bundle",
+    ];
+    for (const route of privateSubroutes) {
+      const ownRead = await request(base, route, { headers: { authorization: `Bearer ${tenantOwnsPrivateDevice}` } });
+      assert.equal(ownRead.response.status, 200, `the owning tenant may use the scoped read route ${route}`);
+      assert.equal(JSON.stringify(ownRead.body).includes("tenant-owned-light"), true);
+
+      for (const [index, scenario] of privateDeviceNonOwners.entries()) {
+        const outsider = appToken({
+          iss: "dinodia-platform-v2", aud: "dinodia-hub:native-v1-hub", sub: scenario.accountId,
+          sid: `sid-private-subroute-outsider-${index}`, jti: `jti-private-subroute-outsider-${index}`,
+          membershipId: scenario.membershipId, trustedDeviceId: `trusted-private-subroute-outsider-${index}`,
+          hubInstallationId: "native-v1-hub", iat: now, exp: now + 300, homeId: "home-a",
+          householdRole: scenario.role, areaIds: scenario.areaIds, policyRevision: 0,
+          scope: ["tenant:device-command"],
+        }, keys.privateKey);
+        const denied = await request(base, route, { headers: { authorization: `Bearer ${outsider}` } });
+        assert.equal(denied.response.status, 403, `${scenario.name} must be denied at ${route}`);
+        assert.equal(denied.body.errorCode, "device_scope_denied");
+        assert.equal(JSON.stringify(denied.body).includes("tenant-owned-light"), false, `${scenario.name} must receive zero private identity bytes from ${route}`);
+        assert.equal(JSON.stringify(denied.body).includes("Private lamp"), false, `${scenario.name} must receive zero private label bytes from ${route}`);
+      }
+    }
+
     await hub.store.savePlatform({ ...(hub.store.getPlatform() || {}), policyRevision: 1 });
     const revokedPolicyToken = appToken({ iss: "dinodia-platform-v2", aud: "dinodia-hub:native-v1-hub", sub: "account-tenant-a", sid: "sid-revoked-policy", jti: "jti-revoked-policy", membershipId: "membership-tenant-a", trustedDeviceId: "trusted-a", hubInstallationId: "native-v1-hub", iat: now, exp: now + 300, homeId: "home-a", householdRole: "TENANT", areaIds: ["area-uuid-kitchen"], policyRevision: 0, scope: ["tenant:device-command"] }, keys.privateKey);
     const revokedPolicyRead = await request(base, "/api/dinodia/v1/devices", { headers: { authorization: `Bearer ${revokedPolicyToken}` } });

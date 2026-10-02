@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const c = require('../src/contracts/dinodiaV1');
+const capabilitySchema = require('../src/capabilities/schema');
 const analytics = require('../src/contracts/analyticsV1');
 const root = path.join(__dirname, 'fixtures/contracts/dinodia-v1');
 const good = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/multi-control-device.json')));
@@ -121,12 +122,29 @@ test('OS consumes the shared negative area/state/control fixtures with strict de
   const invalidState = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/invalid/control-state-boolean-string.json'))).data;
   const booleanControl = good.device.controls.find((control) => control.valueType === 'boolean');
   assert.equal(c.validateControlState(invalidState, good.device, booleanControl), false);
+  const optionState = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/invalid/control-state-option-outside-descriptor.json')));
+  const optionControl = optionState.device.controls.find((control) => control.controlId === optionState.state.controlId);
+  assert.equal(c.validateDevice(optionState.device), true);
+  assert.equal(c.validateControlState(optionState.validState, optionState.device, optionControl), true);
+  assert.equal(c.validateControlState(optionState.state, optionState.device, optionControl), false,
+    'option state must be a member of the current descriptor choices');
   const mutationFixture = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/invalid/writable-unreadable-control.json')));
   const device = structuredClone(JSON.parse(fs.readFileSync(path.join(root, mutationFixture.sourceFixture)))).device;
   const target = device.controls.find((control) => control.controlId === mutationFixture.mutation.controlId);
   Object.assign(target, mutationFixture.mutation);
   assert.equal(c.validateDevice(device), false);
   assert.equal(mutationFixture.expectedOutcome, 'reject_before_dispatch');
+});
+test('OS rejects duplicate control IDs through its Native V1 device validator', () => {
+  const mutation = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/invalid/duplicate-device-control-id.json')));
+  const source = JSON.parse(fs.readFileSync(path.join(root, mutation.sourceFixture)));
+  const device = structuredClone(source.device);
+  const target = device.controls.find((control) => control.controlId === mutation.targetControlId);
+  assert.ok(target);
+  assert.ok(device.controls.some((control) => control.controlId === mutation.duplicateControlId));
+  target.controlId = mutation.duplicateControlId;
+  assert.equal(mutation.expected, 'reject_descriptor_before_projection_or_dispatch');
+  assert.equal(c.validateDevice(device, { homeId: device.homeId, homeMembershipId: source.context.homeMembershipId, role: 'OWNER', areaIds: device.areaIds }), false);
 });
 test('OS rejects tenant-owned data for the wrong membership and wrong-home replay', () => {
   assert.equal(c.validateDevice(wrongOwner.device, { ...wrongOwner.context, role: 'TENANT' }), false);
@@ -232,6 +250,52 @@ test('OS serializer does not resurrect a cached surface after all declared sourc
   });
   assert.ok(projected, 'device identity may remain visible when its last source control disappears');
   assert.deepEqual(projected.controls, [], 'a stale surface descriptor is not a replacement authority for its removed source');
+});
+test('OS serializer maps an explicitly sensitive capability to mandatory step-up', () => {
+  const controlId = 'control:sensitive-power';
+  const projected = c.serializeDevice({
+    device: {
+      id: 'device:sensitive-switch', homeId: 'home:one', areaId: 'area:one', name: 'Sensitive switch', protocol: 'virtual',
+      setup: { status: 'complete' }, presentation: { descriptorRevision: 4 },
+      entities: {
+        [controlId]: { id: controlId, name: 'Power', state: false, capability: {
+          kind: 'binary', controlId, semanticRole: 'unknown', readable: true, writable: true, automatable: true,
+          observable: true, sensitive: true, bindings: [{ serviceId: 'switch.turn_on' }], catalogRevision: 4,
+        } },
+      },
+    },
+    homeId: 'home:one', homeMembershipId: 'membership:tenant', role: 'TENANT', areaIds: ['area:one'],
+    surfaces: [{ id: 'surface:sensitive-switch', sourceEntityIds: [controlId], name: 'Switch' }],
+  });
+  assert.ok(projected);
+  assert.equal(projected.controls[0].stepUpPolicy, 'required');
+  assert.equal(projected.controls[0].confirmationPolicy, 'step_up');
+  assert.equal(projected.controls[0].riskLevel, 'sensitive');
+  assert.equal(projected.controls[0].automatable, false);
+});
+test('OS capability normalization and manifest round-trip retain mandatory step-up policy', () => {
+  const input = { runtime: 'dinodia_os', kind: 'binary', category: 'control', readable: true, writable: true, automatable: true, primary: true, semanticRole: 'power', sensitive: true, bindings: [{ serviceId: 'switch.turn_on' }] };
+  const normalized = capabilitySchema.normalizeCapability(input);
+  assert.equal(normalized.sensitive, true);
+  assert.equal(normalized.stepUpPolicy, 'required');
+  assert.equal(normalized.automatable, false);
+  const manifest = capabilitySchema.manifestFromCapability(normalized);
+  assert.equal(manifest.sensitive, true);
+  assert.equal(manifest.stepUpPolicy, 'required');
+  assert.equal(manifest.automatable, false);
+  const decoded = capabilitySchema.validateManifest(manifest);
+  assert.equal(decoded.ok, true);
+  assert.equal(decoded.manifest.sensitive, true);
+  assert.equal(decoded.manifest.stepUpPolicy, 'required');
+  assert.equal(decoded.manifest.automatable, false);
+  for (const malformed of [
+    { ...input, sensitive: 'false', stepUpPolicy: 'none' },
+    { ...input, sensitive: false, stepUpPolicy: 'required-but-unrecognized' },
+  ]) {
+    const failClosed = capabilitySchema.normalizeCapability(malformed);
+    assert.equal(failClosed.stepUpPolicy, 'required', 'malformed security metadata must not downgrade to no step-up');
+    assert.equal(failClosed.automatable, false);
+  }
 });
 test('OS serializer projects customer labels at the shared Unicode code-point boundary', () => {
   const fixture = JSON.parse(require('node:fs').readFileSync(require('node:path').join(__dirname, 'fixtures/contracts/dinodia-v1/fixtures/customer-label-unicode-boundaries.json'), 'utf8'));

@@ -6,6 +6,7 @@
     "tenantEnabledFamilies": [],
     "mandatoryEventsDisableable": false
   },
+  "quietHours": { "startLocalTime": "22:00", "endLocalTime": "07:00", "endIsInclusive": true },
   "roleCatalogues": {
     "owner": ["hub_availability", "permanent_device_outages", "new_permanent_devices", "tenant_access_requests", "installation_updates", "automation_activity"],
     "propertyManager": ["hub_availability", "permanent_device_outages", "new_permanent_devices", "tenant_access_requests", "installation_updates", "automation_activity"],

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "decisionId": "area_edit_revision",
+  "homeId": "home:areas-a",
+  "areaId": "area:kitchen",
+  "currentRevision": 8,
+  "cases": [
+    { "id": "stale", "expectedRevision": 7, "actorRole": "OWNER", "selectedHomeId": "home:areas-a", "areaCurrent": true, "expected": "REVISION_CONFLICT", "saved": false },
+    { "id": "current", "expectedRevision": 8, "actorRole": "OWNER", "selectedHomeId": "home:areas-a", "areaCurrent": true, "expected": "AREA_EDITED", "saved": true },
+    { "id": "manager-current", "expectedRevision": 8, "actorRole": "PROPERTY_MANAGER", "selectedHomeId": "home:areas-a", "areaCurrent": true, "expected": "AREA_EDITED", "saved": true },
+    { "id": "tenant-current", "expectedRevision": 8, "actorRole": "TENANT", "selectedHomeId": "home:areas-a", "areaCurrent": true, "expected": "ROLE_DENIED", "saved": false },
+    { "id": "wrong-home", "expectedRevision": 8, "actorRole": "OWNER", "selectedHomeId": "home:other", "areaCurrent": true, "expected": "HOME_MISMATCH", "saved": false },
+    { "id": "retired-area", "expectedRevision": 8, "actorRole": "OWNER", "selectedHomeId": "home:areas-a", "areaCurrent": false, "expected": "AREA_NOT_AVAILABLE", "saved": false }
+  ]
+}

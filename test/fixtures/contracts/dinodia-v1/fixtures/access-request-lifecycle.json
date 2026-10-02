@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "decisionId": "access_request_review",
+  "homeId": "home:request-a",
+  "requestId": "access-request:room-a",
+  "currentRevision": 12,
+  "cases": [
+    { "id": "approve-owner", "action": "approve", "actorRole": "OWNER", "selectedHomeId": "home:request-a", "currentRevision": 12, "expectedRevision": 12, "requestState": "pending", "recipientVerified": true, "requestedAreaIds": ["area:room-a"], "expected": "MEMBERSHIP_ACTIVE", "membershipCreated": true, "protectedDataReturned": false },
+    { "id": "approve-manager", "action": "approve", "actorRole": "PROPERTY_MANAGER", "selectedHomeId": "home:request-a", "currentRevision": 12, "expectedRevision": 12, "requestState": "pending", "recipientVerified": true, "requestedAreaIds": ["area:room-a"], "expected": "MEMBERSHIP_ACTIVE", "membershipCreated": true, "protectedDataReturned": false },
+    { "id": "reject-owner", "action": "reject", "actorRole": "OWNER", "selectedHomeId": "home:request-a", "currentRevision": 12, "expectedRevision": 12, "requestState": "pending", "recipientVerified": true, "requestedAreaIds": ["area:room-a"], "expected": "REJECTED", "membershipCreated": false, "protectedDataReturned": false },
+    { "id": "wrong-home", "action": "approve", "actorRole": "OWNER", "selectedHomeId": "home:other", "currentRevision": 12, "expectedRevision": 12, "requestState": "pending", "recipientVerified": true, "requestedAreaIds": ["area:room-a"], "expected": "HOME_MISMATCH", "membershipCreated": false, "protectedDataReturned": false },
+    { "id": "stale-revision", "action": "approve", "actorRole": "OWNER", "selectedHomeId": "home:request-a", "currentRevision": 13, "expectedRevision": 12, "requestState": "pending", "recipientVerified": true, "requestedAreaIds": ["area:room-a"], "expected": "REVISION_CONFLICT", "membershipCreated": false, "protectedDataReturned": false },
+    { "id": "unverified-recipient", "action": "approve", "actorRole": "OWNER", "selectedHomeId": "home:request-a", "currentRevision": 12, "expectedRevision": 12, "requestState": "pending", "recipientVerified": false, "requestedAreaIds": ["area:room-a"], "expected": "RECIPIENT_NOT_VERIFIED", "membershipCreated": false, "protectedDataReturned": false },
+    { "id": "expired", "action": "approve", "actorRole": "OWNER", "selectedHomeId": "home:request-a", "currentRevision": 12, "expectedRevision": 12, "requestState": "expired", "recipientVerified": true, "requestedAreaIds": ["area:room-a"], "expected": "REQUEST_EXPIRED", "membershipCreated": false, "protectedDataReturned": false }
+  ]
+}

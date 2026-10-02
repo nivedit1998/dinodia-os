@@ -87,13 +87,21 @@ function normalizeCapability(input = {}, fallback = {}) {
   const bindings = normalizeBindings(input.bindings || fallback.bindings || input.services?.map((serviceId) => ({ serviceId })) || fallback.services?.map((serviceId) => ({ serviceId })));
   const services = [...new Set(bindings.map((binding) => binding.serviceId))].slice(0, MAX_MANIFEST_SERVICES);
   const constraints = normalizeConstraints(input.constraints || fallback.constraints || {});
+  const semanticRole = String(input.semanticRole || fallback.semanticRole || "unknown");
+  const sensitiveInput = input.sensitive === undefined ? fallback.sensitive : input.sensitive;
+  const stepUpInput = input.stepUpPolicy === undefined ? fallback.stepUpPolicy : input.stepUpPolicy;
+  const malformedSensitivity = sensitiveInput !== undefined && typeof sensitiveInput !== "boolean";
+  const malformedStepUpPolicy = stepUpInput !== undefined && !["none", "required"].includes(String(stepUpInput));
+  const requiresStepUp = sensitiveInput === true || malformedSensitivity || stepUpInput === "required" || malformedStepUpPolicy || ["security_lock", "lock_state"].includes(semanticRole);
   const result = {
     version: CAPABILITY_VERSION,
     kind,
     category,
     readable: input.readable === undefined ? fallback.readable !== false : Boolean(input.readable),
     writable: input.writable === undefined ? Boolean(fallback.writable) : Boolean(input.writable),
-    automatable: input.automatable === undefined ? Boolean(fallback.automatable) : Boolean(input.automatable),
+    automatable: !requiresStepUp && (input.automatable === undefined ? Boolean(fallback.automatable) : Boolean(input.automatable)),
+    sensitive: requiresStepUp,
+    stepUpPolicy: requiresStepUp ? "required" : "none",
     idempotency: input.idempotency === "invoke" || fallback.idempotency === "invoke" ? "invoke" : "set_value",
     observable: input.observable === undefined ? fallback.observable !== false : Boolean(input.observable),
     primary: input.primary === undefined ? Boolean(fallback.primary) : Boolean(input.primary),
@@ -101,7 +109,6 @@ function normalizeCapability(input = {}, fallback = {}) {
     bindings,
     constraints,
   };
-  const semanticRole = String(input.semanticRole || fallback.semanticRole || "unknown");
   result.semanticRole = NATIVE_SEMANTIC_ROLES.has(semanticRole) ? semanticRole : "unknown";
   const voice = input.voice || fallback.voice;
   if (voice && typeof voice === "object" && VOICE_SEMANTICS.has(String(voice.semantic || ""))) {
@@ -138,6 +145,8 @@ function manifestFromCapability(capability, entity = {}) {
     readable: normalized.readable,
     writable: normalized.writable,
     automatable: normalized.automatable,
+    sensitive: normalized.sensitive,
+    stepUpPolicy: normalized.stepUpPolicy,
     idempotency: normalized.idempotency,
     observable: normalized.observable,
     primary: normalized.primary,
@@ -168,6 +177,8 @@ function validateManifest(input) {
   if (input.runtime !== "dinodia_os") return { ok: false, reason: "unknown capability runtime" };
   if (!KINDS.has(String(input.kind || ""))) return { ok: false, reason: "unsupported capability kind" };
   if (input.semanticRole !== undefined && !NATIVE_SEMANTIC_ROLES.has(String(input.semanticRole))) return { ok: false, reason: "unsupported semantic role" };
+  if (input.sensitive !== undefined && typeof input.sensitive !== "boolean") return { ok: false, reason: "invalid sensitive-operation flag" };
+  if (input.stepUpPolicy !== undefined && !["none", "required"].includes(String(input.stepUpPolicy))) return { ok: false, reason: "invalid step-up policy" };
   const serviceItems = Array.isArray(input.services) ? input.services : input.service ? [input.service] : [];
   if (serviceItems.length > MAX_MANIFEST_SERVICES) return { ok: false, reason: "too many services" };
   const bindings = serviceItems.map((service) => {
@@ -184,6 +195,8 @@ function validateManifest(input) {
   const constraints = normalizeConstraints(input.constraints || {});
   if (constraints.min !== undefined && constraints.max !== undefined && constraints.min > constraints.max) return { ok: false, reason: "invalid numeric bounds" };
   if (constraints.options && constraints.options.length > MAX_OPTIONS) return { ok: false, reason: "too many options" };
+  const semanticRole = NATIVE_SEMANTIC_ROLES.has(String(input.semanticRole || "unknown")) ? String(input.semanticRole || "unknown") : "unknown";
+  const requiresStepUp = input.sensitive === true || input.stepUpPolicy === "required" || ["security_lock", "lock_state"].includes(semanticRole);
   return { ok: true, manifest: {
     version: CAPABILITY_VERSION,
     runtime: "dinodia_os",
@@ -191,11 +204,13 @@ function validateManifest(input) {
     category: CATEGORIES.has(String(input.category || "")) ? String(input.category) : "control",
     readable: input.readable !== false,
     writable: Boolean(input.writable),
-    automatable: Boolean(input.automatable),
+    automatable: !requiresStepUp && Boolean(input.automatable),
+    sensitive: requiresStepUp,
+    stepUpPolicy: requiresStepUp ? "required" : "none",
     idempotency: input.idempotency === "invoke" ? "invoke" : "set_value",
     observable: input.observable !== false,
     primary: Boolean(input.primary),
-    semanticRole: NATIVE_SEMANTIC_ROLES.has(String(input.semanticRole || "unknown")) ? String(input.semanticRole || "unknown") : "unknown",
+    semanticRole,
     ...(bindings.length === 1 ? { service: { id: bindings[0].serviceId, ...(bindings[0].parameter ? { parameter: bindings[0].parameter } : {}) } } : {}),
     ...(bindings.length ? { services: bindings.map((binding) => ({ id: binding.serviceId, ...(binding.parameter ? { parameter: binding.parameter } : {}) })) } : {}),
     constraints,

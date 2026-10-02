@@ -1,0 +1,74 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "sourceFixture": "fixtures/multi-control-device.json",
+  "device": {
+    "id": "device:opaque-1",
+    "homeId": "home:opaque-a",
+    "managementClass": "property_device",
+    "ownerMembershipId": null,
+    "lifecycle": "installed",
+    "technicalLabel": "light",
+    "customerLabel": null,
+    "areaIds": ["area:living"],
+    "descriptorRevision": 4,
+    "controls": [
+      {
+        "schemaVersion": 1,
+        "deviceId": "device:opaque-1",
+        "controlId": "control:mode",
+        "label": "Operating mode",
+        "group": "Heating",
+        "sortOrder": 0,
+        "valueType": "option",
+        "interactionKind": "picker",
+        "semanticRole": "operating_mode",
+        "readable": true,
+        "writable": true,
+        "automatable": true,
+        "observable": true,
+        "idempotency": "set_value",
+        "confirmationPolicy": "matching_observation",
+        "riskLevel": "normal",
+        "stepUpPolicy": "none",
+        "constraints": {
+          "options": [
+            {"value": "heat", "label": "Heat"},
+            {"value": "off", "label": "Off"}
+          ]
+        },
+        "catalogRevision": 4,
+        "expectedReportingIntervalSeconds": 60,
+        "maxStateValiditySeconds": 240
+      }
+    ]
+  },
+  "validState": {
+    "deviceId": "device:opaque-1",
+    "controlId": "control:mode",
+    "homeId": "home:opaque-a",
+    "descriptorRevision": 4,
+    "revision": 10,
+    "observedAt": "2026-09-27T09:59:00Z",
+    "receivedAt": "2026-09-27T09:59:01Z",
+    "validUntil": "2026-09-27T10:01:00Z",
+    "quality": "fresh",
+    "value": "heat",
+    "deviceAvailability": "online",
+    "analyticsActivity": "on"
+  },
+  "state": {
+    "deviceId": "device:opaque-1",
+    "controlId": "control:mode",
+    "homeId": "home:opaque-a",
+    "descriptorRevision": 4,
+    "revision": 11,
+    "observedAt": "2026-09-27T09:59:00Z",
+    "receivedAt": "2026-09-27T09:59:01Z",
+    "validUntil": "2026-09-27T10:01:00Z",
+    "quality": "fresh",
+    "value": "boost",
+    "deviceAvailability": "online",
+    "analyticsActivity": "on"
+  },
+  "expected": "reject_before_render_option_value_not_in_current_descriptor"
+}

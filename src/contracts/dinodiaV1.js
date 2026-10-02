@@ -147,7 +147,7 @@ function serializeDevice({ device, homeId, homeMembershipId, role, areaIds, surf
         : { value: option, label: String(option).slice(0, 80) });
       const writable = capability.writable === true && bindings.length > 0 && !(valueType === 'option' && options.length === 0);
       const interactionKind = !writable ? 'read_only' : valueType === 'boolean' ? 'toggle' : valueType === 'number' ? (nativeRole === 'target_temperature' ? 'thermostat' : 'slider') : valueType === 'option' ? 'picker' : valueType === 'invoke' ? 'momentary_action' : 'text_input';
-      const stepUpPolicy = capability.stepUpPolicy === 'required' || ['security_lock','lock_state'].includes(nativeRole) ? 'required' : 'none';
+      const stepUpPolicy = capability.stepUpPolicy === 'required' || capability.sensitive === true || ['security_lock','lock_state'].includes(nativeRole) ? 'required' : 'none';
       const revisionForControl = Number(capability.catalogRevision ?? descriptorRevision);
       const constraints = {
         ...(Number.isFinite(rawConstraints.min) ? { minimum: rawConstraints.min } : {}),

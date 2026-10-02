@@ -5,6 +5,8 @@ const os = require("node:os");
 const path = require("node:path");
 const { Store } = require("../src/store");
 const { createBackup } = require("../src/backup");
+const { allProjectedSurfaces } = require("../src/capabilities/controlSurfaceProjection");
+const { serializeDevice } = require("../src/contracts/dinodiaV1");
 
 test("store persists devices and automations atomically", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-store-"));
@@ -18,6 +20,34 @@ test("store persists devices and automations atomically", async () => {
   assert.equal(restored.listAutomations().length, 1);
   const backup = await createBackup({ dataFile: file, backupDir: path.join(directory, "backups") });
   assert.match(backup, /dinodia-.*\.json$/);
+});
+
+test("sensitive capability step-up survives store normalization and restart", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-sensitive-capability-"));
+  const file = path.join(directory, "dinodia.json");
+  const store = new Store(file);
+  await store.upsertDevice({
+    id: "sensitive-switch", name: "Sensitive switch", protocol: "virtual", areaId: "area:one",
+    setup: { status: "ready" }, state: { state: false },
+    entities: {
+      "sensitive-switch:state": {
+        name: "Power", stateKey: "state", domain: "switch", category: "control", writable: true, primary: true,
+        capability: { kind: "binary", controlId: "control:sensitive-power", semanticRole: "power", readable: true, writable: true, automatable: true, primary: true, sensitive: true, bindings: [{ serviceId: "switch.turn_on" }] },
+      },
+    },
+  });
+
+  const restartedStore = new Store(file);
+  const device = restartedStore.getDevice("sensitive-switch");
+  const storedCapability = device.entities["sensitive-switch:state"].capability;
+  assert.equal(storedCapability.sensitive, true);
+  assert.equal(storedCapability.stepUpPolicy, "required");
+  assert.equal(storedCapability.automatable, false);
+  const dto = serializeDevice({ device, homeId: "home:one", homeMembershipId: "membership:owner", role: "OWNER", areaIds: ["area:one"], surfaces: allProjectedSurfaces(device) });
+  assert.ok(dto);
+  assert.equal(dto.controls[0].stepUpPolicy, "required");
+  assert.equal(dto.controls[0].confirmationPolicy, "step_up");
+  assert.equal(dto.controls[0].automatable, false);
 });
 
 test("store supports rooms, labels, named devices and labeled child entities", async () => {
