@@ -3,7 +3,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { fixedLabelState } = require("./labelCatalog");
 const { normalizeCapability, text } = require("./capabilities/schema");
-const { buildPresentation, isConfigured, labelId } = require("./capabilities/devicePresentation");
+const { buildPresentation, isConfigured, labelId, sourceFingerprint } = require("./capabilities/devicePresentation");
 const { DEFAULT_HEATING_DEMAND_CONFIG, DEFAULT_HEATING_DEMAND_RUNTIME } = require("./heatingDemandController");
 const { NATIVE_AUTOMATION_STORE_VERSION, LIMITS } = require("./automations/constants");
 const { migrateLegacyAutomations } = require("./automations/legacyAdapter");
@@ -279,10 +279,19 @@ function normalizeState(value) {
     },
     entities: device && device.entities && typeof device.entities === "object" ? device.entities : {},
   }, value.areas && typeof value.areas === "object" ? value.areas : {}, Number(value.version || 0))])) : {};
-  const devices = Object.fromEntries(Object.entries(rawDevices).map(([id, device]) => [id, {
-    ...device,
-    presentation: device.presentation && typeof device.presentation === "object" ? device.presentation : buildPresentation(device, "1970-01-01T00:00:00.000Z"),
-  }]));
+  const devices = Object.fromEntries(Object.entries(rawDevices).map(([id, device]) => {
+    const presentation = device.presentation && typeof device.presentation === "object" ? device.presentation : null;
+    const revision = Number(presentation?.descriptorRevision);
+    const hasCurrentRevision = Number.isSafeInteger(revision) && revision >= 1 && presentation?.sourceFingerprint === sourceFingerprint(device);
+    return [id, {
+      ...device,
+      // Backfill a trustworthy monotonic catalog revision for older hub data
+      // and reconcile any cached surface whose source entities changed while
+      // the OS was stopped. The source fingerprint is computed from current
+      // stored authority, never from a client-supplied revision.
+      presentation: hasCurrentRevision ? presentation : buildPresentation({ ...device, presentation }, "1970-01-01T00:00:00.000Z"),
+    }];
+  }));
   const aliases = value.aliases && typeof value.aliases === "object" ? { ...value.aliases } : {};
   for (const [id, device] of Object.entries(devices)) {
     for (const legacy of Array.isArray(device.legacyIds) ? device.legacyIds : []) aliases[String(legacy)] = String(id);
@@ -703,7 +712,7 @@ class Store {
       updatedAt: new Date().toISOString(),
     };
     next.setup = normalizeSetup(device.setup || existing.setup, { status: "needs_setup", reason: "area_and_label_required" });
-    next.presentation = buildPresentation(next);
+    next.presentation = buildPresentation({ ...next, presentation: existing.presentation || null });
     this.state.devices[id] = next;
     for (const legacyId of this.state.devices[id].legacyIds) this.state.aliases[String(legacyId)] = id;
     if (device.metadata?.friendly_name && String(device.metadata.friendly_name) !== id) this.state.aliases[String(device.metadata.friendly_name)] = id;
@@ -1218,6 +1227,10 @@ class Store {
     const before = this.snapshot();
     const removed = device.entities[entityId];
     delete device.entities[entityId];
+    // Refresh the presentation immediately. Keeping a cached surface after
+    // its source entity disappears can leave stale routes visible to readers
+    // and command consumers until the next full device snapshot.
+    device.presentation = buildPresentation(device);
     try {
       await this.persist();
       return true;

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "bundleIdentifier": "com.dinodia.DinodiaV2",
+  "displayName": "Dinodia Smart Living",
+  "appStoreRecordDisplayName": "Dinodia Smart Living",
+  "appStoreRecordStatus": "external_record_and_signing_required",
+  "apnsTopic": "com.dinodia.DinodiaV2",
+  "keychainAccessGroup": "$(AppIdentifierPrefix)com.dinodia.DinodiaV2",
+  "teamIdentifier": "P759CSZK34",
+  "appSiteAssociationApplicationIdentifier": "P759CSZK34.com.dinodia.DinodiaV2",
+  "associatedDomains": ["applinks:dinodia-platform-v2.vercel.app"],
+  "deepLinkScheme": "dinodia-v2",
+  "universalLinkPathPrefix": "/app/",
+  "forbiddenLegacyState": {
+    "oldAppImportAllowed": false,
+    "oldAppSessionReuseAllowed": false,
+    "oldAppPushTokenReuseAllowed": false,
+    "oldAppCachedHomeImportAllowed": false,
+    "oldAppDeepLinkAuthenticationAllowed": false
+  },
+  "externalEvidenceRequired": [
+    "App Store Connect record assigned to bundleIdentifier",
+    "Apple signing and provisioning profile",
+    "APNs production registration and push delivery"
+  ]
+}

@@ -151,6 +151,18 @@ test('OS rejects stale descriptor command and unsupported envelope version', () 
   const device = good.device; const control = device.controls[0];
   assert.equal(c.validateCommand({ homeId: device.homeId, homeMembershipId: good.context.homeMembershipId, deviceId: device.id, controlId: control.id, descriptorRevision: 3, idempotencyKey: '1234567890123456' }, device, control, good.context.homeMembershipId), false);
 });
+test('OS command validator rejects impossible calendar dates but accepts valid UTC and leap-day instants', () => {
+  const invalid = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/invalid/impossible-calendar-date-command.json')));
+  const source = JSON.parse(fs.readFileSync(path.join(root, invalid.sourceFixture || 'fixtures/command-valid.json')));
+  const command = invalid.command || source;
+  const control = good.device.controls.find((item) => item.controlId === command.controlId);
+  assert.ok(control);
+  assert.equal(c.validateCommand(command, good.device, control, command.homeMembershipId), false);
+  assert.equal(invalid.expected, 'reject_before_dispatch');
+  assert.equal(c.validateCommand({ ...command, issuedAt: '2026-02-28T23:59:59Z' }, good.device, control, command.homeMembershipId), true);
+  assert.equal(c.validateCommand({ ...command, issuedAt: '2024-02-29T12:00:00Z' }, good.device, control, command.homeMembershipId), true);
+  assert.equal(c.validateCommand({ ...command, issuedAt: '2025-02-29T12:00:00Z' }, good.device, control, command.homeMembershipId), false);
+});
 test('OS rejects descriptors missing the required step-up policy field', () => {
   const mutation = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/invalid/device-missing-step-up-policy.json')));
   const source = JSON.parse(fs.readFileSync(path.join(root, mutation.sourceFixture)));
@@ -205,6 +217,21 @@ test('OS serializes option controls with no declared choices as read-only', () =
   assert.equal(projected.controls[0].valueType, 'option');
   assert.equal(projected.controls[0].writable, false);
   assert.equal(projected.controls[0].interactionKind, 'read_only');
+});
+test('OS serializer does not resurrect a cached surface after all declared source entities are removed', () => {
+  const projected = c.serializeDevice({
+    device: {
+      id: 'device:removed-source', homeId: 'home:one', areaId: 'area:one', name: 'Removed control', protocol: 'matter',
+      setup: { status: 'complete' }, presentation: { descriptorRevision: 2 }, entities: {},
+    },
+    homeId: 'home:one', homeMembershipId: 'membership:tenant', role: 'TENANT', areaIds: ['area:one'],
+    surfaces: [{
+      id: 'surface:removed-source', sourceEntityIds: ['control:removed'], name: 'Stale power',
+      capability: { kind: 'binary', controlId: 'control:removed', semanticRole: 'power', readable: true, writable: true, bindings: [{ serviceId: 'switch.turn_on' }] },
+    }],
+  });
+  assert.ok(projected, 'device identity may remain visible when its last source control disappears');
+  assert.deepEqual(projected.controls, [], 'a stale surface descriptor is not a replacement authority for its removed source');
 });
 test('OS serializer projects customer labels at the shared Unicode code-point boundary', () => {
   const fixture = JSON.parse(require('node:fs').readFileSync(require('node:path').join(__dirname, 'fixtures/contracts/dinodia-v1/fixtures/customer-label-unicode-boundaries.json'), 'utf8'));

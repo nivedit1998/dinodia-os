@@ -90,7 +90,7 @@ function validateCommand(command, device, control, membershipId) {
   const currentControl = device.controls.find((candidate) => candidate.controlId === control.controlId && candidate.deviceId === control.deviceId);
   if (!validateDevice(device, { homeId: device.homeId, homeMembershipId: membershipId, role: 'TENANT' }) || !currentControl || !sameJsonValue(currentControl, control)) return false;
   const requiresStepUp = control.stepUpPolicy === 'required' || ['security_lock','lock_state'].includes(control.semanticRole);
-  return device.lifecycle === 'installed' && isId(command.commandId) && command.homeId === device.homeId && command.homeMembershipId === membershipId && command.deviceId === device.id && command.controlId === control.controlId && Number.isInteger(command.descriptorRevision) && command.descriptorRevision >= 0 && command.descriptorRevision === device.descriptorRevision && command.descriptorRevision === control.catalogRevision && control.readable && control.writable && control.interactionKind !== 'read_only' && commandValueMatches(control, command.value) && typeof command.issuedAt === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(command.issuedAt) && Number.isFinite(Date.parse(command.issuedAt)) && typeof command.idempotencyKey === 'string' && codePointLength(command.idempotencyKey) >= 16 && codePointLength(command.idempotencyKey) <= 160 && (!requiresStepUp || isId(command.stepUpOperationId));
+  return device.lifecycle === 'installed' && isId(command.commandId) && command.homeId === device.homeId && command.homeMembershipId === membershipId && command.deviceId === device.id && command.controlId === control.controlId && Number.isInteger(command.descriptorRevision) && command.descriptorRevision >= 0 && command.descriptorRevision === device.descriptorRevision && command.descriptorRevision === control.catalogRevision && control.readable && control.writable && control.interactionKind !== 'read_only' && commandValueMatches(control, command.value) && isUtcTimestamp(command.issuedAt) && typeof command.idempotencyKey === 'string' && codePointLength(command.idempotencyKey) >= 16 && codePointLength(command.idempotencyKey) <= 160 && (!requiresStepUp || isId(command.stepUpOperationId));
 }
 function validateControlState(value, device, control) {
   if (!isObject(value) || !hasOnlyKeys(value, ['deviceId','controlId','homeId','descriptorRevision','revision','observedAt','receivedAt','validUntil','quality','value','deviceAvailability','analyticsActivity'])) return false;
@@ -126,7 +126,11 @@ function serializeDevice({ device, homeId, homeMembershipId, role, areaIds, surf
     // Preserve one row per adapter-declared control. A rendered surface can
     // combine power, brightness, mode and setpoint, but the wire contract must
     // not collapse those independent controls into a lossy `composite` value.
-    const sourceControls = sources.length ? sources : [surface];
+    // A surface with declared source entities is not itself a fallback
+    // authority. If every source was removed, projecting the cached surface
+    // would resurrect its old control ID and bindings. Only source-less
+    // adapter surfaces may use their own descriptor as the source.
+    const sourceControls = sources.length ? sources : sourceIds.length === 0 ? [surface] : [];
     for (const source of sourceControls) {
       const capability = isObject(source.capability) ? source.capability : {};
       const bindings = Array.isArray(capability.bindings) ? capability.bindings : [];

@@ -1614,11 +1614,45 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       const requestedControlId = String(body.controlId || body.control_id || "").trim();
       const nonce = String(body.nonce || "").trim();
       if (!deviceId || !requestedControlId || !/^[A-Za-z0-9_-]{20,128}$/.test(nonce)) return json(res, 400, { error: "Device, control and a fresh nonce are required", errorCode: "step_up_descriptor_fields_invalid" });
-      const item = haModel.entities().find((candidate) => String(candidate.device.id) === deviceId && [candidate.entity?.id, candidate.entity?.controlId, candidate.entity?.capability?.controlId, candidate.haId].filter(Boolean).map(String).includes(requestedControlId));
-      if (!item || !appCanCommandDevice(scopedPrincipal, item.device, { controlId: requestedControlId }, item.entity, String(body.serviceId || body.service_id || item.entity?.capability?.bindings?.[0]?.serviceId || ""))) return json(res, 403, { error: "The requested device control is not currently authorised", errorCode: "step_up_control_denied" });
-      const descriptorDigest = item.device.presentation?.sourceFingerprint || item.device.presentation?.descriptorDigest || null;
-      const descriptorRevision = Number(item.device.presentation?.descriptorRevision || item.device.descriptorRevision || 0);
-      if (!Number.isInteger(descriptorRevision) || descriptorRevision < 1) return json(res, 409, { error: "The current device descriptor is unavailable", errorCode: "step_up_descriptor_unavailable" });
+      const device = hubStore.getDevice(deviceId);
+      if (!device || !appCanReadDevice(scopedPrincipal, device)) return json(res, 404, { error: "The selected device is unavailable", errorCode: "step_up_control_denied" });
+      const descriptor = serializeNativeDevice({
+        device: nativeDeviceView(scopedPrincipal, device),
+        homeId: String(scopedPrincipal.homeId),
+        homeMembershipId: String(scopedPrincipal.membershipId),
+        role: String(scopedPrincipal.householdRole),
+        areaIds: (scopedPrincipal.areaIds || []).map(String),
+        surfaces: allProjectedSurfaces(device),
+        revision: Number(device.presentation?.descriptorRevision || device.descriptorRevision || 0),
+      });
+      const control = descriptor?.controls.find((candidate) => candidate.controlId === requestedControlId);
+      const rawEntity = Object.values(device.entities || {}).find((candidate) => String(candidate.id || candidate.sourceId || "") === requestedControlId);
+      if (!descriptor || descriptor.lifecycle !== "installed" || !control || !rawEntity
+        || control.stepUpPolicy !== "required" && !["security_lock", "lock_state"].includes(control.semanticRole)) {
+        return json(res, 403, { error: "The requested sensitive control is not currently authorised", errorCode: "step_up_control_denied" });
+      }
+      const descriptorRevision = descriptor.descriptorRevision;
+      if (!Number.isSafeInteger(descriptorRevision) || descriptorRevision < 1) return json(res, 409, { error: "The current device descriptor is unavailable", errorCode: "step_up_descriptor_unavailable" });
+      const probeCommand = {
+        commandId: `stepup-${nonce}`,
+        homeId: String(scopedPrincipal.homeId),
+        homeMembershipId: String(scopedPrincipal.membershipId),
+        deviceId,
+        controlId: requestedControlId,
+        descriptorRevision,
+        value: body.value,
+        issuedAt: new Date(clock()).toISOString(),
+        idempotencyKey: `stepup-${nonce}`,
+        stepUpOperationId: `stepup-${nonce}`,
+      };
+      if (!validateNativeCommand(probeCommand, descriptor, control, String(scopedPrincipal.membershipId))) return json(res, 400, { error: "The sensitive operation value does not match the current control", errorCode: "step_up_value_invalid" });
+      const binding = nativeCommandBinding({ ...control, value: body.value }, rawEntity);
+      const suppliedService = String(body.serviceId || body.service_id || "").toLowerCase();
+      if (!binding || suppliedService && String(binding.serviceId || "").toLowerCase() !== suppliedService
+        || !appCanCommandDevice(scopedPrincipal, device, { controlId: requestedControlId }, rawEntity, String(binding.serviceId || ""))) {
+        return json(res, 403, { error: "The requested sensitive control is not currently authorised", errorCode: "step_up_control_denied" });
+      }
+      const descriptorDigest = device.presentation?.sourceFingerprint || device.presentation?.descriptorDigest || null;
       const requestedValue = body.value && typeof body.value === "object" && !Array.isArray(body.value) ? { ...body.value, controlId: requestedControlId } : { value: body.value ?? null, controlId: requestedControlId };
       const operationDigest = digestOperation({ actorId: scopedPrincipal.sub, trustedDeviceId: scopedPrincipal.trustedDeviceId, customerSessionId: scopedPrincipal.sid, homeId: scopedPrincipal.homeId, membershipId: scopedPrincipal.membershipId, hubInstallId: scopedPrincipal.hubInstallId, operationKind: "device_sensitive_command", targetIds: [deviceId], value: descriptorBoundValue(requestedValue, { [deviceId]: descriptorDigest }) });
       const identity = await pairing.getPublicIdentity();
@@ -2506,7 +2540,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   }
   function isNativeAppRoute(req, url) {
     return (req.method === "GET" && url.pathname === "/api/dinodia/v1/devices")
-      || (req.method === "POST" && url.pathname === "/api/dinodia/v1/commands");
+      || (req.method === "POST" && (url.pathname === "/api/dinodia/v1/commands" || url.pathname === "/api/step-up/descriptor-challenge"));
   }
   function isHaCompatibilityPath(pathname) {
     return pathname === "/api" || pathname.startsWith("/api/") || pathname.startsWith("/_dinodia/zha/") || pathname === "/_dinodia/sync-status";
@@ -3169,7 +3203,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     if (url.pathname === "/setup.js") return handleSetupScriptRequest(req, res);
     if (url.pathname === "/setup" || url.pathname.startsWith("/_dinodia/setup/")) return handleLocalSetupRequest(req, res, url);
     if (url.pathname.startsWith("/_dinodia/platform/v1/alexa")) return handleNativeAlexaPlatformRequest(req, res, url);
-    // Only the two canonical Native V1 app routes bypass HA compatibility.
+    // Only the canonical Native V1 app routes and its descriptor-bound
+    // sensitive-command challenge bypass HA compatibility.
     // Their app token is still verified by handleDashboardRequest/handleApi;
     // every other /api/* path remains on the existing compatibility router.
     if (isNativeAppRoute(req, url)) return handleDashboardRequest(req, res, url);

@@ -11,6 +11,12 @@ function clone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
+function canonicalValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue(value[key])]));
+}
+
 function normalize(value) {
   return String(value === undefined || value === null ? "" : value).trim();
 }
@@ -389,12 +395,23 @@ function sourceFingerprint(device) {
     identity: device.protocolIdentity,
     definition: device.definition,
     metadata: device.metadata,
-    entities: rawEntities(device).map((entity) => ({ id: entity.id, endpointId: entity.endpointId, logicalKey: entity.logicalKey, stateKey: entity.stateKey, domain: entity.domain, category: entity.category, capability: entity.capability, expose: entity.expose, binding: entity.binding })),
+    areaId: device.areaId || null,
+    setupStatus: String(device.setup?.status || "needs_setup"),
+    lifecycle: device.retired === true ? "retired" : "active",
+    managementClass: device.managementClass || device.metadata?.managementClass || null,
+    tenantOwnerMembershipId: device.tenantOwnerMembershipId || device.metadata?.tenantOwnerMembershipId || null,
+    entities: rawEntities(device).map((entity) => ({ id: entity.id, name: entity.name, original_name: entity.original_name, endpointId: entity.endpointId, endpointName: entity.endpointName, logicalKey: entity.logicalKey, stateKey: entity.stateKey, domain: entity.domain, category: entity.category, capability: entity.capability, expose: entity.expose, binding: entity.binding })),
   };
-  return `sha256:${crypto.createHash("sha256").update(JSON.stringify(relevant)).digest("hex")}`;
+  return `sha256:${crypto.createHash("sha256").update(JSON.stringify(canonicalValue(relevant))).digest("hex")}`;
 }
 
 function buildPresentation(device, now = new Date().toISOString()) {
+  const descriptorFingerprint = sourceFingerprint(device);
+  const previousRevision = Number(device.presentation?.descriptorRevision);
+  const hasPreviousRevision = Number.isSafeInteger(previousRevision) && previousRevision >= 1;
+  const descriptorRevision = hasPreviousRevision && device.presentation?.sourceFingerprint === descriptorFingerprint
+    ? previousRevision
+    : (hasPreviousRevision ? previousRevision + 1 : 1);
   const selectedLabel = labelId(device);
   const configured = isConfigured(device) && ["ready", "preview"].includes(String(device.setup?.status || ""));
   const groups = configured ? groupEntities(device) : new Map();
@@ -415,7 +432,8 @@ function buildPresentation(device, now = new Date().toISOString()) {
   return {
     version: PRESENTATION_VERSION,
     policyRevision: POLICY_REVISION,
-    sourceFingerprint: sourceFingerprint(device),
+    sourceFingerprint: descriptorFingerprint,
+    descriptorRevision,
     generatedAt: now,
     status,
     inferredType,
@@ -462,5 +480,6 @@ module.exports = {
   publicPresentation,
   rawEntityById,
   rawEntities,
+  sourceFingerprint,
   sourceKey,
 };

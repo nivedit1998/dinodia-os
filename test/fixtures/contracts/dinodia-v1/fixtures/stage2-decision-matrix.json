@@ -15,7 +15,12 @@
       { "id": "area:bedroom-b", "originalName": "Spare", "overrideName": "Bedroom", "floorplanShapeId": "shape:b" }
     ],
     "fullGrantCombinedAreaIds": ["area:bedroom-a", "area:bedroom-b"],
-    "partialGrantCombinedAreaIds": ["area:bedroom-a"]
+    "partialGrantCombinedAreaIds": ["area:bedroom-a"],
+    "areaScopeMemberships": {
+      "ownerMembershipId": "membership:owner",
+      "managerMembershipIds": ["membership:manager-one", "membership:manager-two"],
+      "partialTenantMembershipId": "membership:tenant-a"
+    }
   },
   "tenantPrivacy": {
     "deviceId": "device:tenant-private",
@@ -126,5 +131,23 @@
     "periodAggregation": "average_contributing_device_samples",
     "hourAggregation": "sum_selected_devices",
     "summaryAggregation": "average_displayed_buckets"
+  },
+  "distribution": {
+    "bundleIdentifier": "com.dinodia.DinodiaV2",
+    "displayName": "Dinodia Smart Living",
+    "appStoreRecordDisplayName": "Dinodia Smart Living",
+    "appStoreRecordStatus": "external_record_and_signing_required",
+    "apnsTopic": "com.dinodia.DinodiaV2",
+    "keychainAccessGroup": "$(AppIdentifierPrefix)com.dinodia.DinodiaV2",
+    "teamIdentifier": "P759CSZK34",
+    "appSiteAssociationApplicationIdentifier": "P759CSZK34.com.dinodia.DinodiaV2",
+    "associatedDomains": ["applinks:dinodia-platform-v2.vercel.app"],
+    "deepLinkScheme": "dinodia-v2",
+    "universalLinkPathPrefix": "/app/",
+    "oldAppImportAllowed": false,
+    "oldAppSessionReuseAllowed": false,
+    "oldAppPushTokenReuseAllowed": false,
+    "oldAppCachedHomeImportAllowed": false,
+    "oldAppDeepLinkAuthenticationAllowed": false
   }
 }

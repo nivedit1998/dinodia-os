@@ -136,14 +136,74 @@ test("Native v1 device route emits a home-bound contract envelope and never retu
     assert.equal(wrongHome.body.error.code, "HOME_MISMATCH");
     assert.equal(wrongHome.body.error.retryable, false);
     assert.equal(JSON.stringify(wrongHome.body).includes("Private lamp"), false);
+
+    const expiredToken = appToken({ iss: "dinodia-platform-v2", aud: "dinodia-hub:native-v1-hub", sub: "account-tenant-a", sid: "sid-expired-customer", jti: "jti-expired-customer", membershipId: "membership-tenant-a", trustedDeviceId: "trusted-a", hubInstallationId: "native-v1-hub", iat: now - 301, exp: now - 1, homeId: "home-a", householdRole: "TENANT", areaIds: ["area-uuid-kitchen"], policyRevision: 0, scope: ["tenant:device-command"] }, keys.privateKey);
+    const expiredRead = await request(base, "/api/dinodia/v1/devices", { headers: { authorization: `Bearer ${expiredToken}` } });
+    assert.equal(expiredRead.response.status, 401);
+    assert.equal(expiredRead.body.error.code, "AUTH_REQUIRED");
+    assert.equal(Object.hasOwn(expiredRead.body, "data"), false);
+    assert.equal(JSON.stringify(expiredRead.body).includes("Private lamp"), false);
+
+    const privateDeviceNonOwners = [
+      { name: "owner", accountId: "account-owner", membershipId: "membership-owner", role: "OWNER", areaIds: ["area-uuid-kitchen"] },
+      { name: "manager", accountId: "account-manager", membershipId: "membership-manager", role: "PROPERTY_MANAGER", areaIds: ["area-uuid-kitchen"] },
+      { name: "other tenant", accountId: "account-tenant-b", membershipId: "membership-tenant-b", role: "TENANT", areaIds: ["area-uuid-kitchen"] },
+      { name: "tenant without this area grant", accountId: "account-tenant-a", membershipId: "membership-tenant-a", role: "TENANT", areaIds: ["area-uuid-bedroom"] },
+    ];
+    for (const [index, scenario] of privateDeviceNonOwners.entries()) {
+      const nonOwnerToken = appToken({
+        iss: "dinodia-platform-v2", aud: "dinodia-hub:native-v1-hub", sub: scenario.accountId,
+        sid: `sid-private-device-${index}`, jti: `jti-private-device-${index}`, membershipId: scenario.membershipId,
+        trustedDeviceId: `trusted-private-device-${index}`, hubInstallationId: "native-v1-hub",
+        iat: now, exp: now + 300, homeId: "home-a", householdRole: scenario.role,
+        areaIds: scenario.areaIds, policyRevision: 0, scope: ["tenant:device-command"],
+      }, keys.privateKey);
+      const hidden = await request(base, "/api/dinodia/v1/devices", { headers: { authorization: `Bearer ${nonOwnerToken}` } });
+      if (scenario.role === "TENANT") {
+        assert.equal(hidden.response.status, 200, `${scenario.name} receives a valid empty scoped inventory`);
+        assert.deepEqual(hidden.body.data, [], `${scenario.name} must not receive another tenant's private device`);
+      } else {
+        assert.equal(hidden.response.status, 403, `${scenario.name} has no direct OS inventory authority`);
+        assert.equal(Object.hasOwn(hidden.body, "data"), false, `${scenario.name} receives no protected device payload`);
+      }
+      assert.equal(JSON.stringify(hidden.body).includes("tenant-owned-light"), false, `${scenario.name} must not receive the private device ID`);
+      assert.equal(JSON.stringify(hidden.body).includes("Private lamp"), false, `${scenario.name} must not receive the private device label`);
+    }
+
+    await hub.store.savePlatform({ ...(hub.store.getPlatform() || {}), policyRevision: 1 });
+    const revokedPolicyToken = appToken({ iss: "dinodia-platform-v2", aud: "dinodia-hub:native-v1-hub", sub: "account-tenant-a", sid: "sid-revoked-policy", jti: "jti-revoked-policy", membershipId: "membership-tenant-a", trustedDeviceId: "trusted-a", hubInstallationId: "native-v1-hub", iat: now, exp: now + 300, homeId: "home-a", householdRole: "TENANT", areaIds: ["area-uuid-kitchen"], policyRevision: 0, scope: ["tenant:device-command"] }, keys.privateKey);
+    const revokedPolicyRead = await request(base, "/api/dinodia/v1/devices", { headers: { authorization: `Bearer ${revokedPolicyToken}` } });
+    assert.equal(revokedPolicyRead.response.status, 401, "a token from before the current policy revision is revoked");
+    assert.equal(revokedPolicyRead.body.error.code, "AUTH_REQUIRED");
+    assert.equal(Object.hasOwn(revokedPolicyRead.body, "data"), false);
+    assert.equal(JSON.stringify(revokedPolicyRead.body).includes("tenant-owned-light"), false);
   } finally { await hub.stop(); }
 });
 
 test("Native v1 command route enforces current DTO, tenant scope and durable idempotency before dispatch", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-native-v1-command-"));
   const keys = crypto.generateKeyPairSync("ed25519");
+  const hubSigningKeys = crypto.generateKeyPairSync("ed25519");
+  const hubEncryptionKeys = crypto.generateKeyPairSync("ed25519");
+  let hubSignatureCount = 0;
+  const identityBroker = {
+    async getPublicIdentity() {
+      return {
+        serial: "native-command-hub",
+        generation: 7,
+        signingPublicKeyPem: hubSigningKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+        encryptionPublicKeyPem: hubEncryptionKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+      };
+    },
+    async signPlatformRequest({ method, path: requestPath, timestamp, nonce, bodyHash }) {
+      hubSignatureCount += 1;
+      const canonical = [String(method).toUpperCase(), String(requestPath), String(timestamp), String(nonce), String(bodyHash).toLowerCase()].join("\n");
+      return { signature: crypto.sign(null, Buffer.from(canonical, "utf8"), hubSigningKeys.privateKey).toString("base64url") };
+    },
+  };
   const hub = createHub({
-    config: { nodeEnv: "production", appPublicKeys: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), hubId: "native-command-hub", port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    config: { nodeEnv: "production", v2Environment: "test", appPublicKeys: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), hubId: "native-command-hub", port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    identityBroker,
     mqttBridge: mockIntegration(), matterBridge: mockIntegration(),
     cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
     platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
@@ -180,6 +240,7 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     assert.equal(catalog.response.status, 200);
     const dto = catalog.body.data.find((item) => item.id === deviceId);
     assert.ok(dto);
+    assert.ok(dto.descriptorRevision >= 1, "installed controls have a nonzero descriptor revision suitable for operation-bound step-up");
     assert.equal(dto.customerLabel.length, 40, "an over-bound legacy label is safely bounded without dropping the device");
     assert.equal(dto.controls.length, 2, "label projection must preserve the device's control descriptors");
     const storedDevice = hub.store.getDevice(deviceId);
@@ -210,6 +271,50 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     const lock = dto.controls.find((control) => control.semanticRole === "security_lock");
     assert.ok(power && lock);
     assert.equal(power.valueType, "boolean");
+    const stepUpNonce = crypto.randomBytes(24).toString("base64url");
+    const stepUpChallenge = await request(base, "/api/step-up/descriptor-challenge", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ deviceId, controlId: lock.controlId, serviceId: "lock.unlock", value: true, nonce: stepUpNonce }),
+    });
+    assert.equal(stepUpChallenge.response.status, 200, JSON.stringify(stepUpChallenge.body));
+    assert.equal(hubSignatureCount, 1, "the valid selected sensitive operation obtains exactly one hub attestation");
+    assert.equal(stepUpChallenge.body.descriptorRevision, dto.descriptorRevision);
+    assert.equal(stepUpChallenge.body.identityGeneration, 7);
+    assert.equal(stepUpChallenge.body.controlId, lock.controlId);
+    const signedDescriptor = {
+      version: Number(stepUpChallenge.body.version),
+      serial: String(stepUpChallenge.body.serial),
+      identityGeneration: Number(stepUpChallenge.body.identityGeneration),
+      actorId: String(stepUpChallenge.body.actorId),
+      customerSessionId: String(stepUpChallenge.body.customerSessionId),
+      trustedDeviceId: String(stepUpChallenge.body.trustedDeviceId),
+      homeId: String(stepUpChallenge.body.homeId),
+      membershipId: String(stepUpChallenge.body.membershipId),
+      hubInstallId: String(stepUpChallenge.body.hubInstallId),
+      operationKind: String(stepUpChallenge.body.operationKind),
+      targetIds: stepUpChallenge.body.targetIds.map(String),
+      controlId: String(stepUpChallenge.body.controlId),
+      descriptorRevision: Number(stepUpChallenge.body.descriptorRevision),
+      descriptorDigest: stepUpChallenge.body.descriptorDigest == null ? null : String(stepUpChallenge.body.descriptorDigest),
+      operationDigest: String(stepUpChallenge.body.operationDigest),
+      nonce: String(stepUpChallenge.body.nonce),
+      issuedAt: Number(stepUpChallenge.body.issuedAt),
+    };
+    const bodyHash = crypto.createHash("sha256").update(JSON.stringify(signedDescriptor), "utf8").digest("hex");
+    const signedRequest = ["POST", "/api/step-up/descriptor-challenge", String(signedDescriptor.issuedAt), signedDescriptor.nonce, bodyHash].join("\n");
+    assert.equal(crypto.verify(null, Buffer.from(signedRequest, "utf8"), hubSigningKeys.publicKey, Buffer.from(stepUpChallenge.body.hubSignature, "base64url")), true, "the returned challenge must be signed by the isolated hub identity over the exact current descriptor");
+    const nonSensitiveChallenge = await request(base, "/api/step-up/descriptor-challenge", {
+      method: "POST", headers,
+      body: JSON.stringify({ deviceId, controlId: power.controlId, value: true, nonce: crypto.randomBytes(24).toString("base64url") }),
+    });
+    assert.equal(nonSensitiveChallenge.response.status, 403, "the descriptor attestation path is only for sensitive controls");
+    const invalidSensitiveValue = await request(base, "/api/step-up/descriptor-challenge", {
+      method: "POST", headers,
+      body: JSON.stringify({ deviceId, controlId: lock.controlId, value: "unlock", nonce: crypto.randomBytes(24).toString("base64url") }),
+    });
+    assert.equal(invalidSensitiveValue.response.status, 400, "step-up cannot attest a value that violates the live boolean descriptor");
+    assert.equal(hubSignatureCount, 1, "denied targets and invalid values are rejected before hub signing");
     const wsPowerEntity = hub.model.entities().find((entity) => entity.device.id === deviceId && entity.entity?.capability?.semanticRole === "power");
     const wsLockEntity = hub.model.entities().find((entity) => entity.device.id === deviceId && entity.entity?.capability?.semanticRole === "security_lock");
     assert.ok(wsPowerEntity?.haId && wsLockEntity?.haId, "test device has current WebSocket entity bindings");
@@ -231,6 +336,12 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     const command = { commandId: "command-native-1", homeId: "home-command", homeMembershipId: "membership-command-tenant", deviceId, controlId: power.controlId, descriptorRevision: dto.descriptorRevision, value: true, issuedAt: new Date().toISOString(), idempotencyKey: key };
     assert.equal(validateNativeCommand(command, dto, power, "membership-command-tenant"), true);
     const send = (payload) => request(base, "/api/dinodia/v1/commands", { method: "POST", headers: { ...headers, "idempotency-key": payload.idempotencyKey }, body: JSON.stringify(payload) });
+    const beforeImpossibleTimestamp = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
+    const impossibleTimestamp = await send({ ...command, commandId: "command-native-impossible-date", idempotencyKey: "native-command-impossible-date", issuedAt: "2026-02-31T10:00:00Z" });
+    assert.equal(impossibleTimestamp.response.status, 400, JSON.stringify(impossibleTimestamp.body));
+    assert.equal(impossibleTimestamp.body.error.code, "VALIDATION_FAILED");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "OFF", "invalid command time must have no fake-device effect");
+    assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, beforeImpossibleTimestamp, "invalid command time must create no dispatch event");
     const accepted = await send(command);
     assert.equal(accepted.response.status, 202, JSON.stringify(accepted.body));
     assert.equal(accepted.body.status, "accepted");
@@ -247,6 +358,15 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     const wrongHome = await send({ ...command, commandId: "command-native-wrong-home", idempotencyKey: "native-command-idempotency-0003", homeId: "home-other" });
     assert.equal(wrongHome.response.status, 403);
     assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, dispatchCount);
+    for (const [index, role] of ["OWNER", "PROPERTY_MANAGER"].entries()) {
+      const nonTenantToken = appToken({ iss: "dinodia-platform-v2", aud: "dinodia-hub:native-command-hub", sub: `account-${role.toLowerCase()}`, sid: `sid-${role.toLowerCase()}`, jti: `jti-${role.toLowerCase()}`, membershipId: `membership-${role.toLowerCase()}`, trustedDeviceId: `trusted-${role.toLowerCase()}`, hubInstallationId: "native-command-hub", iat: now, exp: now + 300, homeId: "home-command", householdRole: role, areaIds: ["area-uuid-command-kitchen"], policyRevision: 0, scope: ["tenant:device-command"] }, keys.privateKey);
+      const idempotencyKey = `native-command-non-tenant-${index}-0001`;
+      const nonTenantCommand = await request(base, "/api/dinodia/v1/commands", { method: "POST", headers: { authorization: `Bearer ${nonTenantToken}`, "idempotency-key": idempotencyKey }, body: JSON.stringify({ ...command, commandId: `command-native-non-tenant-${index}`, idempotencyKey }) });
+      assert.equal(nonTenantCommand.response.status, 403, `${role} is authenticated but has no direct-to-OS tenant command authority`);
+      assert.equal(Object.hasOwn(nonTenantCommand.body, "data"), false);
+      assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON");
+      assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, dispatchCount, `${role} denial has no dispatch effect`);
+    }
 
     const lockKey = "native-lock-command-idempotency-0001";
     const lockCommand = { ...command, commandId: "command-native-lock", controlId: lock.controlId, value: true, idempotencyKey: lockKey };
@@ -325,6 +445,86 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     assert.equal(readOnlySocketResult.error.code, "insufficient_scope");
     assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, beforeReadOnlyProbe, "a changed-to-read-only descriptor has no WebSocket dispatch event");
     assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON", "a changed-to-read-only descriptor has no WebSocket fake-device effect");
+
+    // A control can disappear after the durable dispatch claim is written but
+    // before the final dispatch check. Treat removal as loss of authority, not
+    // as permission to dispatch the previously captured protocol binding.
+    const beforeRemovedControlProbe = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
+    const beforeRemovalDevice = hub.store.getDevice(deviceId);
+    const powerEntityKey = Object.keys(beforeRemovalDevice.entities).find((key) => beforeRemovalDevice.entities[key].capability?.semanticRole === "power");
+    assert.ok(powerEntityKey, "the removal race starts with the current power control");
+    const currentPowerEntity = beforeRemovalDevice.entities[powerEntityKey];
+    await hub.store.upsertDevice({
+      ...beforeRemovalDevice,
+      entities: { ...beforeRemovalDevice.entities, [powerEntityKey]: { ...currentPowerEntity, capability: { ...currentPowerEntity.capability, writable: true } } },
+    });
+    const writableCatalog = await request(base, "/api/dinodia/v1/devices", { headers });
+    const writableDto = writableCatalog.body.data.find((item) => item.id === deviceId);
+    const writablePower = writableDto?.controls.find((control) => control.semanticRole === "power");
+    assert.equal(writablePower?.writable, true, "the removal race must begin with a currently writable descriptor");
+    const removedControlCommand = {
+      ...command,
+      commandId: "command-native-queued-control-removed",
+      controlId: writablePower.controlId,
+      descriptorRevision: writableDto.descriptorRevision,
+      idempotencyKey: "native-command-idempotency-queued-control-removed",
+      value: false,
+    };
+    let signalRemovedControlClaim;
+    const removedControlClaimSaved = new Promise((resolve) => { signalRemovedControlClaim = resolve; });
+    let releaseRemovedControlGate = () => {};
+    const removedControlGate = new Promise((resolve) => { releaseRemovedControlGate = resolve; });
+    restoreSaveSecurity();
+    hub.store.saveSecurity = async (patch) => {
+      const result = await originalSaveSecurity(patch);
+      if (Object.values(patch.nativeCommandResults || {}).some((entry) => entry?.status === "dispatching" && entry?.commandDigest)) {
+        signalRemovedControlClaim();
+        await removedControlGate;
+      }
+      return result;
+    };
+    releaseQueuedCommand = releaseRemovedControlGate;
+    const removedControlRequest = send(removedControlCommand);
+    await removedControlClaimSaved;
+    assert.equal(await hub.store.removeEntity(deviceId, powerEntityKey), true, "the registry removal path must remove the current raw control");
+    releaseRemovedControlGate();
+    const removedControlDenied = await removedControlRequest;
+    restoreSaveSecurity();
+    assert.equal(removedControlDenied.response.status, 409, JSON.stringify(removedControlDenied.body));
+    assert.equal(removedControlDenied.body.error.code, "CATALOG_REVISION_MISMATCH");
+    assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, beforeRemovedControlProbe, "a control removed while queued has no device-command event");
+    assert.equal(hub.store.getDevice(deviceId).entities[powerEntityKey], undefined, "the queued removal remains in force after denial");
+    const catalogAfterRemoval = await request(base, "/api/dinodia/v1/devices", { headers });
+    const deviceAfterRemoval = catalogAfterRemoval.body.data.find((item) => item.id === deviceId);
+    assert.ok(deviceAfterRemoval, "removing one control must preserve the device's remaining identity");
+    assert.equal(deviceAfterRemoval.controls.some((candidate) => candidate.controlId === writablePower.controlId), false, "a removed control cannot remain in the live Native V1 catalogue");
+
+    const afterRemovalDevice = hub.store.getDevice(deviceId);
+    await hub.store.upsertDevice({
+      ...afterRemovalDevice,
+      entities: { ...afterRemovalDevice.entities, [powerEntityKey]: { ...currentPowerEntity, capability: { ...currentPowerEntity.capability, writable: true } } },
+    });
+
+    const beforeOwnershipChange = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
+    const beforeOwnershipDevice = hub.store.getDevice(deviceId);
+    const ownershipEntity = beforeOwnershipDevice.entities[`${deviceId}:0:state`];
+    await hub.store.upsertDevice({
+      ...beforeOwnershipDevice,
+      tenantOwnerMembershipId: "membership-other-tenant",
+      metadata: { ...beforeOwnershipDevice.metadata, tenantOwnerMembershipId: "membership-other-tenant" },
+      entities: { ...beforeOwnershipDevice.entities, [`${deviceId}:0:state`]: { ...ownershipEntity, capability: { ...ownershipEntity.capability, writable: true } } },
+    });
+    const changedOwnerCatalog = await request(base, "/api/dinodia/v1/devices", { headers });
+    assert.equal(changedOwnerCatalog.response.status, 200);
+    assert.deepEqual(changedOwnerCatalog.body.data, [], "current ownership change immediately removes the device from the prior tenant view");
+    assert.equal(JSON.stringify(changedOwnerCatalog.body).includes(deviceId), false);
+    const changedOwnerAttempt = await send({ ...command, commandId: "command-native-changed-owner", idempotencyKey: "native-command-idempotency-changed-owner" });
+    assert.equal(changedOwnerAttempt.response.status, 404, JSON.stringify(changedOwnerAttempt.body));
+    assert.equal(changedOwnerAttempt.body.error.code, "RESOURCE_NOT_FOUND");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON", "a command after ownership changes has no fake-device effect");
+    assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, beforeOwnershipChange, "a command after ownership changes has no dispatch event");
+    const changedOwnerDevice = hub.store.getDevice(deviceId);
+    await hub.store.upsertDevice({ ...changedOwnerDevice, tenantOwnerMembershipId: "membership-command-tenant", metadata: { ...changedOwnerDevice.metadata, tenantOwnerMembershipId: "membership-command-tenant" } });
 
     const beforeRetiredProbe = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
     const retiredDevice = { ...hub.store.getDevice(deviceId), retired: true };
