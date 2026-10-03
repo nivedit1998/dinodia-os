@@ -1,4 +1,5 @@
 const http = require("node:http");
+const WebSocket = require("ws");
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
@@ -53,7 +54,7 @@ const { StepUpProofVerifier, descriptorBoundValue, digestOperation } = require("
 const { stepUpDescriptorDigest } = require("./auth/stepUpDescriptorDigest");
 const { IdentityBrokerClient, canonicalCloudChallengeUnsigned } = require("./auth/identityBroker");
 const { createSupportProofOfPossession } = require("./auth/supportProofOfPossession");
-const { validateMembership: validateNativeMembership, serializeDevice: serializeNativeDevice, validateCommand: validateNativeCommand, makeEnvelope: makeNativeEnvelope } = require("./contracts/dinodiaV1");
+const { validateMembership: validateNativeMembership, validateArea: validateNativeArea, validateControlState: validateNativeControlState, serializeDevice: serializeNativeDevice, validateCommand: validateNativeCommand, makeEnvelope: makeNativeEnvelope } = require("./contracts/dinodiaV1");
 
 const VERSION = require("../package.json").version;
 
@@ -417,6 +418,15 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   let alexaIntegration;
   let haModel;
   let nativeCommandQueue = Promise.resolve();
+  const nativeEventClients = new Set();
+  let nativeEventQueue = Promise.resolve();
+  const persistedNativeStreamId = String(hubStore.getSecurity?.()?.nativeStreamId || "");
+  const nativeStreamIdValue = /^native:[0-9a-f-]{36}$/i.test(persistedNativeStreamId)
+    ? persistedNativeStreamId
+    : `native:${crypto.randomUUID()}`;
+  if (nativeStreamIdValue !== persistedNativeStreamId) {
+    hubStore.saveSecurity({ nativeStreamId: nativeStreamIdValue }).catch((error) => logger.warn(`[native-events] stream identity persistence failed (${String(error?.code || "storage_unavailable")})`));
+  }
   const activity = new ActivityService({ store: hubStore, eventBus, logger });
   let activityIntegrationTimer = null;
   let electricTimer = null;
@@ -1298,6 +1308,175 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     return json(res, status, { error: { code, message, requestId: crypto.randomUUID(), retryable } });
   }
 
+  function nativeStreamId() { return nativeStreamIdValue; }
+
+  function nativeSequence() {
+    return Math.max(0, Number(hubStore.getSecurity?.()?.nativeEventSequence || 0));
+  }
+
+  function nativeAreasFor(principal) {
+    const publicAreaIds = new Set((principal.areaIds || []).map(String));
+    const homeId = String(principal.homeId || "");
+    return hubStore.listAreas().flatMap((area) => {
+      const id = canonicalAreaIdForHubArea(area.id);
+      if (!id || !publicAreaIds.has(id)) return [];
+      const value = { id, homeId, originalName: String(area.name || "Area").slice(0, 80), overrideName: null, revision: Number.isInteger(area.revision) ? area.revision : 0, lifecycle: "active" };
+      return validateNativeArea(value, homeId) ? [value] : [];
+    });
+  }
+
+  function nativeDevicesFor(principal) {
+    const homeId = String(principal.homeId || "");
+    const areaIds = (principal.areaIds || []).map(String);
+    return hubStore.listDevices()
+      .filter((device) => appCanReadDevice(principal, device))
+      .map((device) => serializeNativeDevice({
+        device: nativeDeviceView(principal, device), homeId, homeMembershipId: String(principal.membershipId),
+        role: String(principal.householdRole), areaIds, surfaces: allProjectedSurfaces(device),
+        revision: Number(device.presentation?.descriptorRevision || device.descriptorRevision || 0),
+      }))
+      .filter(Boolean);
+  }
+
+  function rememberNativeCatalog(devices) {
+    nativeEventQueue = nativeEventQueue.then(async () => {
+      const security = hubStore.getSecurity?.() || {};
+      const prior = Array.isArray(security.nativeCatalogIndex) ? security.nativeCatalogIndex : [];
+      const byId = new Map(prior.map((entry) => [String(entry.deviceId), entry]));
+      for (const dto of devices) {
+        byId.set(dto.id, {
+          deviceId: dto.id,
+          alias: String(hubStore.getDevice(dto.id)?.haDeviceId || dto.id),
+          homeId: dto.homeId,
+          areaIds: dto.areaIds,
+          managementClass: dto.managementClass,
+          ownerMembershipId: dto.ownerMembershipId || null,
+          descriptorRevision: dto.descriptorRevision,
+          controlIds: dto.controls.map((control) => control.controlId),
+        });
+      }
+      await hubStore.saveSecurity({ ...security, nativeCatalogIndex: [...byId.values()].slice(-512) });
+    }).catch((error) => logger.warn(`[native-events] catalogue cursor write failed (${String(error?.code || "storage_unavailable")})`));
+    return nativeEventQueue;
+  }
+
+  function nativeControlStates(principal, devices, onlyDeviceId = null) {
+    const now = Number(clock());
+    const states = [];
+    for (const dto of devices) {
+      if (onlyDeviceId && dto.id !== onlyDeviceId) continue;
+      const source = hubStore.getDevice(dto.id);
+      if (!source || !appCanReadDevice(principal, source)) continue;
+      for (const control of dto.controls) {
+        if (!control.observable || !Number.isInteger(control.maxStateValiditySeconds) || control.maxStateValiditySeconds <= 0) continue;
+        const entity = Object.values(source.entities || {}).find((candidate) => String(candidate.id || candidate.sourceId || "") === control.controlId);
+        const rawState = entity?.state && typeof entity.state === "object" && !Array.isArray(entity.state) && Object.hasOwn(entity.state, "state") ? entity.state.state : entity?.state;
+        const observedMs = Date.parse(String(entity?.lastChanged || entity?.last_changed || entity?.updatedAt || ""));
+        const receivedMs = Date.parse(String(entity?.updatedAt || ""));
+        const observedAt = new Date(Number.isFinite(observedMs) ? observedMs : now).toISOString();
+        const receivedAt = new Date(Math.max(Number.isFinite(receivedMs) ? receivedMs : now, Number.isFinite(observedMs) ? observedMs : now)).toISOString();
+        const validUntilMs = (Number.isFinite(observedMs) ? observedMs : now) + control.maxStateValiditySeconds * 1000;
+        const isExpired = validUntilMs <= now;
+        let value = rawState;
+        if (control.valueType === "boolean" && typeof value !== "boolean") value = value === "on" ? true : value === "off" ? false : null;
+        if (control.valueType === "number" && typeof value !== "number") value = value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value)) ? Number(value) : null;
+        if (control.valueType === "option" && typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") value = null;
+        if (control.valueType === "text" && typeof value !== "string") value = null;
+        if (control.valueType === "invoke") value = null;
+        let quality = value === null ? "unknown" : isExpired ? "unknown" : "fresh";
+        if (isExpired) value = null;
+        const activityRole = ["power", "active_heat_demand", "active_heat_production"].includes(control.semanticRole);
+        const analyticsActivity = activityRole && typeof value === "boolean" ? (value ? "on" : "off") : "unknown";
+        const availability = source.availability === "offline" || source.online === false ? "offline" : value === null ? "unknown" : "online";
+        const state = {
+          deviceId: dto.id, controlId: control.controlId, homeId: dto.homeId,
+          descriptorRevision: dto.descriptorRevision,
+          revision: Math.max(0, Number.isSafeInteger(entity?.stateRevision) ? entity.stateRevision : Number.isSafeInteger(entity?.revision) ? entity.revision : Math.floor(Number.isFinite(observedMs) ? observedMs : now)),
+          observedAt, receivedAt, quality, value, validUntil: new Date(Math.max(validUntilMs, (Number.isFinite(observedMs) ? observedMs : now) + 1)).toISOString(),
+          deviceAvailability: availability, analyticsActivity,
+        };
+        if (validateNativeControlState(state, dto, control)) states.push(state);
+      }
+    }
+    return states;
+  }
+
+  function nativeEnvelopeFor(principal, data, revision = 0, sequence = nativeSequence()) {
+    return makeNativeEnvelope({ homeId: String(principal.homeId), streamId: nativeStreamId(), sequence, generatedAt: new Date(clock()).toISOString(), revision, data });
+  }
+
+  function queueNativeEvent(record) {
+    nativeEventQueue = nativeEventQueue.then(async () => {
+      const security = hubStore.getSecurity?.() || {};
+      const sequence = Math.max(0, Number(security.nativeEventSequence || 0)) + 1;
+      const events = [...(Array.isArray(security.nativeEvents) ? security.nativeEvents : []), { ...record, sequence, generatedAt: new Date(clock()).toISOString() }].slice(-1024);
+      await hubStore.saveSecurity({ ...security, nativeEventSequence: sequence, nativeEvents: events });
+      const item = events[events.length - 1];
+      for (const client of [...nativeEventClients]) sendNativeEvent(client, item).catch(() => client.socket.close(1011, "Event unavailable"));
+    }).catch((error) => logger.warn(`[native-events] event journal write failed (${String(error?.code || "storage_unavailable")})`));
+    return nativeEventQueue;
+  }
+
+  async function sendNativeEvent(client, record) {
+    const principal = appSessionAuth(client.token);
+    if (!principal || principal.householdRole !== "TENANT" || principal.sub !== client.principal.sub || principal.sid !== client.principal.sid || principal.membershipId !== client.principal.membershipId || principal.homeId !== client.principal.homeId) {
+      client.socket.close(4401, "Session expired or revoked");
+      return;
+    }
+    const membershipFingerprint = crypto.createHash("sha256").update(String(principal.membershipId), "utf8").digest("hex");
+    if (record.membershipFingerprint && record.membershipFingerprint !== membershipFingerprint) return;
+    let data;
+    let revision = 0;
+    if (record.kind === "command") {
+      const entry = Object.values(hubStore.getSecurity?.()?.nativeCommandResults || {}).find((candidate) => candidate?.membershipFingerprint === membershipFingerprint && candidate?.result?.commandId === record.commandId);
+      if (!entry) return;
+      data = entry.result;
+    } else {
+      const device = hubStore.getDevice(String(record.deviceId || ""));
+      if (device && appCanReadDevice(principal, device)) {
+        const dto = nativeDevicesFor(principal).find((candidate) => candidate.id === String(record.deviceId));
+        if (!dto) return;
+        revision = dto.descriptorRevision;
+        if (record.kind === "state") {
+          data = nativeControlStates(principal, [dto]).find((state) => state.controlId === String(record.controlId));
+          if (!data) return;
+        } else {
+          data = { schemaVersion: "dinodia.v1", homeId: dto.homeId, deviceId: dto.id, catalogRevision: dto.descriptorRevision, controls: dto.controls, deletedControlIds: Array.isArray(record.deletedControlIds) ? record.deletedControlIds : [] };
+        }
+      } else {
+        if (record.kind !== "catalog" || record.removed !== true) return;
+        const saved = (Array.isArray(hubStore.getSecurity?.()?.nativeCatalogIndex) ? hubStore.getSecurity().nativeCatalogIndex : []).find((entry) => String(entry.deviceId) === String(record.deviceId));
+        const grantedAreas = new Set((principal.areaIds || []).map(String));
+        if (!saved || saved.homeId !== principal.homeId || !Array.isArray(saved.areaIds) || !saved.areaIds.length || !saved.areaIds.every((id) => grantedAreas.has(String(id))) || (saved.managementClass === "tenant_device" && saved.ownerMembershipId !== principal.membershipId)) return;
+        revision = Math.max(0, Number(saved.descriptorRevision || 0)) + 1;
+        data = { schemaVersion: "dinodia.v1", homeId: saved.homeId, deviceId: saved.deviceId, catalogRevision: revision, controls: [], deletedControlIds: Array.isArray(record.deletedControlIds) ? record.deletedControlIds : saved.controlIds };
+      }
+    }
+    const envelope = nativeEnvelopeFor(principal, data, revision, record.sequence);
+    if (envelope && client.socket.readyState === WebSocket.OPEN) client.socket.send(JSON.stringify(envelope));
+  }
+
+  eventBus.on("state_changed", (event = {}) => {
+    const entityId = String(event.entity_id || "");
+    if (!entityId) return;
+    const device = hubStore.listDevices().find((item) => Object.values(item.entities || {}).some((entity) => String(entity.id || entity.sourceId || "") === entityId));
+    if (!device) return;
+    const entity = Object.values(device.entities || {}).find((item) => String(item.id || item.sourceId || "") === entityId);
+    queueNativeEvent({ kind: "state", deviceId: String(device.id), controlId: String(entity?.capability?.controlId || entity?.controlId || entity?.id || entityId) });
+  });
+  eventBus.on("registry_updated", (event = {}) => {
+    if (event.registry !== "device") return;
+    const device = hubStore.listDevices().find((item) => [String(item.id), String(item.haDeviceId || "")].includes(String(event.id || "")));
+    if (device) queueNativeEvent({ kind: "catalog", deviceId: String(device.id) });
+  });
+  eventBus.on("registry_removed", (event = {}) => {
+    if (event.registry !== "device") return;
+    const id = String(event.id || "");
+    if (!id) return;
+    const prior = Array.isArray(hubStore.getSecurity?.()?.nativeCatalogIndex) ? hubStore.getSecurity().nativeCatalogIndex.find((item) => item.deviceId === id || item.alias === id) : null;
+    if (prior) queueNativeEvent({ kind: "catalog", deviceId: String(prior.deviceId), deletedControlIds: prior.controlIds || [], removed: true });
+  });
+
   function appCanCommandDevice(principal, device, body, entity, serviceId) {
     if (!appCanReadDevice(principal, device) || principal.householdRole !== "TENANT" || !principal.scope.includes("tenant:device-command")) return false;
     const descriptor = entity?.surface || entity?.entity || entity || {};
@@ -1416,12 +1595,17 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       return json(res, 403, { error: "Support sessions are read-only and limited to assigned diagnostics", errorCode: "support_scope_denied" });
     }
     if (scopedPrincipal && !(
-      (req.method === "GET" && (pathname === "/api/status" || pathname === "/api/devices" || pathname.startsWith("/api/devices/") || pathname === "/api/dinodia/v1/devices")) ||
+      (req.method === "GET" && (pathname === "/api/status" || pathname === "/api/devices" || pathname.startsWith("/api/devices/") || pathname === "/api/dinodia/v1/health" || pathname === "/api/dinodia/v1/snapshot" || pathname === "/api/dinodia/v1/areas" || pathname === "/api/dinodia/v1/devices" || /^\/api\/dinodia\/v1\/devices\/[^/]+$/.test(pathname) || pathname === "/api/dinodia/v1/control-catalog" || /^\/api\/dinodia\/v1\/commands\/[^/]+$/.test(pathname))) ||
       (req.method === "POST" && pathname === "/api/dinodia/v1/commands") ||
       (req.method === "POST" && pathname.includes("/entities/") && pathname.endsWith("/service")) ||
       (req.method === "POST" && pathname === "/api/step-up/descriptor-challenge")
     )) {
       return json(res, 403, { error: "This app principal is not permitted to use this OS route", errorCode: "insufficient_scope" });
+    }
+    if (pathname.startsWith("/api/dinodia/v1/") && runtimeConfig.nodeEnv === "production") {
+      const cloudOrigin = runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "";
+      const trustedCloud = isHiveCredentialTransportAllowed(req, { nodeEnv: "production", configuredHostname: cloudOrigin, allowLoopback: true });
+      if (req.socket?.encrypted !== true && !trustedCloud) return nativeContractError(res, 426, "HUB_UNAVAILABLE", "Native tenant transport requires the verified HTTPS hub endpoint", true);
     }
     if (pathname === "/api/health" && req.method === "GET") {
       const memory = process.memoryUsage();
@@ -1435,6 +1619,59 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       });
     }
 
+    // Native V1 routes are handled here and never passed to the HA-compatible
+    // router. The public health response intentionally contains no home,
+    // device, identity-key or credential material.
+    if (pathname === "/api/dinodia/v1/health" && req.method === "GET") {
+      return json(res, 200, { ok: true, schemaVersion: "dinodia.v1", mode: "native-v2" });
+    }
+
+    if (["/api/dinodia/v1/snapshot", "/api/dinodia/v1/areas", "/api/dinodia/v1/devices", "/api/dinodia/v1/control-catalog"].includes(pathname) && req.method === "GET") {
+      if (!scopedPrincipal || scopedPrincipal.principalType !== "app" || scopedPrincipal.householdRole !== "TENANT") return nativeContractError(res, 403, "SCOPE_DENIED", "An active selected tenant membership is required");
+      const platformHomeId = String(hubStore.getPlatform?.()?.homeId || "");
+      if (platformHomeId && String(scopedPrincipal.homeId || "") !== platformHomeId) return nativeContractError(res, 403, "HOME_MISMATCH", "The app session is for a different home");
+      const devices = nativeDevicesFor(scopedPrincipal);
+      await rememberNativeCatalog(devices);
+      let data;
+      if (pathname === "/api/dinodia/v1/snapshot") {
+        data = { areas: nativeAreasFor(scopedPrincipal), devices, states: nativeControlStates(scopedPrincipal, devices) };
+      } else if (pathname === "/api/dinodia/v1/areas") {
+        data = nativeAreasFor(scopedPrincipal);
+      } else if (pathname === "/api/dinodia/v1/control-catalog") {
+        const deviceId = String(url.searchParams.get("deviceId") || "");
+        const device = devices.find((item) => item.id === deviceId);
+        if (!device) return nativeContractError(res, 404, "RESOURCE_NOT_FOUND", "The selected device is unavailable");
+        data = { schemaVersion: "dinodia.v1", homeId: device.homeId, deviceId: device.id, catalogRevision: device.descriptorRevision, controls: device.controls, deletedControlIds: [] };
+      } else {
+        data = devices;
+      }
+      const revision = Array.isArray(devices) ? devices.reduce((highest, device) => Math.max(highest, device.descriptorRevision), 0) : 0;
+      const envelope = nativeEnvelopeFor(scopedPrincipal, data, revision);
+      return envelope ? json(res, 200, envelope) : nativeContractError(res, 503, "CONTROL_UNAVAILABLE", "The current Native V1 view cannot be represented safely", true);
+    }
+
+    const nativeDeviceDetail = pathname.match(/^\/api\/dinodia\/v1\/devices\/([^/]+)$/);
+    if (nativeDeviceDetail && req.method === "GET") {
+      if (!scopedPrincipal || scopedPrincipal.principalType !== "app" || scopedPrincipal.householdRole !== "TENANT") return nativeContractError(res, 403, "SCOPE_DENIED", "An active selected tenant membership is required");
+      const deviceId = decodeURIComponent(nativeDeviceDetail[1]);
+      const device = nativeDevicesFor(scopedPrincipal).find((item) => item.id === deviceId);
+      if (!device) return nativeContractError(res, 404, "RESOURCE_NOT_FOUND", "The selected device is unavailable");
+      await rememberNativeCatalog([device]);
+      const envelope = nativeEnvelopeFor(scopedPrincipal, device, device.descriptorRevision);
+      return envelope ? json(res, 200, envelope) : nativeContractError(res, 503, "CONTROL_UNAVAILABLE", "The current device descriptor cannot be represented safely", true);
+    }
+
+    const nativeCommandStatus = pathname.match(/^\/api\/dinodia\/v1\/commands\/([^/]+)$/);
+    if (nativeCommandStatus && req.method === "GET") {
+      if (!scopedPrincipal || scopedPrincipal.principalType !== "app" || scopedPrincipal.householdRole !== "TENANT") return nativeContractError(res, 403, "SCOPE_DENIED", "An active selected tenant membership is required");
+      const commandId = decodeURIComponent(nativeCommandStatus[1]);
+      const membershipFingerprint = crypto.createHash("sha256").update(String(scopedPrincipal.membershipId), "utf8").digest("hex");
+      const entries = Object.values(hubStore.getSecurity?.()?.nativeCommandResults || {});
+      const receipt = entries.find((entry) => entry?.membershipFingerprint === membershipFingerprint && entry?.result?.commandId === commandId);
+      if (!receipt) return nativeContractError(res, 404, "RESOURCE_NOT_FOUND", "The command receipt is unavailable to this membership");
+      return json(res, 200, receipt.result);
+    }
+
     // Canonical Stage 2 read boundary. The bearer remains home- and
     // membership-bound; internal HA-compatible records are projected to the
     // versioned Native DTO and never returned from this route.
@@ -1444,29 +1681,10 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       }
       const platformHomeId = String(hubStore.getPlatform?.()?.homeId || "");
       if (platformHomeId && String(scopedPrincipal.homeId || "") !== platformHomeId) return nativeContractError(res, 403, "HOME_MISMATCH", "The app session is for a different home");
-      const now = new Date().toISOString();
-      const areaIds = Array.isArray(scopedPrincipal.areaIds) ? scopedPrincipal.areaIds.map(String) : [];
-      const devices = hubStore.listDevices()
-        .filter((device) => appCanReadDevice(scopedPrincipal, device))
-        .map((device) => serializeNativeDevice({
-          device: nativeDeviceView(scopedPrincipal, device),
-          homeId: String(scopedPrincipal.homeId),
-          homeMembershipId: String(scopedPrincipal.membershipId),
-          role: String(scopedPrincipal.householdRole),
-          areaIds,
-          surfaces: allProjectedSurfaces(device),
-          revision: Number(device.presentation?.descriptorRevision || 0),
-        }))
-        .filter(Boolean);
+      const now = new Date(clock()).toISOString();
+      const devices = nativeDevicesFor(scopedPrincipal);
       const revision = devices.reduce((highest, device) => Math.max(highest, device.descriptorRevision), 0);
-      const envelope = makeNativeEnvelope({
-        homeId: String(scopedPrincipal.homeId),
-        streamId: `hub:${String(serial)}:device-catalog`,
-        sequence: Number(clock()),
-        generatedAt: now,
-        revision,
-        data: devices,
-      });
+      const envelope = nativeEnvelopeFor(scopedPrincipal, devices, revision);
       if (!envelope) return nativeContractError(res, 503, "CONTROL_UNAVAILABLE", "The current device catalogue cannot be represented safely", true);
       return json(res, 200, envelope);
     }
@@ -1545,7 +1763,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         }
 
         const result = { commandId: command.commandId, homeId: command.homeId, status: "accepted", acceptedAt: new Date(clock()).toISOString(), completedAt: null, errorCode: null };
-        commandResults[idempotencyHash] = { commandDigest, status: "dispatching", result };
+        const membershipFingerprint = crypto.createHash("sha256").update(String(scopedPrincipal.membershipId), "utf8").digest("hex");
+        commandResults[idempotencyHash] = { commandDigest, membershipFingerprint, deviceId: String(command.deviceId), controlId: String(command.controlId), status: "dispatching", result };
         const boundedEntries = Object.entries(commandResults).slice(-512);
         await hubStore.saveSecurity({ nativeCommandResults: Object.fromEntries(boundedEntries) });
         try {
@@ -1585,6 +1804,9 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
           if (!dispatchAuthorized) {
             commandResults[idempotencyHash] = {
               commandDigest,
+              membershipFingerprint,
+              deviceId: String(command.deviceId),
+              controlId: String(command.controlId),
               status: "rejected",
               result: { commandId: command.commandId, homeId: command.homeId, status: "denied", acceptedAt: null, completedAt: null, errorCode: "AUTHORITY_CHANGED_BEFORE_DISPATCH" },
             };
@@ -1593,11 +1815,12 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
           }
           const dispatched = await dispatchNativeCommand(currentPrincipal, dispatchDevice, dispatchControl, command.value);
           if (!dispatched) throw Object.assign(new Error("The current protocol binding is unavailable"), { code: "CONTROL_BINDING_UNAVAILABLE" });
-          commandResults[idempotencyHash] = { commandDigest, status: "accepted", result };
+          commandResults[idempotencyHash] = { commandDigest, membershipFingerprint, deviceId: String(command.deviceId), controlId: String(command.controlId), status: "accepted", result };
+          queueNativeEvent({ kind: "command", deviceId: String(command.deviceId), commandId: String(command.commandId), membershipFingerprint });
           await hubStore.saveSecurity({ nativeCommandResults: Object.fromEntries(Object.entries(commandResults).slice(-512)) });
           return json(res, 202, result);
         } catch {
-          commandResults[idempotencyHash] = { commandDigest, status: "uncertain", result: { ...result, status: "uncertain", errorCode: "COMMAND_OUTCOME_UNCERTAIN" } };
+          commandResults[idempotencyHash] = { commandDigest, membershipFingerprint, deviceId: String(command.deviceId), controlId: String(command.controlId), status: "uncertain", result: { ...result, status: "uncertain", errorCode: "COMMAND_OUTCOME_UNCERTAIN" } };
           await hubStore.saveSecurity({ nativeCommandResults: Object.fromEntries(Object.entries(commandResults).slice(-512)) }).catch(() => {});
           return nativeContractError(res, 502, "COMMAND_UNCERTAIN", "The hub could not confirm whether the device applied the command; it will not resend automatically", true);
         }
@@ -2542,7 +2765,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     return pathname === dashboardAdminPrefix || pathname.startsWith(`${dashboardAdminPrefix}/`);
   }
   function isNativeAppRoute(req, url) {
-    return (req.method === "GET" && url.pathname === "/api/dinodia/v1/devices")
+    return (req.method === "GET" && (url.pathname === "/api/dinodia/v1/snapshot" || url.pathname === "/api/dinodia/v1/areas" || url.pathname === "/api/dinodia/v1/devices" || /^\/api\/dinodia\/v1\/devices\/[^/]+$/.test(url.pathname) || url.pathname === "/api/dinodia/v1/control-catalog" || /^\/api\/dinodia\/v1\/commands\/[^/]+$/.test(url.pathname)))
       || (req.method === "POST" && (url.pathname === "/api/dinodia/v1/commands" || url.pathname === "/api/step-up/descriptor-challenge"));
   }
   function isHaCompatibilityPath(pathname) {
@@ -3166,6 +3389,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   }
   async function handleUnifiedRequest(req, res) {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+    if (url.pathname === "/api/dinodia/v1/health" && req.method === "GET") return json(res, 200, { ok: true, schemaVersion: "dinodia.v1", mode: "native-v2" });
     if (url.pathname === "/_dinodia/cloud-challenge" && req.method === "GET") {
       const remote = isHiveCredentialTransportAllowed(req, { nodeEnv: runtimeConfig.nodeEnv, configuredHostname: runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "", allowLoopback: false });
       if (!remote) return json(res, 404, { error: "Not found" });
@@ -3215,8 +3439,49 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     if (isHaCompatibilityPath(url.pathname)) return haCompat.handleHttp(req, res);
     return handleDashboardRequest(req, res, url);
   }
+  const nativeEventServer = new WebSocket.Server({ noServer: true, maxPayload: 16 * 1024 });
   const server = http.createServer(handleUnifiedRequest);
-  server.on("upgrade", haCompat.handleUpgrade);
+  server.on("upgrade", (req, socket, head) => {
+    let url;
+    try { url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`); }
+    catch { socket.destroy(); return; }
+    if (url.pathname === "/api/dinodia/v1/events") {
+      const token = bearerToken(req);
+      const principal = appSessionAuth(token);
+      const afterText = url.searchParams.get("after") || "0";
+      const after = /^(?:0|[1-9]\d{0,15})$/.test(afterText) ? Number(afterText) : NaN;
+      const productionTransportAllowed = runtimeConfig.nodeEnv !== "production"
+        || req.socket?.encrypted === true
+        || isHiveCredentialTransportAllowed(req, { nodeEnv: "production", configuredHostname: runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "", allowLoopback: true });
+      if (!productionTransportAllowed) { socket.end("HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\n\r\n"); return; }
+      if (!principal || principal.householdRole !== "TENANT" || !principal.scope?.includes("tenant:device-command")) { socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n"); return; }
+      if (!Number.isSafeInteger(after) || after < 0) { socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"); return; }
+      const platformHomeId = String(hubStore.getPlatform?.()?.homeId || "");
+      if (platformHomeId && principal.homeId !== platformHomeId) { socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n"); return; }
+      nativeEventServer.handleUpgrade(req, socket, head, (clientSocket) => {
+        const client = { socket: clientSocket, token, principal };
+        nativeEventClients.add(client);
+        clientSocket.once("close", () => { nativeEventClients.delete(client); clearInterval(client.authTimer); });
+        const security = hubStore.getSecurity?.() || {};
+        const events = Array.isArray(security.nativeEvents) ? security.nativeEvents : [];
+        const oldest = events.length ? Number(events[0].sequence) : Number(security.nativeEventSequence || 0) + 1;
+        if (after > 0 && after < oldest - 1) {
+          clientSocket.send(JSON.stringify({ error: { code: "RESNAPSHOT_REQUIRED", message: "The requested event cursor is no longer retained", requestId: crypto.randomUUID(), retryable: true } }));
+          clientSocket.close(4409, "Resnapshot required");
+          return;
+        }
+        client.authTimer = setInterval(() => {
+          const current = appSessionAuth(token);
+          if (!current || current.sub !== principal.sub || current.sid !== principal.sid || current.membershipId !== principal.membershipId || current.homeId !== principal.homeId) clientSocket.close(4401, "Session expired or revoked");
+        }, 5000);
+        client.authTimer.unref?.();
+        for (const event of events.filter((entry) => Number(entry.sequence) > after)) sendNativeEvent(client, event).catch(() => clientSocket.close(1011, "Event unavailable"));
+      });
+      return;
+    }
+    if (url.pathname.startsWith("/api/dinodia/v1/")) { socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n"); return; }
+    haCompat.handleUpgrade(req, socket, head);
+  });
 
   async function start() {
     if (runtimeConfig.nodeEnv === "production" && legacyCompatibilityEnabled) throw new Error("Legacy dashboard authentication cannot be enabled in production");

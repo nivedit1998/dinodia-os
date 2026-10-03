@@ -33,6 +33,19 @@ function websocketMessage(socket) {
   });
 }
 
+function websocketMessageMatching(socket, predicate, timeoutMs = 2500) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { socket.off("message", onMessage); reject(new Error("Expected Native V1 event did not arrive")); }, timeoutMs);
+    const onMessage = (data) => {
+      let value;
+      try { value = JSON.parse(data.toString()); } catch { return; }
+      if (!predicate(value)) return;
+      clearTimeout(timer); socket.off("message", onMessage); resolve(value);
+    };
+    socket.on("message", onMessage);
+  });
+}
+
 test("production rejects legacy admin, HA, bootstrap and dashboard credentials", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-stage1-production-boundary-"));
   const hub = createHub({
@@ -263,6 +276,7 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
   await hub.start();
   const base = `http://127.0.0.1:${hub.server.address().port}`;
   let socket;
+  let nativeSocket;
   let releaseQueuedCommand = () => {};
   let restoreSaveSecurity = () => {};
   try {
@@ -280,6 +294,28 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     assert.ok(dto.descriptorRevision >= 1, "installed controls have a nonzero descriptor revision suitable for operation-bound step-up");
     assert.equal(dto.customerLabel.length, 40, "an over-bound legacy label is safely bounded without dropping the device");
     assert.equal(dto.controls.length, 2, "label projection must preserve the device's control descriptors");
+    const nativeSnapshot = await request(base, "/api/dinodia/v1/snapshot", { headers });
+    assert.equal(nativeSnapshot.response.status, 200, JSON.stringify(nativeSnapshot.body));
+    assert.equal(nativeSnapshot.body.homeId, "home-command");
+    assert.match(nativeSnapshot.body.streamId, /^native:[0-9a-f-]{36}$/i, "the event stream identity is opaque and persisted, not derived from the hub serial");
+    assert.equal(nativeSnapshot.body.streamId.includes("native-command-hub"), false, "the public stream envelope never exposes the hub serial");
+    assert.deepEqual(nativeSnapshot.body.data.devices.map((item) => item.id), [deviceId]);
+    assert.ok(nativeSnapshot.body.data.states.some((state) => state.deviceId === deviceId && state.homeId === "home-command"));
+    nativeSocket = new WebSocket(`${base.replace("http", "ws")}/api/dinodia/v1/events?after=${nativeSnapshot.body.sequence}`, { headers });
+    await new Promise((resolve, reject) => { nativeSocket.once("open", resolve); nativeSocket.once("error", reject); });
+    const nativeAreas = await request(base, "/api/dinodia/v1/areas", { headers });
+    assert.equal(nativeAreas.response.status, 200);
+    assert.deepEqual(nativeAreas.body.data.map((item) => item.id), ["area-uuid-command-kitchen"]);
+    const nativeDetail = await request(base, `/api/dinodia/v1/devices/${encodeURIComponent(deviceId)}`, { headers });
+    assert.equal(nativeDetail.response.status, 200);
+    assert.equal(nativeDetail.body.data.id, deviceId);
+    const nativeControlCatalog = await request(base, `/api/dinodia/v1/control-catalog?deviceId=${encodeURIComponent(deviceId)}`, { headers });
+    assert.equal(nativeControlCatalog.response.status, 200);
+    assert.equal(nativeControlCatalog.body.data.controls.length, 2);
+    const otherTenant = appToken({ iss: "dinodia-platform-v2", aud: "dinodia-hub:native-command-hub", sub: "account-command-other", sid: "sid-command-other", jti: "jti-command-other", membershipId: "membership-command-other", trustedDeviceId: "trusted-command-other", hubInstallationId: "native-command-hub", iat: now, exp: now + 300, homeId: "home-command", householdRole: "TENANT", areaIds: ["area-uuid-command-kitchen"], policyRevision: 0, scope: ["tenant:device-command"] }, keys.privateKey);
+    const privateDetail = await request(base, `/api/dinodia/v1/devices/${encodeURIComponent(deviceId)}`, { headers: { authorization: `Bearer ${otherTenant}` } });
+    assert.equal(privateDetail.response.status, 404);
+    assert.equal(JSON.stringify(privateDetail.body).includes("Kitchen switch"), false);
     const storedDevice = hub.store.getDevice(deviceId);
     for (const [length, expectedLength] of [[0, deviceId.length], [1, 1], [40, 40], [41, 40], [80, 40]]) {
       await hub.store.upsertDevice({ ...storedDevice, name: "L".repeat(length) || deviceId });
@@ -383,6 +419,14 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     assert.equal(accepted.response.status, 202, JSON.stringify(accepted.body));
     assert.equal(accepted.body.status, "accepted");
     assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON");
+    const streamedCommand = await websocketMessageMatching(nativeSocket, (item) => item.data?.commandId === command.commandId);
+    assert.equal(streamedCommand.homeId, "home-command");
+    assert.ok(streamedCommand.sequence > nativeSnapshot.body.sequence, "Native events have monotonic resume sequence after the snapshot cursor");
+    const commandReceipt = await request(base, `/api/dinodia/v1/commands/${encodeURIComponent(command.commandId)}`, { headers });
+    assert.equal(commandReceipt.response.status, 200);
+    assert.equal(commandReceipt.body.status, "accepted");
+    const foreignReceipt = await request(base, `/api/dinodia/v1/commands/${encodeURIComponent(command.commandId)}`, { headers: { authorization: `Bearer ${otherTenant}` } });
+    assert.equal(foreignReceipt.response.status, 404, "another membership cannot retrieve a command receipt");
     const dispatchCount = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
     const retry = await send(command);
     assert.equal(retry.response.status, 202);
@@ -621,7 +665,7 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     assert.equal(JSON.stringify(revokedPolicyCommand.body).includes(deviceId), false, "revoked command denial does not reveal the device identity");
     assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, beforeRevokedPolicyCommand, "a stale policy token creates no command event");
     assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON", "a stale policy token has zero fake-device effect");
-  } finally { releaseQueuedCommand(); restoreSaveSecurity(); socket?.close(); await hub.stop(); }
+  } finally { releaseQueuedCommand(); restoreSaveSecurity(); nativeSocket?.close(); socket?.close(); await hub.stop(); }
 });
 
 test("support operator sessions are read-only and cannot leak private tenant devices", async () => {

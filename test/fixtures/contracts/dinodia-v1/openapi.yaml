@@ -131,9 +131,10 @@ paths:
               schema: { $ref: "./contract.json#/$defs/customerSessionLogoutReceipt" }
   /api/v2/hub-sessions:
     post:
-      summary: "Issue Selected Home Hub Session"
+      summary: "Issue Selected Tenant Home Hub Session"
       operationId: issueSelectedHomeHubSession
       tags: [Session]
+      description: "Requires an active selected TENANT membership. OWNER and PROPERTY_MANAGER sessions are denied and receive no direct OS endpoint or bearer; those roles use the Platform projection."
       security: [{ CustomerSessionCookie: [] }]
       requestBody:
         required: true
