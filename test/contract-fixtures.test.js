@@ -334,3 +334,147 @@ test('custom presentation labels never infer control semantics and descriptor co
   malformed.controls[1].constraints = { minimum: 0, maximum: 100, step: 0 };
   assert.equal(c.validateDevice(malformed), false);
 });
+
+test('OS executes every indexed direct-device fixture through its Native V1 validators', () => {
+  const index = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/index.json'), 'utf8'));
+  const indexedCases = {
+    'tenant.devices.list': [
+      'fixtures/selected-tenant-property-device.json',
+      'fixtures/selected-tenant-private-device.json',
+      'fixtures/multi-control-device.json',
+      'fixtures/invalid/tenant-device-wrong-owner.json',
+      'fixtures/invalid/wrong-home-envelope.json',
+      'fixtures/invalid/writable-unreadable-control.json',
+      'fixtures/invalid/device-invalid-step-up-policy.json',
+      'fixtures/invalid/duplicate-device-control-id.json',
+      'fixtures/invalid/control-state-option-outside-descriptor.json',
+      'fixtures/customer-label-unicode-boundaries.json',
+    ],
+    'tenant.device.detail': [
+      'fixtures/multi-control-device.json',
+      'fixtures/control-catalog-change.json',
+      'fixtures/invalid/device-invalid-step-up-policy.json',
+      'fixtures/invalid/duplicate-device-control-id.json',
+      'fixtures/invalid/control-state-option-outside-descriptor.json',
+      'fixtures/bounded-string-unicode-semantics.json',
+      'fixtures/prototype-scenarios.json',
+    ],
+    'tenant.device.command': [
+      'fixtures/command-valid.json',
+      'fixtures/invalid/stale-descriptor-command.json',
+      'fixtures/invalid/impossible-calendar-date-command.json',
+      'fixtures/invalid/device-invalid-step-up-policy.json',
+      'fixtures/invalid/duplicate-device-control-id.json',
+      'fixtures/bounded-string-unicode-semantics.json',
+      'fixtures/control-catalog-change.json',
+      'fixtures/prototype-scenarios.json',
+    ],
+  };
+  const read = (reference) => JSON.parse(fs.readFileSync(path.join(root, reference), 'utf8'));
+  const sourceDevice = read('fixtures/multi-control-device.json').device;
+  const commandFixture = read('fixtures/command-valid.json');
+  const deviceContext = (fixture) => ({
+    homeId: fixture.context.homeId,
+    homeMembershipId: fixture.context.homeMembershipId,
+    role: fixture.context.role,
+    areaIds: fixture.context.areaIds,
+  });
+  const validateMutatedDescriptor = (mutation) => {
+    const source = read(mutation.sourceFixture);
+    const device = structuredClone(source.device);
+    if (mutation.mutation) {
+      const control = device.controls.find((item) => item.controlId === mutation.mutation.controlId);
+      assert.ok(control, `${mutation.sourceFixture} contains the indexed mutation target`);
+      Object.assign(control, mutation.mutation);
+    } else if (mutation.controlId) {
+      const control = device.controls.find((item) => item.controlId === mutation.controlId);
+      assert.ok(control, `${mutation.sourceFixture} contains the indexed mutation target`);
+      control[mutation.field] = mutation.invalidValue;
+    } else {
+      const target = device.controls.find((item) => item.controlId === mutation.targetControlId);
+      assert.ok(target, `${mutation.sourceFixture} contains the indexed duplicate target`);
+      target.controlId = mutation.duplicateControlId;
+    }
+    assert.equal(c.validateDevice(device), false, mutation.expected || mutation.expectedOutcome);
+  };
+  const execute = (screen, reference) => {
+    if (reference === 'fixtures/prototype-scenarios.json') return 'swift-rendered-prototype-owned';
+    if (reference === 'fixtures/selected-tenant-property-device.json' ||
+        reference === 'fixtures/selected-tenant-private-device.json') {
+      const fixture = read(reference);
+      assert.equal(c.validateDevice(fixture.device, deviceContext(fixture)), true, reference);
+    } else if (reference === 'fixtures/multi-control-device.json') {
+      assert.equal(c.validateDevice(read(reference).device), true, reference);
+    } else if (reference === 'fixtures/invalid/tenant-device-wrong-owner.json') {
+      const fixture = read(reference);
+      assert.equal(c.validateDevice(fixture.device, { ...fixture.context, role: 'TENANT' }), false, reference);
+    } else if (reference === 'fixtures/invalid/wrong-home-envelope.json') {
+      const fixture = read(reference);
+      assert.equal(c.validateEnvelope(fixture, fixture.data.expectedSelectedHomeId), false, reference);
+    } else if (reference === 'fixtures/invalid/writable-unreadable-control.json' ||
+               reference === 'fixtures/invalid/device-invalid-step-up-policy.json' ||
+               reference === 'fixtures/invalid/duplicate-device-control-id.json') {
+      validateMutatedDescriptor(read(reference));
+    } else if (reference === 'fixtures/invalid/control-state-option-outside-descriptor.json') {
+      const fixture = read(reference);
+      const control = fixture.device.controls.find((item) => item.controlId === fixture.state.controlId);
+      assert.ok(control);
+      assert.equal(c.validateDevice(fixture.device), true, reference);
+      assert.equal(c.validateControlState(fixture.validState, fixture.device, control), true, `${reference}:valid state`);
+      assert.equal(c.validateControlState(fixture.state, fixture.device, control), false, `${reference}:out-of-descriptor value`);
+    } else if (reference === 'fixtures/customer-label-unicode-boundaries.json') {
+      const fixture = read(reference);
+      for (const item of fixture.cases) {
+        const raw = typeof item.value === 'string' ? item.value : String(item.repeat || '').repeat(Number(item.repeatCount || 0));
+        const candidate = { ...sourceDevice, customerLabel: raw };
+        assert.equal(c.validateDevice(candidate), item.wireValid, `${item.id}: Native V1 device validator`);
+      }
+    } else if (reference === 'fixtures/control-catalog-change.json') {
+      const fixture = read(reference);
+      const current = { ...sourceDevice, descriptorRevision: fixture.catalog.catalogRevision, controls: fixture.catalog.controls };
+      assert.equal(c.validateDevice(current), true, `${screen}: updated catalog`);
+      const control = current.controls.find((item) => item.controlId === 'control:power');
+      assert.ok(control);
+      const stale = { ...commandFixture, controlId: control.controlId, descriptorRevision: sourceDevice.descriptorRevision, value: true };
+      assert.equal(c.validateCommand(stale, current, control, stale.homeMembershipId), false, `${screen}: stale queued descriptor`);
+    } else if (reference === 'fixtures/command-valid.json') {
+      const device = sourceDevice;
+      const control = device.controls.find((item) => item.controlId === commandFixture.controlId);
+      assert.ok(control);
+      assert.equal(c.validateCommand(commandFixture, device, control, commandFixture.homeMembershipId), true, reference);
+    } else if (reference === 'fixtures/invalid/stale-descriptor-command.json') {
+      const fixture = read(reference);
+      const control = sourceDevice.controls.find((item) => item.controlId === fixture.command.controlId);
+      assert.ok(control);
+      assert.equal(c.validateCommand(fixture.command, sourceDevice, control, fixture.command.homeMembershipId), false, reference);
+    } else if (reference === 'fixtures/invalid/impossible-calendar-date-command.json') {
+      const fixture = read(reference);
+      const command = fixture.command;
+      const control = sourceDevice.controls.find((item) => item.controlId === command.controlId);
+      assert.ok(control);
+      assert.equal(c.validateCommand(command, sourceDevice, control, command.homeMembershipId), false, reference);
+    } else if (reference === 'fixtures/bounded-string-unicode-semantics.json') {
+      const fixture = read(reference);
+      const text = fixture.boundaryCases.find((item) => item.field === 'textCommand');
+      assert.ok(text);
+      const control = { ...sourceDevice.controls[0], valueType: 'text', interactionKind: 'text_input' };
+      const device = { ...sourceDevice, controls: [control] };
+      const command = (value) => ({ ...commandFixture, controlId: control.controlId, value });
+      assert.equal(c.validateCommand(command(text.repeat.repeat(text.validRepeatCount)), device, control, commandFixture.homeMembershipId), true, `${screen}: bounded text accepted`);
+      assert.equal(c.validateCommand(command(text.repeat.repeat(text.invalidRepeatCount)), device, control, commandFixture.homeMembershipId), false, `${screen}: over-bound text denied`);
+    } else {
+      assert.fail(`${screen} has no executable Native V1 owner for indexed fixture ${reference}`);
+    }
+    return reference;
+  };
+
+  for (const [screen, expectedReferences] of Object.entries(indexedCases)) {
+    assert.deepEqual(index.screenFixtures[screen], expectedReferences, `${screen}: update the OS executor when its canonical fixture inventory changes`);
+    let osOwned = 0;
+    for (const reference of expectedReferences) {
+      const owner = execute(screen, reference);
+      if (owner !== 'swift-rendered-prototype-owned') osOwned += 1;
+    }
+    assert.equal(osOwned, expectedReferences.length - (expectedReferences.includes('fixtures/prototype-scenarios.json') ? 1 : 0));
+  }
+});
