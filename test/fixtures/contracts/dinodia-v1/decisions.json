@@ -223,6 +223,20 @@
     "propertyManagersMayBeMultiple": true,
     "accountDeletionRemovesFinalRelationshipOnly": true,
     "accountDeletionRetainsOtherHomeMemberships": true,
+    "accountRetainingRelationshipKinds": [
+      "active_membership",
+      "unexpired_invitation",
+      "valid_pending_access_request",
+      "durable_pending_property_setup"
+    ],
+    "accountNonRetainingRelationshipKinds": [
+      "expired_invitation",
+      "rejected_invitation",
+      "cancelled_request",
+      "expired_claim_reservation",
+      "open_support_ticket",
+      "closed_support_ticket"
+    ],
     "retiredDeviceHistoricalAnalyticsRetained": true,
     "deviceIdentityMergeRequiresProtocolEvidence": true,
     "nameBasedIdentityMerge": false
@@ -360,6 +374,16 @@
     "fullHomeBundle": true,
     "deterministicSort": true,
     "atomicApply": true,
+    "propertyImpactProjection": {
+      "roles": ["OWNER", "PROPERTY_MANAGER"],
+      "requiresCurrentSelectedMembership": true,
+      "includesTenantNameAndSchedule": true,
+      "includesOnlyAffectedPermanentDevices": true,
+      "omitsPrivateOnlyAutomations": true,
+      "omitsTenantDeviceIdsAndPrivateActionValues": true,
+      "disableDeleteRequireOperationBoundStepUp": true,
+      "projectionIsReadOnly": true
+    },
     "maximumOccurrences": 500,
     "maximumExecutionSummaries": 500,
     "historyDays": 90,

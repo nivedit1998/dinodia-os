@@ -1,0 +1,155 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "homes": [
+    {
+      "homeId": "home:decision-fixture",
+      "revision": 12,
+      "ownerMembershipIds": ["membership:owner"],
+      "managerMembershipIds": ["membership:manager-one", "membership:manager-two"],
+      "automations": [
+        {
+          "automationId": "automation:shared-evening",
+          "homeId": "home:decision-fixture",
+          "tenantName": "Taylor Tenant",
+          "name": "Evening light",
+          "schedule": { "timezone": "Europe/London", "daysOfWeek": [1, 2, 3, 4, 5], "localTime": "19:00" },
+          "targets": [
+            { "deviceId": "device:permanent-radiator", "managementClass": "property_device", "displayName": "Hall radiator" },
+            { "deviceId": "device:private-sensor-NEVER-RENDER", "managementClass": "tenant_device", "displayName": "Private sensor NEVER RENDER", "privateActionValue": "private-value-NEVER-RENDER" }
+          ]
+        },
+        {
+          "automationId": "automation:private-only-NEVER-RENDER",
+          "homeId": "home:decision-fixture",
+          "tenantName": "Taylor Tenant",
+          "name": "Private-only rule NEVER RENDER",
+          "schedule": { "timezone": "Europe/London", "daysOfWeek": [1, 2, 3, 4, 5], "localTime": "06:15" },
+          "targets": [
+            { "deviceId": "device:private-only-NEVER-RENDER", "managementClass": "tenant_device", "displayName": "Personal actuator NEVER RENDER", "privateActionValue": "private-only-value-NEVER-RENDER" }
+          ]
+        }
+      ]
+    },
+    {
+      "homeId": "home:owner-property",
+      "revision": 4,
+      "ownerMembershipIds": ["membership:owner-property"],
+      "managerMembershipIds": [],
+      "automations": [
+        {
+          "automationId": "automation:owner-property-shared",
+          "homeId": "home:owner-property",
+          "tenantName": "Morgan Tenant",
+          "name": "Night heating",
+          "schedule": { "timezone": "Europe/London", "daysOfWeek": [1, 2, 3, 4, 5, 6, 7], "localTime": "22:30" },
+          "targets": [
+            { "deviceId": "device:owner-property-radiator", "managementClass": "property_device", "displayName": "Kitchen radiator" },
+            { "deviceId": "device:owner-private-NEVER-RENDER", "managementClass": "tenant_device", "displayName": "Private plug NEVER RENDER", "privateActionValue": "private-owner-value-NEVER-RENDER" }
+          ]
+        }
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "owner-current-membership",
+      "request": { "homeId": "home:owner-property", "membershipId": "membership:owner-property", "role": "OWNER", "membershipCurrent": true },
+      "expectedDecision": "PROJECTED",
+      "expectedProjection": {
+        "schemaVersion": "dinodia.v1",
+        "homeId": "home:owner-property",
+        "membershipId": "membership:owner-property",
+        "role": "OWNER",
+        "revision": 4,
+        "automations": [
+          {
+            "automationId": "automation:owner-property-shared",
+            "tenantName": "Morgan Tenant",
+            "name": "Night heating",
+            "schedule": { "timezone": "Europe/London", "daysOfWeek": [1, 2, 3, 4, 5, 6, 7], "localTime": "22:30" },
+            "affectedPermanentDevices": [{ "deviceId": "device:owner-property-radiator", "displayName": "Kitchen radiator" }],
+            "availableActions": ["disable", "delete"],
+            "stepUpRequired": true
+          }
+        ]
+      },
+      "expectedProtectedEffects": 0
+    },
+    {
+      "id": "manager-one-current-membership",
+      "request": { "homeId": "home:decision-fixture", "membershipId": "membership:manager-one", "role": "PROPERTY_MANAGER", "membershipCurrent": true },
+      "expectedDecision": "PROJECTED",
+      "expectedProjection": {
+        "schemaVersion": "dinodia.v1",
+        "homeId": "home:decision-fixture",
+        "membershipId": "membership:manager-one",
+        "role": "PROPERTY_MANAGER",
+        "revision": 12,
+        "automations": [
+          {
+            "automationId": "automation:shared-evening",
+            "tenantName": "Taylor Tenant",
+            "name": "Evening light",
+            "schedule": { "timezone": "Europe/London", "daysOfWeek": [1, 2, 3, 4, 5], "localTime": "19:00" },
+            "affectedPermanentDevices": [{ "deviceId": "device:permanent-radiator", "displayName": "Hall radiator" }],
+            "availableActions": ["disable", "delete"],
+            "stepUpRequired": true
+          }
+        ]
+      },
+      "expectedProtectedEffects": 0
+    },
+    {
+      "id": "manager-two-current-membership",
+      "request": { "homeId": "home:decision-fixture", "membershipId": "membership:manager-two", "role": "PROPERTY_MANAGER", "membershipCurrent": true },
+      "expectedDecision": "PROJECTED",
+      "expectedProjection": {
+        "schemaVersion": "dinodia.v1",
+        "homeId": "home:decision-fixture",
+        "membershipId": "membership:manager-two",
+        "role": "PROPERTY_MANAGER",
+        "revision": 12,
+        "automations": [
+          {
+            "automationId": "automation:shared-evening",
+            "tenantName": "Taylor Tenant",
+            "name": "Evening light",
+            "schedule": { "timezone": "Europe/London", "daysOfWeek": [1, 2, 3, 4, 5], "localTime": "19:00" },
+            "affectedPermanentDevices": [{ "deviceId": "device:permanent-radiator", "displayName": "Hall radiator" }],
+            "availableActions": ["disable", "delete"],
+            "stepUpRequired": true
+          }
+        ]
+      },
+      "expectedProtectedEffects": 0
+    },
+    {
+      "id": "tenant-role-denied",
+      "request": { "homeId": "home:decision-fixture", "membershipId": "membership:tenant-a", "role": "TENANT", "membershipCurrent": true },
+      "expectedDecision": "DENIED_NO_PROJECTION",
+      "expectedProjection": { "automations": [] },
+      "expectedProtectedEffects": 0
+    },
+    {
+      "id": "manager-wrong-home-denied",
+      "request": { "homeId": "home:owner-property", "membershipId": "membership:manager-one", "role": "PROPERTY_MANAGER", "membershipCurrent": true },
+      "expectedDecision": "DENIED_NO_PROJECTION",
+      "expectedProjection": { "automations": [] },
+      "expectedProtectedEffects": 0
+    },
+    {
+      "id": "manager-revoked-membership-denied",
+      "request": { "homeId": "home:decision-fixture", "membershipId": "membership:manager-one", "role": "PROPERTY_MANAGER", "membershipCurrent": false },
+      "expectedDecision": "DENIED_NO_PROJECTION",
+      "expectedProjection": { "automations": [] },
+      "expectedProtectedEffects": 0
+    },
+    {
+      "id": "unknown-manager-denied",
+      "request": { "homeId": "home:decision-fixture", "membershipId": "membership:manager-outsider", "role": "PROPERTY_MANAGER", "membershipCurrent": true },
+      "expectedDecision": "DENIED_NO_PROJECTION",
+      "expectedProjection": { "automations": [] },
+      "expectedProtectedEffects": 0
+    }
+  ]
+}

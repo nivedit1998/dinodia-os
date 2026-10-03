@@ -81,3 +81,22 @@ test("installer build identity changes when the locked setup runtime changes", a
   const afterPairing = validateCandidate({ sourceDir: candidate, envFile: fixtureData.envFile, identityDir: fixtureData.identityDir });
   assert.notEqual(afterPairing.buildId, afterIdentityBroker.buildId);
 });
+
+test("installer build identity ignores Python bytecode excluded from release archives", async () => {
+  const fixtureData = await fixture();
+  const candidate = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-bytecode-build-"));
+  await fs.cp(sourceDir, candidate, { recursive: true, filter: (entry) => !entry.includes("node_modules") && !entry.includes(".git") });
+  const before = validateCandidate({ sourceDir: candidate, envFile: fixtureData.envFile, identityDir: fixtureData.identityDir });
+
+  const cacheDir = path.join(candidate, "src", "integrations", "hive", "python", "__pycache__");
+  await fs.mkdir(cacheDir, { recursive: true });
+  await fs.writeFile(path.join(cacheDir, "generated-during-local-test.cpython-314.pyc"), Buffer.from([0xde, 0xad, 0xbe, 0xef]));
+  const afterCacheFile = validateCandidate({ sourceDir: candidate, envFile: fixtureData.envFile, identityDir: fixtureData.identityDir });
+  assert.equal(afterCacheFile.buildId, before.buildId);
+
+  await fs.rm(cacheDir, { recursive: true, force: true });
+  await fs.mkdir(path.join(candidate, "src", "integrations", "hive", "python"), { recursive: true });
+  await fs.writeFile(path.join(candidate, "src", "integrations", "hive", "python", "generated-outside-cache.pyc"), Buffer.from([0xca, 0xfe]));
+  const afterStandaloneBytecode = validateCandidate({ sourceDir: candidate, envFile: fixtureData.envFile, identityDir: fixtureData.identityDir });
+  assert.equal(afterStandaloneBytecode.buildId, before.buildId);
+});

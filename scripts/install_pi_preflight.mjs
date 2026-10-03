@@ -42,6 +42,11 @@ function sourceFingerprint(sourceDir) {
     if (!fs.existsSync(rootPath)) continue;
     const visit = (directory) => {
       for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        // Python bytecode is generated locally and is intentionally excluded
+        // from release archives. It must not make source and packaged build
+        // identities disagree (or make builds depend on a developer's Python).
+        if (entry.isDirectory() && entry.name === "__pycache__") continue;
+        if (entry.isFile() && entry.name.endsWith(".pyc")) continue;
         const absolute = path.join(directory, entry.name);
         if (entry.isDirectory()) visit(absolute);
         else if (entry.isFile() || entry.isSymbolicLink()) files.push(path.relative(sourceDir, absolute));

@@ -1,0 +1,11 @@
+{
+  "sourceFixture": "fixtures/automation-property-impact.json",
+  "caseId": "manager-one-current-membership",
+  "automationId": "automation:shared-evening",
+  "targetDeviceId": "device:permanent-radiator",
+  "addField": "ownerMembershipId",
+  "addValue": "membership:forged-authority",
+  "expectedDecision": "DENIED_NO_PROJECTION",
+  "expectedProjection": { "automations": [] },
+  "expectedProtectedEffects": 0
+}
