@@ -369,6 +369,18 @@ test('OS executes every indexed direct-device fixture through its Native V1 vali
       'fixtures/control-catalog-change.json',
       'fixtures/prototype-scenarios.json',
     ],
+    'owner.devices.inventory': [
+      'fixtures/multi-control-device.json',
+      'fixtures/deleted-device-tombstone.json',
+      'fixtures/customer-label-unicode-boundaries.json',
+      'fixtures/bounded-string-unicode-semantics.json',
+    ],
+    'owner.device.information': [
+      'fixtures/multi-control-device.json',
+      'fixtures/control-catalog-change.json',
+      'fixtures/invalid/duplicate-device-control-id.json',
+      'fixtures/prototype-scenarios.json',
+    ],
   };
   const read = (reference) => JSON.parse(fs.readFileSync(path.join(root, reference), 'utf8'));
   const sourceDevice = read('fixtures/multi-control-device.json').device;
@@ -405,6 +417,8 @@ test('OS executes every indexed direct-device fixture through its Native V1 vali
       assert.equal(c.validateDevice(fixture.device, deviceContext(fixture)), true, reference);
     } else if (reference === 'fixtures/multi-control-device.json') {
       assert.equal(c.validateDevice(read(reference).device), true, reference);
+    } else if (reference === 'fixtures/deleted-device-tombstone.json') {
+      assert.equal(c.validateEnvelope(read(reference)), true, `${screen}: canonical retired-device history envelope`);
     } else if (reference === 'fixtures/invalid/tenant-device-wrong-owner.json') {
       const fixture = read(reference);
       assert.equal(c.validateDevice(fixture.device, { ...fixture.context, role: 'TENANT' }), false, reference);
@@ -426,8 +440,23 @@ test('OS executes every indexed direct-device fixture through its Native V1 vali
       const fixture = read(reference);
       for (const item of fixture.cases) {
         const raw = typeof item.value === 'string' ? item.value : String(item.repeat || '').repeat(Number(item.repeatCount || 0));
-        const candidate = { ...sourceDevice, customerLabel: raw };
-        assert.equal(c.validateDevice(candidate), item.wireValid, `${item.id}: Native V1 device validator`);
+        const controlId = 'control:indexed-label';
+        const projected = c.serializeDevice({
+          device: {
+            id: 'device:indexed-label', homeId: 'home:opaque-a', areaId: 'area:living', name: raw, protocol: 'virtual',
+            setup: { status: 'complete' }, presentation: { descriptorRevision: 1 },
+            entities: { [controlId]: { id: controlId, name: 'Power', capability: { kind: 'binary', controlId, semanticRole: 'power', readable: true, writable: false, observable: true } } },
+          },
+          homeId: 'home:opaque-a', homeMembershipId: 'membership:owner-a', role: 'OWNER', areaIds: ['area:living'],
+          surfaces: [{ id: 'surface:indexed-label', sourceEntityIds: [controlId], name: 'Main' }],
+        });
+        const expectedLabel = item.projected !== undefined
+          ? item.projected
+          : String(item.repeat || '').repeat(Number(item.projectedRepeatCount || 0));
+        assert.ok(projected, `${screen}:${item.id}: label metadata cannot erase identity or controls`);
+        assert.equal(projected.customerLabel, expectedLabel, `${screen}:${item.id}: serializer projection`);
+        assert.equal(Array.from(projected.customerLabel || '').length, item.projectedCodePoints, `${screen}:${item.id}: code-point bound`);
+        assert.equal(projected.controls.length, 1, `${screen}:${item.id}: preserve current controls`);
       }
     } else if (reference === 'fixtures/control-catalog-change.json') {
       const fixture = read(reference);
@@ -462,6 +491,8 @@ test('OS executes every indexed direct-device fixture through its Native V1 vali
       const command = (value) => ({ ...commandFixture, controlId: control.controlId, value });
       assert.equal(c.validateCommand(command(text.repeat.repeat(text.validRepeatCount)), device, control, commandFixture.homeMembershipId), true, `${screen}: bounded text accepted`);
       assert.equal(c.validateCommand(command(text.repeat.repeat(text.invalidRepeatCount)), device, control, commandFixture.homeMembershipId), false, `${screen}: over-bound text denied`);
+    } else if (reference === 'fixtures/invalid/duplicate-device-control-id.json') {
+      validateMutatedDescriptor(read(reference));
     } else {
       assert.fail(`${screen} has no executable Native V1 owner for indexed fixture ${reference}`);
     }
