@@ -480,6 +480,17 @@ class PlatformPairing {
           ? await this.request("/api/hub-agent/token-state", payload, this.vault.get("platform.syncSecret"))
           : null;
       if (!result) throw new Error("A factory-enrolled hub identity is required for Platform synchronisation");
+      const reportedHubInstallId = result.hubInstallId == null ? "" : String(result.hubInstallId);
+      const hubInstallId = reportedHubInstallId || String(platform.hubInstallId || "");
+      if (reportedHubInstallId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(reportedHubInstallId)) {
+        throw Object.assign(new Error("Platform returned an invalid enrolled hub installation ID"), { code: "hub_installation_id_invalid" });
+      }
+      if (platform.hubInstallId && reportedHubInstallId && String(platform.hubInstallId) !== reportedHubInstallId) {
+        throw Object.assign(new Error("Platform hub installation identity changed; refusing to rebind this paired OS"), { code: "hub_installation_id_changed" });
+      }
+      if (!hubInstallId) {
+        throw Object.assign(new Error("Platform did not provide the enrolled hub installation ID required for native synchronisation"), { code: "hub_installation_id_missing" });
+      }
       if (result.homeId !== undefined && (typeof result.homeId !== "string" || !result.homeId || result.homeId.length > 160)) throw new Error("Platform returned an invalid Native V1 home binding");
       const areaBindings = Array.isArray(result.areaBindings)
         ? result.areaBindings.filter((binding) => binding && typeof binding === "object" && !Array.isArray(binding)
@@ -518,6 +529,7 @@ class PlatformPairing {
         : (platform.acceptedTokenHashes || []);
       await this.store.savePlatform({
         paired: true,
+        hubInstallId,
         agentSeenVersion: nextVersion,
         publishedVersion: Number(result.publishedVersion || platform.publishedVersion || 0),
         acceptedTokenHashes: returnedHashes,
@@ -533,10 +545,10 @@ class PlatformPairing {
       const updaterStatus = await this.getUpdaterStatus().catch(() => null);
       if (updaterStatus) await this.store.ensureUpdaterStatusEvent?.(updaterStatus, this.clock());
       const syncState = this.store.getSyncOutbox();
-      const syncBatch = await this.store.prepareSyncBatch(platform.hubInstallId, this.runtime, this.clock());
+      const syncBatch = await this.store.prepareSyncBatch(hubInstallId, this.runtime, this.clock());
       const syncEnvelope = syncBatch || {
         schemaVersion: 1,
-        hubInstallationId: String(platform.hubInstallId || ""),
+        hubInstallationId: hubInstallId,
         streamId: String(syncState.streamId),
         fromSequence: Number(syncState.acknowledgedSequence || 0) + 1,
         toSequence: Number(syncState.acknowledgedSequence || 0),

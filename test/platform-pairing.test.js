@@ -90,15 +90,20 @@ test("incident transitions use the durable native sync stream and retire only af
   await vault.set("platform.encryptionPublicKey", record.encryptionPublicKey);
   await vault.set("platform.identityGeneration", "1");
   await vault.set("platform.machineCredential", "test-machine-credential");
-  await store.savePlatform({ paired: true, hubInstallId: "11111111-1111-4111-8111-111111111111", provisioningCredentialVersion: 1, homeId: "home-a" });
+  // Older paired installations may predate the local hub-installation ID
+  // pointer. The authenticated token-state response must recover this exact
+  // existing Platform identity before the outbox is submitted.
+  await store.savePlatform({ paired: true, provisioningCredentialVersion: 1, homeId: "home-a" });
   await store.queueIncidentEnvelope({ id: "offline-1:1", incidentId: "offline-1", revision: 1, kind: "device_offline", state: "open", severity: "critical", summary: "Device offline", firstObservedAt: new Date().toISOString(), lastObservedAt: new Date().toISOString() });
   const seen = [];
+  let reportedHubInstallId = "11111111-1111-4111-8111-111111111111";
   const pairing = new PlatformPairing({
     store, vault, apiUrl: "https://platform.test", serial: "DINODIA-INCIDENT-HUB", intervalMs: 60000,
+    logger: { error() {} },
     fetchImpl: async (url, options) => {
       const body = JSON.parse(options.body);
       seen.push({ url, body });
-    if (url.endsWith("/token-state")) return { ok: true, async json() { return { homeId: "home-a", latestVersion: 0, publishedVersion: 0, hubTokenHashes: [] }; } };
+    if (url.endsWith("/token-state")) return { ok: true, async json() { return { hubInstallId: reportedHubInstallId, homeId: "home-a", latestVersion: 0, publishedVersion: 0, hubTokenHashes: [] }; } };
     if (url.endsWith("/v2/sync")) return { ok: true, async json() { return nativeSyncAck(body); } };
       if (url.endsWith("/heartbeat")) return { ok: true, async json() { return { ok: true, online: true, lanEndpoint: { revision: body.lanEndpoint.revision, state: body.lanEndpoint.state } }; } };
       throw new Error(`Unexpected test route: ${url}`);
@@ -107,11 +112,19 @@ test("incident transitions use the durable native sync stream and retire only af
   await pairing.syncNow();
   const sync = seen.find((entry) => entry.url.endsWith("/v2/sync"));
   assert.ok(sync);
+  assert.equal(sync.body.hubInstallationId, "11111111-1111-4111-8111-111111111111");
+  assert.equal(store.getPlatform().hubInstallId, sync.body.hubInstallationId, "the enrolled installation ID is durably recovered before syncing the outbox");
   assert.equal(sync.body.events[0].type, "incident.transition");
   assert.equal(sync.body.events[0].payload.incidentKey, crypto.createHash("sha256").update("offline-1").digest("hex"));
   assert.equal(Object.hasOwn(sync.body.events[0].payload, "summary"), false, "tenant/private incident summary is not exported in the bounded cloud projection");
   assert.equal(store.listPendingIncidentEnvelopes().length, 0, "local incident is retired only after the accepted stream cursor is persisted");
   assert.equal(store.getSyncOutbox().acknowledgedSequence, sync.body.toSequence);
+
+  reportedHubInstallId = "22222222-2222-4222-8222-222222222222";
+  await pairing.syncNow();
+  assert.equal(seen.filter((entry) => entry.url.endsWith("/v2/sync")).length, 1, "a contradictory authenticated installation binding is rejected before sending another batch");
+  assert.equal(store.getPlatform().hubInstallId, "11111111-1111-4111-8111-111111111111", "a paired OS never silently rebinds to another Platform installation");
+  pairing.stop();
 });
 
 test("native provisioning completes the outbound challenge, encrypted credential delivery and acknowledgement", async () => {
@@ -197,7 +210,7 @@ test("operator credential receipt stays DELIVERED until the hub acknowledgement 
     if (url.endsWith("/credentials/activate")) return { ok: true, async json() { return { ok: true, state: "ACTIVE" }; } };
     if (url.endsWith("/v2/sync")) return { ok: true, async json() { return nativeSyncAck(body); } };
     assert.match(url, /\/token-state$/);
-    return { ok: true, async json() { return { latestVersion: 2, publishedVersion: 0, operatorCredentialDelivery: { version: 2, envelope }, operatorCredentialStates: [], offlineAuthorisations: [], acceptedActivityIncidentIds: [] }; } };
+    return { ok: true, async json() { return { hubInstallId: "33333333-3333-4333-8333-333333333333", latestVersion: 2, publishedVersion: 0, operatorCredentialDelivery: { version: 2, envelope }, operatorCredentialStates: [], offlineAuthorisations: [], acceptedActivityIncidentIds: [] }; } };
   };
   const pairing = new PlatformPairing({ store, vault, apiUrl: "https://platform.test", serial: "DINODIA-OPERATOR-HUB", fetchImpl, intervalMs: 60000 });
   await pairing.syncNow();
