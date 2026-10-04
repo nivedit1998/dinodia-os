@@ -652,9 +652,18 @@ class Store {
       this.state.updatedAt = new Date().toISOString();
       const serialized = JSON.stringify(this.state, null, 2);
       await fs.promises.mkdir(path.dirname(this.filePath), { recursive: true });
-      const tempPath = `${this.filePath}.${process.pid}.tmp`;
-      await fs.promises.writeFile(tempPath, serialized, { mode: 0o600 });
-      await fs.promises.rename(tempPath, this.filePath);
+      // A PID-only temporary name collides when a controlled restart briefly
+      // has two Store instances for the same durable path (for example, a
+      // late completion from the stopped server racing the replacement). Each
+      // atomic writer needs its own same-directory name before rename.
+      const tempPath = `${this.filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+      try {
+        await fs.promises.writeFile(tempPath, serialized, { mode: 0o600, flag: "wx" });
+        await fs.promises.rename(tempPath, this.filePath);
+      } catch (error) {
+        await fs.promises.unlink(tempPath).catch(() => {});
+        throw error;
+      }
     });
     this.writeQueue = operation.catch(() => {});
     return operation;

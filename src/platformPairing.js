@@ -40,7 +40,7 @@ function privateLanIp() {
   return privateInterface()?.address || "";
 }
 
-function validateLanEndpointObservation(value, serial, expectedPort = 8123) {
+function validateLanEndpointObservation(value, serial, expectedPort = 80) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const allowed = new Set(["version", "revision", "state", "baseUrl", "discoveryHost"]);
   if (Object.keys(value).some((key) => !allowed.has(key)) || value.version !== 1
@@ -49,16 +49,18 @@ function validateLanEndpointObservation(value, serial, expectedPort = 8123) {
   if (value.state === "UNAVAILABLE") return !Object.hasOwn(value, "baseUrl");
   if (value.state !== "CURRENT" || typeof value.baseUrl !== "string") return false;
   const match = value.baseUrl.match(/^http:\/\/(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})$/);
-  if (!match || match[2] !== String(expectedPort) || !isPrivateIPv4(match[1])) return false;
+  const allowedPorts = expectedPort === 80 ? new Set(["80", "8123"]) : new Set([String(expectedPort)]);
+  if (!match || !allowedPorts.has(match[2]) || !isPrivateIPv4(match[1])) return false;
   try {
     const parsed = new URL(value.baseUrl);
-    return parsed.protocol === "http:" && parsed.hostname === match[1] && parsed.port === String(expectedPort)
+    const normalizedPort = parsed.port || (parsed.protocol === "http:" ? "80" : "443");
+    return parsed.protocol === "http:" && parsed.hostname === match[1] && allowedPorts.has(normalizedPort)
       && parsed.pathname === "/" && !parsed.search && !parsed.hash && !parsed.username && !parsed.password;
   } catch { return false; }
 }
 
 class PlatformPairing {
-  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, haPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, runtime, getLanEndpoint = null, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, legacyCompatibilityEnabled = false, clock = () => Date.now() } = {}) {
+  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, haPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, runtime, getLanEndpoint = null, getLanTlsIdentity = null, acknowledgeLanTlsIdentity = null, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, legacyCompatibilityEnabled = false, clock = () => Date.now() } = {}) {
     this.store = store;
     this.vault = vault;
     this.identityBroker = identityBroker;
@@ -79,6 +81,8 @@ class PlatformPairing {
         ? { state: "CURRENT", address: selected.address, interfaceName: selected.name }
         : { state: "UNAVAILABLE", address: "", interfaceName: null };
     });
+    this.getLanTlsIdentity = getLanTlsIdentity || (() => null);
+    this.acknowledgeLanTlsIdentity = acknowledgeLanTlsIdentity || (() => false);
     this.pendingEndpointHeartbeat = false;
     this.queuedImmediateSync = false;
     this.runtime = {
@@ -325,13 +329,14 @@ class PlatformPairing {
     const state = selected?.state === "CURRENT" && isPrivateIPv4(selected.address) ? "CURRENT" : "UNAVAILABLE";
     // The native HTTP contract has one fixed installer port. Do not derive it
     // from an ephemeral test listener or a configurable tenant transport.
-    const setupPort = 8123;
+    const setupPort = this.production ? 80 : this.haPort;
     const discoveryHost = `dinodia-${this.serial.toLowerCase()}.local`;
     let baseUrl;
     if (state === "CURRENT") {
       const candidate = String(selected.address || "");
       const parsed = new URL(`http://${candidate}:${setupPort}`);
-      if (parsed.hostname !== candidate || parsed.port !== String(setupPort) || parsed.pathname !== "/") throw new Error("The selected physical LAN endpoint is malformed");
+      const normalizedPort = parsed.port || (parsed.protocol === "http:" ? "80" : "443");
+      if (parsed.hostname !== candidate || normalizedPort !== String(setupPort) || parsed.pathname !== "/") throw new Error("The selected physical LAN endpoint is malformed");
       baseUrl = `http://${candidate}:${setupPort}`;
     }
     const previous = this.store?.getPlatform?.()?.lanEndpointObservation || null;
@@ -471,13 +476,19 @@ class PlatformPairing {
       const syncStartedAt = this.clock();
       if (nativeIdentity && (this.pendingEndpointHeartbeat || syncStartedAt - this.lastHeartbeatAt >= this.heartbeatIntervalMs)) {
         const lanEndpoint = await this.buildLanEndpointObservation(nativeIdentity.generation);
+        const lanTlsIdentity = this.getLanTlsIdentity();
         const heartbeat = await this.requestWithHubIdentity("/api/hub-agent/v2/heartbeat", {
           serial: this.serial,
           hubRuntime: this.runtime,
           lanEndpoint,
+          ...(lanTlsIdentity ? { lanTlsIdentity } : {}),
         });
         if (Number(heartbeat?.lanEndpoint?.revision) !== lanEndpoint.revision || heartbeat?.lanEndpoint?.state !== lanEndpoint.state) {
           throw Object.assign(new Error("Platform did not acknowledge the current LAN endpoint revision"), { code: "lan_endpoint_ack_mismatch" });
+        }
+        const acknowledgedTlsGeneration = Number(heartbeat?.lanTlsIdentity?.acknowledgedGeneration || 0);
+        if (acknowledgedTlsGeneration > 0 && !this.acknowledgeLanTlsIdentity(acknowledgedTlsGeneration)) {
+          throw Object.assign(new Error("Platform acknowledged an unknown customer LAN certificate generation"), { code: "lan_tls_ack_mismatch" });
         }
         this.lastHeartbeatAt = this.clock();
         // A link change can arrive after this request captured its endpoint.

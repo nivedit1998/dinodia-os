@@ -6,6 +6,21 @@
   "membershipId": "membership:fixture-owner",
   "hubEndpoint": {
     "state": "verified_cloud",
-    "origin": "https://dinodia-fixture-hub.dinodiasmartliving.com"
+    "origin": "https://dinodia-fixture-hub.dinodiasmartliving.com",
+    "lan": {
+      "state": "verified_lan",
+      "origin": "https://dinodia-0123456789abcdef0123.local:8123",
+      "publicHubId": "0123456789abcdef0123",
+      "certificateGeneration": 1,
+      "currentSpkiPin": "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      "currentNotBefore": "2026-09-27T09:00:00Z",
+      "currentNotAfter": "2028-09-26T09:00:00Z",
+      "nextCertificateGeneration": 2,
+      "nextSpkiPin": "sha256/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+      "nextNotBefore": "2026-09-27T09:30:00Z",
+      "nextNotAfter": "2028-09-26T09:30:00Z",
+      "reportedAt": "2026-09-27T10:00:00Z",
+      "validUntil": "2026-09-27T10:07:00Z"
+    }
   }
 }

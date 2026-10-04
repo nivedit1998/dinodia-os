@@ -179,7 +179,9 @@ fs.renameSync(temporary, path);
 NODE
 chown "$INSTALL_USER":"$INSTALL_USER" "$STAGE_DIR/.env"
 chmod 0600 "$STAGE_DIR/.env"
-printf '{"buildId":"%s","packageVersion":%s,"mode":"native-v2"}\n' "$BUILD_ID" "$(node -p 'JSON.stringify(require(process.argv[1]).version)' "$STAGE_DIR/package.json")" > "$STAGE_DIR/BUILD.json"
+store_schema_version="$(node -p 'require(process.argv[1]).NATIVE_AUTOMATION_STORE_VERSION' "$STAGE_DIR/src/automations/constants.js")"
+[[ "$store_schema_version" =~ ^[1-9][0-9]*$ ]] || die "candidate store schema version is invalid"
+printf '{"buildId":"%s","packageVersion":%s,"mode":"native-v2","storeSchemaVersion":%s}\n' "$BUILD_ID" "$(node -p 'JSON.stringify(require(process.argv[1]).version)' "$STAGE_DIR/package.json")" "$store_schema_version" > "$STAGE_DIR/BUILD.json"
 chown "$INSTALL_USER":"$INSTALL_USER" "$STAGE_DIR/BUILD.json"
 chmod 0644 "$STAGE_DIR/BUILD.json"
 
@@ -303,6 +305,11 @@ done
 if [[ "$discovery_ok" -ne 1 ]]; then die "locked-setup mDNS did not resolve the candidate alias to the selected private interface; rollback will restore the prior configuration"; fi
 rm -f -- "$AVAHI_CONFIG_CANDIDATE"
 AVAHI_CONFIG_CANDIDATE=""
+
+# Install the narrow root-owned updater executor only after the Native V2
+# candidate and existing setup discovery have passed their health checks. Its
+# root trust policy is created disabled and is never replaced on later runs.
+bash "$RELEASE_DIR/scripts/install-updater-service.sh" "$RELEASE_DIR" "$BUILD_ID"
 
 COMPLETED=1
 SERVICES_STOPPED=0

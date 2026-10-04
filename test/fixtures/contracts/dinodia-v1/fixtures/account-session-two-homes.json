@@ -1,6 +1,8 @@
 {
   "schemaVersion": "dinodia.v1",
   "accountId": "account:multi-home",
+  "sessionId": "session:multi-home",
+  "trustedDeviceId": "trusted-device:multi-home",
   "memberships": [
     {
       "accountId": "account:multi-home",

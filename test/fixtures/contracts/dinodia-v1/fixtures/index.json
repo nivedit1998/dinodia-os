@@ -30,7 +30,7 @@
     "owner.home.transfer": ["fixtures/claim-first-wins.json", "fixtures/transfer-lifecycle.json", "fixtures/replacement-hub.json", "fixtures/prototype-scenarios.json"],
     "owner.account": ["fixtures/multi-home-memberships.json", "fixtures/account-relationship-lifecycle.json", "fixtures/stage2-decision-matrix.json"],
     "owner.activity.notifications": ["fixtures/notification-security-mandatory.json", "fixtures/notification-delivery-is-not-authority.json", "fixtures/notification-lifecycle.json", "fixtures/out-of-order-events.json", "fixtures/prototype-scenarios.json"],
-    "owner.hub.status": ["fixtures/hub-cloudurl-verified.json", "fixtures/hub-heartbeat-freshness.json", "fixtures/lan-endpoint-unavailable.json"],
+    "owner.hub.status": ["fixtures/hub-cloudurl-verified.json", "fixtures/hub-heartbeat-freshness.json", "fixtures/lan-endpoint-unavailable.json", "fixtures/updater-maintenance-status-unprovisioned.json", "fixtures/invalid/updater-maintenance-status-exposes-authority.json"],
     "employee.company_portal": ["fixtures/customer-session-receipt.json", "fixtures/customer-hub-session-test-only.json"],
     "system.contract_error": ["fixtures/error-home-denied.json", "fixtures/invalid/unknown-required-version.json"],
     "app.home.offline_chooser": ["fixtures/offline-home-selection.json", "fixtures/invalid/offline-home-expired.json", "fixtures/offline-scope-widening.json"],

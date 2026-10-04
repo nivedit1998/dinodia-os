@@ -229,11 +229,11 @@
         "homeId": { "$ref": "#/$defs/id" },
         "descriptorRevision": { "type": "integer", "minimum": 0 },
         "revision": { "type": "integer", "minimum": 0 },
-        "observedAt": { "$ref": "#/$defs/timestamp" },
-        "receivedAt": { "$ref": "#/$defs/timestamp" },
+        "observedAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+        "receivedAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
         "quality": { "$ref": "#/$defs/quality" },
         "value": {},
-        "validUntil": { "$ref": "#/$defs/timestamp" },
+        "validUntil": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
         "deviceAvailability": { "enum": ["online", "offline", "unknown"] },
         "analyticsActivity": { "enum": ["on", "off", "unknown"] }
       },
@@ -267,10 +267,12 @@
     },
     "accountSessionContext": {
       "type": "object",
-      "required": ["schemaVersion", "accountId", "memberships", "expiresAt"],
+      "required": ["schemaVersion", "accountId", "sessionId", "trustedDeviceId", "memberships", "expiresAt"],
       "properties": {
         "schemaVersion": { "const": "dinodia.v1" },
         "accountId": { "$ref": "#/$defs/id" },
+        "sessionId": { "$ref": "#/$defs/id", "description": "Opaque identifier for the authenticated HttpOnly-cookie session; never a credential." },
+        "trustedDeviceId": { "$ref": "#/$defs/id", "description": "Opaque identifier for the trusted installation bound to this session; never a signing key or credential." },
         "memberships": { "type": "array", "items": { "$ref": "#/$defs/membership" }, "uniqueItems": true },
         "expiresAt": { "$ref": "#/$defs/timestamp" }
       },
@@ -309,6 +311,31 @@
       "properties": { "ok": { "const": true } },
       "additionalProperties": false
     },
+    "customerLanEndpoint": {
+      "type": "object",
+      "required": ["state", "origin", "publicHubId", "certificateGeneration", "currentSpkiPin", "currentNotBefore", "currentNotAfter", "reportedAt", "validUntil"],
+      "properties": {
+        "state": { "const": "verified_lan" },
+        "origin": { "type": "string", "pattern": "^https://dinodia-[a-f0-9]{20}\\.local:8123$" },
+        "publicHubId": { "type": "string", "pattern": "^[a-f0-9]{20}$" },
+        "certificateGeneration": { "type": "integer", "minimum": 1 },
+        "currentSpkiPin": { "type": "string", "pattern": "^sha256/[A-Za-z0-9+/]{43}=$" },
+        "currentNotBefore": { "$ref": "#/$defs/timestamp" },
+        "currentNotAfter": { "$ref": "#/$defs/timestamp" },
+        "nextCertificateGeneration": { "type": "integer", "minimum": 2 },
+        "nextSpkiPin": { "type": "string", "pattern": "^sha256/[A-Za-z0-9+/]{43}=$" },
+        "nextNotBefore": { "$ref": "#/$defs/timestamp" },
+        "nextNotAfter": { "$ref": "#/$defs/timestamp" },
+        "reportedAt": { "$ref": "#/$defs/timestamp" },
+        "validUntil": { "$ref": "#/$defs/timestamp" }
+      },
+      "allOf": [{
+        "if": { "required": ["nextCertificateGeneration", "nextSpkiPin", "nextNotBefore", "nextNotAfter"] },
+        "then": { "properties": { "nextCertificateGeneration": { "type": "integer", "minimum": 2 } } },
+        "else": { "not": { "anyOf": [{ "required": ["nextCertificateGeneration"] }, { "required": ["nextSpkiPin"] }, { "required": ["nextNotBefore"] }, { "required": ["nextNotAfter"] }] } }
+      }],
+      "additionalProperties": false
+    },
     "customerHubSession": {
       "type": "object",
       "required": ["ok", "token", "expiresAt", "homeId", "membershipId", "hubEndpoint"],
@@ -325,13 +352,14 @@
               "required": ["state", "origin"],
               "properties": {
                 "state": { "const": "verified_cloud" },
-                "origin": { "type": "string", "pattern": "^https://dinodia-[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.dinodiasmartliving\\.com$" }
+                "origin": { "type": "string", "pattern": "^https://dinodia-[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.dinodiasmartliving\\.com$" },
+                "lan": { "$ref": "#/$defs/customerLanEndpoint" }
               },
               "additionalProperties": false
             },
             {
               "required": ["state"],
-              "properties": { "state": { "const": "unavailable" } },
+              "properties": { "state": { "const": "unavailable" }, "lan": { "$ref": "#/$defs/customerLanEndpoint" } },
               "not": { "required": ["origin"] },
               "additionalProperties": false
             }
@@ -429,7 +457,7 @@
         "commandId": { "$ref": "#/$defs/id" },
         "homeId": { "$ref": "#/$defs/id" },
         "status": {
-          "enum": ["accepted", "succeeded", "rejected", "uncertain", "expired"]
+          "enum": ["accepted", "applied", "failed", "timed_out", "uncertain"]
         },
         "acceptedAt": { "$ref": "#/$defs/timestamp" },
         "completedAt": {
@@ -1152,7 +1180,11 @@
             "id": { "$ref": "#/$defs/id" }, "homeId": { "$ref": "#/$defs/id" },
             "membershipId": { "$ref": "#/$defs/id" }, "trustedDeviceId": { "$ref": "#/$defs/id" },
             "areaIds": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
-            "scopes": { "const": ["tenant:device-command"] }, "policyRevision": { "type": "integer", "minimum": 0 }
+            "scopes": { "const": ["tenant:device-command"] }, "policyRevision": { "type": "integer", "minimum": 0 },
+            "hubInstallationId": { "$ref": "#/$defs/id" },
+            "membershipRevision": { "type": "integer", "minimum": 0 },
+            "issuedAt": { "$ref": "#/$defs/timestamp" },
+            "lanEndpoint": { "$ref": "#/$defs/customerLanEndpoint" }
           },
           "additionalProperties": false
         }
@@ -1192,8 +1224,8 @@
         "baseUrl": {
           "type": "string",
           "maxLength": 64,
-          "pattern": "^http://(?:(?:10\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))|(?:192\\.168\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))|(?:172\\.(?!(?:17|18)\\.)(?:1[6-9]|2[0-9]|3[01])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))):8123$",
-          "not": { "pattern": "\\.(?:0|255):8123$" }
+          "pattern": "^http://(?:(?:10\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))|(?:192\\.168\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))|(?:172\\.(?!(?:17|18)\\.)(?:1[6-9]|2[0-9]|3[01])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))):(?:80|8123)$",
+          "not": { "pattern": "\\.(?:0|255):(?:80|8123)$" }
         },
         "discoveryHost": { "type": "string", "maxLength": 80, "pattern": "^dinodia-[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.local$" }
       },
@@ -1201,6 +1233,58 @@
         { "properties": { "state": { "const": "CURRENT" } }, "required": ["baseUrl"] },
         { "properties": { "state": { "const": "UNAVAILABLE" } }, "not": { "required": ["baseUrl"] } }
       ],
+      "additionalProperties": false
+    },
+    "lanTlsIdentityObservation": {
+      "type": "object",
+      "required": ["version", "revision", "state", "publicHubId", "host", "port", "certificateGeneration", "currentSpkiPin", "currentNotBefore", "currentNotAfter", "acknowledgedGeneration"],
+      "properties": {
+        "version": { "const": 1 }, "revision": { "type": "integer", "minimum": 1 },
+        "state": { "enum": ["CURRENT", "UNAVAILABLE"] },
+        "publicHubId": { "type": "string", "pattern": "^[a-f0-9]{20}$" },
+        "host": { "type": "string", "pattern": "^dinodia-[a-f0-9]{20}\\.local$" },
+        "port": { "const": 8123 }, "certificateGeneration": { "type": "integer", "minimum": 1 },
+        "currentSpkiPin": { "type": "string", "pattern": "^sha256/[A-Za-z0-9+/]{43}=$" },
+        "currentNotBefore": { "$ref": "#/$defs/timestamp" }, "currentNotAfter": { "$ref": "#/$defs/timestamp" },
+        "nextCertificateGeneration": { "type": "integer", "minimum": 2 },
+        "nextSpkiPin": { "type": "string", "pattern": "^sha256/[A-Za-z0-9+/]{43}=$" },
+        "nextNotBefore": { "$ref": "#/$defs/timestamp" }, "nextNotAfter": { "$ref": "#/$defs/timestamp" },
+        "acknowledgedGeneration": { "type": "integer", "minimum": 0 }
+      },
+      "allOf": [{
+        "if": { "required": ["nextCertificateGeneration", "nextSpkiPin", "nextNotBefore", "nextNotAfter"] },
+        "then": {},
+        "else": { "not": { "anyOf": [{ "required": ["nextCertificateGeneration"] }, { "required": ["nextSpkiPin"] }, { "required": ["nextNotBefore"] }, { "required": ["nextNotAfter"] }] } }
+      }],
+      "additionalProperties": false
+    },
+    "updaterMaintenanceStatus": {
+      "type": "object",
+      "required": ["schemaVersion", "status"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "status": {
+          "type": "object",
+          "required": ["phase", "trustState", "activeReleaseVersion", "lastAttempt", "busy"],
+          "properties": {
+            "phase": { "enum": ["idle", "downloading", "verifying", "staged", "maintenance", "activating", "health_check", "active", "rolled_back", "failed"] },
+            "trustState": { "enum": ["ready", "unprovisioned"] },
+            "activeReleaseVersion": { "type": ["string", "null"], "maxLength": 96 },
+            "lastAttempt": {
+              "type": ["object", "null"],
+              "required": ["phase", "result", "updatedAt"],
+              "properties": {
+                "phase": { "enum": ["downloading", "verifying", "staged", "maintenance", "activating", "health_check", "active", "rolled_back", "failed"] },
+                "result": { "type": ["string", "null"], "maxLength": 96 },
+                "updatedAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }
+              },
+              "additionalProperties": false
+            },
+            "busy": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        }
+      },
       "additionalProperties": false
     },
     "uiState": { "enum": ["restoring_session", "loading", "ready", "empty", "stale", "offline", "denied", "expired", "uncertain", "maintenance", "error"] },
@@ -1224,6 +1308,7 @@
                 "NOT_DEVICE_OWNER",
                 "PERMANENT_DEVICE_IMMUTABLE",
                 "RESOURCE_NOT_FOUND",
+                "IDEMPOTENCY_CONFLICT",
                 "REVISION_CONFLICT",
                 "CATALOG_REVISION_MISMATCH",
                 "CONTROL_REMOVED",

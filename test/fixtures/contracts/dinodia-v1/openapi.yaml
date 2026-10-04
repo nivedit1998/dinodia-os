@@ -575,6 +575,27 @@ paths:
           {
             description: Current descriptor rejects command value or sensitive policy,
           }
+  /api/dinodia/v1/maintenance/status:
+    servers:
+      - url: https://dinodia-{hubId}.local:8123
+        description: Current selected tenant hub over its pinned HTTPS LAN endpoint or verified CloudURL.
+        variables:
+          hubId: { default: hub-identifier, description: Public hub DNS label resolved from the authenticated selected-home session. }
+    get:
+      summary: Read native updater maintenance status
+      operationId: readNativeUpdaterMaintenanceStatus
+      tags: [Devices]
+      description: Read-only. Requires a current selected tenant hub session or an authenticated scoped Dinodia operator; exposes no signing material, artifact URL or environment data. A disabled release-signing trust state is reported as unprovisioned and does not enable updates.
+      security: [{ CustomerBearer: [] }]
+      responses:
+        "200":
+          description: Bounded updater phase and release status.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/updaterMaintenanceStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /api/v2/tenant/account/delete:
     post:
       summary: "Delete Customer Account"
@@ -1053,6 +1074,8 @@ components:
   schemas:
     HubLanEndpointObservation:
       $ref: "./contract.json#/$defs/lanEndpointObservation"
+    HubLanTlsIdentityObservation:
+      $ref: "./contract.json#/$defs/lanTlsIdentityObservation"
     NativeError:
       $ref: "./contract.json#/$defs/error"
   responses:

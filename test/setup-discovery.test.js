@@ -55,10 +55,28 @@ test("production setup discovery pins the exact serial alias and setup service t
   assert.deepEqual(status, { running: true, hostname: "dinodia-din-home-001.local", address: "192.168.1.76", error: null });
   assert.deepEqual(calls.map(({ command, args }) => [command, args]), [
     ["avahi-publish-address", ["-R", "dinodia-din-home-001.local", "192.168.1.76"]],
-    ["avahi-publish-service", ["Dinodia OS din-home-001", "_http._tcp", "8123", "path=/setup", "serial=din-home-001"]],
+    ["avahi-publish-service", ["Dinodia OS Setup din-home-001", "_http._tcp", "8123", "path=/setup", "serial=din-home-001"]],
   ]);
   discovery.stop();
   assert.equal(discovery.status().running, false);
+});
+
+test("production publishes separate restricted HTTP setup and public-ID HTTPS runtime names", () => {
+  const { calls, spawnProcess } = spawnRecorder();
+  const discovery = new SetupDiscovery({
+    serial: "DIN-HOME-001", nodeEnv: "production", interfaces: () => interfacesWithBridgeFirst,
+    spawnProcess, logger: { warn() {} }, physicalCheck: () => true, readAvahiConfig: () => configuredAvahi,
+  });
+  discovery.start(80, 80, "dinodia-0123456789abcdefabcd.local", 8123);
+  calls.forEach(({ child }) => child.emit("spawn"));
+  assert.equal(discovery.observation().baseUrl, "http://192.168.1.76:80", "installer HTTP remains a private-IP setup endpoint on port 80");
+  assert.deepEqual(calls.map(({ command, args }) => [command, args]), [
+    ["avahi-publish-address", ["-R", "dinodia-din-home-001.local", "192.168.1.76"]],
+    ["avahi-publish-service", ["Dinodia OS Setup din-home-001", "_http._tcp", "80", "path=/setup", "serial=din-home-001"]],
+    ["avahi-publish-address", ["-R", "dinodia-0123456789abcdefabcd.local", "192.168.1.76"]],
+    ["avahi-publish-service", ["Dinodia OS din-home-001", "_https._tcp", "8123", "path=/api/dinodia/v1/health"]],
+  ]);
+  discovery.stop();
 });
 
 test("missing Avahi publisher reports discovery unavailable instead of claiming it is running", () => {

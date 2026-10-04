@@ -65,6 +65,9 @@ class SetupDiscovery {
     this.onEndpointChange = onEndpointChange;
     this.networkCheckIntervalMs = Math.max(1000, Number(networkCheckIntervalMs) || 10000);
     this.port = 8123;
+    this.servicePort = 8123;
+    this.customerHostname = "";
+    this.customerPort = 8123;
     this.watchTimer = null;
     this.lastEndpointKey = null;
     this.selected = null;
@@ -74,9 +77,12 @@ class SetupDiscovery {
     this.state = { running: false, hostname: `dinodia-${this.serial}.local`, address: "", error: null };
   }
 
-  start(port) {
+  start(servicePort, endpointPort = servicePort, customerHostname = "", customerPort = 8123) {
     if (this.nodeEnv !== "production" || !this.serial) return this.status();
-    this.port = Number(port) || 8123;
+    this.servicePort = Number(servicePort) || 80;
+    this.port = Number(endpointPort) || this.servicePort;
+    this.customerHostname = /^dinodia-[a-f0-9]{20}\.local$/.test(String(customerHostname)) ? String(customerHostname) : "";
+    this.customerPort = Number(customerPort) || 8123;
     this.refresh();
     if (!this.watchTimer) {
       this.watchTimer = setInterval(() => this.refresh(), this.networkCheckIntervalMs);
@@ -130,8 +136,12 @@ class SetupDiscovery {
     // record, otherwise Avahi reports a local name collision.
     const specs = [
       ["avahi-publish-address", ["-R", this.state.hostname, address]],
-      ["avahi-publish-service", [`Dinodia OS ${this.serial}`, "_http._tcp", String(this.port), "path=/setup", `serial=${this.serial}`]],
+      ["avahi-publish-service", [`Dinodia OS Setup ${this.serial}`, "_http._tcp", String(this.servicePort), "path=/setup", `serial=${this.serial}`]],
     ];
+    if (this.customerHostname) specs.push(
+      ["avahi-publish-address", ["-R", this.customerHostname, address]],
+      ["avahi-publish-service", [`Dinodia OS ${this.serial}`, "_https._tcp", String(this.customerPort), "path=/api/dinodia/v1/health"]],
+    );
     const spawned = new Set();
     const generation = ++this.generation;
     this.activeGeneration = generation;

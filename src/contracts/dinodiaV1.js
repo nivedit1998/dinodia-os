@@ -94,11 +94,17 @@ function validateCommand(command, device, control, membershipId) {
 }
 function validateControlState(value, device, control) {
   if (!isObject(value) || !hasOnlyKeys(value, ['deviceId','controlId','homeId','descriptorRevision','revision','observedAt','receivedAt','validUntil','quality','value','deviceAvailability','analyticsActivity'])) return false;
-  const observed = Date.parse(value.observedAt); const received = Date.parse(value.receivedAt); const validUntil = Date.parse(value.validUntil);
+  const observed = value.observedAt == null ? NaN : Date.parse(value.observedAt);
+  const received = value.receivedAt == null ? NaN : Date.parse(value.receivedAt);
+  const validUntil = value.validUntil == null ? NaN : Date.parse(value.validUntil);
   const valueMatches = value.value === null
     ? ['unknown','unavailable'].includes(value.quality)
     : commandValueMatches(control, value.value);
-  return value.deviceId === device.id && value.controlId === control.controlId && value.homeId === device.homeId && value.descriptorRevision === device.descriptorRevision && value.descriptorRevision === control.catalogRevision && Number.isInteger(value.revision) && value.revision >= 0 && isUtcTimestamp(value.observedAt) && isUtcTimestamp(value.receivedAt) && isUtcTimestamp(value.validUntil) && Number.isFinite(observed) && Number.isFinite(received) && Number.isFinite(validUntil) && received >= observed && validUntil > observed && Number.isInteger(control.maxStateValiditySeconds) && validUntil - observed <= control.maxStateValiditySeconds * 1000 && ['fresh','stale','unknown','unavailable'].includes(value.quality) && valueMatches && ['online','offline','unknown'].includes(value.deviceAvailability) && ['on','off','unknown'].includes(value.analyticsActivity);
+  const noObservation = value.observedAt == null;
+  const timesValid = noObservation
+    ? value.validUntil == null && ['unknown','unavailable'].includes(value.quality) && value.value === null && value.analyticsActivity === 'unknown' && (value.receivedAt == null || isUtcTimestamp(value.receivedAt))
+    : isUtcTimestamp(value.observedAt) && isUtcTimestamp(value.receivedAt) && isUtcTimestamp(value.validUntil) && Number.isFinite(observed) && Number.isFinite(received) && Number.isFinite(validUntil) && received >= observed && validUntil > observed && Number.isInteger(control.maxStateValiditySeconds) && validUntil - observed <= control.maxStateValiditySeconds * 1000;
+  return value.deviceId === device.id && value.controlId === control.controlId && value.homeId === device.homeId && value.descriptorRevision === device.descriptorRevision && value.descriptorRevision === control.catalogRevision && Number.isInteger(value.revision) && value.revision >= 0 && timesValid && ['fresh','stale','unknown','unavailable'].includes(value.quality) && valueMatches && ['online','offline','unknown'].includes(value.deviceAvailability) && ['on','off','unknown'].includes(value.analyticsActivity);
 }
 function effectiveControlQuality(state, now = Date.now()) {
   const validUntil = Date.parse(state.validUntil);

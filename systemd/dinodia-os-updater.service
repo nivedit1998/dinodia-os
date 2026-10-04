@@ -1,0 +1,38 @@
+[Unit]
+Description=Dinodia Native V2 isolated signed updater
+After=local-fs.target network-online.target
+Wants=network-online.target
+Before=dinodia-os.service
+RequiresMountsFor=/opt/dinodia-os-releases /var/lib/dinodia-os-updater
+
+[Service]
+Type=simple
+User=root
+Group=dinodia
+ExecStart=/usr/bin/node /usr/lib/dinodia-os-updater/current/src/updater/service.js
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=dinodia-os-updater
+RuntimeDirectoryMode=0750
+UMask=0027
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID
+AmbientCapabilities=
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+ReadWritePaths=/opt/dinodia-os /opt/dinodia-os-releases /var/lib/dinodia-os /var/lib/dinodia-os-updater /run/dinodia-os-updater
+StateDirectory=dinodia-os-updater
+StateDirectoryMode=0700
+TimeoutStartSec=90
+TimeoutStopSec=10
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

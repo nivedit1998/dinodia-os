@@ -286,6 +286,36 @@ test("signed heartbeat persists monotonic LAN endpoint revisions and keeps unava
   assert.equal(observations[5].revision, observations[4].revision + 1);
 });
 
+test("production installer heartbeat accepts the URL-normalized default HTTP port 80", async () => {
+  const serial = "DINODIA-PRODUCTION-LAN-HUB";
+  let platform = {};
+  const store = {
+    getPlatform() { return platform; },
+    async savePlatform(value) { platform = { ...platform, ...value }; },
+  };
+  const pairing = new PlatformPairing({
+    store,
+    vault: {},
+    apiUrl: "https://platform.test",
+    serial,
+    haPort: 8123,
+    runtime: { nodeEnv: "production" },
+    getLanEndpoint: () => ({ state: "CURRENT", address: "192.168.1.76", interfaceName: "eth0" }),
+  });
+
+  const observation = await pairing.buildLanEndpointObservation(7);
+
+  assert.deepEqual(observation, {
+    version: 1,
+    revision: 1,
+    state: "CURRENT",
+    baseUrl: "http://192.168.1.76:80",
+    discoveryHost: "dinodia-dinodia-production-lan-hub.local",
+  });
+  assert.equal(validateLanEndpointObservation(observation, serial, 80), true);
+  assert.equal(platform.lanEndpointObservation.identityGeneration, 7);
+});
+
 test("CloudURL re-verification is included inside the machine-signed Platform request body", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-cloud-reverify-"));
   const store = new Store(path.join(directory, "dinodia.json"));

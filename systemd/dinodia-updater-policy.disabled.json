@@ -1,0 +1,13 @@
+{
+  "enabled": false,
+  "approvedChannel": "stable",
+  "targetArch": "aarch64",
+  "apiVersion": 2,
+  "storeSchemaVersion": 10,
+  "signingKeyId": "",
+  "releaseSigningPublicKey": "",
+  "allowedArtifactHosts": [],
+  "maxManifestLifetimeMs": 604800000,
+  "downloadTimeoutMs": 60000,
+  "minimumFreeBytes": 67108864
+}

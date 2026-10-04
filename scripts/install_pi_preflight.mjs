@@ -3,6 +3,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 
 export const CANONICAL_PLATFORM_ORIGIN = "https://dinodia-platform-v2.vercel.app";
@@ -80,6 +81,9 @@ export function validateCandidate({ sourceDir, envFile, identityDir }) {
   for (const name of ["DINODIA_APP_PUBLIC_KEYS", "DINODIA_OPERATOR_PUBLIC_KEY", "DINODIA_MANUFACTURING_ROOT_PUBLIC_KEYS"]) required(values, name);
 
   const packageJson = JSON.parse(fs.readFileSync(path.join(sourceDir, "package.json"), "utf8"));
+  const requireFromCandidate = createRequire(path.join(sourceDir, "package.json"));
+  const storeSchemaVersion = requireFromCandidate(path.join(sourceDir, "src/automations/constants.js")).NATIVE_AUTOMATION_STORE_VERSION;
+  if (!Number.isSafeInteger(storeSchemaVersion) || storeSchemaVersion < 1) fail("candidate store schema identity is invalid");
   if (!packageJson.version || packageJson.version === "0.5.0") fail("candidate package version is still the legacy 0.5.0 release");
   if (!fs.statSync(identityDir, { throwIfNoEntry: false })?.isDirectory()) fail("the enrolled identity directory is missing");
   const identityPath = path.join(identityDir, "identity.json");
@@ -88,7 +92,7 @@ export function validateCandidate({ sourceDir, envFile, identityDir }) {
   if (!String(identity.serial || "") || !Number.isInteger(Number(identity.generation)) || Number(identity.generation) < 1) fail("the enrolled identity is incomplete");
 
   const buildId = sourceFingerprint(sourceDir);
-  return { buildId, platformOrigin: CANONICAL_PLATFORM_ORIGIN, packageVersion: packageJson.version };
+  return { buildId, platformOrigin: CANONICAL_PLATFORM_ORIGIN, packageVersion: packageJson.version, storeSchemaVersion };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

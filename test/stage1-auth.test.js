@@ -9,13 +9,14 @@ const { CredentialRegistry, CREDENTIAL_TYPES } = require("../src/auth/credential
 const { createOperatorSessionToken, verifyOperatorSessionToken } = require("../src/auth/operatorSession");
 const { ProvisioningPairingService } = require("../src/auth/provisioningPairing");
 const { generateManufacturingIdentity, stableManufacturingIdentityPayload, signPairingEnvelope, verifyPairingEnvelope } = require("../src/auth/manufacturingIdentity");
-const { createLanChallenge, signLanChallenge, verifyLanProof, canUseArea, OfflineLanAuthorisationStore } = require("../src/auth/offlineLanAuthorizer");
+const { createLanChallenge, createNativeLanChallenge, signLanChallenge, verifyLanProof, canUseArea, OfflineLanAuthorisationStore } = require("../src/auth/offlineLanAuthorizer");
 const { StepUpProofRegistry } = require("../src/auth/stepUpProofs");
 const { RevocationCoordinator } = require("../src/auth/revocationCoordinator");
 const { Store } = require("../src/store");
 const { SecretVault } = require("../src/secretVault");
 const { canonicalPlatformRequest, canonicalCloudChallenge, canonicalCloudChallengeUnsigned, encryptPrivateKey, decryptPrivateKey, loadIdentity, createIdentityBrokerServer } = require("../src/auth/identityBroker");
 const { createSupportProofOfPossession, supportProofRequestDigest } = require("../src/auth/supportProofOfPossession");
+const { isPrivateLanRequest, isTrustedOfflineLanTransport } = require("../src/server");
 
 test("operator sessions are signed, hub-bound, session-time-limited, with separate recent-auth enforcement", () => {
   const keys = crypto.generateKeyPairSync("ed25519");
@@ -119,6 +120,20 @@ test("offline LAN proof is short-lived, area-scoped and operation-bound", () => 
   assert.equal(canUseArea({ areaIds: ["a1"], areaId: "a2" }), false);
 });
 
+test("offline LAN proof verifies the same P-256 key type registered by iOS trusted-device enrollment", () => {
+  const keys = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const challenge = createNativeLanChallenge({
+    grantId: "grant-p256", purpose: "native.read", homeId: "home-p256", hubInstallId: "hub-p256",
+    membershipId: "membership-p256", trustedDeviceId: "phone-p256", policyRevision: 7,
+    areaIds: ["area-p256"], requestPath: "/api/dinodia/v1/snapshot", now: 1_000,
+  });
+  const signature = signLanChallenge(challenge, keys.privateKey);
+  assert.equal(verifyLanProof({ challenge, signature, publicKey: keys.publicKey, now: 1_500 }), true);
+  assert.equal(verifyLanProof({ challenge, signature, publicKey: keys.publicKey, now: 31_001 }), false);
+  const changed = { ...challenge, homeId: "other-home" };
+  assert.equal(verifyLanProof({ challenge: changed, signature, publicKey: keys.publicKey, now: 1_500 }), false);
+});
+
 test("signed offline grants require the customer account identity and persist account-wide revocation", async () => {
   const platform = crypto.generateKeyPairSync("ed25519");
   const security = { offlineAuthorisations: {}, usedLanNonces: {} };
@@ -177,11 +192,23 @@ test("offline LAN proofs use the canonical Area UUID while resolving the target'
   assert.equal(await authorisations.verify(extraFieldProof), null, "unknown signed challenge fields are rejected");
 });
 
-test("offline authority is not accepted through forwarded or public transports", () => {
-  const source = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "src", "server.js"), "utf8");
-  assert.match(source, /function isPrivateLanRequest/);
-  assert.match(source, /cf-connecting-ip/);
-  assert.match(source, /challengeHeader && signature && grantId && isPrivateLanRequest\(req\)/);
+test("offline authority is restricted to direct private or loopback TLS transport", () => {
+  const lanHost = "dinodia-0123456789abcdefabcd.local";
+  const request = (remoteAddress, headers = {}, encrypted = false) => ({ socket: { remoteAddress, encrypted, servername: encrypted ? lanHost : "" }, headers: { host: `${lanHost}:8123`, ...headers } });
+  assert.equal(isPrivateLanRequest(request("127.0.0.1")), true);
+  assert.equal(isTrustedOfflineLanTransport(request("127.0.0.1", {}, true)), true, "loopback integration proves the exact TLS hostname");
+  assert.equal(isPrivateLanRequest(request("192.168.1.25")), true);
+  assert.equal(isTrustedOfflineLanTransport(request("192.168.1.25", {}, true)), true, "customer offline authority requires encrypted direct LAN and exact TLS host");
+  assert.equal(isTrustedOfflineLanTransport(request("192.168.1.25")), false, "plain HTTP on the LAN is not customer transport");
+  for (const headers of [
+    { "x-forwarded-for": "192.168.1.25" },
+    { "cf-connecting-ip": "192.168.1.25" },
+    { "x-forwarded-host": "dinodia.example.invalid" },
+  ]) {
+    assert.equal(isPrivateLanRequest(request("127.0.0.1", headers, true)), false, "publicly forwarded requests cannot use offline authority");
+    assert.equal(isTrustedOfflineLanTransport(request("127.0.0.1", headers, true)), false);
+  }
+  assert.equal(isTrustedOfflineLanTransport(request("203.0.113.9", {}, true)), false, "a public socket is never offline LAN authority");
 });
 
 test("generic step-up proof is one-use and exact-operation-bound", () => {

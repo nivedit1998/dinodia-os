@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "status": {
+    "phase": "idle",
+    "trustState": "unprovisioned",
+    "activeReleaseVersion": null,
+    "lastAttempt": null,
+    "busy": false
+  }
+}
