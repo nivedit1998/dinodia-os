@@ -482,6 +482,19 @@ class PlatformPairing {
       if (!result) throw new Error("A factory-enrolled hub identity is required for Platform synchronisation");
       const reportedHubInstallId = result.hubInstallId == null ? "" : String(result.hubInstallId);
       const hubInstallId = reportedHubInstallId || String(platform.hubInstallId || "");
+      const installationSyncMode = result.installationSyncMode == null ? "ACTIVE" : String(result.installationSyncMode);
+      if (!["ACTIVE", "INSTALLATION_BOOTSTRAP", "UNAVAILABLE"].includes(installationSyncMode)) {
+        throw Object.assign(new Error("Platform returned an invalid installation sync mode"), { code: "installation_sync_mode_invalid" });
+      }
+      if (installationSyncMode === "UNAVAILABLE") {
+        throw Object.assign(new Error("Platform has not granted current synchronization authority to this installation"), { code: "hub_sync_authority_changed" });
+      }
+      const serverAcceptedSequence = Number(result.syncAcceptedSequence ?? 0);
+      const serverStreamId = result.syncStreamId == null ? null : String(result.syncStreamId);
+      if (!Number.isSafeInteger(serverAcceptedSequence) || serverAcceptedSequence < 0
+        || (serverStreamId !== null && (serverStreamId.length < 16 || serverStreamId.length > 80))) {
+        throw Object.assign(new Error("Platform returned an invalid native sync cursor"), { code: "hub_sync_cursor_invalid" });
+      }
       if (reportedHubInstallId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(reportedHubInstallId)) {
         throw Object.assign(new Error("Platform returned an invalid enrolled hub installation ID"), { code: "hub_installation_id_invalid" });
       }
@@ -545,39 +558,45 @@ class PlatformPairing {
       const updaterStatus = await this.getUpdaterStatus().catch(() => null);
       if (updaterStatus) await this.store.ensureUpdaterStatusEvent?.(updaterStatus, this.clock());
       const syncState = this.store.getSyncOutbox();
-      const syncBatch = await this.store.prepareSyncBatch(hubInstallId, this.runtime, this.clock());
-      const syncEnvelope = syncBatch || {
-        schemaVersion: 1,
-        hubInstallationId: hubInstallId,
-        streamId: String(syncState.streamId),
-        fromSequence: Number(syncState.acknowledgedSequence || 0) + 1,
-        toSequence: Number(syncState.acknowledgedSequence || 0),
-        events: [],
-        queueDepth: 0,
-        acknowledgedCloudRevision: Number(syncState.cloudRevision || 0),
-        runtime: this.store.getSyncRuntime?.(this.runtime) || this.runtime,
-        sentAt: new Date(this.clock()).toISOString(),
-      };
-      const syncResult = await this.requestWithHubIdentity("/api/hub-agent/v2/sync", syncEnvelope);
-      if (syncResult?.streamId !== syncEnvelope.streamId || !Number.isSafeInteger(Number(syncResult?.cloudRevision))
-        || !syncResult?.configuration || syncResult.configuration.revision !== Number(syncResult.cloudRevision)) {
-        throw Object.assign(new Error("Platform returned an invalid native sync acknowledgement/configuration"), { code: "sync_response_invalid" });
+      const bootstrapBatchOptions = installationSyncMode === "INSTALLATION_BOOTSTRAP"
+        ? { allowedTypesPrefix: ["sync.compacted", "update.status", "area.upsert"], serverAcceptedSequence, serverStreamId }
+        : {};
+      const syncBatch = await this.store.prepareSyncBatch(hubInstallId, this.runtime, this.clock(), bootstrapBatchOptions);
+      let syncResult = null;
+      if (syncBatch || installationSyncMode === "ACTIVE") {
+        const syncEnvelope = syncBatch || {
+          schemaVersion: 1,
+          hubInstallationId: hubInstallId,
+          streamId: String(syncState.streamId),
+          fromSequence: Number(syncState.acknowledgedSequence || 0) + 1,
+          toSequence: Number(syncState.acknowledgedSequence || 0),
+          events: [],
+          queueDepth: 0,
+          acknowledgedCloudRevision: Number(syncState.cloudRevision || 0),
+          runtime: this.store.getSyncRuntime?.(this.runtime) || this.runtime,
+          sentAt: new Date(this.clock()).toISOString(),
+        };
+        syncResult = await this.requestWithHubIdentity("/api/hub-agent/v2/sync", syncEnvelope);
+        if (syncResult?.streamId !== syncEnvelope.streamId || !Number.isSafeInteger(Number(syncResult?.cloudRevision))
+          || !syncResult?.configuration || syncResult.configuration.revision !== Number(syncResult.cloudRevision)) {
+          throw Object.assign(new Error("Platform returned an invalid native sync acknowledgement/configuration"), { code: "sync_response_invalid" });
+        }
+        await applyCloudConfiguration(this.store, syncResult.configuration);
+        if (syncBatch) {
+          await this.store.acknowledgeSyncBatch({
+            streamId: syncResult.streamId,
+            acceptedThroughSequence: Number(syncResult.acceptedThroughSequence),
+            cloudRevision: Number(syncResult.cloudRevision),
+            configurationAppliedRevision: Number(syncResult.configurationAppliedRevision),
+            resnapshotRequired: syncResult.resnapshotRequired === true,
+          }, this.clock());
+        } else {
+          await this.store.acknowledgeSyncConfiguration(Number(syncResult.cloudRevision), this.clock());
+        }
+        await this.store.advanceSyncUsage?.(this.clock());
       }
-      await applyCloudConfiguration(this.store, syncResult.configuration);
-      if (syncBatch) {
-        await this.store.acknowledgeSyncBatch({
-          streamId: syncResult.streamId,
-          acceptedThroughSequence: Number(syncResult.acceptedThroughSequence),
-          cloudRevision: Number(syncResult.cloudRevision),
-          configurationAppliedRevision: Number(syncResult.configurationAppliedRevision),
-          resnapshotRequired: syncResult.resnapshotRequired === true,
-        }, this.clock());
-      } else {
-        await this.store.acknowledgeSyncConfiguration(Number(syncResult.cloudRevision), this.clock());
-      }
-      await this.store.advanceSyncUsage?.(this.clock());
       const heartbeatAt = this.clock();
-      if (nativeIdentity && (this.pendingEndpointHeartbeat || heartbeatAt - this.lastHeartbeatAt >= this.heartbeatIntervalMs)) {
+      if (nativeIdentity && (installationSyncMode === "INSTALLATION_BOOTSTRAP" || this.pendingEndpointHeartbeat || heartbeatAt - this.lastHeartbeatAt >= this.heartbeatIntervalMs)) {
         const lanEndpoint = await this.buildLanEndpointObservation(nativeIdentity.generation);
         const lanTlsIdentity = this.getLanTlsIdentity();
         const heartbeat = await this.requestWithHubIdentity("/api/hub-agent/v2/heartbeat", {
@@ -599,13 +618,15 @@ class PlatformPairing {
         // first acknowledgement may therefore never clear a newer change.
         this.pendingEndpointHeartbeat = this.queuedImmediateSync;
       }
-      await this.store.savePlatform({ lastSyncAt: new Date(this.clock()).toISOString(), lastError: null });
+      await this.store.savePlatform({ ...(syncResult ? { lastSyncAt: new Date(this.clock()).toISOString() } : {}), lastError: null });
       await this.onSyncResult(result, undefined, undefined, undefined, undefined);
       // Alexa has a dedicated bounded synchroniser. Keeping it outside this
       // heartbeat prevents a catalogue update from delaying token/state sync.
-      this.lastSuccess = new Date().toISOString();
+      if (syncResult) this.lastSuccess = new Date().toISOString();
       this.lastError = null;
-      if ((this.store.getSyncOutbox?.().events || []).some((event) => event.sequence > Number(this.store.getSyncOutbox?.().acknowledgedSequence || 0))) {
+      const outboxAfterSync = this.store.getSyncOutbox?.();
+      const nextPending = (outboxAfterSync?.events || []).find((event) => event.sequence > Number(outboxAfterSync?.acknowledgedSequence || 0));
+      if (nextPending && (installationSyncMode === "ACTIVE" || (syncResult && nextPending.type === "area.upsert"))) {
         setImmediate(() => this.syncNow().catch(() => {}));
       }
       this.retryAttempt = 0;

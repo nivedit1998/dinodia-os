@@ -128,7 +128,14 @@ function enqueueSyncEventInState(state, type, aggregateId, payload, options = {}
 function nextSyncBatch(outboxValue, options = {}) {
   const outbox = normalizeSyncOutbox(outboxValue);
   if (outbox.inFlight) return JSON.parse(JSON.stringify(outbox.inFlight));
-  const events = outbox.events.filter((event) => event.sequence > outbox.acknowledgedSequence).slice(0, SYNC_BATCH_MAX_EVENTS);
+  const pending = outbox.events.filter((event) => event.sequence > outbox.acknowledgedSequence);
+  if (!pending.length) return null;
+  const allowedTypesPrefix = Array.isArray(options.allowedTypesPrefix) ? new Set(options.allowedTypesPrefix.map(String)) : null;
+  const events = [];
+  for (const event of pending.slice(0, SYNC_BATCH_MAX_EVENTS)) {
+    if (allowedTypesPrefix && !allowedTypesPrefix.has(event.type)) break;
+    events.push(event);
+  }
   if (!events.length) return null;
   const selected = [];
   for (const event of events) {
@@ -144,7 +151,7 @@ function nextSyncBatch(outboxValue, options = {}) {
     fromSequence: selected[0].sequence,
     toSequence: selected[selected.length - 1].sequence,
     events: selected,
-    queueDepth: events.length,
+    queueDepth: pending.length,
     acknowledgedCloudRevision: outbox.cloudRevision,
     runtime: options.runtime || { kind: "dinodia_os", version: "0.0.0", capabilities: {} },
     sentAt: new Date(options.now || Date.now()).toISOString(),

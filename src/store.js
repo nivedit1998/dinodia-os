@@ -1671,14 +1671,29 @@ class Store {
     }
   }
 
-  async prepareSyncBatch(hubInstallationId, runtime, now = Date.now()) {
+  async prepareSyncBatch(hubInstallationId, runtime, now = Date.now(), options = {}) {
     const before = this.snapshot();
     try {
       const outbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
+      const allowedTypesPrefix = Array.isArray(options.allowedTypesPrefix) ? options.allowedTypesPrefix.map(String) : null;
+      if (outbox.inFlight && allowedTypesPrefix) {
+        const serverAcceptedSequence = Number(options.serverAcceptedSequence);
+        const serverStreamId = options.serverStreamId == null ? null : String(options.serverStreamId);
+        const inFlight = outbox.inFlight;
+        if (serverStreamId && serverStreamId !== outbox.streamId) throw new Error("Platform sync stream identity changed while an event batch was in flight");
+        if (serverAcceptedSequence >= Number(inFlight.toSequence)) return clone(inFlight);
+        if (serverAcceptedSequence !== Number(outbox.acknowledgedSequence)) {
+          throw new Error("Platform sync cursor changed inside an unacknowledged range; refusing to rewrite the durable request");
+        }
+        // The authenticated Platform cursor proves that no event in this
+        // range committed. It is now safe to narrow the request to the
+        // contiguous Area-only prefix required by installation bootstrap.
+        outbox.inFlight = null;
+      }
       if (!outbox.inFlight) {
-        outbox.inFlight = nextSyncBatch(outbox, { hubInstallationId, runtime: this.getSyncRuntime(runtime), now });
+        outbox.inFlight = nextSyncBatch(outbox, { hubInstallationId, runtime: this.getSyncRuntime(runtime), now, ...(allowedTypesPrefix ? { allowedTypesPrefix } : {}) });
         outbox.lastAttemptAt = new Date(now).toISOString();
-        if (outbox.inFlight) await this.persist();
+        await this.persist();
       }
       return clone(outbox.inFlight);
     } catch (error) {
