@@ -7,9 +7,219 @@ const { buildPresentation, isConfigured, labelId, sourceFingerprint } = require(
 const { DEFAULT_HEATING_DEMAND_CONFIG, DEFAULT_HEATING_DEMAND_RUNTIME } = require("./heatingDemandController");
 const { NATIVE_AUTOMATION_STORE_VERSION, LIMITS } = require("./automations/constants");
 const { migrateLegacyAutomations } = require("./automations/legacyAdapter");
+const { getSurfaces } = require("./capabilities/devicePresentation");
+const { serializeDevice } = require("./contracts/dinodiaV1");
+const { enqueueSyncEventInState, initialSyncOutbox, nextSyncBatch, normalizeSyncOutbox } = require("./sync/syncOutbox");
+const { validateCloudConfiguration } = require("./sync/cloudConfiguration");
+const { activityFor, advanceUsage, initialUsageState, observeUsage } = require("./sync/usageBuckets");
+
+function sourceTimestamp(value) {
+  if (typeof value !== "string") return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/.exec(value);
+  if (!match) return null;
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return null;
+  const date = new Date(time);
+  return [date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate(), date.getUTCHours(), date.getUTCMinutes(), date.getUTCSeconds()]
+    .every((component, index) => component === Number(match[index + 1])) ? date.toISOString() : null;
+}
+
+function currentEntityValue(entity) {
+  const value = entity?.state;
+  return value && typeof value === "object" && !Array.isArray(value) && Object.hasOwn(value, "state") ? value.state : value;
+}
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function nativeSyncDeviceProjection(device) {
+  const protocol = String(device?.protocol || "unknown").toLowerCase();
+  return {
+    osDeviceId: String(device?.id || "").slice(0, 160),
+    name: String(device?.name || device?.id || "Device").slice(0, 160),
+    areaId: device?.areaId ? String(device.areaId).slice(0, 160) : null,
+    protocol: ["zigbee", "matter", "thread", "hive", "google_nest"].includes(protocol) ? protocol : "unknown",
+    deviceType: String(device?.deviceType || device?.metadata?.device_type || device?.protocol || "unknown").slice(0, 120),
+    technicalLabel: String(device?.technicalLabel || device?.deviceType || device?.protocol || "device").slice(0, 80),
+    descriptorRevision: Math.max(1, Number(device?.presentation?.descriptorRevision) || 1),
+    descriptorDigest: crypto.createHash("sha256").update(String(device?.presentation?.sourceFingerprint || ""), "utf8").digest("hex"),
+    available: device?.available !== false,
+    observedAt: device?.lastSeenAt ? String(device.lastSeenAt) : null,
+  };
+}
+
+function nativeSyncControlCatalogProjection(state, device) {
+  const policy = state.platform?.devicePolicies?.[String(device?.id || "")];
+  const homeId = String(state.platform?.homeId || "");
+  const areaId = String(device?.areaId || "");
+  if (policy?.managementClass !== "PROPERTY_DEVICE" || !homeId || !areaId || device?.retired === true) return null;
+  const dto = serializeDevice({
+    device,
+    homeId,
+    homeMembershipId: "native-sync-projection",
+    role: "OWNER",
+    areaIds: [areaId],
+    surfaces: getSurfaces(device),
+    revision: Number(device?.presentation?.descriptorRevision || 0),
+  });
+  if (!dto) return null;
+  // serializeDevice is the existing Native V1 public descriptor projection;
+  // it strips live values and executable integration bindings.
+  return {
+    osDeviceId: dto.id,
+    catalogRevision: dto.descriptorRevision,
+    descriptorDigest: String(nativeSyncDeviceProjection(device).descriptorDigest),
+    controls: dto.controls,
+  };
+}
+
+function nativeControlId(deviceId, endpointId, logicalKey, declared = "") {
+  const candidate = String(declared || "");
+  if (/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(candidate)
+    && !/^(?:internal|ha|hass|homeassistant):/i.test(candidate)) return candidate;
+  const digest = crypto.createHash("sha256").update(`${String(deviceId)}\n${String(endpointId)}\n${String(logicalKey)}`, "utf8").digest("hex").slice(0, 40);
+  return `ctrl_${digest}`;
+}
+
+function enqueueNativeDeviceSync(state, previous, current, options = {}) {
+  const id = String(current?.id || previous?.id || "");
+  const policy = state.platform?.devicePolicies?.[id];
+  // Tenant-owned devices remain local/private. Platform policy may be delivered
+  // to the hub so the tenant can control them, but their device identity and
+  // activity are never projected back into owner/manager cloud sync.
+  if (!id || policy?.managementClass !== "PROPERTY_DEVICE") return;
+  const currentProjection = nativeSyncDeviceProjection(current);
+  enqueueSyncEventInState(state, "device.upsert", id, currentProjection, options);
+  const currentCatalog = nativeSyncControlCatalogProjection(state, current);
+  if (!currentCatalog) return;
+  const previousCatalog = previous ? nativeSyncControlCatalogProjection(state, previous) : null;
+  if (previousCatalog && previousCatalog.catalogRevision === currentCatalog.catalogRevision
+    && JSON.stringify(previousCatalog.controls) === JSON.stringify(currentCatalog.controls)) return;
+  enqueueSyncEventInState(state, "control.catalog.upsert", id, currentCatalog, { critical: true });
+  if (previousCatalog) {
+    const retained = new Set(currentCatalog.controls.map((control) => String(control.controlId)));
+    const removedControlIds = previousCatalog.controls.map((control) => String(control.controlId)).filter((controlId) => !retained.has(controlId));
+    if (removedControlIds.length) enqueueSyncEventInState(state, "control.catalog.tombstone", id, {
+      osDeviceId: id.slice(0, 160), catalogRevision: currentCatalog.catalogRevision,
+      descriptorDigest: currentCatalog.descriptorDigest, controlIds: removedControlIds,
+    }, { critical: true });
+  }
+}
+
+function bucketEventProjection(bucket) {
+  return {
+    osDeviceId: bucket.osDeviceId, osAreaId: bucket.osAreaId, analyticsCategory: bucket.category,
+    controlId: bucket.controlId, sourceGeneration: bucket.sourceGeneration, bucketStart: bucket.bucketStart,
+    revision: bucket.revision, onSeconds: bucket.onSeconds, offSeconds: bucket.offSeconds,
+    unknownSeconds: bucket.unknownSeconds, closedAt: bucket.closedAt, purgeAt: bucket.purgeAt,
+  };
+}
+
+function queueUsageBucket(state, bucketKey, now) {
+  const usage = state.syncUsage = initialUsageState(state.syncUsage);
+  const bucket = usage.buckets[bucketKey];
+  if (!bucket) return false;
+  usage.queuedRevisions = usage.queuedRevisions || {};
+  if (Number(usage.queuedRevisions[bucketKey] || 0) >= bucket.revision) return false;
+  const aggregateId = crypto.createHash("sha256").update(bucketKey, "utf8").digest("hex");
+  const event = enqueueSyncEventInState(state, "usage.bucket", aggregateId, bucketEventProjection(bucket), { now });
+  if (!event) return false;
+  usage.queuedRevisions[bucketKey] = bucket.revision;
+  return true;
+}
+
+function recordDeviceSyncObservations(state, device, nowMs) {
+  const deviceId = String(device?.id || "");
+  const policy = state.platform?.devicePolicies?.[deviceId];
+  const generation = Number(state.identity?.generation || 0);
+  if (!policy || policy.managementClass !== "PROPERTY_DEVICE" || policy.lifecycle === "RETIRED"
+    || policy.lifecycle === "REMOVED" || policy.lifecycle === "REMOVAL_PENDING"
+    || !["LIGHT", "BOILER", "RADIATOR"].includes(policy.analyticsCategory)
+    || !Number.isSafeInteger(generation) || generation < 1) return;
+  const catalog = nativeSyncControlCatalogProjection(state, device);
+  if (!catalog) return;
+  const entities = Object.values(device.entities || {});
+  const usage = state.syncUsage = initialUsageState(state.syncUsage);
+  for (const control of catalog.controls) {
+    if (!control.observable || !Number.isSafeInteger(control.maxStateValiditySeconds) || control.maxStateValiditySeconds <= 0) continue;
+    const role = String(control.semanticRole || "");
+    if (!(policy.analyticsCategory === "LIGHT" && role === "power"
+      || policy.analyticsCategory === "RADIATOR" && role === "active_heat_demand"
+      || policy.analyticsCategory === "BOILER" && role === "active_heat_production")) continue;
+    const entity = entities.find((item) => String(item.capability?.controlId || item.controlId || item.id || item.sourceId || "") === control.controlId);
+    const observedAt = sourceTimestamp(entity?.sourceObservedAt || entity?.lastChanged || entity?.last_changed || entity?.updatedAt || "");
+    if (!entity || !observedAt) continue;
+    const observedMs = Date.parse(observedAt);
+    if (observedMs > nowMs || nowMs - observedMs > 30 * 60 * 1000) continue;
+    const validityMs = Math.min(control.maxStateValiditySeconds * 1000, policy.analyticsCategory === "RADIATOR" ? 30 * 60 * 1000 : Number.MAX_SAFE_INTEGER);
+    const validUntil = new Date(observedMs + validityMs).toISOString();
+    const value = currentEntityValue(entity);
+    const activity = activityFor({ category: policy.analyticsCategory, role, value, available: device.available !== false });
+    const result = observeUsage(usage, {
+      osDeviceId: deviceId,
+      osAreaId: String(device.areaId || ""),
+      category: policy.analyticsCategory,
+      controlId: String(control.controlId),
+      sourceGeneration: generation,
+      activity,
+      observedAt,
+      validUntil,
+      nowMs,
+    });
+    state.syncUsage = result.state;
+    for (const key of result.changedBuckets) queueUsageBucket(state, key, nowMs);
+  }
+
+  // A temperature sample is accepted only from an explicitly observable
+  // ambient-temperature descriptor and its source timestamp. Read time and
+  // target temperature are never substituted for the sensor observation.
+  if (policy.analyticsCategory === "RADIATOR") {
+    for (const control of catalog.controls) {
+      if (control.semanticRole !== "ambient_temperature" || !control.observable || !Number.isSafeInteger(control.maxStateValiditySeconds)) continue;
+      const entity = entities.find((item) => String(item.capability?.controlId || item.controlId || item.id || item.sourceId || "") === control.controlId);
+      const observedAt = sourceTimestamp(entity?.sourceObservedAt || entity?.lastChanged || entity?.last_changed || entity?.updatedAt || "");
+      const value = currentEntityValue(entity);
+      if (!observedAt || typeof value !== "number" || !Number.isFinite(value) || value < -50 || value > 80) continue;
+      const observedMs = Date.parse(observedAt);
+      const validUntil = observedMs + Math.min(30 * 60 * 1000, control.maxStateValiditySeconds * 1000);
+      if (observedMs > nowMs || nowMs >= validUntil) continue;
+      const sourceEventKey = crypto.createHash("sha256").update([deviceId, control.controlId, generation, observedAt].join("\n"), "utf8").digest("hex");
+      usage.temperatureQueuedKeys = usage.temperatureQueuedKeys || [];
+      if (usage.temperatureQueuedKeys.includes(sourceEventKey)) continue;
+      const sample = enqueueSyncEventInState(state, "temperature.sample", sourceEventKey, {
+        osDeviceId: deviceId, osAreaId: String(device.areaId || ""), controlId: String(control.controlId),
+        sourceGeneration: generation, sourceEventKey, temperature: Math.round(value * 100) / 100,
+        sourceObservedAt: observedAt, validUntil: new Date(validUntil).toISOString(), quality: "fresh",
+      }, { now: nowMs });
+      if (sample) usage.temperatureQueuedKeys = [...usage.temperatureQueuedKeys, sourceEventKey].slice(-1024);
+    }
+  }
+}
+
+function nativeIncidentSyncProjection(envelope = {}) {
+  const incidentId = String(envelope.incidentId || "");
+  const revision = Number(envelope.revision || 1);
+  if (!incidentId || !Number.isSafeInteger(revision) || revision < 1) return null;
+  const incidentKey = crypto.createHash("sha256").update(incidentId, "utf8").digest("hex");
+  const occurredAt = new Date(envelope.occurredAt || Date.now());
+  const firstObservedAt = new Date(envelope.firstObservedAt || occurredAt);
+  const lastObservedAt = new Date(envelope.lastObservedAt || occurredAt);
+  const resolved = String(envelope.state || "open").toLowerCase() === "resolved";
+  const resolvedAt = resolved && envelope.resolvedAt ? new Date(envelope.resolvedAt) : null;
+  if (![occurredAt, firstObservedAt, lastObservedAt, ...(resolvedAt ? [resolvedAt] : [])].every((date) => Number.isFinite(date.getTime()))) return null;
+  return {
+    incidentKey,
+    revision,
+    kind: String(envelope.kind || "device_offline").toLowerCase().replace(/[^a-z0-9_:-]/g, "_").slice(0, 80),
+    state: resolved ? "resolved" : "open",
+    severity: "critical",
+    occurredAt: occurredAt.toISOString(),
+    firstObservedAt: firstObservedAt.toISOString(),
+    lastObservedAt: lastObservedAt.toISOString(),
+    resolvedAt: resolvedAt?.toISOString() || null,
+    osDeviceId: typeof envelope.device?.id === "string" ? envelope.device.id.slice(0, 160) : null,
+  };
 }
 
 const ACTIVITY_MAX_RECORDS = 2000;
@@ -116,7 +326,7 @@ function normalizeIncidentOutbox(value) {
       id: String(entry.id || entry.envelope.id || crypto.randomUUID()),
       attempts: Math.max(0, Number(entry.attempts) || 0),
       createdAt: String(entry.createdAt || new Date().toISOString()),
-    })).slice(0, 100)
+    })).slice(0, 10_000)
     : [];
   return {
     pending,
@@ -182,6 +392,12 @@ function initialState() {
       acceptedTokenHashes: [],
       areaBindings: [],
       homeId: null,
+      cloudRevision: 0,
+      cloudConfigurationChecksum: null,
+      cloudConfiguration: null,
+      devicePolicies: {},
+      updaterStatus: null,
+      updaterStatusRevision: 0,
       operatorCredentialStates: [],
       syncIntervalMinutes: 2,
       lastPairAt: null,
@@ -196,6 +412,8 @@ function initialState() {
     events: [],
     activity: initialActivityState(),
     incidentOutbox: normalizeIncidentOutbox(),
+    syncOutbox: initialSyncOutbox(),
+    syncUsage: initialUsageState(),
     cloudflare: { mode: "disabled", hostname: "", token: "", origin: "http://127.0.0.1:8123" },
     zigbee: { adapterPath: "", adapterName: "", adapterType: "", recommended: false, discoveryPrefix: "dinodia-ha", removedAdapterPaths: [] },
     thread: { configured: false, rcpDevice: "", rcpName: "", baudRate: 460800, infraIf: "eth0", threadIf: "wpan0", updatedAt: null },
@@ -361,6 +579,14 @@ function normalizeState(value) {
         ? persistedPlatform.areaBindings.filter((binding) => binding && typeof binding.areaId === "string" && binding.areaId.length > 0 && binding.areaId.length <= 160 && typeof binding.hubAreaId === "string" && binding.hubAreaId.length > 0 && binding.hubAreaId.length <= 160)
         : [],
       homeId: typeof persistedPlatform.homeId === "string" && persistedPlatform.homeId.length > 0 && persistedPlatform.homeId.length <= 160 ? persistedPlatform.homeId : null,
+      cloudRevision: Math.max(0, Number(persistedPlatform.cloudRevision) || 0),
+      policyRevision: Math.max(0, Number(persistedPlatform.policyRevision) || 0),
+      cloudConfigurationChecksum: typeof persistedPlatform.cloudConfigurationChecksum === "string" && /^[a-f0-9]{64}$/i.test(persistedPlatform.cloudConfigurationChecksum) ? persistedPlatform.cloudConfigurationChecksum : null,
+      cloudConfiguration: validateCloudConfiguration(persistedPlatform.cloudConfiguration, persistedPlatform) ? persistedPlatform.cloudConfiguration : null,
+      devicePolicies: validateCloudConfiguration(persistedPlatform.cloudConfiguration, persistedPlatform)
+        ? Object.fromEntries(persistedPlatform.cloudConfiguration.devicePolicies.map((policy) => [String(policy.osDeviceId), clone(policy)])) : {},
+      updaterStatus: persistedPlatform.updaterStatus && typeof persistedPlatform.updaterStatus === "object" ? clone(persistedPlatform.updaterStatus) : null,
+      updaterStatusRevision: Math.max(0, Number(persistedPlatform.updaterStatusRevision) || 0),
       operatorCredentialStates: Array.isArray(persistedPlatform.operatorCredentialStates)
         ? persistedPlatform.operatorCredentialStates.filter((entry) => entry && Number.isInteger(Number(entry.version))).map((entry) => ({ version: Number(entry.version), state: String(entry.state || ''), graceUntil: entry.graceUntil ? String(entry.graceUntil) : null }))
         : [],
@@ -372,6 +598,8 @@ function normalizeState(value) {
     events: Array.isArray(value.events) ? value.events.slice(0, 500) : [],
     activity,
     incidentOutbox: normalizeIncidentOutbox(value.incidentOutbox),
+    syncOutbox: normalizeSyncOutbox(value.syncOutbox),
+    syncUsage: initialUsageState(value.syncUsage),
     cloudflare: value.cloudflare && typeof value.cloudflare === "object" ? { ...base.cloudflare, ...value.cloudflare } : base.cloudflare,
     zigbee: value.zigbee && typeof value.zigbee === "object" ? { ...base.zigbee, ...value.zigbee, removedAdapterPaths: normalizeIds(value.zigbee.removedAdapterPaths) } : base.zigbee,
     thread: value.thread && typeof value.thread === "object" ? { ...base.thread, ...value.thread, configured: Boolean(value.thread.configured), rcpDevice: String(value.thread.rcpDevice || ""), rcpName: String(value.thread.rcpName || ""), baudRate: Number(value.thread.baudRate) || 460800, infraIf: String(value.thread.infraIf || "eth0"), threadIf: String(value.thread.threadIf || "wpan0") } : base.thread,
@@ -559,6 +787,20 @@ function mergeEntities(existing, incoming, deviceId, state) {
     const hasReportedState = Object.prototype.hasOwnProperty.call(stateObject, stateKey);
     const nextState = hasReportedState ? clone(stateObject[stateKey]) : (entity.state !== undefined ? clone(entity.state) : previous.state);
     const stateChanged = JSON.stringify(previous.state) !== JSON.stringify(nextState);
+    const endpointId = String(entity.endpointId || previous.endpointId || "0");
+    const logicalKey = String(entity.logicalKey || previous.logicalKey || stateKey);
+    const capability = normalizeCapability(entity.capability || previous.capability || {}, {
+      kind: ["state", "power"].includes(stateKey.toLowerCase()) ? "binary" : (entity.expose?.type === "numeric" ? "sensor" : undefined),
+      category: entity.category || previous.category || "control",
+      readable: entity.readable,
+      writable: entity.writable,
+      observable: entity.observable,
+      stateKey,
+      unit: entity.expose?.unit,
+      deviceClass: entity.expose?.device_class,
+      constraints: entity.expose,
+    });
+    capability.controlId = nativeControlId(deviceId, endpointId, logicalKey, capability.controlId || entity.controlId || previous.controlId);
     entities[entityId] = {
       ...previous,
       ...clone(entity),
@@ -566,24 +808,15 @@ function mergeEntities(existing, incoming, deviceId, state) {
       sourceId: String(entity.sourceId || previous.sourceId || entityId),
       deviceId: String(entity.deviceId || previous.deviceId || deviceId),
       stateKey,
-      endpointId: String(entity.endpointId || previous.endpointId || "0"),
-      logicalKey: String(entity.logicalKey || previous.logicalKey || stateKey),
-      capability: normalizeCapability(entity.capability || previous.capability || {}, {
-        kind: ["state", "power"].includes(stateKey.toLowerCase()) ? "binary" : (entity.expose?.type === "numeric" ? "sensor" : undefined),
-        category: entity.category || previous.category || "control",
-        readable: entity.readable,
-        writable: entity.writable,
-        observable: entity.observable,
-        stateKey,
-        unit: entity.expose?.unit,
-        deviceClass: entity.expose?.device_class,
-        constraints: entity.expose,
-      }),
+      endpointId,
+      logicalKey,
+      capability,
       name: String(entity.name || previous.name || humanize(stateKey)),
       original_name: String(entity.original_name || previous.original_name || entity.name || previous.name || humanize(stateKey)),
       labels: normalizeIds(entity.labels || previous.labels),
       labelIds: normalizeIds(entity.labelIds || previous.labelIds || entity.labels || previous.labels),
       state: nextState,
+      sourceObservedAt: sourceTimestamp(entity.sourceObservedAt || entity.observedAt || entity.last_changed || entity.lastChanged) || previous.sourceObservedAt || null,
       lastChanged: stateChanged ? new Date().toISOString() : (previous.lastChanged || previous.updatedAt || new Date().toISOString()),
       updatedAt: new Date().toISOString(),
     };
@@ -593,20 +826,25 @@ function mergeEntities(existing, incoming, deviceId, state) {
     const matchingKey = Object.keys(entities).find((key) => key === entityId || entities[key]?.sourceId === entityId);
     const previous = (matchingKey && entities[matchingKey]) || {};
     if (matchingKey && matchingKey !== entityId) delete entities[matchingKey];
+    const endpointId = String(previous.endpointId || "0");
+    const logicalKey = String(previous.logicalKey || stateKey);
+    const capability = normalizeCapability(previous.capability || {}, { kind: ["state", "power"].includes(stateKey.toLowerCase()) ? "binary" : "sensor", stateKey, writable: false });
+    capability.controlId = nativeControlId(deviceId, endpointId, logicalKey, capability.controlId || previous.controlId);
     entities[entityId] = {
       ...previous,
       id: entityId,
       sourceId: String(previous.sourceId || entityId),
       deviceId: String(deviceId),
       stateKey,
-      endpointId: String(previous.endpointId || "0"),
-      logicalKey: String(previous.logicalKey || stateKey),
-      capability: normalizeCapability(previous.capability || {}, { kind: ["state", "power"].includes(stateKey.toLowerCase()) ? "binary" : "sensor", stateKey, writable: false }),
+      endpointId,
+      logicalKey,
+      capability,
       name: String(previous.name || humanize(stateKey)),
       original_name: String(previous.original_name || previous.name || humanize(stateKey)),
       labels: normalizeIds(previous.labels),
       labelIds: normalizeIds(previous.labelIds || previous.labels),
       state: clone(stateObject[stateKey]),
+      sourceObservedAt: previous.sourceObservedAt || null,
       lastChanged: JSON.stringify(previous.state) !== JSON.stringify(stateObject[stateKey]) ? new Date().toISOString() : (previous.lastChanged || previous.updatedAt || new Date().toISOString()),
       updatedAt: new Date().toISOString(),
     };
@@ -619,6 +857,7 @@ class Store {
     this.filePath = filePath;
     this.state = this.load();
     this.writeQueue = Promise.resolve();
+    this.automationPolicyQueue = Promise.resolve();
   }
 
   load() {
@@ -646,6 +885,49 @@ class Store {
   }
 
   async mutateAtomically(mutator) { return this.commit(mutator); }
+
+  async withAutomationPolicyLock(work) {
+    const previous = this.automationPolicyQueue;
+    let release;
+    this.automationPolicyQueue = new Promise((resolve) => { release = resolve; });
+    await previous;
+    try { return await work(); }
+    finally { release(); }
+  }
+
+  async applyCloudConfigurationSnapshot(platformPatch, runtimeAutomations = []) {
+    return this.withAutomationPolicyLock(() => this.mutateAtomically((state) => {
+      state.platform = { ...(state.platform || {}), ...clone(platformPatch) };
+      state.automations = state.automations || {};
+      state.automationTriggers = state.automationTriggers || {};
+      state.automationActions = state.automationActions || {};
+      const incoming = new Map(runtimeAutomations.map((record) => [String(record.automation.id), record]));
+      for (const [id, automation] of Object.entries(state.automations)) {
+        if (automation?.source !== "platform_sync" || incoming.has(String(id))) continue;
+        for (const execution of state.automationExecutions || []) {
+          if (execution.automationId === id && !execution.definitionSnapshot) {
+            execution.definitionSnapshot = { id, name: automation.name, revision: automation.revision };
+          }
+        }
+        delete state.automations[id];
+        for (const [triggerId, trigger] of Object.entries(state.automationTriggers)) if (trigger.automationId === id) delete state.automationTriggers[triggerId];
+        for (const [actionId, action] of Object.entries(state.automationActions)) if (action.automationId === id) delete state.automationActions[actionId];
+      }
+      for (const [id, record] of incoming) {
+        const previous = state.automations[id];
+        const definition = clone(record.automation);
+        if (previous?.createdAt) definition.createdAt = previous.createdAt;
+        state.automations[id] = definition;
+        for (const [triggerId, trigger] of Object.entries(state.automationTriggers)) if (trigger.automationId === id) delete state.automationTriggers[triggerId];
+        for (const [actionId, action] of Object.entries(state.automationActions)) if (action.automationId === id) delete state.automationActions[actionId];
+        const trigger = clone(record.trigger);
+        trigger.automationId = id;
+        state.automationTriggers[trigger.id] = trigger;
+        for (const action of record.actions) state.automationActions[action.id] = clone(action);
+      }
+      return { revision: Number(platformPatch.cloudRevision), activeAutomationCount: incoming.size };
+    }));
+  }
 
   async persist() {
     const operation = this.writeQueue.then(async () => {
@@ -694,7 +976,7 @@ class Store {
     return result;
   }
 
-  async upsertDevice(device) {
+  async upsertDevice(device, options = {}) {
     if (!device || !device.id) throw new Error("device.id is required");
     const id = String(device.id);
     const before = this.snapshot();
@@ -723,6 +1005,14 @@ class Store {
     next.setup = normalizeSetup(device.setup || existing.setup, { status: "needs_setup", reason: "area_and_label_required" });
     next.presentation = buildPresentation({ ...next, presentation: existing.presentation || null });
     this.state.devices[id] = next;
+    const previousProjection = existing.id ? nativeSyncDeviceProjection(existing) : null;
+    const syncProjection = nativeSyncDeviceProjection(next);
+    if (this.state.platform?.devicePolicies?.[id] && (!previousProjection || JSON.stringify(previousProjection) !== JSON.stringify(syncProjection)
+      || JSON.stringify(nativeSyncControlCatalogProjection(this.state, existing)?.controls || []) !== JSON.stringify(nativeSyncControlCatalogProjection(this.state, next)?.controls || []))) {
+      enqueueNativeDeviceSync(this.state, existing.id ? existing : null, next, { critical: !previousProjection });
+    }
+    const observationNow = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
+    recordDeviceSyncObservations(this.state, next, observationNow);
     for (const legacyId of this.state.devices[id].legacyIds) this.state.aliases[String(legacyId)] = id;
     if (device.metadata?.friendly_name && String(device.metadata.friendly_name) !== id) this.state.aliases[String(device.metadata.friendly_name)] = id;
     try {
@@ -742,6 +1032,7 @@ class Store {
     const source = this.state.devices[sourceId];
     if (!source) return this.upsertDevice({ ...patch, id: targetId });
     const before = this.snapshot();
+    if (this.state.platform?.devicePolicies?.[sourceId]) enqueueSyncEventInState(this.state, "device.tombstone", sourceId, { osDeviceId: sourceId.slice(0, 160), removedAt: new Date().toISOString(), replacementOsDeviceId: targetId.slice(0, 160) }, { critical: true });
     const target = this.state.devices[targetId] || {};
     const aliases = { ...(this.state.aliases || {}), [sourceId]: targetId };
     const migratedEntities = {};
@@ -769,6 +1060,7 @@ class Store {
     };
     this.state.devices[targetId].setup = normalizeSetup(this.state.devices[targetId].setup, { status: "needs_setup", reason: "area_and_label_required" });
     this.state.devices[targetId].presentation = buildPresentation(this.state.devices[targetId]);
+    if (this.state.platform?.devicePolicies?.[targetId]) enqueueNativeDeviceSync(this.state, target, this.state.devices[targetId], { critical: true });
     this.state.aliases = aliases;
     this.updateHeatingDemandControllerDeviceReferences(sourceId, targetId);
     try {
@@ -818,6 +1110,7 @@ class Store {
     const resolvedId = this.state.aliases?.[String(id)] || String(id);
     const device = this.state.devices[resolvedId];
     if (!device) return false;
+    if (this.state.platform?.devicePolicies?.[resolvedId]) enqueueSyncEventInState(this.state, "device.tombstone", resolvedId, { osDeviceId: String(resolvedId).slice(0, 160), removedAt: new Date().toISOString() }, { critical: true });
     const references = new Set([String(id), resolvedId, device.haDeviceId, device.metadata?.friendly_name, device.metadata?.friendlyName, device.metadata?.ieee_address, device.metadata?.ieee, device.metadata?.resource_name, device.protocolIdentity?.ieeeAddress, device.protocolIdentity?.nodeId, device.protocolIdentity?.resourceName, ...(device.legacyIds || [])].filter(Boolean).map(String));
     for (const [entityId, entity] of Object.entries(device.entities || {})) {
       references.add(String(entityId));
@@ -887,6 +1180,9 @@ class Store {
       updatedAt: new Date().toISOString(),
     };
     this.state.areas[id] = area;
+    if (!existing.id || String(existing.name || "") !== area.name || String(existing.icon || "") !== area.icon) {
+      enqueueSyncEventInState(this.state, "area.upsert", String(id), { osAreaId: String(id).slice(0, 160), name: area.name.slice(0, 160), icon: area.icon.slice(0, 40) }, { critical: !existing.id });
+    }
     try {
       await this.persist();
     } catch (error) {
@@ -916,10 +1212,12 @@ class Store {
     const area = this.state.areas[areaId];
     if (!area) return { removed: false, areaId, deviceAssignmentsCleared: 0, entityAssignmentsCleared: 0 };
     const before = this.snapshot();
+    enqueueSyncEventInState(this.state, "area.tombstone", areaId, { osAreaId: areaId.slice(0, 160), removedAt: new Date().toISOString() }, { critical: true });
     let deviceAssignmentsCleared = 0;
     let entityAssignmentsCleared = 0;
     delete this.state.areas[areaId];
     for (const device of Object.values(this.state.devices)) {
+      const previousDevice = clone(device);
       const inheritedAreaAssignment = device.areaId === areaId;
       if (device.areaId === areaId) {
         device.areaId = null;
@@ -939,6 +1237,7 @@ class Store {
         device.setup.reason = "area_and_label_required";
         device.presentation = buildPresentation(device);
       }
+      if (inheritedAreaAssignment) enqueueNativeDeviceSync(this.state, previousDevice, device);
     }
     try {
       await this.persist();
@@ -1208,6 +1507,7 @@ class Store {
     const existing = device.entities && device.entities[entityId];
     if (!existing) return null;
     const before = this.snapshot();
+    const previousDevice = clone(device);
     const labels = normalizeIds(patch.labelIds === undefined ? (patch.labels === undefined ? existing.labelIds : patch.labels) : patch.labelIds);
     device.entities[entityId] = {
       ...existing,
@@ -1220,6 +1520,7 @@ class Store {
       updatedAt: new Date().toISOString(),
     };
     device.presentation = buildPresentation(device);
+    if (this.state.platform?.devicePolicies?.[resolvedDeviceId]) enqueueNativeDeviceSync(this.state, previousDevice, device);
     try {
       await this.persist();
     } catch (error) {
@@ -1234,12 +1535,14 @@ class Store {
     const device = this.state.devices[resolvedDeviceId];
     if (!device || !device.entities || !device.entities[entityId]) return false;
     const before = this.snapshot();
+    const previousDevice = clone(device);
     const removed = device.entities[entityId];
     delete device.entities[entityId];
     // Refresh the presentation immediately. Keeping a cached surface after
     // its source entity disappears can leave stale routes visible to readers
     // and command consumers until the next full device snapshot.
     device.presentation = buildPresentation(device);
+    if (this.state.platform?.devicePolicies?.[resolvedDeviceId]) enqueueNativeDeviceSync(this.state, previousDevice, device, { critical: true });
     try {
       await this.persist();
       return true;
@@ -1329,6 +1632,299 @@ class Store {
 
   getPlatform() {
     return clone(this.state.platform || initialState().platform);
+  }
+
+  getSyncOutbox() {
+    return clone(this.state.syncOutbox || initialSyncOutbox());
+  }
+
+  getSyncRuntime(base = {}) {
+    const outbox = normalizeSyncOutbox(this.state.syncOutbox);
+    const remaining = outbox.events.filter((event) => event.sequence > outbox.acknowledgedSequence);
+    const capabilities = base.capabilities && typeof base.capabilities === "object" && !Array.isArray(base.capabilities) ? clone(base.capabilities) : {};
+    return {
+      kind: "dinodia_os",
+      version: String(base.version || "0.0.0"),
+      capabilities: {
+        ...capabilities,
+        nativeSyncOutbox: {
+          queueDepth: remaining.length,
+          gapDetected: outbox.gapDetected,
+          criticalBacklog: outbox.criticalBacklog,
+          telemetryPaused: outbox.telemetryPaused,
+          droppedTelemetryCount: outbox.droppedTelemetryCount,
+          lastErrorCode: outbox.lastErrorCode,
+        },
+      },
+    };
+  }
+
+  async queueSyncEvent(type, aggregateId, payload, options = {}) {
+    const before = this.snapshot();
+    try {
+      const event = enqueueSyncEventInState(this.state, type, String(aggregateId || ""), payload, options);
+      await this.persist();
+      return event;
+    } catch (error) {
+      this.state = before;
+      throw error;
+    }
+  }
+
+  async prepareSyncBatch(hubInstallationId, runtime, now = Date.now()) {
+    const before = this.snapshot();
+    try {
+      const outbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
+      if (!outbox.inFlight) {
+        outbox.inFlight = nextSyncBatch(outbox, { hubInstallationId, runtime: this.getSyncRuntime(runtime), now });
+        outbox.lastAttemptAt = new Date(now).toISOString();
+        if (outbox.inFlight) await this.persist();
+      }
+      return clone(outbox.inFlight);
+    } catch (error) {
+      this.state = before;
+      throw error;
+    }
+  }
+
+  async ensureSyncSnapshot(now = Date.now()) {
+    const outbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
+    const before = this.snapshot();
+    try {
+      let changed = false;
+      if (!outbox.snapshotCreatedAt) {
+        for (const area of Object.values(this.state.areas || {})) {
+          enqueueSyncEventInState(this.state, "area.upsert", String(area.id), { osAreaId: String(area.id).slice(0, 160), name: String(area.name || area.id).slice(0, 160), icon: String(area.icon || "room").slice(0, 40) }, { now, critical: true });
+        }
+        outbox.snapshotCreatedAt = new Date(now).toISOString();
+        changed = true;
+      }
+      for (const device of Object.values(this.state.devices || {})) {
+        const deviceId = String(device.id);
+        if (this.state.platform?.devicePolicies?.[deviceId]?.managementClass === "PROPERTY_DEVICE" && !outbox.snapshotDeviceIds.includes(deviceId)) {
+          enqueueNativeDeviceSync(this.state, null, device, { now, critical: true });
+          outbox.snapshotDeviceIds.push(deviceId);
+          changed = true;
+        }
+      }
+      if (changed) await this.persist();
+      return changed;
+    } catch (error) {
+      this.state = before;
+      throw error;
+    }
+  }
+
+  async advanceSyncUsage(now = Date.now()) {
+    const nowMs = now instanceof Date ? now.getTime() : Number(now);
+    if (!Number.isSafeInteger(nowMs)) throw new Error("Invalid native usage advance time");
+    const before = this.snapshot();
+    try {
+      const usage = this.state.syncUsage = initialUsageState(this.state.syncUsage);
+      const advanced = advanceUsage(usage, nowMs);
+      this.state.syncUsage = advanced.state;
+      let queued = 0;
+      for (const key of advanced.changedBuckets) if (queueUsageBucket(this.state, key, nowMs)) queued += 1;
+      // A prior telemetry-pressure condition is retried from the locally
+      // durable absolute bucket revision, never by incrementing cloud totals.
+      for (const [key, bucket] of Object.entries(this.state.syncUsage.buckets)) {
+        if (Number(this.state.syncUsage.queuedRevisions[key] || 0) < Number(bucket.revision)) {
+          if (queueUsageBucket(this.state, key, nowMs)) queued += 1;
+        }
+      }
+      const cutoff = nowMs - 366 * 24 * 60 * 60 * 1000;
+      for (const [key, bucket] of Object.entries(this.state.syncUsage.buckets)) {
+        if (Date.parse(bucket.purgeAt) > nowMs) continue;
+        const queuedRevision = Number(this.state.syncUsage.queuedRevisions[key] || 0);
+        const pending = this.state.syncOutbox.events.some((event) => event.type === "usage.bucket" && event.aggregateId === crypto.createHash("sha256").update(key, "utf8").digest("hex"));
+        if (!pending && queuedRevision >= bucket.revision) {
+          delete this.state.syncUsage.buckets[key];
+          delete this.state.syncUsage.queuedRevisions[key];
+        } else if (Date.parse(bucket.bucketStart) < cutoff) {
+          this.state.syncOutbox.gapDetected = true;
+        }
+      }
+      if (advanced.changedBuckets.length || queued || JSON.stringify(before.syncUsage) !== JSON.stringify(this.state.syncUsage)) await this.persist();
+      return { changedBuckets: advanced.changedBuckets.length, queued };
+    } catch (error) {
+      this.state = before;
+      throw error;
+    }
+  }
+
+  async ensureSyncIncidentEvents(now = Date.now()) {
+    const before = this.snapshot();
+    try {
+      const pending = this.listPendingIncidentEnvelopes(100);
+      let queued = 0;
+      for (const entry of pending) {
+        const incident = entry.envelope || {};
+        const projection = nativeIncidentSyncProjection(incident);
+        if (!projection) continue;
+        const revision = projection.revision;
+        const sequenceBefore = Number(this.state.syncOutbox?.nextSequence || 1);
+        enqueueSyncEventInState(this.state, "incident.transition", projection.incidentKey, projection, { now, critical: true, dedupeRevision: revision });
+        if (Number(this.state.syncOutbox?.nextSequence || 1) > sequenceBefore) queued += 1;
+      }
+      if (queued) await this.persist();
+      return queued;
+    } catch (error) {
+      this.state = before;
+      throw error;
+    }
+  }
+
+  async ensureUpdaterStatusEvent(status, now = Date.now()) {
+    if (!status || typeof status !== "object" || Array.isArray(status)) return false;
+    const platform = this.state.platform || initialState().platform;
+    const normalized = {
+      trustState: ["ready", "unprovisioned"].includes(status.trustState) ? status.trustState : "unavailable",
+      phase: ["idle", "downloading", "verifying", "staged", "maintenance", "activating", "health_check", "active", "failed", "rolled_back"].includes(status.phase) ? status.phase : "unavailable",
+      activeReleaseVersion: typeof status.activeReleaseVersion === "string" ? status.activeReleaseVersion.slice(0, 96) : null,
+      attemptId: typeof status.lastAttempt?.attemptId === "string" ? status.lastAttempt.attemptId.slice(0, 96) : null,
+      releaseId: typeof status.lastAttempt?.releaseId === "string" ? status.lastAttempt.releaseId.slice(0, 96) : null,
+      attemptPhase: ["downloading", "verifying", "staged", "maintenance", "activating", "health_check", "active", "failed", "rolled_back"].includes(status.lastAttempt?.phase) ? status.lastAttempt.phase : null,
+      resultCode: typeof status.lastAttempt?.result === "string" ? status.lastAttempt.result.toUpperCase().replace(/[^A-Z0-9_-]/g, "_").slice(0, 96) || null : null,
+      updatedAt: typeof status.lastAttempt?.updatedAt === "string" && Number.isFinite(Date.parse(status.lastAttempt.updatedAt)) ? new Date(status.lastAttempt.updatedAt).toISOString() : null,
+      busy: status.busy === true,
+    };
+    if (JSON.stringify(platform.updaterStatus || null) === JSON.stringify(normalized)) return false;
+    const before = this.snapshot();
+    try {
+      const revision = Number(platform.updaterStatusRevision || 0) + 1;
+      enqueueSyncEventInState(this.state, "update.status", "hub-updater", { ...normalized, revision }, { now, critical: true, dedupeRevision: revision });
+      this.state.platform = { ...platform, updaterStatus: normalized, updaterStatusRevision: revision };
+      await this.persist();
+      return true;
+    } catch (error) {
+      this.state = before;
+      throw error;
+    }
+  }
+
+  async ensureAutomationOutcomeEvents(now = Date.now()) {
+    const before = this.snapshot();
+    try {
+      const outbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
+      const acknowledged = new Set(outbox.acknowledgedAutomationOccurrences);
+      const existing = new Set([...outbox.events, ...(outbox.inFlight?.events || [])]
+        .filter((event) => event.type === "automation.outcome").map((event) => String(event.payload?.occurrenceId || event.aggregateId)));
+      let queued = 0;
+      for (const execution of this.state.automationExecutions || []) {
+        const occurrenceId = String(execution.occurrenceId || "");
+        const automation = this.state.automations?.[String(execution.automationId || "")];
+        if (!occurrenceId || (execution.source !== "platform_sync" && automation?.source !== "platform_sync")
+          || acknowledged.has(occurrenceId) || existing.has(occurrenceId)) continue;
+        const outcomes = Array.isArray(execution.actionOutcomes) ? execution.actionOutcomes.slice(0, 32) : [];
+        if (!outcomes.length || !execution.startedAt || !execution.completedAt) continue;
+        const actionStatuses = { applied: 0, failed: 0, uncertain: 0, skipped: 0 };
+        for (const outcome of outcomes) {
+          if (["applied", "succeeded"].includes(String(outcome.status))) actionStatuses.applied += 1;
+          else if (String(outcome.status) === "failed") actionStatuses.failed += 1;
+          else if (["uncertain", "running"].includes(String(outcome.status))) actionStatuses.uncertain += 1;
+          else actionStatuses.skipped += 1;
+        }
+        const status = ["succeeded", "partial", "failed", "interrupted"].includes(String(execution.status))
+          ? String(execution.status) : actionStatuses.failed || actionStatuses.uncertain ? "partial" : "succeeded";
+        const sequenceBefore = Number(this.state.syncOutbox.nextSequence);
+        enqueueSyncEventInState(this.state, "automation.outcome", occurrenceId, {
+          occurrenceId: occurrenceId.slice(0, 160), automationId: String(execution.automationId),
+          automationRevision: Number(execution.revision || automation.revision || 1), status,
+          startedAt: String(execution.startedAt), completedAt: String(execution.completedAt),
+          actionCount: outcomes.length, actionStatuses,
+        }, { now, critical: true });
+        if (Number(this.state.syncOutbox.nextSequence) > sequenceBefore) {
+          queued += 1;
+          existing.add(occurrenceId);
+        }
+      }
+      if (queued) await this.persist();
+      return queued;
+    } catch (error) {
+      this.state = before;
+      throw error;
+    }
+  }
+
+  async acknowledgeSyncBatch(receipt, now = Date.now()) {
+    const before = this.snapshot();
+    try {
+      const outbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
+      const batch = outbox.inFlight;
+      if (!batch || !receipt || receipt.streamId !== outbox.streamId || Number(receipt.acceptedThroughSequence) !== batch.toSequence) {
+        throw new Error("Platform sync acknowledgement does not match the durable in-flight range");
+      }
+      outbox.acknowledgedSequence = Math.max(outbox.acknowledgedSequence, batch.toSequence);
+      const acceptedIncidentEvents = new Map((batch.events || []).filter((event) => event.type === "incident.transition")
+        .map((event) => [`${event.payload.incidentKey}|${Number(event.payload.revision)}`, event]));
+      if (acceptedIncidentEvents.size) {
+        const remaining = [];
+        for (const entry of this.state.incidentOutbox?.pending || []) {
+          const incidentId = String(entry.envelope?.incidentId || "");
+          const key = crypto.createHash("sha256").update(incidentId, "utf8").digest("hex");
+          const eventKey = `${key}|${Number(entry.envelope?.revision || 1)}`;
+          if (acceptedIncidentEvents.has(eventKey)) {
+            this.state.incidentOutbox.acknowledged[String(entry.id)] = { acknowledgedAt: new Date(now).toISOString(), incidentKey: key, revision: Number(entry.envelope?.revision || 1) };
+          } else remaining.push(entry);
+        }
+        this.state.incidentOutbox.pending = remaining;
+        this.state.incidentOutbox.lastUploadAt = new Date(now).toISOString();
+      }
+      const acceptedAutomationOccurrences = (batch.events || [])
+        .filter((event) => event.type === "automation.outcome")
+        .map((event) => String(event.payload?.occurrenceId || event.aggregateId));
+      if (acceptedAutomationOccurrences.length) {
+        outbox.acknowledgedAutomationOccurrences = [...new Set([
+          ...outbox.acknowledgedAutomationOccurrences, ...acceptedAutomationOccurrences,
+        ])].slice(-500);
+      }
+      outbox.events = outbox.events.filter((event) => event.sequence > outbox.acknowledgedSequence);
+      outbox.inFlight = null;
+      outbox.cloudRevision = Math.max(outbox.cloudRevision, Number(receipt.cloudRevision) || 0);
+      // The caller has already validated and durably applied the returned
+      // configuration before acknowledging this batch.
+      outbox.configurationAppliedRevision = Math.max(outbox.configurationAppliedRevision, Number(receipt.cloudRevision) || 0);
+      outbox.lastSuccessfulSyncAt = new Date(now).toISOString();
+      outbox.lastErrorCode = null;
+      // A successful contiguous batch does not repair events which were
+      // previously compacted/dropped or a known retention gap. Only an
+      // explicit future full-reconciliation receipt may clear this flag.
+      outbox.gapDetected = outbox.gapDetected || receipt.resnapshotRequired === true;
+      outbox.criticalBacklog = false;
+      outbox.telemetryPaused = false;
+      await this.persist();
+      return this.getSyncOutbox();
+    } catch (error) {
+      this.state = before;
+      throw error;
+    }
+  }
+
+  async acknowledgeSyncConfiguration(revision, now = Date.now()) {
+    const before = this.snapshot();
+    try {
+      const outbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
+      const next = Number(revision);
+      if (!Number.isSafeInteger(next) || next < outbox.cloudRevision) throw new Error("Cloud configuration revision moved backwards");
+      outbox.cloudRevision = next;
+      outbox.configurationAppliedRevision = next;
+      outbox.lastSuccessfulSyncAt = new Date(now).toISOString();
+      outbox.lastErrorCode = null;
+      await this.persist();
+      return this.getSyncOutbox();
+    } catch (error) {
+      this.state = before;
+      throw error;
+    }
+  }
+
+  async markSyncFailure(code) {
+    const before = this.snapshot();
+    try {
+      const outbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
+      outbox.lastErrorCode = String(code || "sync_failed").slice(0, 80);
+      await this.persist();
+    } catch (error) { this.state = before; throw error; }
   }
 
   async savePlatform(patch = {}) {
@@ -1919,7 +2515,10 @@ class Store {
       attempts: 0,
       createdAt: new Date().toISOString(),
     };
-    this.state.incidentOutbox.pending = [...pending, entry].slice(-100);
+    if (pending.length >= 10_000) throw Object.assign(new Error("The durable incident backlog has reached its safety bound"), { code: "sync_critical_backlog_full" });
+    const projection = nativeIncidentSyncProjection(envelope);
+    if (projection) enqueueSyncEventInState(this.state, "incident.transition", projection.incidentKey, projection, { critical: true, dedupeRevision: projection.revision });
+    this.state.incidentOutbox.pending = [...pending, entry];
     this.state.incidentOutbox.lastError = null;
     return entry;
   }

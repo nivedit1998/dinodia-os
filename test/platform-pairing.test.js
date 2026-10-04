@@ -28,13 +28,36 @@ function encryptedMachineEnvelope(identity, credential, version, purpose = "mach
   };
 }
 
+function nativeSyncAck(request) {
+  const configuration = {
+    revision: 1,
+    policyRevision: 1,
+    areas: [],
+    memberships: [],
+    devicePolicies: [],
+    automations: [],
+    releasePolicy: { mode: "MANUAL", automaticInstallEnabled: false, desiredRelease: null },
+  };
+  const canonical = (value) => Array.isArray(value) ? `[${value.map(canonical).join(",")}]`
+    : !value || typeof value !== "object" ? JSON.stringify(value)
+      : `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+  configuration.checksum = crypto.createHash("sha256").update(canonical(configuration)).digest("hex");
+  return {
+    streamId: request.streamId,
+    cloudRevision: configuration.revision,
+    configurationAppliedRevision: request.acknowledgedCloudRevision,
+    acceptedThroughSequence: request.toSequence,
+    resnapshotRequired: false,
+    configuration,
+  };
+}
+
 test("platform pairing signs requests, stores only token hashes, and acknowledges publication", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-pairing-"));
   const store = new Store(path.join(directory, "dinodia.json"));
   await store.saveIdentity({ serial: "hub-test" });
   const vault = new SecretVault({ dataDir: directory });
   const calls = [];
-  let tokenStateCalls = 0;
   const fetchImpl = async (url, options) => {
     const body = JSON.parse(options.body);
     calls.push({ url, body });
@@ -42,26 +65,53 @@ test("platform pairing signs requests, stores only token hashes, and acknowledge
     const secret = url.includes("/pair") ? "bootstrap" : "sync";
     assert.equal(body.sig, sign(secret, body.serial, body.ts, body.nonce));
     if (url.endsWith("/pair")) return { ok: true, async json() { return { syncSecret: "sync", latestVersion: 2, publishedVersion: 0, hubTokenHashes: [crypto.createHash("sha256").update("hub-token").digest("hex")] }; } };
-    tokenStateCalls += 1;
-    return { ok: true, async json() { return { latestVersion: 2, publishedVersion: tokenStateCalls > 1 ? 2 : 1, hubTokenHashes: [crypto.createHash("sha256").update("hub-token").digest("hex")], acceptedActivityIncidentIds: (body.activityIncidents?.incidents || []).map((incident) => incident.id) }; } };
+    return { ok: true, async json() { return { latestVersion: 2, publishedVersion: 2, hubTokenHashes: [crypto.createHash("sha256").update("hub-token").digest("hex")] }; } };
   };
-  const pairing = new PlatformPairing({ store, vault, apiUrl: "https://platform.test", serial: "hub-test", legacyCompatibilityEnabled: true, intervalMs: 60000, getActivityIncidents: () => ({ schemaVersion: 1, capturedAt: new Date().toISOString(), incidents: store.listPendingIncidentEnvelopes(50).map((entry) => entry.envelope) }), onSyncResult: async (result) => store.acknowledgeIncidentEnvelopes(result.acceptedActivityIncidentIds || []), fetchImpl });
+  const pairing = new PlatformPairing({ store, vault, apiUrl: "https://platform.test", serial: "hub-test", legacyCompatibilityEnabled: true, intervalMs: 60000, fetchImpl });
   await pairing.configure({ bootstrapSecret: "bootstrap" });
   const paired = await pairing.pair();
   assert.equal(paired.latestVersion, 2);
   assert.equal(vault.get("platform.syncSecret"), "sync");
   assert.equal(store.getPlatform().acceptedTokenHashes.length, 1);
-  await store.queueIncidentEnvelope({ id: "offline-1:1", incidentId: "offline-1", revision: 1, kind: "device_offline", state: "open", severity: "critical", summary: "Device offline", firstObservedAt: new Date().toISOString(), lastObservedAt: new Date().toISOString() });
-  await pairing.syncNow();
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  const tokenState = calls.find((call) => call.url.endsWith('/token-state'));
-  assert.equal(tokenState.body.hubRuntime.kind, 'dinodia_os');
-  assert.equal(tokenState.body.hubRuntime.capabilities.managedAreaProvisioningV1, true);
-  assert.equal(tokenState.body.activityIncidents.incidents[0].incidentId, "offline-1");
-  assert.equal(store.listPendingIncidentEnvelopes().length, 0);
-  assert.equal(tokenStateCalls >= 2, true);
-  assert.equal(store.getPlatform().publishedVersion, 2);
+  assert.equal(store.getPlatform().publishedVersion, 0);
   assert.equal(calls.every((call) => !Object.keys(call.body).some((key) => /token/i.test(key) && key !== "agentSeenVersion")), true);
+});
+
+test("incident transitions use the durable native sync stream and retire only after its receipt", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-incident-sync-"));
+  const store = new Store(path.join(directory, "dinodia.json"));
+  await store.saveIdentity({ serial: "DINODIA-INCIDENT-HUB" });
+  const vault = new SecretVault({ dataDir: directory });
+  const identity = generateManufacturingIdentity({ serial: "DINODIA-INCIDENT-HUB" });
+  const record = vaultIdentityRecord(identity);
+  await vault.set("platform.identityPrivateKey", record.signingPrivateKey);
+  await vault.set("platform.identityPublicKey", record.signingPublicKey);
+  await vault.set("platform.encryptionPrivateKey", record.encryptionPrivateKey);
+  await vault.set("platform.encryptionPublicKey", record.encryptionPublicKey);
+  await vault.set("platform.identityGeneration", "1");
+  await vault.set("platform.machineCredential", "test-machine-credential");
+  await store.savePlatform({ paired: true, hubInstallId: "11111111-1111-4111-8111-111111111111", provisioningCredentialVersion: 1, homeId: "home-a" });
+  await store.queueIncidentEnvelope({ id: "offline-1:1", incidentId: "offline-1", revision: 1, kind: "device_offline", state: "open", severity: "critical", summary: "Device offline", firstObservedAt: new Date().toISOString(), lastObservedAt: new Date().toISOString() });
+  const seen = [];
+  const pairing = new PlatformPairing({
+    store, vault, apiUrl: "https://platform.test", serial: "DINODIA-INCIDENT-HUB", intervalMs: 60000,
+    fetchImpl: async (url, options) => {
+      const body = JSON.parse(options.body);
+      seen.push({ url, body });
+    if (url.endsWith("/token-state")) return { ok: true, async json() { return { homeId: "home-a", latestVersion: 0, publishedVersion: 0, hubTokenHashes: [] }; } };
+    if (url.endsWith("/v2/sync")) return { ok: true, async json() { return nativeSyncAck(body); } };
+      if (url.endsWith("/heartbeat")) return { ok: true, async json() { return { ok: true, online: true, lanEndpoint: { revision: body.lanEndpoint.revision, state: body.lanEndpoint.state } }; } };
+      throw new Error(`Unexpected test route: ${url}`);
+    },
+  });
+  await pairing.syncNow();
+  const sync = seen.find((entry) => entry.url.endsWith("/v2/sync"));
+  assert.ok(sync);
+  assert.equal(sync.body.events[0].type, "incident.transition");
+  assert.equal(sync.body.events[0].payload.incidentKey, crypto.createHash("sha256").update("offline-1").digest("hex"));
+  assert.equal(Object.hasOwn(sync.body.events[0].payload, "summary"), false, "tenant/private incident summary is not exported in the bounded cloud projection");
+  assert.equal(store.listPendingIncidentEnvelopes().length, 0, "local incident is retired only after the accepted stream cursor is persisted");
+  assert.equal(store.getSyncOutbox().acknowledgedSequence, sync.body.toSequence);
 });
 
 test("native provisioning completes the outbound challenge, encrypted credential delivery and acknowledgement", async () => {
@@ -84,7 +134,7 @@ test("native provisioning completes the outbound challenge, encrypted credential
   const fetchImpl = async (url, options) => {
     const body = JSON.parse(options.body);
     calls.push({ url, body, headers: options.headers });
-    if (url.endsWith("/pairing/register")) return { ok: true, async json() { return { ok: true, attemptId: "attempt-1", pairingId: "pairing-1" }; } };
+    if (url.endsWith("/pairing/register")) return { ok: true, async json() { return { ok: true, attemptId: "attempt-1", pairingId: "pairing-1", hubInstallId: "22222222-2222-4222-8222-222222222222" }; } };
     if (url.endsWith("/pairing/challenge")) return { ok: true, async json() { return { ok: true, challenge: "challenge-for-hub", expiresAt: new Date(Date.now() + 60_000).toISOString() }; } };
     if (url.endsWith("/pairing/prove")) return { ok: true, async json() { return { ok: true, attemptId: body.attemptId, version: 1, envelope: encryptedMachineEnvelope(identity, credential, 1) }; } };
     if (url.endsWith("/pairing/acknowledge")) {
@@ -92,8 +142,9 @@ test("native provisioning completes the outbound challenge, encrypted credential
       return { ok: true, async json() { return { ok: true, acknowledged: true }; } };
     }
     if (url.endsWith('/heartbeat')) return { ok: true, async json() { return { ok: true, online: true, lanEndpoint: { revision: body.lanEndpoint.revision, state: body.lanEndpoint.state } }; } };
-    assert.match(url, /\/token-state$/);
-    return { ok: true, async json() { return { latestVersion: 0, publishedVersion: 0, hubTokenHashes: [], acceptedActivityIncidentIds: [] }; } };
+    if (url.endsWith('/token-state')) return { ok: true, async json() { return { latestVersion: 0, publishedVersion: 0, hubTokenHashes: [], acceptedActivityIncidentIds: [] }; } };
+    if (url.endsWith('/v2/sync')) return { ok: true, async json() { return nativeSyncAck(body); } };
+    throw new Error(`Unexpected test route: ${url}`);
   };
   const pairing = new PlatformPairing({ store, vault, apiUrl: "https://platform.test", serial: "DINODIA-TEST-HUB", fetchImpl, intervalMs: 60000 });
   const presentation = { attemptId: "attempt-1", code: "short-lived-presentation", expiresAt: Date.now() + 15 * 60_000 };
@@ -108,8 +159,9 @@ test("native provisioning completes the outbound challenge, encrypted credential
     "/api/hub-agent/v2/pairing/challenge",
     "/api/hub-agent/v2/pairing/prove",
     "/api/hub-agent/v2/pairing/acknowledge",
-    "/api/hub-agent/v2/heartbeat",
     "/api/hub-agent/token-state",
+    "/api/hub-agent/v2/sync",
+    "/api/hub-agent/v2/heartbeat",
   ]);
 });
 
@@ -143,6 +195,7 @@ test("operator credential receipt stays DELIVERED until the hub acknowledgement 
       return { ok: true, async json() { return { ok: true, state: "ACKNOWLEDGED" }; } };
     }
     if (url.endsWith("/credentials/activate")) return { ok: true, async json() { return { ok: true, state: "ACTIVE" }; } };
+    if (url.endsWith("/v2/sync")) return { ok: true, async json() { return nativeSyncAck(body); } };
     assert.match(url, /\/token-state$/);
     return { ok: true, async json() { return { latestVersion: 2, publishedVersion: 0, operatorCredentialDelivery: { version: 2, envelope }, operatorCredentialStates: [], offlineAuthorisations: [], acceptedActivityIncidentIds: [] }; } };
   };
@@ -172,7 +225,7 @@ test("operator policy sync is at most 30 seconds while the signed operations hea
   await vault.set("platform.encryptionFingerprint", record.encryptionKeyFingerprint);
   await vault.set("platform.identityGeneration", "1");
   await vault.set("platform.manufacturingCertificateSignature", "test-only-certificate-signature");
-  await store.savePlatform({ paired: true, provisioningCredentialVersion: 1 });
+  await store.savePlatform({ paired: true, provisioningCredentialVersion: 1, hubInstallId: "33333333-3333-4333-8333-333333333333" });
   let now = 1_000_000;
   const routes = [];
   const pairing = new PlatformPairing({
@@ -181,6 +234,7 @@ test("operator policy sync is at most 30 seconds while the signed operations hea
     fetchImpl: async (url, options) => {
       routes.push(new URL(url).pathname);
       const body = JSON.parse(options.body || "{}");
+      if (url.endsWith("/v2/sync")) return { ok: true, async json() { return nativeSyncAck(body); } };
       return { ok: true, async json() { return { latestVersion: 0, publishedVersion: 0, operatorCredentialStates: [], offlineAuthorisations: [], acceptedActivityIncidentIds: [], ...(url.endsWith("/heartbeat") && body.lanEndpoint ? { lanEndpoint: { revision: body.lanEndpoint.revision, state: body.lanEndpoint.state } } : {}) }; } };
     },
   });
@@ -212,7 +266,7 @@ test("signed heartbeat persists monotonic LAN endpoint revisions and keeps unava
   await vault.set("platform.encryptionFingerprint", record.encryptionKeyFingerprint);
   await vault.set("platform.identityGeneration", "1");
   await vault.set("platform.manufacturingCertificateSignature", "test-only-certificate-signature");
-  await store.savePlatform({ paired: true, provisioningCredentialVersion: 1 });
+  await store.savePlatform({ paired: true, provisioningCredentialVersion: 1, hubInstallId: "44444444-4444-4444-8444-444444444444" });
   let address = "192.168.1.76";
   const discovery = new SetupDiscovery({
     serial: "DINODIA-LAN-HUB",
@@ -241,6 +295,7 @@ test("signed heartbeat persists monotonic LAN endpoint revisions and keeps unava
         }
         return { ok: true, async json() { return { ok: true, online: true, lanEndpoint: { revision: body.lanEndpoint.revision, state: body.lanEndpoint.state } }; } };
       }
+      if (url.endsWith("/v2/sync")) return { ok: true, async json() { return nativeSyncAck(body); } };
       return { ok: true, async json() { return { latestVersion: 0, publishedVersion: 0, operatorCredentialStates: [], offlineAuthorisations: [], acceptedActivityIncidentIds: [] }; } };
     },
   });

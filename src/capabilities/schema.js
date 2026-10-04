@@ -109,6 +109,9 @@ function normalizeCapability(input = {}, fallback = {}) {
     bindings,
     constraints,
   };
+  const publicControlId = String(input.controlId || fallback.controlId || "");
+  if (/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(publicControlId)
+    && !/^(?:internal|ha|hass|homeassistant):/i.test(publicControlId)) result.controlId = publicControlId;
   result.semanticRole = NATIVE_SEMANTIC_ROLES.has(semanticRole) ? semanticRole : "unknown";
   const voice = input.voice || fallback.voice;
   if (voice && typeof voice === "object" && VOICE_SEMANTICS.has(String(voice.semantic || ""))) {

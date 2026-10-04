@@ -844,7 +844,11 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     store: hubStore,
     activity,
     logger,
-    executeControl: async ({ action }) => {
+    executeControl: async ({ automation, action }) => hubStore.withAutomationPolicyLock(async () => {
+      const current = hubStore.getNativeAutomation(automation.id)?.automation;
+      if (!current || current.enabled !== true || Number(current.revision) !== Number(automation.revision)) {
+        throw Object.assign(new Error("The automation policy changed before this action could be dispatched"), { code: "automation_policy_changed" });
+      }
       const device = hubStore.getDevice(action.deviceId);
       if (!device) throw Object.assign(new Error("The automation device is no longer available"), { code: "missing_device" });
       const match = findControl(nativeAutomationService.internalCatalogue(), action.deviceId, action.controlId);
@@ -852,7 +856,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       const compiled = compileTarget(match.control, action.targetValue);
       const route = resolveExecutionRoute(device, match.control, compiled);
       return commandEntity(device, route.entity, route.serviceId, route.data, {});
-    },
+    }),
   });
   nativeAutomationScheduler = new AutomationScheduler({ store: hubStore, service: nativeAutomationService, executor: nativeAutomationExecutor, logger });
 
@@ -944,6 +948,15 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       : { version: 1, revision: 1, state: "UNAVAILABLE", discoveryHost: `dinodia-${serial.toLowerCase()}.local` },
     getLanTlsIdentity: () => lanTlsIdentity?.publicReport() || null,
     acknowledgeLanTlsIdentity: (generation) => lanTlsIdentity?.acknowledge(Number(generation)) || false,
+    getUpdaterStatus: async () => {
+      try {
+        const result = await requestUpdaterControl({ operation: "status" }, updaterSocketPath);
+        return result?.ok === true && result.status && typeof result.status === "object"
+          ? result.status : { phase: "unavailable", trustState: "unavailable", activeReleaseVersion: null, lastAttempt: null, busy: false };
+      } catch {
+        return { phase: "unavailable", trustState: "unavailable", activeReleaseVersion: null, lastAttempt: null, busy: false };
+      }
+    },
     runtime: {
       nodeEnv: runtimeConfig.nodeEnv,
       kind: "dinodia_os",
@@ -1354,8 +1367,10 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     const areaId = canonicalAreaIdForHubArea(device.areaId || device.metadata?.areaId);
     const areaIds = new Set((principal.areaIds || []).map(String));
     if (!areaId || !areaIds.has(areaId)) return false;
-    const ownerMembershipId = String(device.tenantOwnerMembershipId || device.metadata?.tenantOwnerMembershipId || "");
-    const managementClass = String(device.managementClass || device.metadata?.managementClass || "");
+    const platformPolicy = hubStore.getPlatform?.()?.devicePolicies?.[String(device.id)] || null;
+    if (platformPolicy && ["RETIRED", "REMOVED", "REMOVAL_PENDING", "RECOMMISSION_REQUIRED"].includes(String(platformPolicy.lifecycle))) return false;
+    const ownerMembershipId = String(platformPolicy?.ownerMembershipId || device.tenantOwnerMembershipId || device.metadata?.tenantOwnerMembershipId || "");
+    const managementClass = platformPolicy?.managementClass === "TENANT_DEVICE" ? "tenant_device" : String(device.managementClass || device.metadata?.managementClass || "");
     const privateDevice = managementClass === "tenant_device" || Boolean(ownerMembershipId);
     // The durable membership is the only tenant-device authority. The legacy
     // account-level tenantOwnerId is deliberately ignored and can never grant
@@ -1377,9 +1392,18 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
 
   function nativeDeviceView(principal, device) {
     const canonicalAreaId = canonicalAreaIdForHubArea(device?.areaId || device?.metadata?.areaId);
-    return canonicalAreaId && (principal?.areaIds || []).map(String).includes(canonicalAreaId)
-      ? { ...device, areaId: canonicalAreaId }
-      : null;
+    if (!canonicalAreaId || !(principal?.areaIds || []).map(String).includes(canonicalAreaId)) return null;
+    const policy = hubStore.getPlatform?.()?.devicePolicies?.[String(device.id)] || null;
+    return {
+      ...device,
+      areaId: canonicalAreaId,
+      ...(policy ? {
+        managementClass: policy.managementClass === "TENANT_DEVICE" ? "tenant_device" : "property_device",
+        tenantOwnerMembershipId: policy.ownerMembershipId || null,
+        name: policy.customerLabel || policy.overrideName || device.name,
+        retired: ["RETIRED", "REMOVED", "REMOVAL_PENDING", "RECOMMISSION_REQUIRED"].includes(String(policy.lifecycle)),
+      } : {}),
+    };
   }
 
   function nativeContractError(res, status, code, message, retryable = false) {
@@ -1451,7 +1475,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       if (!source || !appCanReadDevice(principal, source)) continue;
       for (const control of dto.controls) {
         if (!control.observable || !Number.isInteger(control.maxStateValiditySeconds) || control.maxStateValiditySeconds <= 0) continue;
-        const entity = Object.values(source.entities || {}).find((candidate) => String(candidate.id || candidate.sourceId || "") === control.controlId);
+        const entity = nativeRawEntityForControl(source, control.controlId);
         const rawState = entity?.state && typeof entity.state === "object" && !Array.isArray(entity.state) && Object.hasOwn(entity.state, "state") ? entity.state.state : entity?.state;
         const observedMs = Date.parse(String(entity?.lastChanged || entity?.last_changed || ""));
         const receivedMs = Date.parse(String(entity?.updatedAt || ""));
@@ -1539,7 +1563,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   }
 
   function normalizedNativeObservedValue(device, control) {
-    const entity = Object.values(device?.entities || {}).find((candidate) => String(candidate.id || candidate.sourceId || "") === String(control?.controlId));
+    const entity = nativeRawEntityForControl(device, control?.controlId);
     if (!entity) return { entity: null, value: null, observedAtMs: NaN, revision: 0 };
     const raw = entity.state && typeof entity.state === "object" && !Array.isArray(entity.state) && Object.hasOwn(entity.state, "state") ? entity.state.state : entity.state;
     let value = raw;
@@ -1555,6 +1579,17 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     }
     const timestamp = Date.parse(String(entity.lastChanged || entity.last_changed || entity.updatedAt || ""));
     return { entity, value, observedAtMs: timestamp, revision: Math.max(0, Number(entity.stateRevision || entity.revision || 0)) };
+  }
+
+  function nativeRawEntityForControl(device, controlId) {
+    const requested = String(controlId || "");
+    if (!requested) return null;
+    return Object.values(device?.entities || {}).find((entity) => [
+      entity?.capability?.controlId,
+      entity?.controlId,
+      entity?.id,
+      entity?.sourceId,
+    ].some((value) => value != null && String(value) === requested)) || null;
   }
 
   function nativeCommandValueMatches(control, requested, observed) {
@@ -1752,7 +1787,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   }
 
   async function dispatchNativeCommand(principal, device, control, value) {
-    const raw = Object.values(device.entities || {}).find((entity) => String(entity.id || entity.sourceId || "") === String(control.controlId));
+    const raw = nativeRawEntityForControl(device, control.controlId);
     if (!raw) return false;
     const surface = allProjectedSurfaces(device).find((candidate) => String(candidate.id) === String(control.surfaceId) && (candidate.sourceEntityIds || []).map(String).includes(String(raw.id || raw.sourceId)));
     if (!surface || surface.capability?.writable === false) return false;
@@ -2064,7 +2099,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       if (Number(command.descriptorRevision) !== dto.descriptorRevision) return nativeContractError(res, 409, "CATALOG_REVISION_MISMATCH", "Refresh the current device controls");
       const control = dto.controls.find((candidate) => candidate.controlId === command.controlId);
       if (!control || !validateNativeCommand(command, dto, control, String(scopedPrincipal.membershipId))) return nativeContractError(res, 400, "VALIDATION_FAILED", "The command does not match the current control descriptor");
-      const rawEntity = Object.values(device.entities || {}).find((entity) => String(entity.id || entity.sourceId || "") === String(control.controlId));
+      const rawEntity = nativeRawEntityForControl(device, control.controlId);
       const binding = nativeCommandBinding({ ...control, value: command.value }, rawEntity);
       const serviceId = String(binding?.serviceId || "").toLowerCase();
       if (!rawEntity || !binding || !appCanCommandDevice(scopedPrincipal, device, { controlId: control.controlId }, rawEntity, serviceId)) return nativeContractError(res, 403, "SCOPE_DENIED", "The current control is not writable for this membership");
@@ -2112,7 +2147,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         if (!liveDto || liveDto.lifecycle !== "installed" || liveDto.descriptorRevision !== command.descriptorRevision || !liveControl || stableJson(liveControl) !== stableJson(control) || !validateNativeCommand(command, liveDto, liveControl, String(scopedPrincipal.membershipId))) {
           return nativeContractError(res, 409, "CATALOG_REVISION_MISMATCH", "The current device or control authority changed; refresh before retrying");
         }
-        const liveEntity = Object.values(liveDevice.entities || {}).find((entity) => String(entity.id || entity.sourceId || "") === String(liveControl.controlId));
+        const liveEntity = nativeRawEntityForControl(liveDevice, liveControl.controlId);
         const liveBinding = nativeCommandBinding({ ...liveControl, value: command.value }, liveEntity);
         if (!liveEntity || !liveBinding || !appCanCommandDevice(scopedPrincipal, liveDevice, { controlId: liveControl.controlId }, liveEntity, String(liveBinding.serviceId || "").toLowerCase())) {
           return nativeContractError(res, 403, "SCOPE_DENIED", "The current control is no longer writable for this membership");
@@ -2173,7 +2208,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
             : null;
           const dispatchControl = dispatchDto?.controls.find((candidate) => candidate.controlId === command.controlId);
           const dispatchEntity = dispatchDevice && dispatchControl
-            ? Object.values(dispatchDevice.entities || {}).find((entity) => String(entity.id || entity.sourceId || "") === String(dispatchControl.controlId))
+            ? nativeRawEntityForControl(dispatchDevice, dispatchControl.controlId)
             : null;
           const dispatchBinding = dispatchControl && dispatchEntity
             ? nativeCommandBinding({ ...dispatchControl, value: command.value }, dispatchEntity)
@@ -2255,7 +2290,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         revision: Number(device.presentation?.descriptorRevision || device.descriptorRevision || 0),
       });
       const control = descriptor?.controls.find((candidate) => candidate.controlId === requestedControlId);
-      const rawEntity = Object.values(device.entities || {}).find((candidate) => String(candidate.id || candidate.sourceId || "") === requestedControlId);
+      const rawEntity = nativeRawEntityForControl(device, requestedControlId);
       if (!descriptor || descriptor.lifecycle !== "installed" || !control || !rawEntity
         || control.stepUpPolicy !== "required" && !["security_lock", "lock_state"].includes(control.semanticRole)) {
         return json(res, 403, { error: "The requested sensitive control is not currently authorised", errorCode: "step_up_control_denied" });

@@ -51,7 +51,7 @@ class AutomationScheduler {
       }
       state.automationRuntime = { ...(state.automationRuntime || {}), recoveredAt: now, schedulerRunning: false };
       if (changed) {
-        const summaries = recovered.map((item) => ({ occurrenceId: item.id, automationId: item.automationId, revision: item.revision, status: "interrupted", startedAt: item.startedAt || item.claimedAt, completedAt: item.completedAt, actionOutcomes: clone(item.actionOutcomes || []) }));
+        const summaries = recovered.map((item) => ({ occurrenceId: item.id, automationId: item.automationId, revision: item.revision, source: item.source || state.automations?.[item.automationId]?.source || "native_v2", status: "interrupted", startedAt: item.startedAt || item.claimedAt, completedAt: item.completedAt, actionOutcomes: clone(item.actionOutcomes || []) }));
         state.automationExecutions = [...summaries, ...(state.automationExecutions || [])]
           .slice(0, LIMITS.maxExecutionHistory);
       }
@@ -61,10 +61,10 @@ class AutomationScheduler {
     }
   }
 
-  async claim(occurrence, actions) {
+  async claim(occurrence, automation, actions) {
     return this.store.mutateNativeAutomation((state) => {
       if (state.automationOccurrences[occurrence.id]) return false;
-      state.automationOccurrences[occurrence.id] = { ...occurrence, status: "claimed", claimedAt: this.now().toISOString(), completedAt: null, actionOutcomes: (actions || []).map((action) => ({ actionId: action.id, deviceId: action.deviceId, controlId: action.controlId, status: "pending", startedAt: null, completedAt: null, errorCode: null, errorMessage: null })) };
+      state.automationOccurrences[occurrence.id] = { ...occurrence, source: automation?.source || "native_v2", status: "claimed", claimedAt: this.now().toISOString(), completedAt: null, actionOutcomes: (actions || []).map((action) => ({ actionId: action.id, deviceId: action.deviceId, controlId: action.controlId, status: "pending", startedAt: null, completedAt: null, errorCode: null, errorMessage: null })) };
       const ids = Object.keys(state.automationOccurrences);
       const cutoff = Date.now() - LIMITS.maxExecutionAgeMs;
       for (const id of ids) {
@@ -93,7 +93,7 @@ class AutomationScheduler {
         for (const date of candidates) {
           const occurrence = scheduledOccurrence(stored.automation, stored.trigger, date);
           if (!occurrence) continue;
-          if (await this.claim(occurrence, stored.actions)) due.push({ occurrence, stored });
+          if (await this.claim(occurrence, stored.automation, stored.actions)) due.push({ occurrence, stored });
         }
       }
       await this.store.mutateNativeAutomation((state) => { state.automationRuntime = { ...(state.automationRuntime || {}), schedulerRunning: Boolean(this.timer), lastTickAt: now.toISOString(), lastError: null }; });

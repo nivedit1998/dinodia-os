@@ -1,6 +1,7 @@
 const crypto = require("node:crypto");
 const { canonicalCloudChallenge } = require("./auth/identityBroker");
 const { privateInterface, isPrivateIPv4 } = require("./setupDiscovery");
+const { applyCloudConfiguration } = require("./sync/cloudConfiguration");
 
 function sign(secret, serial, ts, nonce) {
   return crypto.createHmac("sha256", String(secret)).update(`${serial}.${ts}.${nonce}`).digest("hex");
@@ -60,7 +61,7 @@ function validateLanEndpointObservation(value, serial, expectedPort = 80) {
 }
 
 class PlatformPairing {
-  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, haPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, runtime, getLanEndpoint = null, getLanTlsIdentity = null, acknowledgeLanTlsIdentity = null, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, legacyCompatibilityEnabled = false, clock = () => Date.now() } = {}) {
+  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, haPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, runtime, getLanEndpoint = null, getLanTlsIdentity = null, acknowledgeLanTlsIdentity = null, getUpdaterStatus = null, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, legacyCompatibilityEnabled = false, clock = () => Date.now() } = {}) {
     this.store = store;
     this.vault = vault;
     this.identityBroker = identityBroker;
@@ -83,6 +84,7 @@ class PlatformPairing {
     });
     this.getLanTlsIdentity = getLanTlsIdentity || (() => null);
     this.acknowledgeLanTlsIdentity = acknowledgeLanTlsIdentity || (() => false);
+    this.getUpdaterStatus = getUpdaterStatus || (async () => null);
     this.pendingEndpointHeartbeat = false;
     this.queuedImmediateSync = false;
     this.runtime = {
@@ -115,6 +117,7 @@ class PlatformPairing {
 
   status() {
     const platform = this.store?.getPlatform?.() || {};
+    const sync = this.store?.getSyncOutbox?.() || {};
     return {
       configured: Boolean(this.apiUrl && this.serial),
       paired: Boolean(platform.paired),
@@ -127,6 +130,16 @@ class PlatformPairing {
       runtime: { ...this.runtime, capabilities: { ...this.runtime.capabilities } },
       lastSuccess: this.lastSuccess || platform.lastSyncAt || null,
       lastError: this.lastError || platform.lastError || null,
+      sync: {
+        streamId: sync.streamId || null,
+        acknowledgedSequence: Number(sync.acknowledgedSequence || 0),
+        queueDepth: Array.isArray(sync.events) ? sync.events.length : 0,
+        lastSuccessfulSyncAt: sync.lastSuccessfulSyncAt || null,
+        lastErrorCode: sync.lastErrorCode || null,
+        criticalBacklog: sync.criticalBacklog === true,
+        gapDetected: sync.gapDetected === true,
+      },
+      updater: platform.updaterStatus || { phase: "unavailable", trustState: "unavailable", activeReleaseVersion: null, lastAttempt: null, busy: false },
     };
   }
 
@@ -449,53 +462,18 @@ class PlatformPairing {
     if (!platform.paired) return null;
     this.syncing = true;
     try {
-      const heatingUsage = this.getHeatingUsage() || undefined;
-      const heatingUsageResetAckAt = this.getHeatingUsageResetAck() || undefined;
-      const electricUsage = this.getElectricUsage() || undefined;
-      // The legacy reset epoch is intentionally shared by both local usage
-      // trackers so platform/home-reset remains one atomic compatibility
-      // contract for old and new hubs.
-      const electricUsageResetAckAt = this.getElectricUsageResetAck() || undefined;
-      const sharedUsageResetAckAt = heatingUsageResetAckAt || electricUsageResetAckAt;
-      const activityIncidents = this.getActivityIncidents() || undefined;
+      await this.store.ensureSyncSnapshot?.(this.clock());
+      await this.store.ensureSyncIncidentEvents?.(this.clock());
+      await this.store.ensureAutomationOutcomeEvents?.(this.clock());
       const payload = {
         agentSeenVersion: Number(platform.agentSeenVersion || 0),
         hubRuntime: this.runtime,
-        haAreas: this.getAreaSnapshot(),
-        heatingUsage,
-        heatingUsageResetAckAt: sharedUsageResetAckAt,
-        electricUsage,
-        activityIncidents,
         operatorCredentialVersion: Number(platform.operatorCredentialVersion || 0),
       };
-      // Heartbeat is a deliberately narrow, signed liveness contract. The
-      // broader token-state response remains responsible for credential and
-      // offline-policy synchronisation, but it is not the source of the
-      // platform's approximately two-minute hub availability signal.
+      // Heartbeat is sent only after the signed bootstrap policy and complete
+      // v2 configuration have been durably applied. On reconnect, the hub
+      // cannot report normal liveness while it is still using stale policy.
       const nativeIdentity = await this.getPublicIdentity();
-      const syncStartedAt = this.clock();
-      if (nativeIdentity && (this.pendingEndpointHeartbeat || syncStartedAt - this.lastHeartbeatAt >= this.heartbeatIntervalMs)) {
-        const lanEndpoint = await this.buildLanEndpointObservation(nativeIdentity.generation);
-        const lanTlsIdentity = this.getLanTlsIdentity();
-        const heartbeat = await this.requestWithHubIdentity("/api/hub-agent/v2/heartbeat", {
-          serial: this.serial,
-          hubRuntime: this.runtime,
-          lanEndpoint,
-          ...(lanTlsIdentity ? { lanTlsIdentity } : {}),
-        });
-        if (Number(heartbeat?.lanEndpoint?.revision) !== lanEndpoint.revision || heartbeat?.lanEndpoint?.state !== lanEndpoint.state) {
-          throw Object.assign(new Error("Platform did not acknowledge the current LAN endpoint revision"), { code: "lan_endpoint_ack_mismatch" });
-        }
-        const acknowledgedTlsGeneration = Number(heartbeat?.lanTlsIdentity?.acknowledgedGeneration || 0);
-        if (acknowledgedTlsGeneration > 0 && !this.acknowledgeLanTlsIdentity(acknowledgedTlsGeneration)) {
-          throw Object.assign(new Error("Platform acknowledged an unknown customer LAN certificate generation"), { code: "lan_tls_ack_mismatch" });
-        }
-        this.lastHeartbeatAt = this.clock();
-        // A link change can arrive after this request captured its endpoint.
-        // Keep the immediate-send marker through the queued follow-up; the
-        // first acknowledgement may therefore never clear a newer change.
-        this.pendingEndpointHeartbeat = this.queuedImmediateSync;
-      }
       const result = nativeIdentity
         ? await this.requestWithHubIdentity("/api/hub-agent/token-state", payload)
         : this.legacyCompatibilityEnabled && this.vault?.get("platform.syncSecret")
@@ -548,16 +526,76 @@ class PlatformPairing {
         operatorCredentialStates,
         policyRevision: Number(result.policyRevision ?? platform.policyRevision ?? 0),
         syncIntervalMinutes: Number(result.platformSyncIntervalMinutes || platform.syncIntervalMinutes || 2),
-        lastSyncAt: new Date().toISOString(),
         lastError: null,
       });
       await this.onOperatorCredentialStateChange({ previous: previousOperatorCredentialStates, current: operatorCredentialStates, now: Date.now(), hubId: this.serial });
       if (Array.isArray(result.offlineAuthorisations)) await this.acceptOfflineAuthorisations(result.offlineAuthorisations);
-      await this.onSyncResult(result, heatingUsage, heatingUsageResetAckAt, electricUsage, electricUsageResetAckAt);
+      const updaterStatus = await this.getUpdaterStatus().catch(() => null);
+      if (updaterStatus) await this.store.ensureUpdaterStatusEvent?.(updaterStatus, this.clock());
+      const syncState = this.store.getSyncOutbox();
+      const syncBatch = await this.store.prepareSyncBatch(platform.hubInstallId, this.runtime, this.clock());
+      const syncEnvelope = syncBatch || {
+        schemaVersion: 1,
+        hubInstallationId: String(platform.hubInstallId || ""),
+        streamId: String(syncState.streamId),
+        fromSequence: Number(syncState.acknowledgedSequence || 0) + 1,
+        toSequence: Number(syncState.acknowledgedSequence || 0),
+        events: [],
+        queueDepth: 0,
+        acknowledgedCloudRevision: Number(syncState.cloudRevision || 0),
+        runtime: this.store.getSyncRuntime?.(this.runtime) || this.runtime,
+        sentAt: new Date(this.clock()).toISOString(),
+      };
+      const syncResult = await this.requestWithHubIdentity("/api/hub-agent/v2/sync", syncEnvelope);
+      if (syncResult?.streamId !== syncEnvelope.streamId || !Number.isSafeInteger(Number(syncResult?.cloudRevision))
+        || !syncResult?.configuration || syncResult.configuration.revision !== Number(syncResult.cloudRevision)) {
+        throw Object.assign(new Error("Platform returned an invalid native sync acknowledgement/configuration"), { code: "sync_response_invalid" });
+      }
+      await applyCloudConfiguration(this.store, syncResult.configuration);
+      if (syncBatch) {
+        await this.store.acknowledgeSyncBatch({
+          streamId: syncResult.streamId,
+          acceptedThroughSequence: Number(syncResult.acceptedThroughSequence),
+          cloudRevision: Number(syncResult.cloudRevision),
+          configurationAppliedRevision: Number(syncResult.configurationAppliedRevision),
+          resnapshotRequired: syncResult.resnapshotRequired === true,
+        }, this.clock());
+      } else {
+        await this.store.acknowledgeSyncConfiguration(Number(syncResult.cloudRevision), this.clock());
+      }
+      await this.store.advanceSyncUsage?.(this.clock());
+      const heartbeatAt = this.clock();
+      if (nativeIdentity && (this.pendingEndpointHeartbeat || heartbeatAt - this.lastHeartbeatAt >= this.heartbeatIntervalMs)) {
+        const lanEndpoint = await this.buildLanEndpointObservation(nativeIdentity.generation);
+        const lanTlsIdentity = this.getLanTlsIdentity();
+        const heartbeat = await this.requestWithHubIdentity("/api/hub-agent/v2/heartbeat", {
+          serial: this.serial,
+          hubRuntime: this.runtime,
+          lanEndpoint,
+          ...(lanTlsIdentity ? { lanTlsIdentity } : {}),
+        });
+        if (Number(heartbeat?.lanEndpoint?.revision) !== lanEndpoint.revision || heartbeat?.lanEndpoint?.state !== lanEndpoint.state) {
+          throw Object.assign(new Error("Platform did not acknowledge the current LAN endpoint revision"), { code: "lan_endpoint_ack_mismatch" });
+        }
+        const acknowledgedTlsGeneration = Number(heartbeat?.lanTlsIdentity?.acknowledgedGeneration || 0);
+        if (acknowledgedTlsGeneration > 0 && !this.acknowledgeLanTlsIdentity(acknowledgedTlsGeneration)) {
+          throw Object.assign(new Error("Platform acknowledged an unknown customer LAN certificate generation"), { code: "lan_tls_ack_mismatch" });
+        }
+        this.lastHeartbeatAt = this.clock();
+        // A link change can arrive after this request captured its endpoint.
+        // Keep the immediate-send marker through the queued follow-up; the
+        // first acknowledgement may therefore never clear a newer change.
+        this.pendingEndpointHeartbeat = this.queuedImmediateSync;
+      }
+      await this.store.savePlatform({ lastSyncAt: new Date(this.clock()).toISOString(), lastError: null });
+      await this.onSyncResult(result, undefined, undefined, undefined, undefined);
       // Alexa has a dedicated bounded synchroniser. Keeping it outside this
       // heartbeat prevents a catalogue update from delaying token/state sync.
       this.lastSuccess = new Date().toISOString();
       this.lastError = null;
+      if ((this.store.getSyncOutbox?.().events || []).some((event) => event.sequence > Number(this.store.getSyncOutbox?.().acknowledgedSequence || 0))) {
+        setImmediate(() => this.syncNow().catch(() => {}));
+      }
       this.retryAttempt = 0;
       this.nextRetryAt = 0;
       if (this.retryTimer) clearTimeout(this.retryTimer);
@@ -571,9 +609,12 @@ class PlatformPairing {
     } catch (error) {
       this.lastError = String(error.message || error);
       this.retryAttempt = Math.min(this.retryAttempt + 1, 8);
-      // Do not let transient Platform errors stretch policy/revocation
-      // convergence beyond the 60-second connected-hub enforcement target.
-      const retryDelay = Math.min(15_000, 5000 * (2 ** (this.retryAttempt - 1))) + Math.floor(Math.random() * 1000);
+      const errorCode = String(error?.code || "sync_failed").slice(0, 80);
+      await this.store.markSyncFailure?.(errorCode).catch(() => {});
+      // Full-jitter exponential retry; the independent durable interval and
+      // policy refresh continue even after a transient sync failure.
+      const retryCeiling = Math.min(5 * 60_000, 1000 * (2 ** (this.retryAttempt - 1)));
+      const retryDelay = Math.floor(Math.random() * retryCeiling);
       this.nextRetryAt = Date.now() + retryDelay;
       if (!this.retryTimer) {
         this.retryTimer = setTimeout(() => {

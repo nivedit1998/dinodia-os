@@ -19,9 +19,6 @@ function classify(entity, device) {
   if (["unavailable", "unknown", ""].includes(value)) return { known: false, isOn: false };
   if (["off", "closed", "locked", "idle", "docked", "stopped", "standby"].includes(value)) return { known: true, isOn: false };
   if (["on", "open", "opening", "closing", "heat", "heating", "active", "cleaning", "playing"].includes(value)) return { known: true, isOn: true };
-  const current = Number(device.state?.current_temperature ?? device.state?.temperature);
-  const target = Number(device.state?.target_temperature ?? device.state?.target_temp);
-  if (Number.isFinite(current) && Number.isFinite(target)) return { known: true, isOn: target > current };
   return { known: false, isOn: false };
 }
 

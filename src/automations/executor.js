@@ -51,7 +51,7 @@ class AutomationExecutor {
     }
     const status = failed === 0 ? "succeeded" : failed === actions.length ? "failed" : "partial";
     const completedAt = this.now().toISOString();
-    const execution = { occurrenceId, automationId: automation.id, revision: automation.revision, status, startedAt, completedAt, actionOutcomes: clone(outcomes) };
+    const execution = { occurrenceId, automationId: automation.id, revision: automation.revision, source: automation.source || occurrence.source || "native_v2", status, startedAt, completedAt, actionOutcomes: clone(outcomes) };
     await this.store.mutateNativeAutomation((state) => {
       const current = state.automationOccurrences[occurrenceId];
       if (current) Object.assign(current, { status, completedAt, actionOutcomes: clone(outcomes) });

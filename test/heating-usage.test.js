@@ -4,7 +4,12 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { Store } = require("../src/store");
-const { HeatingUsageTracker } = require("../src/heatingUsage");
+const { HeatingUsageTracker, classify } = require("../src/heatingUsage");
+
+test("heating target temperature alone never implies actual activity", () => {
+  assert.deepEqual(classify({ stateKey: "target_temperature", state: 22 }, { state: { current_temperature: 18, target_temperature: 22 } }), { known: false, isOn: false });
+  assert.deepEqual(classify({ stateKey: "target_temperature", state: 16 }, { state: { current_temperature: 20, target_temperature: 16 } }), { known: false, isOn: false });
+});
 
 test("heating usage tracks labeled intervals and acknowledges platform resets", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-heating-"));
