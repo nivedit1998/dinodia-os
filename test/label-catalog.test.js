@@ -17,16 +17,17 @@ test("every hub exposes the four fixed Dinodia labels", async () => {
   assert.equal(upgraded.getLabel("legacy").name, "Legacy");
 });
 
-test("Dinodia OS does not expose local area or label creation controls", async () => {
+test("Dinodia OS exposes assigned Area creation but keeps labels fixed", async () => {
   const html = await fs.readFile(path.join(__dirname, "..", "public", "index.html"), "utf8");
   const app = await fs.readFile(path.join(__dirname, "..", "public", "app.js"), "utf8");
-  assert.match(html, /Areas are created during hub provisioning or by Home Support/);
+  assert.match(html, /id="area-create-form"/);
+  assert.match(html, /id="area-create-name"/);
   assert.match(html, /Available labels for devices and entities: Light, Boiler, Radiator and Tenant Device/);
   assert.doesNotMatch(html, /id="area-form"/);
   assert.doesNotMatch(html, /id="label-form"/);
   assert.doesNotMatch(app, /data-delete-area/);
   assert.doesNotMatch(app, /data-delete-label/);
-  assert.doesNotMatch(app, /method:\s*["'](?:POST|PUT|DELETE)["'][^}]*\/api\/areas/);
+  assert.match(app, /api\("\/api\/areas",\s*\{\s*method:\s*"POST"/);
   assert.doesNotMatch(app, /method:\s*["'](?:POST|PUT|DELETE)["'][^}]*\/api\/labels/);
   assert.match(app, /const FIXED_LABELS/);
 });

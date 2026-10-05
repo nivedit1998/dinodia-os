@@ -447,6 +447,27 @@ class PlatformPairing {
     return { paired: true, version: Number(delivery.version) };
   }
 
+  async publishSignedHeartbeat(nativeIdentity) {
+    const lanEndpoint = await this.buildLanEndpointObservation(nativeIdentity.generation);
+    const lanTlsIdentity = this.getLanTlsIdentity();
+    const heartbeat = await this.requestWithHubIdentity("/api/hub-agent/v2/heartbeat", {
+      serial: this.serial,
+      hubRuntime: this.store.getSyncRuntime?.(this.runtime) || this.runtime,
+      lanEndpoint,
+      ...(lanTlsIdentity ? { lanTlsIdentity } : {}),
+    });
+    if (Number(heartbeat?.lanEndpoint?.revision) !== lanEndpoint.revision || heartbeat?.lanEndpoint?.state !== lanEndpoint.state) {
+      throw Object.assign(new Error("Platform did not acknowledge the current LAN endpoint revision"), { code: "lan_endpoint_ack_mismatch" });
+    }
+    const acknowledgedTlsGeneration = Number(heartbeat?.lanTlsIdentity?.acknowledgedGeneration || 0);
+    if (acknowledgedTlsGeneration > 0 && !this.acknowledgeLanTlsIdentity(acknowledgedTlsGeneration)) {
+      throw Object.assign(new Error("Platform acknowledged an unknown customer LAN certificate generation"), { code: "lan_tls_ack_mismatch" });
+    }
+    this.lastHeartbeatAt = this.clock();
+    this.pendingEndpointHeartbeat = this.queuedImmediateSync;
+    return heartbeat;
+  }
+
   async syncNow() {
     if (this.syncing) return null;
     if (this.nextRetryAt && Date.now() < this.nextRetryAt) return null;
@@ -461,6 +482,8 @@ class PlatformPairing {
     }
     if (!platform.paired) return null;
     this.syncing = true;
+    let heartbeatIdentity = null;
+    let heartbeatAuthorityConfirmed = false;
     try {
       await this.store.ensureSyncSnapshot?.(this.clock());
       await this.store.ensureSyncIncidentEvents?.(this.clock());
@@ -474,6 +497,7 @@ class PlatformPairing {
       // v2 configuration have been durably applied. On reconnect, the hub
       // cannot report normal liveness while it is still using stale policy.
       const nativeIdentity = await this.getPublicIdentity();
+      heartbeatIdentity = nativeIdentity;
       const result = nativeIdentity
         ? await this.requestWithHubIdentity("/api/hub-agent/token-state", payload)
         : this.legacyCompatibilityEnabled && this.vault?.get("platform.syncSecret")
@@ -482,6 +506,7 @@ class PlatformPairing {
       if (!result) throw new Error("A factory-enrolled hub identity is required for Platform synchronisation");
       const reportedHubInstallId = result.hubInstallId == null ? "" : String(result.hubInstallId);
       const hubInstallId = reportedHubInstallId || String(platform.hubInstallId || "");
+      const developmentCompatibilityOnly = !nativeIdentity && this.legacyCompatibilityEnabled && !this.production;
       const installationSyncMode = result.installationSyncMode == null ? "ACTIVE" : String(result.installationSyncMode);
       if (!["ACTIVE", "INSTALLATION_BOOTSTRAP", "UNAVAILABLE"].includes(installationSyncMode)) {
         throw Object.assign(new Error("Platform returned an invalid installation sync mode"), { code: "installation_sync_mode_invalid" });
@@ -501,7 +526,7 @@ class PlatformPairing {
       if (platform.hubInstallId && reportedHubInstallId && String(platform.hubInstallId) !== reportedHubInstallId) {
         throw Object.assign(new Error("Platform hub installation identity changed; refusing to rebind this paired OS"), { code: "hub_installation_id_changed" });
       }
-      if (!hubInstallId) {
+      if (!hubInstallId && !developmentCompatibilityOnly) {
         throw Object.assign(new Error("Platform did not provide the enrolled hub installation ID required for native synchronisation"), { code: "hub_installation_id_missing" });
       }
       if (result.homeId !== undefined && (typeof result.homeId !== "string" || !result.homeId || result.homeId.length > 160)) throw new Error("Platform returned an invalid Native V1 home binding");
@@ -542,7 +567,7 @@ class PlatformPairing {
         : (platform.acceptedTokenHashes || []);
       await this.store.savePlatform({
         paired: true,
-        hubInstallId,
+        ...(hubInstallId ? { hubInstallId } : {}),
         agentSeenVersion: nextVersion,
         publishedVersion: Number(result.publishedVersion || platform.publishedVersion || 0),
         acceptedTokenHashes: returnedHashes,
@@ -553,13 +578,31 @@ class PlatformPairing {
         syncIntervalMinutes: Number(result.platformSyncIntervalMinutes || platform.syncIntervalMinutes || 2),
         lastError: null,
       });
+      // The deliberately isolated development compatibility adapter only
+      // refreshes its legacy token allowlist. It has no Native V2 installation
+      // authority, so it must not enter the durable cloud sync route.
+      if (developmentCompatibilityOnly) {
+        await this.onSyncResult(result, undefined, undefined, undefined, undefined);
+        this.lastError = null;
+        this.retryAttempt = 0;
+        this.nextRetryAt = 0;
+        if (this.retryTimer) clearTimeout(this.retryTimer);
+        this.retryTimer = null;
+        return result;
+      }
+      heartbeatAuthorityConfirmed = Boolean(nativeIdentity);
       await this.onOperatorCredentialStateChange({ previous: previousOperatorCredentialStates, current: operatorCredentialStates, now: Date.now(), hubId: this.serial });
       if (Array.isArray(result.offlineAuthorisations)) await this.acceptOfflineAuthorisations(result.offlineAuthorisations);
       const updaterStatus = await this.getUpdaterStatus().catch(() => null);
       if (updaterStatus) await this.store.ensureUpdaterStatusEvent?.(updaterStatus, this.clock());
       const syncState = this.store.getSyncOutbox();
       const bootstrapBatchOptions = installationSyncMode === "INSTALLATION_BOOTSTRAP"
-        ? { allowedTypesPrefix: ["sync.compacted", "update.status", "area.upsert"], serverAcceptedSequence, serverStreamId }
+        ? {
+          allowedTypesPrefix: ["sync.compacted", "update.status", "area.upsert", "incident.transition"],
+          allowedEventPrefix: (event) => event.type !== "incident.transition"
+            || event.payload?.osDeviceId === null && /^(hub|integration)_/.test(String(event.payload?.kind || "")),
+          serverAcceptedSequence, serverStreamId,
+        }
         : {};
       const syncBatch = await this.store.prepareSyncBatch(hubInstallId, this.runtime, this.clock(), bootstrapBatchOptions);
       let syncResult = null;
@@ -597,26 +640,7 @@ class PlatformPairing {
       }
       const heartbeatAt = this.clock();
       if (nativeIdentity && (installationSyncMode === "INSTALLATION_BOOTSTRAP" || this.pendingEndpointHeartbeat || heartbeatAt - this.lastHeartbeatAt >= this.heartbeatIntervalMs)) {
-        const lanEndpoint = await this.buildLanEndpointObservation(nativeIdentity.generation);
-        const lanTlsIdentity = this.getLanTlsIdentity();
-        const heartbeat = await this.requestWithHubIdentity("/api/hub-agent/v2/heartbeat", {
-          serial: this.serial,
-          hubRuntime: this.runtime,
-          lanEndpoint,
-          ...(lanTlsIdentity ? { lanTlsIdentity } : {}),
-        });
-        if (Number(heartbeat?.lanEndpoint?.revision) !== lanEndpoint.revision || heartbeat?.lanEndpoint?.state !== lanEndpoint.state) {
-          throw Object.assign(new Error("Platform did not acknowledge the current LAN endpoint revision"), { code: "lan_endpoint_ack_mismatch" });
-        }
-        const acknowledgedTlsGeneration = Number(heartbeat?.lanTlsIdentity?.acknowledgedGeneration || 0);
-        if (acknowledgedTlsGeneration > 0 && !this.acknowledgeLanTlsIdentity(acknowledgedTlsGeneration)) {
-          throw Object.assign(new Error("Platform acknowledged an unknown customer LAN certificate generation"), { code: "lan_tls_ack_mismatch" });
-        }
-        this.lastHeartbeatAt = this.clock();
-        // A link change can arrive after this request captured its endpoint.
-        // Keep the immediate-send marker through the queued follow-up; the
-        // first acknowledgement may therefore never clear a newer change.
-        this.pendingEndpointHeartbeat = this.queuedImmediateSync;
+        await this.publishSignedHeartbeat(nativeIdentity);
       }
       await this.store.savePlatform({ ...(syncResult ? { lastSyncAt: new Date(this.clock()).toISOString() } : {}), lastError: null });
       await this.onSyncResult(result, undefined, undefined, undefined, undefined);
@@ -644,6 +668,17 @@ class PlatformPairing {
       this.retryAttempt = Math.min(this.retryAttempt + 1, 8);
       const errorCode = String(error?.code || "sync_failed").slice(0, 80);
       await this.store.markSyncFailure?.(errorCode).catch(() => {});
+      // Heartbeat and sync are separate facts. Once current installation
+      // authority has been confirmed, report the persisted queue/error snapshot
+      // even when inventory ingestion itself failed. This does not advance the
+      // sync receipt/cursor or acknowledge a newer cloud policy.
+      if (heartbeatIdentity && heartbeatAuthorityConfirmed) {
+        try { await this.publishSignedHeartbeat(heartbeatIdentity); }
+        catch (heartbeatError) {
+          const heartbeatCode = String(heartbeatError?.code || "heartbeat_report_failed");
+          this.logger.warn(`[platform] signed queue-status heartbeat unavailable (${/^[a-z0-9_.:-]{1,80}$/i.test(heartbeatCode) ? heartbeatCode : "heartbeat_report_failed"})`);
+        }
+      }
       // Full-jitter exponential retry; the independent durable interval and
       // policy refresh continue even after a transient sync failure.
       const retryCeiling = Math.min(5 * 60_000, 1000 * (2 ** (this.retryAttempt - 1)));

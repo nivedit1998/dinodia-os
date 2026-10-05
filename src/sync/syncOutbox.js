@@ -134,6 +134,7 @@ function nextSyncBatch(outboxValue, options = {}) {
   const events = [];
   for (const event of pending.slice(0, SYNC_BATCH_MAX_EVENTS)) {
     if (allowedTypesPrefix && !allowedTypesPrefix.has(event.type)) break;
+    if (typeof options.allowedEventPrefix === "function" && !options.allowedEventPrefix(event)) break;
     events.push(event);
   }
   if (!events.length) return null;

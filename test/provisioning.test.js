@@ -124,7 +124,9 @@ test("development compatibility pairing remains isolated from production native 
   const tokenOne = "token-one-for-provisioning-test";
   const tokenTwo = "token-two-for-provisioning-test";
   let syncCalls = 0;
+  const platformRoutes = [];
   const platform = http.createServer(async (req, res) => {
+    platformRoutes.push(req.url);
     const body = await new Promise((resolve) => { let value = ""; req.on("data", (chunk) => { value += chunk; }); req.on("end", () => resolve(JSON.parse(value || "{}"))); });
     const expectedSecret = req.url.endsWith("/pair") ? bootstrapSecret : syncSecret;
     assert.equal(body.sig, sign(expectedSecret, body.serial, body.ts, body.nonce));
@@ -163,6 +165,7 @@ test("development compatibility pairing remains isolated from production native 
   assert.equal(newToken.response.status, 200);
   const expired = await request(agentBase, "/api/", { headers: { authorization: `Bearer ${tokenOne}` } });
   assert.equal(expired.response.status, 401);
+  assert.equal(platformRoutes.some((route) => route.includes("/v2/")), false, "the development-only compatibility adapter never enters Native V2 sync without enrolled installation authority");
   await hub.stop();
   await new Promise((resolve) => platform.close(resolve));
 });

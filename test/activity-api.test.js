@@ -44,7 +44,7 @@ test("activity API is authenticated, filterable, paginated, and emits live recor
   const unauthorized = await request(base, "/_dinodia/admin/api/activity");
   assert.equal(unauthorized.response.status, 401);
   const headers = { authorization: "Bearer test-token" };
-  const area = await request(base, "/_dinodia/admin/api/areas", { method: "POST", headers, body: JSON.stringify({ name: "Kitchen" }) });
+  const area = await request(base, "/_dinodia/admin/api/areas", { method: "POST", headers, body: JSON.stringify({ id: "11111111-1111-4111-8111-111111111111", name: "Kitchen", icon: "room" }) });
   const liveRecord = new Promise((resolve) => hub.eventBus.once("dinodia_activity_created", resolve));
   const device = await request(base, "/_dinodia/admin/api/devices", { method: "POST", headers, body: JSON.stringify({ id: "activity-lamp", name: "Kitchen lamp", protocol: "virtual", areaId: area.body.id, state: { power: "OFF" } }) });
   assert.equal(device.response.status, 201);

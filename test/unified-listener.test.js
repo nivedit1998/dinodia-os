@@ -7,6 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const WebSocket = require("ws");
 const { createHub } = require("../src/server");
+const { createOperatorSessionToken } = require("../src/auth/operatorSession");
 
 async function freePort() {
   const probe = net.createServer();
@@ -133,6 +134,71 @@ test("Stage B serves the dashboard and HA compatibility only on unified 8123", a
     }
   } finally {
     await hub.stop();
+  }
+});
+
+test("physical installer listener serves a bounded authenticated dashboard and idempotent Area commissioning only", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-installer-commissioning-"));
+  const [unifiedPort, agentPort, customerPort] = await Promise.all([freePort(), freePort(), freePort()]);
+  const keys = crypto.generateKeyPairSync("ed25519");
+  const hubId = "installer-listener-hub";
+  const operatorToken = createOperatorSessionToken({ sub: "assigned-installer", hubId, scope: ["os:admin"], recentAuthAt: Date.now() }, keys.privateKey);
+  const hub = createHub({
+    config: {
+      nodeEnv: "production", v2Environment: "test", loopbackLanListenerForTest: true, customerLanPortForTest: customerPort,
+      hubId, operatorPublicKey: keys.publicKey.export({ format: "pem", type: "spki" }).toString(),
+      port: 0, haPort: unifiedPort, hubAgentPort: agentPort, dataDir: directory,
+      dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"),
+      staticDir: path.join(__dirname, "..", "public"), otbrUrl: "",
+    },
+    mqttBridge: mockIntegration(), matterBridge: mockIntegration(), cloudflareTunnel: mockCloudflare(),
+    platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
+  });
+  try {
+    await hub.start();
+    await new Promise((resolve, reject) => { hub.setupServer.once("error", reject); hub.setupServer.listen(0, "127.0.0.1", resolve); });
+    const physical = `http://127.0.0.1:${hub.setupServer.address().port}`;
+    const operator = { authorization: `Bearer ${operatorToken}` };
+    const home = await fetch(`${physical}/`, { headers: operator });
+    assert.equal(home.status, 200);
+    assert.match(await home.text(), /area-create-form/);
+    assert.equal((await fetch(`${physical}/styles.css`, { headers: operator })).status, 200);
+    assert.equal((await fetch(`${physical}/js/api.js`, { headers: operator })).status, 200);
+    assert.equal((await fetch(`${physical}/`, { headers: { authorization: "Bearer customer-or-ha-token" } })).status, 401);
+    assert.equal((await fetch(`${physical}/_dinodia/admin/api/status`, { headers: operator })).status, 200);
+    assert.equal((await fetch(`${physical}/_dinodia/admin/api/status`)).status, 401);
+
+    const id = crypto.randomUUID();
+    const create = () => request(physical, "/_dinodia/admin/api/areas", { method: "POST", headers: operator, body: JSON.stringify({ id, name: "Kitchen", icon: "room" }) });
+    const created = await create();
+    assert.equal(created.response.status, 201);
+    assert.equal(created.body.id, id);
+    const firstOutbox = hub.store.getSyncOutbox().events.filter((entry) => entry.type === "area.upsert" && entry.aggregateId === id);
+    assert.equal(firstOutbox.length, 1, "Area and its durable sync event are committed once");
+    const retry = await create();
+    assert.equal(retry.response.status, 200);
+    assert.equal(hub.store.getSyncOutbox().events.filter((entry) => entry.type === "area.upsert" && entry.aggregateId === id).length, 1);
+    const changedRetry = await request(physical, "/_dinodia/admin/api/areas", { method: "POST", headers: operator, body: JSON.stringify({ id, name: "Bedroom", icon: "room" }) });
+    assert.equal(changedRetry.response.status, 409);
+    assert.equal(hub.store.getArea(id).name, "Kitchen");
+    const duplicateName = await request(physical, "/_dinodia/admin/api/areas", { method: "POST", headers: operator, body: JSON.stringify({ id: crypto.randomUUID(), name: " kitchen ", icon: "room" }) });
+    assert.equal(duplicateName.response.status, 409);
+    const invalid = await request(physical, "/_dinodia/admin/api/areas", { method: "POST", headers: operator, body: JSON.stringify({ id: crypto.randomUUID(), name: "\u0000", icon: "room" }) });
+    assert.equal(invalid.response.status, 400);
+    const areaCount = hub.store.listAreas().length;
+    const deniedArea = await request(physical, "/_dinodia/admin/api/areas", { method: "POST", body: JSON.stringify({ id: crypto.randomUUID(), name: "Private", icon: "room" }) });
+    assert.equal(deniedArea.response.status, 401);
+    assert.equal(JSON.stringify(deniedArea.body).includes("Kitchen"), false);
+    assert.equal(hub.store.listAreas().length, areaCount);
+
+    const queueBefore = hub.store.getSyncOutbox().events.length;
+    assert.equal((await request(physical, "/_dinodia/admin/api/entities/test-device/service", { method: "POST", headers: operator, body: JSON.stringify({ serviceId: "light.turn_on" }) })).response.status, 404);
+    assert.equal((await fetch(`${physical}/api/websocket`, { headers: operator })).status, 404);
+    assert.equal(hub.store.getSyncOutbox().events.length, queueBefore, "installer HTTP exposes no customer/HA command surface");
+    assert.equal((await fetch(`${physical}/_dinodia/setup/status`)).status, 403, "setup status remains locked until the originating browser completes its one-use handoff");
+  } finally {
+    await hub.stop();
+    await fs.rm(directory, { recursive: true, force: true });
   }
 });
 

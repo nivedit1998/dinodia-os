@@ -36,7 +36,9 @@ test("dashboard keeps the intended setup order and production safety boundary", 
   const order = ["cloudflare-section", "provisioning-section", "areas-section", "radios-section", "devices-section"];
   assert.ok(order.every((id) => html.includes(`id="${id}"`)));
   assert.ok(order.every((id, index) => html.indexOf(`id="${id}"`) < html.indexOf(`id="${order[index + 1] || id}"`) || index === order.length - 1));
-  assert.match(html, /Areas are created during hub provisioning or by Home Support/);
+  assert.match(html, /id="area-create-form"/);
+  assert.match(html, /id="area-create-name"/);
+  assert.match(html, /id="area-create-status"/);
   assert.doesNotMatch(html, /Add test device|Raw JSON command/i);
 });
 

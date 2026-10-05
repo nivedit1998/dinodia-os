@@ -41,6 +41,65 @@ function renderAreasDashboard() {
 }
 function renderAreaControls() { const filter = $("#device-filter"); const current = filter.value; filter.innerHTML = `<option value="all">All devices</option>${state.areas.map((area) => `<option value="${escapeHtml(area.id)}">${escapeHtml(area.name)}</option>`).join("")}<option value="unassigned">Unassigned</option>`; filter.value = [...state.areas.map((area) => area.id), "unassigned", "all"].includes(current) ? current : "all"; state.selectedArea = filter.value === "unassigned" ? "" : filter.value; filter.onchange = () => { state.selectedArea = filter.value === "unassigned" ? "" : filter.value; renderAreasDashboard(); renderDevices(); }; }
 function renderAreas() { $("#areas").innerHTML = state.areas.length ? state.areas.map((area) => `<span class="chip">${escapeHtml(area.name)}</span>`).join("") : `<p class="subtle small">No areas have been provisioned yet.</p>`; }
+
+let pendingAreaCreateOperation = null;
+function createAreaOperationId() {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  // randomUUID is restricted to secure contexts, while getRandomValues is
+  // available to the authenticated installer UI on a private HTTP LAN.
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+function readPendingAreaCreate() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem("dinodia.os.pending-area-create.v1") || "null");
+    if (saved && /^[0-9a-f-]{36}$/i.test(saved.id || "") && typeof saved.name === "string") pendingAreaCreateOperation = saved;
+  } catch { /* Private browsing/storage-disabled mode retains the request in memory. */ }
+  return pendingAreaCreateOperation;
+}
+function writePendingAreaCreate(operation) {
+  pendingAreaCreateOperation = operation;
+  try { sessionStorage.setItem("dinodia.os.pending-area-create.v1", JSON.stringify(operation)); } catch { /* Same-page retry remains idempotent. */ }
+}
+function clearPendingAreaCreate() {
+  pendingAreaCreateOperation = null;
+  try { sessionStorage.removeItem("dinodia.os.pending-area-create.v1"); } catch { /* Nothing else to clear. */ }
+}
+
+$("#area-create-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const nameInput = $("#area-create-name");
+  const submit = $("#area-create-submit");
+  const status = $("#area-create-status");
+  const name = String(nameInput?.value || "").normalize("NFKC").trim();
+  if (!name || [...name].length > 80) {
+    status.textContent = "Enter an Area name of 1–80 characters.";
+    nameInput?.focus();
+    return;
+  }
+  const saved = readPendingAreaCreate();
+  const operation = saved?.name === name ? saved : { id: createAreaOperationId(), name };
+  writePendingAreaCreate(operation);
+  if (submit) submit.disabled = true;
+  status.textContent = "Saving this Area on the selected hub…";
+  try {
+    const area = await api("/api/areas", { method: "POST", body: JSON.stringify({ id: operation.id, name: operation.name, icon: "room" }) });
+    clearPendingAreaCreate();
+    state.areas = [...state.areas.filter((entry) => entry.id !== area.id), area];
+    renderAreaControls();
+    renderAreasDashboard();
+    renderAreas();
+    $("#area-count").textContent = String(state.areas.length);
+    form.reset();
+    status.textContent = "Area saved on this hub. Platform sync is pending; refresh the assigned-work status in Company Portal to confirm its acknowledgement.";
+  } catch (error) {
+    status.textContent = `${error.message}. If the response was interrupted, retrying this same submission will not create a duplicate Area.`;
+  } finally { if (submit) submit.disabled = false; }
+});
 function renderLabels() { $("#labels").innerHTML = fixedLabels().map((label) => `<span class="chip label-chip">${escapeHtml(label.name)}</span>`).join(""); }
 
 function serviceParameter(serviceId, input) { if (input?.dataset?.parameter) return input.dataset.parameter; const suffix = String(serviceId).split(".").pop(); return suffix === "select_option" ? "option" : suffix === "set_value" ? "value" : suffix === "set_temperature" ? "temperature" : suffix === "set_hvac_mode" ? "hvac_mode" : suffix === "set_preset_mode" ? "preset_mode" : "value"; }

@@ -60,7 +60,7 @@ test("HTTP API protects writes and controls a virtual device", async () => {
   assert.equal(invalidAdapter.response.status, 400);
   const quickLink = await request(base, dashboardRoute("/api/integrations/cloudflare"), { method: "POST", headers, body: JSON.stringify({ action: "quick" }) });
   assert.equal(quickLink.body.publicUrl, "https://test.trycloudflare.com");
-  const area = await request(base, dashboardRoute("/api/areas"), { method: "POST", headers, body: JSON.stringify({ name: "Kitchen" }) });
+  const area = await request(base, dashboardRoute("/api/areas"), { method: "POST", headers, body: JSON.stringify({ id: "11111111-1111-4111-8111-111111111111", name: "Kitchen", icon: "room" }) });
   const label = await request(base, dashboardRoute("/api/labels"), { method: "POST", headers, body: JSON.stringify({ name: "Lights" }) });
   const created = await request(base, dashboardRoute("/api/devices"), { method: "POST", headers, body: JSON.stringify({ id: "lamp", name: "Lamp", protocol: "virtual", state: { power: "OFF" } }) });
   assert.equal(created.response.status, 201);

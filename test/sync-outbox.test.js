@@ -77,31 +77,40 @@ test("installation bootstrap reframes only a server-unaccepted in-flight prefix 
   const { directory, store } = temporaryStore();
   try {
     const hubId = "00000000-0000-4000-8000-000000000001";
+    await store.queueSyncEvent("incident.transition", "a".repeat(64), {
+      incidentKey: "a".repeat(64), revision: 1, kind: "hub_network_unavailable", state: "open", severity: "critical",
+      occurredAt: "2026-10-05T10:00:00.000Z", firstObservedAt: "2026-10-05T09:59:00.000Z",
+      lastObservedAt: "2026-10-05T10:00:00.000Z", resolvedAt: null, osDeviceId: null,
+    }, { now: Date.parse("2026-10-05T10:00:00.000Z"), critical: true });
     await store.ensureUpdaterStatusEvent({ trustState: "unprovisioned", phase: "idle", busy: false }, Date.parse("2026-10-05T10:00:00.000Z"));
     await store.saveArea({ name: "Kitchen", icon: "room" }, "os-area-1");
     await store.queueSyncEvent("device.tombstone", "device-1", { osDeviceId: "device-1", removedAt: "2026-10-05T10:00:00.000Z" }, { critical: true });
 
     const original = await store.prepareSyncBatch(hubId, { version: "test" }, Date.parse("2026-10-05T10:01:00.000Z"));
-    assert.deepEqual(original.events.map((event) => event.type), ["update.status", "area.upsert", "device.tombstone"]);
+    assert.deepEqual(original.events.map((event) => event.type), ["incident.transition", "update.status", "area.upsert", "device.tombstone"]);
 
     const bootstrap = await store.prepareSyncBatch(hubId, { version: "test" }, Date.parse("2026-10-05T10:02:00.000Z"), {
-      allowedTypesPrefix: ["sync.compacted", "update.status", "area.upsert"], serverAcceptedSequence: 0, serverStreamId: null,
+      allowedTypesPrefix: ["sync.compacted", "update.status", "area.upsert", "incident.transition"],
+      allowedEventPrefix: (event) => event.type !== "incident.transition" || (event.payload.osDeviceId === null && /^(hub|integration)_/.test(event.payload.kind)),
+      serverAcceptedSequence: 0, serverStreamId: null,
     });
-    assert.deepEqual(bootstrap.events.map((event) => event.type), ["update.status", "area.upsert"]);
+    assert.deepEqual(bootstrap.events.map((event) => event.type), ["incident.transition", "update.status", "area.upsert"]);
     assert.equal(bootstrap.fromSequence, 1);
-    assert.equal(bootstrap.toSequence, 2);
-    await store.acknowledgeSyncBatch({ streamId: bootstrap.streamId, acceptedThroughSequence: 2, cloudRevision: 1 }, Date.parse("2026-10-05T10:03:00.000Z"));
+    assert.equal(bootstrap.toSequence, 3);
+    await store.acknowledgeSyncBatch({ streamId: bootstrap.streamId, acceptedThroughSequence: 3, cloudRevision: 1 }, Date.parse("2026-10-05T10:03:00.000Z"));
 
     const stillBootstrap = await store.prepareSyncBatch(hubId, { version: "test" }, Date.parse("2026-10-05T10:04:00.000Z"), {
-      allowedTypesPrefix: ["sync.compacted", "update.status", "area.upsert"], serverAcceptedSequence: 2, serverStreamId: bootstrap.streamId,
+      allowedTypesPrefix: ["sync.compacted", "update.status", "area.upsert", "incident.transition"],
+      allowedEventPrefix: (event) => event.type !== "incident.transition" || (event.payload.osDeviceId === null && /^(hub|integration)_/.test(event.payload.kind)),
+      serverAcceptedSequence: 3, serverStreamId: bootstrap.streamId,
     });
     assert.equal(stillBootstrap, null, "bootstrap cannot send device events before installation activation");
-    assert.equal(store.getSyncOutbox().acknowledgedSequence, 2);
-    assert.deepEqual(store.getSyncOutbox().events.filter((event) => event.sequence > 2).map((event) => event.type), ["device.tombstone"]);
+    assert.equal(store.getSyncOutbox().acknowledgedSequence, 3);
+    assert.deepEqual(store.getSyncOutbox().events.filter((event) => event.sequence > 3).map((event) => event.type), ["device.tombstone"]);
 
     const active = await store.prepareSyncBatch(hubId, { version: "test" }, Date.parse("2026-10-05T10:05:00.000Z"));
     assert.deepEqual(active.events.map((event) => event.type), ["device.tombstone"]);
-    assert.equal(active.fromSequence, 3);
+    assert.equal(active.fromSequence, 4);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

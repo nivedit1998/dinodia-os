@@ -2619,7 +2619,23 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     }
     if (resource === "areas" && req.method === "GET" && !id) return json(res, 200, { areas: hubStore.listAreas() });
     if (resource === "areas" && req.method === "POST" && !id) {
-      const area = await hubStore.saveArea(await readBody(req));
+      const input = await readBody(req);
+      if (!input || typeof input !== "object" || Array.isArray(input)
+        || Object.keys(input).sort().join(",") !== "icon,id,name"
+        || typeof input.id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.id)
+        || typeof input.name !== "string" || input.name.trim().length < 1 || [...input.name.trim()].length > 80
+        || /[\u0000-\u001f\u007f]/u.test(input.name) || input.icon !== "room") {
+        return json(res, 400, { error: "Enter a valid Area name", errorCode: "area_input_invalid" });
+      }
+      const normalizedName = input.name.normalize("NFKC").trim();
+      const idempotentArea = hubStore.getArea(input.id);
+      if (idempotentArea) {
+        if (idempotentArea.name === normalizedName && idempotentArea.icon === input.icon) return json(res, 200, idempotentArea);
+        return json(res, 409, { error: "This Area request ID was already used with different details", errorCode: "area_request_conflict" });
+      }
+      const duplicate = hubStore.listAreas().find((area) => area.name.normalize("NFKC").trim().toLocaleLowerCase() === normalizedName.toLocaleLowerCase());
+      if (duplicate) return json(res, 409, { error: "An Area with that name already exists", errorCode: "area_already_exists" });
+      const area = await hubStore.saveArea({ name: normalizedName, icon: input.icon }, input.id);
       await activity.record({ type: "area_created", area: { id: area.id, name: area.name }, detail: `Area ${area.name} was created.` });
       eventBus.emit("registry_updated", { registry: "area", id: area.id });
       eventBus.emit("dinodia_dashboard_updated", { kind: "registry", registry: "area", id: area.id, at: new Date().toISOString() });
@@ -3887,8 +3903,26 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   const setupServer = http.createServer((req, res) => {
     let pathname = "";
     try { pathname = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`).pathname; } catch {}
-    if (req.method !== "GET" && req.method !== "POST" && req.method !== "DELETE") return text(res, 405, "Method not allowed");
-    if (pathname !== "/setup" && pathname !== "/setup.js" && !pathname.startsWith("/_dinodia/setup/")) return json(res, 404, { error: "Not found" });
+    const setupRoute = (pathname === "/setup" || pathname === "/setup.js") && req.method === "GET"
+      || pathname === "/_dinodia/setup/status" && req.method === "GET"
+      || pathname === "/_dinodia/setup/claim-challenge" && req.method === "GET"
+      || ["/_dinodia/setup/operator-attempt", "/_dinodia/setup/pairing", "/_dinodia/setup/support-access", "/_dinodia/setup/operator-session"].includes(pathname)
+        && (req.method === "POST" || pathname === "/_dinodia/setup/pairing" && req.method === "DELETE");
+    const staticRoute = req.method === "GET" && (["/", "/index.html", "/styles.css", "/app.js"].includes(pathname)
+      || /^\/js\/[A-Za-z0-9._/-]+$/.test(pathname) && !pathname.split("/").includes(".."));
+    const installerReadRoutes = new Set([
+      "/api/status", "/api/devices", "/api/automations", "/api/areas", "/api/labels",
+      "/api/provisioning", "/api/readiness", "/api/integrations/zigbee/pairing",
+      "/api/heating-demand-controller", "/api/activity",
+    ]);
+    const adminApiPath = pathname.startsWith("/_dinodia/admin/") ? pathname.slice("/_dinodia/admin".length) : "";
+    const operatorReadRoute = req.method === "GET" && installerReadRoutes.has(adminApiPath);
+    const operatorAreaCreateRoute = req.method === "POST" && adminApiPath === "/api/areas";
+    const operatorEndRoute = req.method === "POST" && pathname === "/_dinodia/operator-session/end";
+    const recognizedPath = setupRoute || staticRoute || operatorReadRoute || operatorAreaCreateRoute || operatorEndRoute;
+    if (!recognizedPath && ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(req.method)) return json(res, 404, { error: "Not found" });
+    if (!recognizedPath) return text(res, 405, "Method not allowed");
+    if (!setupRoute && !staticRoute && !operatorReadRoute && !operatorAreaCreateRoute && !operatorEndRoute) return json(res, 404, { error: "Not found" });
     return handleUnifiedRequest(req, res);
   });
   let httpsServer = null;

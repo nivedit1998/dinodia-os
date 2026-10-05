@@ -1691,7 +1691,11 @@ class Store {
         outbox.inFlight = null;
       }
       if (!outbox.inFlight) {
-        outbox.inFlight = nextSyncBatch(outbox, { hubInstallationId, runtime: this.getSyncRuntime(runtime), now, ...(allowedTypesPrefix ? { allowedTypesPrefix } : {}) });
+        outbox.inFlight = nextSyncBatch(outbox, {
+          hubInstallationId, runtime: this.getSyncRuntime(runtime), now,
+          ...(allowedTypesPrefix ? { allowedTypesPrefix } : {}),
+          ...(typeof options.allowedEventPrefix === "function" ? { allowedEventPrefix: options.allowedEventPrefix } : {}),
+        });
         outbox.lastAttemptAt = new Date(now).toISOString();
         await this.persist();
       }

@@ -264,6 +264,58 @@ test("operator policy sync is at most 30 seconds while the signed operations hea
   assert.equal(routes.filter((route) => route.endsWith("/token-state")).length, 4);
 });
 
+test("a failed signed inventory sync still reports the durable backlog and bounded error in an independent heartbeat", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-sync-failure-heartbeat-"));
+  try {
+    const store = new Store(path.join(directory, "dinodia.json"));
+    const serial = "DINODIA-SYNC-FAILURE-HUB";
+    await store.saveIdentity({ serial });
+    const vault = new SecretVault({ dataDir: directory });
+    const identity = generateManufacturingIdentity({ serial });
+    const record = vaultIdentityRecord(identity);
+    for (const [key, value] of Object.entries({
+      "platform.identityPrivateKey": record.signingPrivateKey,
+      "platform.identityPublicKey": record.signingPublicKey,
+      "platform.encryptionPrivateKey": record.encryptionPrivateKey,
+      "platform.encryptionPublicKey": record.encryptionPublicKey,
+      "platform.identityFingerprint": record.publicKeyFingerprint,
+      "platform.encryptionFingerprint": record.encryptionKeyFingerprint,
+      "platform.identityGeneration": "1",
+      "platform.machineCredential": "disposable-machine-credential",
+    })) await vault.set(key, value);
+    const hubInstallId = "11111111-1111-4111-8111-111111111111";
+    await store.savePlatform({ paired: true, hubInstallId, homeId: "home-sync-failure" });
+    const calls = [];
+    const pairing = new PlatformPairing({
+      store, vault, apiUrl: "https://platform.test", serial, intervalMs: 60000,
+      getLanEndpoint: async () => ({ state: "UNAVAILABLE", address: "", interfaceName: null }),
+      logger: { error() {}, warn() {} },
+      fetchImpl: async (url, options) => {
+        const body = JSON.parse(options.body);
+        calls.push({ url, body });
+        if (url.endsWith("/token-state")) return { ok: true, async json() { return {
+          hubInstallId, homeId: "home-sync-failure", latestVersion: 0, publishedVersion: 0, hubTokenHashes: [],
+          installationSyncMode: "ACTIVE", syncAcceptedSequence: 0, syncStreamId: store.getSyncOutbox().streamId,
+          policyRevision: 0, areaBindings: [],
+        }; } };
+        if (url.endsWith("/v2/sync")) throw Object.assign(new Error("disposable loopback sync unavailable"), { code: "loopback_sync_unavailable" });
+        if (url.endsWith("/heartbeat")) return { ok: true, async json() { return { ok: true, online: true, lanEndpoint: { revision: body.lanEndpoint.revision, state: body.lanEndpoint.state } }; } };
+        throw new Error("Unexpected test route");
+      },
+    });
+    await pairing.syncNow();
+    const sync = calls.find((call) => call.url.endsWith("/v2/sync"));
+    const heartbeat = calls.find((call) => call.url.endsWith("/heartbeat"));
+    assert.ok(sync);
+    assert.ok(heartbeat, "sync failure must not prevent the independent authenticated heartbeat");
+    assert.equal(heartbeat.body.hubRuntime.capabilities.nativeSyncOutbox.queueDepth, store.getSyncOutbox().events.length);
+    assert.equal(heartbeat.body.hubRuntime.capabilities.nativeSyncOutbox.lastErrorCode, "loopback_sync_unavailable");
+    assert.equal(store.getSyncOutbox().acknowledgedSequence, 0, "heartbeat does not forge or advance a sync receipt");
+    assert.equal(store.getSyncOutbox().lastErrorCode, "loopback_sync_unavailable");
+    pairing.stop();
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
+
 test("signed heartbeat persists monotonic LAN endpoint revisions and keeps unavailable addresses out of the report", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-lan-endpoint-heartbeat-"));
   const store = new Store(path.join(directory, "dinodia.json"));

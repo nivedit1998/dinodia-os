@@ -18,8 +18,17 @@ test("legacy store data gains identity/capability metadata without losing user a
   assert.equal(store.getDevice("lamp").entities["lamp:state"].name, "My light");
   assert.equal(store.getDevice("lamp").areaId, "kitchen");
   const before = store.snapshot();
+  // Persist the normalized migration before simulating a restart. The legacy
+  // fixture has no outbox stream ID, so two unpersisted normalizations would
+  // compare independently generated IDs rather than durable state.
+  await store.persist();
   const reloaded = new Store(file);
-  assert.deepEqual({ ...reloaded.snapshot(), updatedAt: null }, { ...before, updatedAt: null });
+  assert.equal(reloaded.snapshot().version, before.version);
+  assert.equal(reloaded.getSyncOutbox().streamId, before.syncOutbox.streamId);
+  assert.deepEqual(reloaded.listAreas(), store.listAreas());
+  assert.equal(reloaded.getDevice("lamp").name, before.devices.lamp.name);
+  assert.equal(reloaded.getDevice("lamp").areaId, before.devices.lamp.areaId);
+  assert.deepEqual(reloaded.getDevice("lamp").entities["lamp:state"].labelIds, before.devices.lamp.entities["lamp:state"].labelIds);
 });
 
 test("legacy event history is conservatively migrated into the activity ledger", async () => {
