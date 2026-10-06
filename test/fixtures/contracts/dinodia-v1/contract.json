@@ -305,10 +305,216 @@
       },
       "additionalProperties": false
     },
+    "mobileSessionMembership": {
+      "type": "object",
+      "required": ["accountId", "homeId", "homeMembershipId", "role", "status", "areaIds", "revision", "postcode"],
+      "properties": {
+        "accountId": { "$ref": "#/$defs/id" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "homeMembershipId": { "$ref": "#/$defs/id" },
+        "role": { "$ref": "#/$defs/role" },
+        "status": { "const": "active" },
+        "areaIds": { "type": "array", "items": { "$ref": "#/$defs/id" }, "uniqueItems": true },
+        "revision": { "type": "integer", "minimum": 0 },
+        "postcode": { "type": ["string", "null"], "maxLength": 32 }
+      },
+      "additionalProperties": false
+    },
+    "mobileSessionUser": {
+      "type": "object",
+      "required": ["accountId", "displayName", "username", "email", "emailVerifiedAt"],
+      "properties": {
+        "accountId": { "$ref": "#/$defs/id" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "username": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "email": { "type": "string", "format": "email", "maxLength": 320 },
+        "emailVerifiedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "mobileSessionReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "accountId", "sessionId", "trustedDeviceId", "accessToken", "refreshToken", "accessTokenExpiresAt", "refreshTokenExpiresAt", "user", "memberships", "nextAction"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "ok": { "const": true },
+        "accountId": { "$ref": "#/$defs/id" },
+        "sessionId": { "$ref": "#/$defs/id" },
+        "trustedDeviceId": { "$ref": "#/$defs/id" },
+        "accessToken": { "type": "string", "pattern": "^dno-customer-access-[A-Za-z0-9_-]{32,160}$", "writeOnly": true },
+        "refreshToken": { "type": "string", "pattern": "^dno-customer-session-[A-Za-z0-9_-]{32,160}$", "writeOnly": true },
+        "accessTokenExpiresAt": { "$ref": "#/$defs/timestamp" },
+        "refreshTokenExpiresAt": { "$ref": "#/$defs/timestamp" },
+        "user": { "$ref": "#/$defs/mobileSessionUser" },
+        "memberships": { "type": "array", "items": { "$ref": "#/$defs/mobileSessionMembership" }, "uniqueItems": true },
+        "nextAction": { "enum": ["CHANGE_PASSWORD", "CHOOSE_USERNAME", "POLICY_UNAVAILABLE", "ACCEPT_POLICY", "PENDING_RELATIONSHIPS", "SELECT_HOME"] },
+        "offlineHubEnforcement": { "enum": ["PENDING", "NOT_REQUIRED"] }
+      },
+      "additionalProperties": false
+    },
     "customerSessionLogoutReceipt": {
       "type": "object",
       "required": ["ok"],
       "properties": { "ok": { "const": true } },
+      "additionalProperties": false
+    },
+    "customerProfileReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "accountId", "displayName", "username", "phoneNumber", "email", "emailVerified", "profileRevision"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "ok": { "const": true },
+        "accountId": { "$ref": "#/$defs/id" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "username": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "phoneNumber": { "type": ["string", "null"], "pattern": "^[+() .0-9-]{7,40}$" },
+        "email": { "type": "string", "format": "email", "maxLength": 320 },
+        "emailVerified": { "type": "boolean" },
+        "profileRevision": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "customerProfileUpdateRequest": {
+      "type": "object",
+      "required": ["displayName", "username", "phoneNumber", "expectedProfileRevision", "proof"],
+      "properties": {
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "username": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "phoneNumber": { "type": ["string", "null"], "pattern": "^[+() .0-9-]{7,40}$" },
+        "expectedProfileRevision": { "$ref": "#/$defs/timestamp" },
+        "proof": { "type": "string", "minLength": 40, "maxLength": 8192, "writeOnly": true }
+      },
+      "additionalProperties": false
+    },
+    "tenantMembershipRemovalPreview": {
+      "type": "object",
+      "required": ["schemaVersion", "homeMembershipId", "homePostcode", "accessRevision", "homeManagementRevision", "willDeleteAccount", "otherRelationshipsRemain"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "homeMembershipId": { "$ref": "#/$defs/id" },
+        "homePostcode": { "type": ["string", "null"], "maxLength": 32 },
+        "accessRevision": { "type": "integer", "minimum": 1 }, "homeManagementRevision": { "type": "integer", "minimum": 1 },
+        "willDeleteAccount": { "type": "boolean" }, "otherRelationshipsRemain": { "type": "boolean" }
+      },
+      "oneOf": [
+        { "properties": { "willDeleteAccount": { "const": true }, "otherRelationshipsRemain": { "const": false } }, "required": ["willDeleteAccount", "otherRelationshipsRemain"] },
+        { "properties": { "willDeleteAccount": { "const": false }, "otherRelationshipsRemain": { "const": true } }, "required": ["willDeleteAccount", "otherRelationshipsRemain"] }
+      ],
+      "additionalProperties": false
+    },
+    "tenantMembershipRemovalRequest": {
+      "type": "object",
+      "required": ["expectedAccessRevision", "expectedManagementRevision", "confirmFinalAccountDeletion", "proof", "idempotencyKey"],
+      "properties": {
+        "expectedAccessRevision": { "type": "integer", "minimum": 1 }, "expectedManagementRevision": { "type": "integer", "minimum": 1 },
+        "confirmFinalAccountDeletion": { "type": "boolean" },
+        "proof": { "type": "string", "minLength": 40, "maxLength": 8192, "writeOnly": true },
+        "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]{16,160}$" }
+      },
+      "additionalProperties": false
+    },
+    "tenantMembershipRemovalReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "state", "homeMembershipId", "accountDeleted", "otherRelationshipsRemain", "nextAction", "hubEnforcement", "anonymousReference", "idempotentReplay"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "state": { "const": "REMOVED" },
+        "homeMembershipId": { "$ref": "#/$defs/id" }, "accountDeleted": { "type": "boolean" },
+        "otherRelationshipsRemain": { "type": "boolean" }, "nextAction": { "enum": ["SELECT_HOME", "PENDING_RELATIONSHIPS", "SIGN_IN"] },
+        "hubEnforcement": { "const": "PENDING" }, "anonymousReference": { "type": ["string", "null"], "pattern": "^del_[A-Za-z0-9_-]{32}$" },
+        "idempotentReplay": { "type": "boolean" }
+      },
+      "allOf": [
+        { "if": { "properties": { "accountDeleted": { "const": true } }, "required": ["accountDeleted"] }, "then": { "properties": { "otherRelationshipsRemain": { "const": false }, "nextAction": { "const": "SIGN_IN" }, "anonymousReference": { "type": "string", "pattern": "^del_[A-Za-z0-9_-]{32}$" } } } },
+        { "if": { "properties": { "accountDeleted": { "const": false } }, "required": ["accountDeleted"] }, "then": { "properties": { "otherRelationshipsRemain": { "const": true }, "nextAction": { "enum": ["SELECT_HOME", "PENDING_RELATIONSHIPS"] }, "anonymousReference": { "type": "null" } } } }
+      ],
+      "additionalProperties": false
+    },
+    "customerEmailChangeRequest": {
+      "type": "object",
+      "required": ["email", "expectedProfileRevision", "proof"],
+      "properties": {
+        "email": { "type": "string", "format": "email", "maxLength": 320 },
+        "expectedProfileRevision": { "$ref": "#/$defs/timestamp" },
+        "proof": { "type": "string", "minLength": 40, "maxLength": 8192, "writeOnly": true }
+      },
+      "additionalProperties": false
+    },
+    "customerEmailChangeReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "state", "challengeId", "expiresAt", "emailSubmission"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "state": { "const": "PENDING" },
+        "challengeId": { "$ref": "#/$defs/id" }, "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "emailSubmission": { "enum": ["ACCEPTED", "FAILED"] }
+      },
+      "additionalProperties": false
+    },
+    "customerPolicyProjection": {
+      "type": "object",
+      "required": ["version", "title", "text", "contentSha256"],
+      "properties": {
+        "version": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "text": { "type": "string", "minLength": 20, "maxLength": 40000 },
+        "contentSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "customerAuthRequirements": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "nextAction", "accepted", "policy"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "ok": { "const": true },
+        "nextAction": { "enum": ["CHANGE_PASSWORD", "CHOOSE_USERNAME", "POLICY_UNAVAILABLE", "ACCEPT_POLICY", "CONTINUE"] },
+        "accepted": { "type": "boolean" },
+        "policy": { "anyOf": [{ "$ref": "#/$defs/customerPolicyProjection" }, { "type": "null" }] }
+      },
+      "additionalProperties": false
+    },
+    "invitedTenantRegistrationRequest": {
+      "type": "object",
+      "required": ["invitationId", "email", "password"],
+      "properties": {
+        "invitationId": { "type": "string", "format": "uuid" },
+        "email": { "type": "string", "format": "email", "maxLength": 320 },
+        "password": { "type": "string", "minLength": 12, "maxLength": 1024 }
+      },
+      "additionalProperties": false
+    },
+    "invitedTenantUsernameRequest": {
+      "type": "object", "required": ["username"],
+      "properties": { "username": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,79}$" } },
+      "additionalProperties": false
+    },
+    "invitedTenantUsernameReceipt": {
+      "type": "object", "required": ["schemaVersion", "ok", "username", "usernameNormalized", "nextAction"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true },
+        "username": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,79}$" },
+        "usernameNormalized": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,79}$" },
+        "nextAction": { "const": "CONTINUE" }
+      }, "additionalProperties": false
+    },
+    "customerPolicyAcceptanceRequest": {
+      "type": "object",
+      "required": ["version", "contentSha256", "accepted"],
+      "properties": {
+        "version": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$" },
+        "contentSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "accepted": { "const": true }
+      },
+      "additionalProperties": false
+    },
+    "customerPolicyAcceptanceReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "policyVersion", "contentSha256", "idempotentReplay"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "ok": { "const": true },
+        "policyVersion": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$" },
+        "contentSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "idempotentReplay": { "type": "boolean" }
+      },
       "additionalProperties": false
     },
     "customerLanEndpoint": {
@@ -776,6 +982,75 @@
       },
       "additionalProperties": false
     },
+    "publicSupportEmailChallengeRequest": {
+      "type": "object",
+      "required": ["replyEmail", "category", "description"],
+      "properties": {
+        "replyEmail": { "type": "string", "format": "email", "maxLength": 320 },
+        "category": { "enum": ["ACCOUNT_OR_SIGN_IN", "ACCESS_OR_PERMISSIONS", "DEVICE_PROBLEM", "HUB_OR_CONNECTION", "AUTOMATION", "ALEXA", "OTHER"] },
+        "description": { "type": "string", "minLength": 1, "maxLength": 4000 }
+      },
+      "additionalProperties": false
+    },
+    "publicSupportEmailChallengeReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "state", "challengeId", "expiresAt", "emailSubmission"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "state": { "const": "PENDING" },
+        "challengeId": { "$ref": "#/$defs/id" }, "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "emailSubmission": { "enum": ["ACCEPTED", "FAILED"] }
+      },
+      "additionalProperties": false
+    },
+    "publicSupportEmailVerificationRequest": {
+      "type": "object",
+      "required": ["challengeId", "code", "category", "description"],
+      "properties": {
+        "challengeId": { "$ref": "#/$defs/id" }, "code": { "type": "string", "pattern": "^\\d{6}$" },
+        "category": { "enum": ["ACCOUNT_OR_SIGN_IN", "ACCESS_OR_PERMISSIONS", "DEVICE_PROBLEM", "HUB_OR_CONNECTION", "AUTOMATION", "ALEXA", "OTHER"] },
+        "description": { "type": "string", "minLength": 1, "maxLength": 4000 }
+      },
+      "additionalProperties": false
+    },
+    "publicSupportTicketReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "state", "publicReference", "idempotentReplay"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "state": { "const": "SUBMITTED" },
+        "publicReference": { "type": "string", "pattern": "^DNO-[A-Z0-9]{16}$" }, "idempotentReplay": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "supportTicketListReceipt": {
+      "type": "object",
+      "required": ["ok", "tickets"],
+      "properties": {
+        "ok": { "const": true },
+        "tickets": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/supportTicket" } }
+      },
+      "additionalProperties": false
+    },
+    "supportTicketDetailReceipt": {
+      "type": "object",
+      "required": ["ok", "ticket"],
+      "properties": { "ok": { "const": true }, "ticket": { "$ref": "#/$defs/supportTicket" } },
+      "additionalProperties": false
+    },
+    "homeInvitationAreasReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "homeId", "managementRevision", "areas"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "ok": { "const": true },
+        "homeId": { "$ref": "#/$defs/id" },
+        "managementRevision": { "type": "integer", "minimum": 0 },
+        "areas": {
+          "type": "array", "maxItems": 64,
+          "items": { "type": "object", "required": ["id", "name"], "properties": { "id": { "$ref": "#/$defs/id" }, "name": { "type": "string", "minLength": 1, "maxLength": 120 } }, "additionalProperties": false }
+        }
+      },
+      "additionalProperties": false
+    },
     "supportAccessRequestCreateRequest": {
       "type": "object",
       "required": ["requestedScope", "areaIds", "targetIds"],
@@ -811,10 +1086,10 @@
       "oneOf": [
         {
           "type": "object",
-          "required": ["approve"],
+          "required": ["approve", "confirmation", "proof"],
           "properties": {
             "approve": { "const": true },
-            "confirmation": { "type": "string", "maxLength": 100 },
+            "confirmation": { "enum": ["I approve this support access for my property", "I approve this support access for me"] },
             "proof": { "type": "string", "minLength": 1, "maxLength": 8192 }
           },
           "additionalProperties": false
@@ -831,13 +1106,11 @@
       "oneOf": [
         {
           "type": "object",
-          "required": ["ok", "requestId", "status", "oneUseCode", "codeExpiresAt"],
+          "required": ["ok", "requestId", "status"],
           "properties": {
             "ok": { "const": true },
             "requestId": { "$ref": "#/$defs/id" },
-            "status": { "const": "APPROVED" },
-            "oneUseCode": { "type": "string", "minLength": 1, "maxLength": 128 },
-            "codeExpiresAt": { "$ref": "#/$defs/timestamp" }
+            "status": { "const": "APPROVED" }
           },
           "additionalProperties": false
         },
@@ -852,6 +1125,19 @@
           "additionalProperties": false
         }
       ]
+    },
+    "supportAccessIssueReceipt": {
+      "type": "object",
+      "required": ["ok", "requestId", "status", "oneUseCode", "supportUrl", "codeExpiresAt"],
+      "properties": {
+        "ok": { "const": true },
+        "requestId": { "$ref": "#/$defs/id" },
+        "status": { "const": "ISSUED" },
+        "oneUseCode": { "type": "string", "pattern": "^DNO-S-[A-Za-z0-9_-]{20,}$", "maxLength": 128 },
+        "supportUrl": { "type": "string", "pattern": "^https://[^/?#]+/support-access$" },
+        "codeExpiresAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
     },
     "supportAccessRevokeRequest": {
       "type": "object",
@@ -899,6 +1185,7 @@
       ],
       "properties": {
         "ticketId": { "$ref": "#/$defs/id" },
+        "publicReference": { "type": "string", "minLength": 1, "maxLength": 20 },
         "customerAccountId": { "$ref": "#/$defs/id" },
         "homeId": { "type": ["string", "null"] },
         "homeMembershipId": { "type": ["string", "null"] },
@@ -915,6 +1202,7 @@
         },
         "status": {
           "enum": [
+            "OPEN",
             "NEW",
             "REVIEWING",
             "WAITING_FOR_CUSTOMER",
@@ -927,11 +1215,25 @@
           ]
         },
         "revision": { "type": "integer", "minimum": 0 },
+        "description": { "type": "string", "maxLength": 4000 },
         "createdAt": { "$ref": "#/$defs/timestamp" },
         "updatedAt": { "$ref": "#/$defs/timestamp" },
+        "closedAt": { "type": ["string", "null"], "format": "date-time" },
+        "hubEnforcement": { "enum": ["PENDING", "ACKNOWLEDGED", "EXPIRED", "NOT_REQUIRED"] },
         "customerVisibleUpdates": {
           "type": "array",
-          "items": { "type": "object" }
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "required": ["id", "code", "summary", "createdAt"],
+            "properties": {
+              "id": { "$ref": "#/$defs/id" },
+              "code": { "type": "string", "maxLength": 80 },
+              "summary": { "type": ["string", "null"], "maxLength": 500 },
+              "createdAt": { "$ref": "#/$defs/timestamp" }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "allOf": [{
@@ -1065,7 +1367,7 @@
       "additionalProperties": false
     },
     "stepUpOperationKind": {
-      "enum": ["trusted_device_remove", "support_ticket_close", "support_access_approve", "support_access_revoke", "alexa_unlink", "heating_sensitive_command", "device_sensitive_command"]
+      "enum": ["trusted_device_remove", "customer_password_change", "customer_profile_change", "customer_email_change", "support_ticket_close", "support_access_approve", "support_access_revoke", "alexa_unlink", "heating_sensitive_command", "device_sensitive_command"]
     },
     "stepUpDescriptorAttestation": {
       "type": "object",
@@ -1204,14 +1506,24 @@
       },
       "additionalProperties": false
     },
+    "supportAccessApprovalProjection": {
+      "type": "object", "required": ["ok", "requests"],
+      "properties": {
+        "ok": { "const": true },
+        "requests": { "type": "array", "maxItems": 100, "items": { "type": "object", "required": ["requestId", "ticketId", "publicReference", "requestedScope", "areaIds", "createdAt"], "properties": {
+          "requestId": { "$ref": "#/$defs/id" }, "ticketId": { "$ref": "#/$defs/id" }, "publicReference": { "type": "string", "minLength": 1, "maxLength": 32 },
+          "requestedScope": { "enum": ["TENANT_SCOPE", "PROPERTY_SCOPE"] }, "areaIds": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/id" }, "uniqueItems": true }, "createdAt": { "$ref": "#/$defs/timestamp" }
+        }, "additionalProperties": false } }
+      }, "additionalProperties": false
+    },
     "supportTicketCloseRequest": {
       "type": "object", "required": ["action"],
       "properties": { "action": { "const": "close" }, "proof": { "type": "string", "minLength": 1, "maxLength": 8192, "writeOnly": true } },
       "additionalProperties": false
     },
     "supportTicketCloseReceipt": {
-      "type": "object", "required": ["ok", "ticketId", "status", "message"],
-      "properties": { "ok": { "const": true }, "ticketId": { "$ref": "#/$defs/id" }, "status": { "const": "CLOSED" }, "message": { "type": "string", "maxLength": 240 } },
+      "type": "object", "required": ["ok", "ticketId", "status", "message", "hubEnforcement"],
+      "properties": { "ok": { "const": true }, "ticketId": { "$ref": "#/$defs/id" }, "status": { "const": "CLOSED" }, "message": { "type": "string", "maxLength": 240 }, "hubEnforcement": { "enum": ["PENDING", "ACKNOWLEDGED", "EXPIRED", "NOT_REQUIRED"] } },
       "additionalProperties": false
     },
     "lanEndpointObservation": {
@@ -1287,6 +1599,237 @@
       },
       "additionalProperties": false
     },
+    "customerPendingRelationshipsProjection": {
+      "type": "object",
+      "required": ["schemaVersion", "asOf", "pendingRelationships"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "asOf": { "$ref": "#/$defs/timestamp" },
+        "pendingRelationships": { "type": "array", "maxItems": 150, "items": { "$ref": "#/$defs/customerPendingRelationship" } }
+      },
+      "additionalProperties": false
+    },
+    "customerPendingRelationship": {
+      "type": "object",
+      "required": ["id", "type", "postcode", "createdAt", "expiresAt", "state", "allowedActions"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "type": { "enum": ["INVITATION", "ROOM_ACCESS_REQUEST", "HOME_SETUP", "INSTALLATION_PENDING"] },
+        "postcode": { "type": ["string", "null"], "maxLength": 32 },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "expiresAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+        "state": { "type": "string", "pattern": "^[A-Z_]{1,48}$" },
+        "allowedActions": { "type": "array", "items": { "enum": ["ACCEPT", "DECLINE", "CANCEL", "VIEW_STATUS", "RESUME_SETUP", "REFRESH"] }, "uniqueItems": true },
+        "role": { "enum": ["PROPERTY_MANAGER", "TENANT"] },
+        "inviterLabel": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "areaLabel": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "decisionRevision": { "$ref": "#/$defs/timestamp" },
+        "revision": { "type": "integer", "minimum": 0 },
+        "requiredStep": { "type": ["string", "null"], "pattern": "^[A-Z_]{1,80}$" }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "INVITATION" } }, "required": ["type"] }, "then": { "required": ["role", "inviterLabel", "decisionRevision"], "properties": { "postcode": { "type": "string", "minLength": 1, "maxLength": 32 }, "allowedActions": { "const": ["ACCEPT", "DECLINE"] } }, "not": { "anyOf": [{ "required": ["areaLabel"] }, { "required": ["revision"] }, { "required": ["requiredStep"] }] } } },
+        { "if": { "properties": { "type": { "const": "ROOM_ACCESS_REQUEST" } }, "required": ["type"] }, "then": { "required": ["areaLabel", "decisionRevision"], "properties": { "postcode": { "type": "string", "minLength": 1, "maxLength": 32 }, "allowedActions": { "const": ["VIEW_STATUS", "CANCEL"] } }, "not": { "anyOf": [{ "required": ["role"] }, { "required": ["inviterLabel"] }, { "required": ["revision"] }, { "required": ["requiredStep"] }] } } },
+        { "if": { "properties": { "type": { "enum": ["HOME_SETUP", "INSTALLATION_PENDING"] } }, "required": ["type"] }, "then": { "required": ["revision", "requiredStep"], "not": { "anyOf": [{ "required": ["role"] }, { "required": ["inviterLabel"] }, { "required": ["areaLabel"] }] } } },
+        { "if": { "properties": { "type": { "const": "HOME_SETUP" } }, "required": ["type"] }, "then": { "properties": { "allowedActions": { "const": ["RESUME_SETUP"] } } } },
+        { "if": { "properties": { "type": { "const": "INSTALLATION_PENDING" } }, "required": ["type"] }, "then": { "properties": { "postcode": { "type": "string", "minLength": 1, "maxLength": 32 }, "allowedActions": { "const": ["VIEW_STATUS", "REFRESH"] } } } }
+      ],
+      "additionalProperties": false
+    },
+    "customerInvitationDecisionRequest": {
+      "type": "object",
+      "required": ["decision", "expectedUpdatedAt"],
+      "properties": { "decision": { "enum": ["ACCEPT", "DECLINE"] }, "expectedUpdatedAt": { "$ref": "#/$defs/timestamp" } },
+      "additionalProperties": false
+    },
+    "customerMembershipInvitationRequest": {
+      "type": "object",
+      "required": ["email", "areaIds", "expectedManagementRevision"],
+      "properties": {
+        "email": { "type": "string", "format": "email", "maxLength": 320 },
+        "areaIds": { "type": "array", "items": { "$ref": "#/$defs/id" }, "uniqueItems": true, "maxItems": 64 },
+        "expectedManagementRevision": { "type": "integer", "minimum": 0 },
+        "resendInvitationId": { "$ref": "#/$defs/id" }
+      },
+      "additionalProperties": false
+    },
+    "customerMembershipInvitationReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "invitationId", "homeId", "role", "state", "expiresAt", "emailSubmission", "idempotentReplay"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true },
+        "invitationId": { "$ref": "#/$defs/id" }, "homeId": { "$ref": "#/$defs/id" },
+        "role": { "enum": ["PROPERTY_MANAGER", "TENANT"] },
+        "state": { "enum": ["PENDING", "REVOKED"] },
+        "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "emailSubmission": { "enum": ["PENDING", "ACCEPTED", "NOT_SENT", "FAILED"] },
+        "idempotentReplay": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "customerPropertyManagerListReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "homeId", "managementRevision", "managers"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "homeId": { "$ref": "#/$defs/id" },
+        "managementRevision": { "type": "integer", "minimum": 0 },
+        "managers": { "type": "array", "maxItems": 32, "items": { "type": "object", "required": ["membershipId", "displayName", "activatedAt"], "properties": { "membershipId": { "$ref": "#/$defs/id" }, "displayName": { "type": "string", "minLength": 1, "maxLength": 160 }, "activatedAt": { "$ref": "#/$defs/timestamp" } }, "additionalProperties": false } }
+      },
+      "additionalProperties": false
+    },
+    "customerInvitationDecisionReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "invitationId", "decision", "state", "homeMembershipId", "idempotentReplay"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "invitationId": { "$ref": "#/$defs/id" },
+        "decision": { "enum": ["ACCEPT", "DECLINE"] }, "state": { "enum": ["ACCEPTED", "DECLINED"] },
+        "homeMembershipId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] }, "idempotentReplay": { "type": "boolean" }
+      },
+      "allOf": [
+        { "if": { "properties": { "decision": { "const": "ACCEPT" } }, "required": ["decision"] }, "then": { "properties": { "state": { "const": "ACCEPTED" }, "homeMembershipId": { "$ref": "#/$defs/id" } } } },
+        { "if": { "properties": { "decision": { "const": "DECLINE" } }, "required": ["decision"] }, "then": { "properties": { "state": { "const": "DECLINED" }, "homeMembershipId": { "type": "null" } } } }
+      ],
+      "additionalProperties": false
+    },
+    "customerRoomQrScanRequest": {
+      "type": "object", "required": ["reference"],
+      "properties": { "reference": { "type": "string", "pattern": "^dno_room_[A-Za-z0-9_-]{40,64}$" } }, "additionalProperties": false
+    },
+    "customerRoomQrScanReceipt": {
+      "type": "object", "required": ["schemaVersion", "ok", "state", "areaLabel", "qrGeneration", "requestValiditySeconds"],
+      "properties": { "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "state": { "const": "AVAILABLE" }, "areaLabel": { "type": "string", "minLength": 1, "maxLength": 80 }, "qrGeneration": { "type": "integer", "minimum": 1 }, "requestValiditySeconds": { "const": 604800 } },
+      "additionalProperties": false
+    },
+    "customerRoomAccessRequestRequest": {
+      "type": "object", "required": ["reference", "expectedGeneration", "idempotencyKey"],
+      "properties": { "reference": { "type": "string", "pattern": "^dno_room_[A-Za-z0-9_-]{40,64}$" }, "expectedGeneration": { "type": "integer", "minimum": 1 }, "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]{16,160}$" } },
+      "additionalProperties": false
+    },
+    "customerRoomAccessRequestReceipt": {
+      "type": "object", "required": ["schemaVersion", "ok", "requestId", "areaLabel", "state", "expiresAt", "revision", "coalesced", "idempotentReplay"],
+      "properties": { "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "requestId": { "$ref": "#/$defs/id" }, "areaLabel": { "type": "string", "minLength": 1, "maxLength": 80 }, "state": { "const": "PENDING" }, "expiresAt": { "$ref": "#/$defs/timestamp" }, "revision": { "$ref": "#/$defs/timestamp" }, "coalesced": { "type": "boolean" }, "idempotentReplay": { "type": "boolean" } },
+      "additionalProperties": false
+    },
+    "customerRoomAccessCancelRequest": {
+      "type": "object", "required": ["expectedRevision", "idempotencyKey"],
+      "properties": { "expectedRevision": { "$ref": "#/$defs/timestamp" }, "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]{16,160}$" } }, "additionalProperties": false
+    },
+    "customerRoomAccessDecisionRequest": {
+      "type": "object", "required": ["requestId", "decision", "expectedRevision", "idempotencyKey"],
+      "properties": { "requestId": { "$ref": "#/$defs/id" }, "decision": { "enum": ["APPROVE", "REJECT"] }, "expectedRevision": { "$ref": "#/$defs/timestamp" }, "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]{16,160}$" } }, "additionalProperties": false
+    },
+    "customerRoomAccessDecisionReceipt": {
+      "type": "object", "required": ["schemaVersion", "ok", "requestId", "state", "membershipId", "idempotentReplay"],
+      "properties": { "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "requestId": { "$ref": "#/$defs/id" }, "state": { "enum": ["APPROVED", "REJECTED"] }, "membershipId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] }, "idempotentReplay": { "type": "boolean" } },
+      "additionalProperties": false
+    },
+    "customerHomeClaimResolveRequest": {
+      "type": "object",
+      "required": ["reference"],
+      "properties": { "reference": { "type": "string", "pattern": "^dno_home_[A-Za-z0-9_-]{40,64}$" } },
+      "additionalProperties": false
+    },
+    "customerHomeClaimResolveReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "claimId", "generation", "state", "expiresAt"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "claimId": { "$ref": "#/$defs/id" },
+        "generation": { "type": "integer", "minimum": 1 }, "state": { "const": "SETUP" }, "expiresAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "customerHomeClaimSetupStatus": {
+      "type": "object",
+      "required": ["schemaVersion", "claimId", "state", "requiredStep", "revision", "expiresAt", "postcode", "ownDraft"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "claimId": { "$ref": "#/$defs/id" },
+        "state": { "enum": ["SETUP", "INSTALLATION_PENDING"] }, "requiredStep": { "enum": ["PROFILE", "ADDRESS", "ADDRESS_CONFIRMATION", "POLICY", null] },
+        "revision": { "type": "integer", "minimum": 0 }, "expiresAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+        "postcode": { "type": ["string", "null"], "maxLength": 32 },
+        "ownDraft": { "anyOf": [{ "$ref": "#/$defs/customerHomeClaimOwnDraft" }, { "type": "null" }] }
+      },
+      "allOf": [
+        { "if": { "properties": { "state": { "const": "SETUP" } }, "required": ["state"] }, "then": { "properties": { "expiresAt": { "$ref": "#/$defs/timestamp" }, "ownDraft": { "$ref": "#/$defs/customerHomeClaimOwnDraft" } } } },
+        { "if": { "properties": { "state": { "const": "INSTALLATION_PENDING" } }, "required": ["state"] }, "then": { "properties": { "expiresAt": { "type": "null" }, "ownDraft": { "type": "null" } } } }
+      ],
+      "additionalProperties": false
+    },
+    "customerHomeClaimOwnDraft": {
+      "type": "object", "required": ["addressLine1", "addressLine2", "city", "region", "postcode", "country", "timezone"],
+      "properties": {
+        "addressLine1": { "type": ["string", "null"], "maxLength": 200 }, "addressLine2": { "type": ["string", "null"], "maxLength": 200 },
+        "city": { "type": ["string", "null"], "maxLength": 120 }, "region": { "type": ["string", "null"], "maxLength": 120 },
+        "postcode": { "type": ["string", "null"], "maxLength": 32 }, "country": { "type": ["string", "null"], "maxLength": 2 },
+        "timezone": { "type": ["string", "null"], "maxLength": 80 }
+      }, "additionalProperties": false
+    },
+    "customerHomeClaimAddress": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "claimId", "addressLine1", "addressLine2", "city", "region", "postcode", "country", "timezone", "addressRevision", "addressDigest"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "claimId": { "$ref": "#/$defs/id" },
+        "addressLine1": { "type": ["string", "null"], "maxLength": 200 }, "addressLine2": { "type": ["string", "null"], "maxLength": 200 },
+        "city": { "type": ["string", "null"], "maxLength": 120 }, "region": { "type": ["string", "null"], "maxLength": 120 },
+        "postcode": { "type": ["string", "null"], "maxLength": 32 }, "country": { "type": ["string", "null"], "maxLength": 2 },
+        "timezone": { "type": ["string", "null"], "maxLength": 80 }, "addressRevision": { "type": "integer", "minimum": 0 },
+        "addressDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }, "additionalProperties": false
+    },
+    "customerHomeClaimSetupRequest": {
+      "type": "object", "required": ["expectedRevision", "step", "mutation"],
+      "properties": {
+        "expectedRevision": { "type": "integer", "minimum": 0 },
+        "step": { "enum": ["PROFILE", "ADDRESS", "ADDRESS_CONFIRMATION", "POLICY"] },
+        "mutation": { "type": "object" }
+      },
+      "oneOf": [
+        { "properties": { "step": { "const": "PROFILE" }, "mutation": { "type": "object", "required": ["displayName", "username"], "properties": { "displayName": { "type": "string", "minLength": 1, "maxLength": 160 }, "username": { "type": "string", "minLength": 1, "maxLength": 80 } }, "additionalProperties": false } } },
+        { "properties": { "step": { "const": "ADDRESS" }, "mutation": { "type": "object", "required": ["addressLine1", "addressLine2", "city", "region", "postcode", "country", "timezone"], "properties": { "addressLine1": { "type": "string", "minLength": 1, "maxLength": 200 }, "addressLine2": { "type": "string", "maxLength": 200 }, "city": { "type": "string", "minLength": 1, "maxLength": 120 }, "region": { "type": "string", "maxLength": 120 }, "postcode": { "type": "string", "minLength": 1, "maxLength": 32 }, "country": { "type": "string", "pattern": "^[A-Z]{2}$" }, "timezone": { "type": "string", "minLength": 1, "maxLength": 80 } }, "additionalProperties": false } } },
+        { "properties": { "step": { "const": "ADDRESS_CONFIRMATION" }, "mutation": { "type": "object", "required": ["addressRevision", "addressDigest"], "properties": { "addressRevision": { "type": "integer", "minimum": 0 }, "addressDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" } }, "additionalProperties": false } } },
+        { "properties": { "step": { "const": "POLICY" }, "mutation": { "type": "object", "required": ["policyVersion", "contentSha256", "accepted"], "properties": { "policyVersion": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$" }, "contentSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }, "accepted": { "const": true } }, "additionalProperties": false } } }
+      ],
+      "additionalProperties": false
+    },
+    "customerHomeClaimSetupReceipt": {
+      "type": "object", "required": ["schemaVersion", "ok", "claimId", "step", "expiresAt", "revision"],
+      "properties": { "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "claimId": { "$ref": "#/$defs/id" }, "step": { "enum": ["PROFILE", "ADDRESS", "ADDRESS_CONFIRMATION", "POLICY"] }, "expiresAt": { "$ref": "#/$defs/timestamp" }, "revision": { "type": "integer", "minimum": 0 } },
+      "additionalProperties": false
+    },
+    "customerHomeClaimCompleteRequest": {
+      "type": "object", "required": ["expectedRevision", "idempotencyKey"],
+      "properties": { "expectedRevision": { "type": "integer", "minimum": 0 }, "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]{16,160}$" } },
+      "additionalProperties": false
+    },
+    "customerHomeClaimCompleteReceipt": {
+      "type": "object", "required": ["schemaVersion", "ok", "claimId", "state", "idempotentReplay", "postcode"],
+      "properties": { "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "claimId": { "$ref": "#/$defs/id" }, "state": { "const": "PENDING_INSTALLATION" }, "idempotentReplay": { "type": "boolean" }, "postcode": { "type": ["string", "null"], "maxLength": 32 } },
+      "additionalProperties": false
+    },
+    "apnsRegistrationRequest": {
+      "type": "object", "required": ["deviceToken", "environment"],
+      "properties": { "deviceToken": { "type": "string", "minLength": 64, "maxLength": 512, "pattern": "^(?:[A-Fa-f0-9]{2}){32,256}$" }, "environment": { "enum": ["DEVELOPMENT", "PRODUCTION"] } },
+      "additionalProperties": false
+    },
+    "apnsRegistrationReceipt": {
+      "type": "object", "required": ["schemaVersion", "ok", "trustedDeviceId", "revision", "state", "idempotentReplay"],
+      "properties": { "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "trustedDeviceId": { "type": "string", "format": "uuid" }, "revision": { "type": "integer", "minimum": 0 }, "state": { "enum": ["ENABLED", "DISABLED"] }, "idempotentReplay": { "type": "boolean" } },
+      "additionalProperties": false
+    },
+    "notificationPreferences": {
+      "type": "object", "required": ["version", "enabledFamilies"],
+      "properties": { "version": { "const": 1 }, "enabledFamilies": { "type": "array", "maxItems": 6, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 80 } } },
+      "additionalProperties": false
+    },
+    "managerNotificationAssignment": {
+      "type": "object", "required": ["version", "assignments"],
+      "properties": { "version": { "const": 1 }, "assignments": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "object", "required": ["membershipId", "enabledFamilies"], "properties": { "membershipId": { "type": "string", "format": "uuid" }, "enabledFamilies": { "type": "array", "maxItems": 6, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 80 } } }, "additionalProperties": false } } },
+      "additionalProperties": false
+    },
+    "quietHoursPreference": {
+      "type": "object", "required": ["version", "enabled", "startLocalTime", "endLocalTime", "timeZone", "days"],
+      "properties": { "version": { "const": 1 }, "enabled": { "type": "boolean" }, "startLocalTime": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$" }, "endLocalTime": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$" }, "timeZone": { "type": "string", "minLength": 1, "maxLength": 64 }, "days": { "type": "array", "uniqueItems": true, "items": { "type": "integer", "minimum": 1, "maximum": 7 } } },
+      "additionalProperties": false
+    },
     "uiState": { "enum": ["restoring_session", "loading", "ready", "empty", "stale", "offline", "denied", "expired", "uncertain", "maintenance", "error"] },
     "error": {
       "type": "object",
@@ -1300,6 +1843,9 @@
               "enum": [
                 "AUTH_REQUIRED",
                 "TOKEN_EXPIRED",
+                "CUSTOMER_ACCESS_EXPIRED",
+                "EMAIL_VERIFICATION_REQUIRED",
+                "ROOM_ACCESS_HOME_NOT_READY",
                 "STEP_UP_REQUIRED",
                 "STEP_UP_FAILED",
                 "SCOPE_DENIED",
@@ -1310,6 +1856,7 @@
                 "RESOURCE_NOT_FOUND",
                 "IDEMPOTENCY_CONFLICT",
                 "REVISION_CONFLICT",
+                "FINAL_RELATIONSHIP_CONFIRMATION_REQUIRED",
                 "CATALOG_REVISION_MISMATCH",
                 "CONTROL_REMOVED",
                 "VALIDATION_FAILED",

@@ -1,0 +1,8 @@
+{
+  "expectedAccessRevision": 3,
+  "expectedManagementRevision": 8,
+  "confirmFinalAccountDeletion": false,
+  "proof": "disposable-step-up-proof-value-that-is-not-a-real-authority-token-0000000000000000",
+  "idempotencyKey": "tenant-remove-fixture-000002",
+  "homeMembershipId": "caller-selected-membership"
+}

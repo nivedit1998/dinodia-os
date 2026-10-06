@@ -1,0 +1,5 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dinodia.invalid/contracts/dinodia-v1/customer-email-change-receipt.schema.json",
+  "$ref": "./contract.json#/$defs/customerEmailChangeReceipt"
+}

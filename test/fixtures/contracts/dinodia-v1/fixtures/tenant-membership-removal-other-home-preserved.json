@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "ok": true,
+  "state": "REMOVED",
+  "homeMembershipId": "33333333-3333-4333-8333-333333333333",
+  "accountDeleted": false,
+  "otherRelationshipsRemain": true,
+  "nextAction": "SELECT_HOME",
+  "hubEnforcement": "PENDING",
+  "anonymousReference": null,
+  "idempotentReplay": false
+}

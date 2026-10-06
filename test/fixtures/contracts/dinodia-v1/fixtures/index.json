@@ -53,7 +53,7 @@
     "owner.profile": ["fixtures/account-session-two-homes.json", "fixtures/multi-home-memberships.json"],
     "owner.password_and_security": ["fixtures/stage2-decision-matrix.json", "fixtures/offline-home-selection.json", "fixtures/trusted-device-revocation.json", "fixtures/prototype-scenarios.json"],
     "tenant.profile": ["fixtures/account-session-two-homes.json", "fixtures/access-policy-selected-tenant.json"],
-    "tenant.settings": ["fixtures/notification-security-mandatory.json", "fixtures/stage2-decision-matrix.json"],
+    "tenant.settings": ["fixtures/notification-security-mandatory.json", "fixtures/stage2-decision-matrix.json", "fixtures/tenant-membership-removal-final-warning.json", "fixtures/tenant-membership-removal-other-home-preserved.json"],
     "tenant.logout_and_revoke": ["fixtures/stage2-decision-matrix.json", "fixtures/account-relationship-lifecycle.json", "fixtures/offline-home-selection.json"],
     "tenant.device.commissioning.recovery": ["fixtures/commissioning-expired.json", "fixtures/control-catalog-change.json"],
     "tenant.management.pending": ["fixtures/invitation-pending-no-membership.json", "fixtures/invitation-lifecycle.json", "fixtures/support-access-property-scope.json", "fixtures/installation-request-lifecycle.json", "fixtures/access-request-lifecycle.json", "fixtures/prototype-scenarios.json"],

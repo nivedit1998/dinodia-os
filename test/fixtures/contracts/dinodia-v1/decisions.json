@@ -291,7 +291,14 @@
     "mandatorySecurityEventsIgnoreQuietHours": true,
     "deduplicateByEventRecipientAndChannel": true,
     "deduplicationKeyFields": ["eventId", "recipientId", "channel"],
-    "deliveryReceiptIsNotAuthority": true
+    "deliveryReceiptIsNotAuthority": true,
+    "roleCatalogues": {
+      "OWNER": ["hub_availability", "permanent_device_outages", "new_permanent_devices", "tenant_access_requests", "installation_updates", "automation_activity"],
+      "PROPERTY_MANAGER": ["hub_availability", "permanent_device_outages", "new_permanent_devices", "tenant_access_requests", "installation_updates", "automation_activity"],
+      "TENANT": ["hub_availability", "permanent_device_outages_in_authorized_areas", "own_tenant_device_outages", "new_permanent_devices_in_authorized_areas", "automation_failure_or_skipped_run", "access_request_decisions"]
+    },
+    "mandatoryFamiliesDisableable": false,
+    "propertyManagerFamilyAssignmentAuthority": "ORIGINAL_OWNER"
   },
   "provisioning": {
     "hubOwnsDiscoveryAndCapabilityDescriptors": true,
