@@ -1700,6 +1700,30 @@
       "properties": { "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "state": { "const": "AVAILABLE" }, "areaLabel": { "type": "string", "minLength": 1, "maxLength": 80 }, "qrGeneration": { "type": "integer", "minimum": 1 }, "requestValiditySeconds": { "const": 604800 } },
       "additionalProperties": false
     },
+    "publicRoomAccessEmailChallengeRequest": {
+      "type": "object", "required": ["reference", "expectedGeneration", "email", "idempotencyKey"],
+      "properties": { "reference": { "type": "string", "pattern": "^dno_room_[A-Za-z0-9_-]{40,64}$" }, "expectedGeneration": { "type": "integer", "minimum": 1 }, "email": { "type": "string", "format": "email", "maxLength": 320 }, "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]{16,160}$" } },
+      "additionalProperties": false
+    },
+    "publicRoomAccessEmailChallengeReceipt": {
+      "type": "object", "required": ["schemaVersion", "ok", "state", "requestId", "expiresAt", "emailSubmission", "idempotentReplay"],
+      "properties": { "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "state": { "enum": ["VERIFY_EMAIL", "PENDING"] }, "requestId": { "$ref": "#/$defs/id" }, "challengeId": { "$ref": "#/$defs/id" }, "expiresAt": { "$ref": "#/$defs/timestamp" }, "revision": { "$ref": "#/$defs/timestamp" }, "emailSubmission": { "enum": ["ACCEPTED", "PENDING", "NOT_REQUIRED"] }, "idempotentReplay": { "type": "boolean" } },
+      "allOf": [
+        { "if": { "properties": { "state": { "const": "VERIFY_EMAIL" } }, "required": ["state"] }, "then": { "required": ["challengeId"], "not": { "required": ["revision"] } } },
+        { "if": { "properties": { "state": { "const": "PENDING" } }, "required": ["state"] }, "then": { "required": ["revision"], "not": { "required": ["challengeId"] }, "properties": { "emailSubmission": { "const": "NOT_REQUIRED" } } } }
+      ],
+      "additionalProperties": false
+    },
+    "publicRoomAccessEmailVerificationRequest": {
+      "type": "object", "required": ["requestId", "challengeId", "code"],
+      "properties": { "requestId": { "$ref": "#/$defs/id" }, "challengeId": { "$ref": "#/$defs/id" }, "code": { "type": "string", "pattern": "^\\d{6}$" } },
+      "additionalProperties": false
+    },
+    "publicRoomAccessEmailVerificationReceipt": {
+      "type": "object", "required": ["schemaVersion", "ok", "state", "requestId", "expiresAt", "revision", "idempotentReplay"],
+      "properties": { "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "state": { "const": "PENDING" }, "requestId": { "$ref": "#/$defs/id" }, "expiresAt": { "$ref": "#/$defs/timestamp" }, "revision": { "$ref": "#/$defs/timestamp" }, "idempotentReplay": { "type": "boolean" } },
+      "additionalProperties": false
+    },
     "customerRoomAccessRequestRequest": {
       "type": "object", "required": ["reference", "expectedGeneration", "idempotencyKey"],
       "properties": { "reference": { "type": "string", "pattern": "^dno_room_[A-Za-z0-9_-]{40,64}$" }, "expectedGeneration": { "type": "integer", "minimum": 1 }, "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]{16,160}$" } },
@@ -1726,7 +1750,44 @@
     "customerHomeClaimResolveRequest": {
       "type": "object",
       "required": ["reference"],
-      "properties": { "reference": { "type": "string", "pattern": "^dno_home_[A-Za-z0-9_-]{40,64}$" } },
+      "properties": {
+        "reference": { "type": "string", "pattern": "^(dno_home_[A-Za-z0-9_-]{40,64}|DNO-HOME-[A-Za-z0-9_-]{32,64})$" },
+        "resolverProof": { "$ref": "#/$defs/customerHomeClaimResolverProof" }
+      },
+      "allOf": [{
+        "if": { "properties": { "reference": { "pattern": "^dno_home_" } }, "required": ["reference"] },
+        "then": { "not": { "required": ["resolverProof"] } },
+        "else": { "required": ["resolverProof"] }
+      }],
+      "additionalProperties": false
+    },
+    "customerHomeClaimResolverProof": {
+      "type": "object",
+      "required": ["version", "serial", "identityGeneration", "challengeId", "challenge", "resolverGeneration", "expiresAt", "timestamp", "nonce", "bodyHash", "hubSignature"],
+      "properties": {
+        "version": { "const": 1 }, "serial": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "identityGeneration": { "type": "integer", "minimum": 1 }, "challengeId": { "$ref": "#/$defs/id" },
+        "challenge": { "type": "string", "pattern": "^[A-Za-z0-9_-]{20,128}$" }, "resolverGeneration": { "type": "integer", "minimum": 1 },
+        "expiresAt": { "$ref": "#/$defs/timestamp" }, "timestamp": { "type": "string", "pattern": "^\\d{10,16}$" },
+        "nonce": { "type": "string", "pattern": "^[A-Za-z0-9_-]{16,128}$" }, "bodyHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "hubSignature": { "type": "string", "pattern": "^[A-Za-z0-9_-]{40,2048}$" }
+      },
+      "additionalProperties": false
+    },
+    "customerHomeClaimLanEndpointRequest": {
+      "type": "object",
+      "required": ["reference"],
+      "properties": { "reference": { "type": "string", "pattern": "^DNO-HOME-[A-Za-z0-9_-]{32,64}$" } },
+      "additionalProperties": false
+    },
+    "customerHomeClaimLanEndpointReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "lanEndpoint"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "ok": { "const": true },
+        "lanEndpoint": { "$ref": "#/$defs/customerLanEndpoint" }
+      },
       "additionalProperties": false
     },
     "customerHomeClaimResolveReceipt": {
@@ -1804,6 +1865,75 @@
       "type": "object", "required": ["schemaVersion", "ok", "claimId", "state", "idempotentReplay", "postcode"],
       "properties": { "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "claimId": { "$ref": "#/$defs/id" }, "state": { "const": "PENDING_INSTALLATION" }, "idempotentReplay": { "type": "boolean" }, "postcode": { "type": ["string", "null"], "maxLength": 32 } },
       "additionalProperties": false
+    },
+    "ownershipTransferStatus": {
+      "type": "object", "required": ["schemaVersion", "homeId", "managementRevision", "activeTransfer"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "homeId": { "$ref": "#/$defs/id" },
+        "managementRevision": { "type": "integer", "minimum": 1 },
+        "activeTransfer": { "anyOf": [{ "$ref": "#/$defs/ownershipTransferSummary" }, { "type": "null" }] }
+      }, "additionalProperties": false
+    },
+    "ownershipTransferSummary": {
+      "type": "object", "required": ["transferId", "state", "createdAt", "updatedAt", "reference", "recipientEmail", "emailDeliveryStatus", "expiresAt"],
+      "properties": {
+        "transferId": { "$ref": "#/$defs/id" }, "state": { "const": "PENDING" },
+        "createdAt": { "$ref": "#/$defs/timestamp" }, "updatedAt": { "$ref": "#/$defs/timestamp" },
+        "reference": { "type": "string", "pattern": "^dno_transfer_[0-9a-f-]{36}_[A-Za-z0-9_-]{40,64}$" },
+        "recipientEmail": { "type": "string", "format": "email", "maxLength": 320 },
+        "emailDeliveryStatus": { "enum": ["PENDING", "ACCEPTED", "FAILED"] }, "expiresAt": { "type": "null" }
+      }, "additionalProperties": false
+    },
+    "ownershipTransferStartRequest": {
+      "type": "object", "required": ["action", "recipientEmail", "expectedManagementRevision", "proof", "idempotencyKey"],
+      "properties": {
+        "action": { "const": "START" }, "recipientEmail": { "type": "string", "format": "email", "maxLength": 320 },
+        "expectedManagementRevision": { "type": "integer", "minimum": 1 },
+        "proof": { "type": "string", "minLength": 40, "maxLength": 8192 },
+        "idempotencyKey": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{16,160}$", "minLength": 16, "maxLength": 160 }
+      }, "additionalProperties": false
+    },
+    "ownershipTransferCancelRequest": {
+      "type": "object", "required": ["action", "transferId", "expectedTransferUpdatedAt", "proof", "idempotencyKey"],
+      "properties": {
+        "action": { "const": "CANCEL" }, "transferId": { "$ref": "#/$defs/id" },
+        "expectedTransferUpdatedAt": { "$ref": "#/$defs/timestamp" },
+        "proof": { "type": "string", "minLength": 40, "maxLength": 8192 },
+        "idempotencyKey": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{16,160}$", "minLength": 16, "maxLength": 160 }
+      }, "additionalProperties": false
+    },
+    "ownershipTransferResolveRequest": {
+      "type": "object", "required": ["reference", "idempotencyKey"],
+      "properties": {
+        "reference": { "type": "string", "minLength": 32, "maxLength": 160, "pattern": "^(?:dno_transfer_[0-9a-f-]{36}_[A-Za-z0-9_-]{40,64}|DNO-HOME-[A-Za-z0-9_-]{32,64})$" },
+        "idempotencyKey": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{16,160}$", "minLength": 16, "maxLength": 160 },
+        "resolverProof": { "$ref": "#/$defs/customerHomeClaimResolverProof" }
+      }, "oneOf": [
+        { "properties": { "reference": { "pattern": "^dno_transfer_" } }, "not": { "required": ["resolverProof"] } },
+        { "required": ["resolverProof"], "properties": { "reference": { "pattern": "^DNO-HOME-" } } }
+      ], "additionalProperties": false
+    },
+    "ownershipTransferStartReceipt": {
+      "type": "object", "required": ["schemaVersion", "ok", "transferId", "reference", "state", "emailDeliveryStatus", "idempotentReplay"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "transferId": { "$ref": "#/$defs/id" },
+        "reference": { "type": "string", "pattern": "^dno_transfer_[0-9a-f-]{36}_[A-Za-z0-9_-]{40,64}$" },
+        "state": { "const": "PENDING" }, "emailDeliveryStatus": { "enum": ["PENDING", "ACCEPTED", "FAILED"] },
+        "idempotentReplay": { "type": "boolean" }
+      }, "additionalProperties": false
+    },
+    "ownershipTransferCancelReceipt": {
+      "type": "object", "required": ["schemaVersion", "ok", "transferId", "state", "idempotentReplay"],
+      "properties": { "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "transferId": { "$ref": "#/$defs/id" }, "state": { "const": "CANCELLED" }, "idempotentReplay": { "type": "boolean" } },
+      "additionalProperties": false
+    },
+    "ownershipTransferResolveReceipt": {
+      "type": "object", "required": ["schemaVersion", "ok", "transferId", "homeId", "homeMembershipId", "state", "idempotentReplay"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "transferId": { "$ref": "#/$defs/id" },
+        "homeId": { "$ref": "#/$defs/id" }, "homeMembershipId": { "$ref": "#/$defs/id" },
+        "state": { "const": "TRANSFERRED" }, "idempotentReplay": { "type": "boolean" }
+      }, "additionalProperties": false
     },
     "apnsRegistrationRequest": {
       "type": "object", "required": ["deviceToken", "environment"],

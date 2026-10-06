@@ -3324,17 +3324,10 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     if (!localSetupHostAllowed(req)) return json(res, 404, { error: "Setup page is available only on the private provisioning network" });
     setupHeaders(res);
     if (!["GET", "POST", "DELETE"].includes(req.method)) return json(res, 405, { error: "Method not allowed" });
-    if (url.pathname === "/_dinodia/setup/claim-challenge" && req.method === "GET") {
-      if (!(await setupRateLimitAllows(req))) return json(res, 429, { error: "Too many setup attempts. Wait before trying again." });
-      const reference = String(url.searchParams.get("reference") || "").trim();
-      if (!reference || reference.length > 512) return json(res, 404, { error: "Claim resolver is unavailable" });
-      try {
-        const challenge = await pairing.requestPermanentClaimChallenge(reference);
-        return json(res, 200, { ok: true, ...challenge });
-      } catch (error) {
-        return json(res, Number(error.statusCode) || 404, { error: "Claim resolver is unavailable", errorCode: "claim_resolver_unavailable" });
-      }
-    }
+    // Permanent-label Home authority is never resolved over the installer-only
+    // serial/port-80 setup channel. The only supported resolver is the pinned
+    // publicHubId HTTPS listener below.
+    if (url.pathname === "/_dinodia/setup/claim-challenge") return json(res, 404, { error: "Claim resolver is unavailable" });
     if (req.method === "POST") {
       const origin = String(req.headers.origin || "");
       if (origin !== `http://${req.headers.host}`) return json(res, 403, { error: "Setup request origin is not allowed" });
@@ -3848,6 +3841,36 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   }
   async function handleUnifiedRequest(req, res) {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+    if (url.pathname === "/api/dinodia/v1/claim-resolver/challenge") {
+      if (req.method !== "POST") return nativeContractError(res, 405, "METHOD_NOT_ALLOWED", "The claim resolver method is not allowed");
+      const report = lanTlsIdentity?.publicReport();
+      const expectedHost = report?.state === "CURRENT" ? `${report.host}:${lanListenerPort}` : "";
+      const localAddress = String(req.socket?.localAddress || "").replace(/^::ffff:/, "");
+      const selectedAddress = String(physicalLanAddress || "").replace(/^::ffff:/, "");
+      const host = String(req.headers.host || "").toLowerCase();
+      const servername = String(req.socket?.servername || "").toLowerCase();
+      const forwarded = req.headers["x-forwarded-for"] || req.headers["cf-connecting-ip"] || req.headers["x-forwarded-host"] || req.headers["x-forwarded-proto"];
+      if (!req.socket?.encrypted || req.socket.localPort !== lanListenerPort || !expectedHost
+        || host !== expectedHost.toLowerCase() || servername !== report.host.toLowerCase()
+        || !selectedAddress || localAddress !== selectedAddress || !isPrivateLanRequest(req) || forwarded
+        || req.headers.origin || req.headers.authorization || req.headers.cookie
+        || !String(req.headers["content-type"] || "").toLowerCase().startsWith("application/json")) {
+        return nativeContractError(res, 404, "CLAIM_RESOLVER_UNAVAILABLE", "The local claim resolver is unavailable");
+      }
+      if (!(await setupRateLimitAllows(req))) return nativeContractError(res, 429, "RATE_LIMITED", "Wait before trying again");
+      let body;
+      try { body = await readBody(req, 2_048); } catch { return nativeContractError(res, 400, "VALIDATION_FAILED", "The claim resolver request is invalid"); }
+      if (!body || Array.isArray(body) || typeof body !== "object" || Object.keys(body).length !== 1
+        || typeof body.reference !== "string" || !/^DNO-HOME-[A-Za-z0-9_-]{32,64}$/.test(body.reference)) {
+        return nativeContractError(res, 400, "VALIDATION_FAILED", "The claim resolver request is invalid");
+      }
+      try {
+        const challenge = await pairing.requestPermanentClaimChallenge(body.reference);
+        return json(res, 200, { ok: true, ...challenge });
+      } catch {
+        return nativeContractError(res, 404, "CLAIM_RESOLVER_UNAVAILABLE", "The local claim resolver is unavailable");
+      }
+    }
     if (url.pathname === "/api/dinodia/v1/health" && req.method === "GET") return json(res, 200, { ok: true, schemaVersion: "dinodia.v1", mode: "native-v2" });
     if (url.pathname === "/_dinodia/cloud-challenge" && req.method === "GET") {
       const remote = isHiveCredentialTransportAllowed(req, { nodeEnv: runtimeConfig.nodeEnv, configuredHostname: runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "", allowLoopback: false });
@@ -3905,7 +3928,6 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     try { pathname = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`).pathname; } catch {}
     const setupRoute = (pathname === "/setup" || pathname === "/setup.js") && req.method === "GET"
       || pathname === "/_dinodia/setup/status" && req.method === "GET"
-      || pathname === "/_dinodia/setup/claim-challenge" && req.method === "GET"
       || ["/_dinodia/setup/operator-attempt", "/_dinodia/setup/pairing", "/_dinodia/setup/support-access", "/_dinodia/setup/operator-session"].includes(pathname)
         && (req.method === "POST" || pathname === "/_dinodia/setup/pairing" && req.method === "DELETE");
     const staticRoute = req.method === "GET" && (["/", "/index.html", "/styles.css", "/app.js"].includes(pathname)

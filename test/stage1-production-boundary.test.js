@@ -43,11 +43,12 @@ async function request(base, route, options = {}) {
 function pinnedTlsRequest(base, route, options, certificatePem, expectedPin) {
   const url = new URL(route, base);
   const method = options?.method || "GET";
-  const headers = { "content-type": "application/json", ...(options?.headers || {}) };
-  return new Promise((resolve, reject) => {
-    const client = https.request({
-      hostname: url.hostname, port: url.port, path: `${url.pathname}${url.search}`, method, headers,
-      servername: url.hostname, ca: certificatePem, rejectUnauthorized: true,
+    const headers = { "content-type": "application/json", ...(options?.headers || {}) };
+    return new Promise((resolve, reject) => {
+      const client = https.request({
+        hostname: url.hostname, port: url.port, path: `${url.pathname}${url.search}`, method, headers,
+        agent: new https.Agent({ keepAlive: false, maxCachedSessions: 0 }),
+        servername: url.hostname, ca: certificatePem, rejectUnauthorized: true,
       lookup: (_hostname, options, callback) => {
         if (typeof options === "function") { callback = options; options = {}; }
         if (options?.all) callback(null, [{ address: "127.0.0.1", family: 4 }]);
@@ -1030,6 +1031,29 @@ test("offline enrolled authority reaches only the actual loopback customer TLS l
   const lanCertificatePem = require("node:fs").readFileSync(path.join(directory, "lan-identity", "lan-tls", storedLanIdentity.current.certificateFile));
   const customerLanBase = `https://${lanTlsReport.host}:${lanPort}`;
   const tlsRequest = (route, options = {}, pin = lanTlsReport.currentSpkiPin) => pinnedTlsRequest(customerLanBase, route, options, lanCertificatePem, pin);
+  const resolverReference = `DNO-HOME-${crypto.randomBytes(32).toString("base64url")}`;
+  const issuedResolverChallenge = {
+    version: 1, serial: "offline-native-hub", identityGeneration: 1,
+    challengeId: crypto.randomUUID(), challenge: crypto.randomBytes(24).toString("base64url"),
+    resolverGeneration: 1, expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    timestamp: String(Date.now()), nonce: crypto.randomBytes(24).toString("base64url"),
+    bodyHash: crypto.createHash("sha256").update("controlled-test-proof").digest("hex"),
+    hubSignature: crypto.randomBytes(48).toString("base64url"),
+  };
+  const resolverReferences = [];
+  hub.pairing.requestPermanentClaimChallenge = async (reference) => {
+    resolverReferences.push(reference);
+    return issuedResolverChallenge;
+  };
+  const resolverPath = "/api/dinodia/v1/claim-resolver/challenge";
+  const tlsResolver = await tlsRequest(resolverPath, { method: "POST", body: JSON.stringify({ reference: resolverReference }) });
+  assert.equal(tlsResolver.response.status, 200, JSON.stringify(tlsResolver.body));
+  assert.deepEqual(resolverReferences, [resolverReference], "only the current identity-pinned HTTPS listener may ask Platform for a permanent-label challenge");
+  const wrongHostResolver = await tlsRequest(resolverPath, { method: "POST", headers: { host: `wrong.local:${lanPort}` }, body: JSON.stringify({ reference: resolverReference }) });
+  assert.equal(wrongHostResolver.response.status, 404);
+  const installerHttpResolver = await request(base, `/_dinodia/setup/claim-challenge?reference=${encodeURIComponent(resolverReference)}`);
+  assert.equal(installerHttpResolver.response.status, 404, "installer HTTP is not a Home-claim authority path");
+  assert.deepEqual(resolverReferences, [resolverReference], "wrong-host TLS and installer HTTP denials have zero challenge issuance effects");
   const offline = new OfflineLanAuthorisationStore({ store: hub.store });
   const grant = await offline.enroll({ id: "offline-grant-1", homeId: "home-offline", hubInstallId: hubId, membershipId: "membership-offline-tenant", trustedDeviceId: "trusted-offline", userId: "account-offline", householdRole: "TENANT", publicKey: identityKeys.publicKey.export({ type: "spki", format: "pem" }).toString(), areaIds: ["area-public-offline"], scope: ["tenant:device-command"], policyRevision: 4 });
   const now = Date.now();

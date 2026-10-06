@@ -1069,6 +1069,38 @@ paths:
         "200": { description: Bounded preview for the current Area credential only., content: { application/json: { schema: { $ref: "./contract.json#/$defs/customerRoomQrScanReceipt" } } } }
         "404": { description: Unknown or unavailable QR; no Home identity is disclosed. }
         "409": { description: Home is not currently accepting Room requests. }
+  /api/public/areas/request-access/email-challenges:
+    post:
+      summary: "Begin a Private Prospective Room Request Email Verification"
+      operationId: beginProspectiveRoomAccess
+      tags: [Home]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./contract.json#/$defs/publicRoomAccessEmailChallengeRequest" }
+      responses:
+        "200": { description: The verified email already has a pending Room request; no duplicate request is created., content: { application/json: { schema: { $ref: "./contract.json#/$defs/publicRoomAccessEmailChallengeReceipt" } } } }
+        "202": { description: Email proof submitted; no account, membership, request-queue row or notification exists before verification., content: { application/json: { schema: { $ref: "./contract.json#/$defs/publicRoomAccessEmailChallengeReceipt" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/public/areas/request-access/email-challenges/verify:
+    post:
+      summary: "Verify Prospective Room Request Email and Publish the Seven-Day Request"
+      operationId: verifyProspectiveRoomAccess
+      tags: [Home]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./contract.json#/$defs/publicRoomAccessEmailVerificationRequest" }
+      responses:
+        "201": { description: Email is verified; one exact original-Area request becomes visible to the authorised owner/manager queue., content: { application/json: { schema: { $ref: "./contract.json#/$defs/publicRoomAccessEmailVerificationReceipt" } } } }
+        "200": { description: Exact verification retry reconciles the same request., content: { application/json: { schema: { $ref: "./contract.json#/$defs/publicRoomAccessEmailVerificationReceipt" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
   /api/public/support/email-challenges:
     post:
       summary: "Request Public Get Help Email Verification"
@@ -1195,6 +1227,26 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "409": { $ref: "#/components/responses/Conflict" }
         "429": { $ref: "#/components/responses/RateLimited" }
+  /api/v2/home-claims/lan-endpoint:
+    post:
+      summary: "Get the Fresh Pinned Hub Endpoint for a Permanent Home Label"
+      operationId: getCustomerHomeClaimLanEndpoint
+      tags: [Home]
+      security: [{ CustomerSessionCookie: [] }, { MobileAccessBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./contract.json#/$defs/customerHomeClaimLanEndpointRequest" }
+      responses:
+        "200":
+          description: "Current signed-in customer’s exact verified hub identity; contains no Home or membership data."
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/customerHomeClaimLanEndpointReceipt" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: "The current label or verified hub endpoint is unavailable." }
+        "429": { $ref: "#/components/responses/RateLimited" }
   /api/v2/home-claims/{claimId}/status:
     get:
       summary: "Read Claimant-Owned Home Setup Status"
@@ -1281,6 +1333,55 @@ paths:
             application/json:
               schema: { $ref: "./contract.json#/$defs/customerHomeClaimCompleteReceipt" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/homes/{homeId}/ownership-transfer:
+    get:
+      summary: "Read the Current Homeowner’s Transfer Status"
+      operationId: getOwnershipTransferStatus
+      tags: [Home]
+      security: [{ CustomerSessionCookie: [] }, { MobileAccessBearer: [] }]
+      parameters: [{ name: homeId, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        "200": { description: Bounded transfer state visible only to the current owner, content: { application/json: { schema: { $ref: "./contract.json#/$defs/ownershipTransferStatus" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Caller is not the current owner of this Home. }
+    post:
+      summary: "Start or Cancel a Non-expiring Ownership Transfer"
+      operationId: changeOwnershipTransfer
+      tags: [Home]
+      security: [{ CustomerSessionCookie: [] }, { MobileAccessBearer: [] }]
+      parameters: [{ name: homeId, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - { $ref: "./contract.json#/$defs/ownershipTransferStartRequest" }
+                - { $ref: "./contract.json#/$defs/ownershipTransferCancelRequest" }
+      responses:
+        "200": { description: Cancellation receipt; all QR, email and live resolver presentations are invalidated, content: { application/json: { schema: { $ref: "./contract.json#/$defs/ownershipTransferCancelReceipt" } } } }
+        "202": { description: Transfer started; owner must share the reference only with the exact verified recipient, content: { application/json: { schema: { $ref: "./contract.json#/$defs/ownershipTransferStartReceipt" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Caller is not the current owner of this Home. }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/ownership-transfers/resolve:
+    post:
+      summary: "Accept an Ownership Transfer for the Signed-in Verified Recipient"
+      operationId: acceptOwnershipTransfer
+      tags: [Home]
+      security: [{ CustomerSessionCookie: [] }, { MobileAccessBearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./contract.json#/$defs/ownershipTransferResolveRequest" }
+      responses:
+        "200": { description: One-time current-role and relationship transition receipt, content: { application/json: { schema: { $ref: "./contract.json#/$defs/ownershipTransferResolveReceipt" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Transfer is not available to this verified recipient. }
         "409": { $ref: "#/components/responses/Conflict" }
   /api/v2/trusted-devices/{trustedDeviceId}:
     delete:
