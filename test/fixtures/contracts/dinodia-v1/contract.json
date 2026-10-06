@@ -1994,7 +1994,7 @@
       "type": "object", "required": ["version", "tiles"],
       "properties": {
         "version": { "const": 1 },
-        "tiles": { "type": "array", "maxItems": 500, "items": { "type": "object", "required": ["deviceId", "size"], "properties": { "deviceId": { "$ref": "#/$defs/id" }, "size": { "enum": ["COMPACT", "STANDARD", "LARGE"] }, "position": { "type": "integer", "minimum": 0, "maximum": 499 }, "label": { "type": "string", "minLength": 1, "maxLength": 40 } }, "additionalProperties": false } },
+        "tiles": { "type": "array", "maxItems": 500, "items": { "type": "object", "required": ["deviceId", "size"], "properties": { "deviceId": { "$ref": "#/$defs/id" }, "size": { "enum": ["MINI", "SMALL", "MEDIUM", "LARGE", "COMPACT", "STANDARD"] }, "position": { "type": "integer", "minimum": 0, "maximum": 499 }, "label": { "type": "string", "minLength": 1, "maxLength": 40 } }, "additionalProperties": false } },
         "labelColours": { "type": "object", "maxProperties": 64, "propertyNames": { "minLength": 1, "maxLength": 40, "pattern": "^\\S(?:.*\\S)?$" }, "additionalProperties": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" } }
       }, "additionalProperties": false
     },
