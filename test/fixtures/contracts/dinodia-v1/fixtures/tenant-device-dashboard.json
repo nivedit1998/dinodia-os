@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "dinodia.v1",
+  "ok": true,
+  "revision": { "streamId": "tenant-context:membership:fixture", "sequence": 12 },
+  "home": { "id": "home:fixture", "postcode": "SW1A 1AA" },
+  "tenant": { "id": "account:fixture", "name": "Fixture Tenant", "username": "fixture-tenant" },
+  "membership": { "membershipId": "membership:fixture", "homeId": "home:fixture", "role": "tenant", "status": "active", "revision": 4 },
+  "areaAccess": [{ "areaId": "area:kitchen" }],
+  "areaOverrides": [{ "areaId": "area:kitchen", "originalName": "Kitchen", "overrideName": null }],
+  "areaGroups": [],
+  "deviceOverrides": [
+    { "id": "device:property-light", "osDeviceId": "os-device:property-light", "inventoryRevision": 5, "descriptorRevision": 2, "managementClass": "property_device", "ownerMembershipId": null, "areaIds": ["area:kitchen"], "overrideName": null, "customerLabel": null, "canManage": false, "canRename": false, "canRelabel": false, "canMove": false, "canRemove": false },
+    { "id": "device:private-light", "osDeviceId": "os-device:private-light", "inventoryRevision": 3, "descriptorRevision": 1, "managementClass": "tenant_device", "ownerMembershipId": "membership:fixture", "areaIds": ["area:kitchen"], "overrideName": "Bedside light", "customerLabel": "Lights", "canManage": true, "canRename": true, "canRelabel": true, "canMove": true, "canRemove": true }
+  ],
+  "preferences": { "layoutRevision": 1 },
+  "layout": { "revision": 1, "document": { "version": 1, "tiles": [{ "deviceId": "device:private-light", "size": "STANDARD", "position": 0, "label": "Reading light" }], "labelColours": { "Lights": "#f2c94c" } }, "updatedAt": "2026-10-06T10:00:00Z" },
+  "recovery": [],
+  "pendingRemovals": [{ "deviceId": "device:old-private-light", "displayName": "Old bedside light", "requestedAt": "2026-10-06T09:55:00Z" }],
+  "hubSync": { "configurationRevision": 14, "appliedRevision": 13, "lastSuccessfulSyncAt": "2026-10-06T09:58:00Z", "lastErrorCode": null }
+}

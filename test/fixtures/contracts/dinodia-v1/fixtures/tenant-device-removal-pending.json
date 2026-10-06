@@ -1,0 +1,4 @@
+{
+  "request": { "expectedDescriptorRevision": 1, "expectedInventoryRevision": 3, "proof": "test-only-operation-proof-not-a-production-credential" },
+  "receipt": { "schemaVersion": "dinodia.v1", "ok": true, "homeId": "home:fixture", "deviceId": "device:private-light", "osDeviceId": "os-device:private-light", "state": "REMOVAL_PENDING", "inventoryRevision": 4, "hubEnforcement": "PENDING" }
+}

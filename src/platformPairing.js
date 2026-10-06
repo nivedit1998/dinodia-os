@@ -61,7 +61,7 @@ function validateLanEndpointObservation(value, serial, expectedPort = 80) {
 }
 
 class PlatformPairing {
-  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, haPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, runtime, getLanEndpoint = null, getLanTlsIdentity = null, acknowledgeLanTlsIdentity = null, getUpdaterStatus = null, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, legacyCompatibilityEnabled = false, clock = () => Date.now() } = {}) {
+  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, haPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, runtime, getLanEndpoint = null, getLanTlsIdentity = null, acknowledgeLanTlsIdentity = null, getUpdaterStatus = null, reconcileTenantDeviceRemoval = null, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, legacyCompatibilityEnabled = false, clock = () => Date.now() } = {}) {
     this.store = store;
     this.vault = vault;
     this.identityBroker = identityBroker;
@@ -85,6 +85,7 @@ class PlatformPairing {
     this.getLanTlsIdentity = getLanTlsIdentity || (() => null);
     this.acknowledgeLanTlsIdentity = acknowledgeLanTlsIdentity || (() => false);
     this.getUpdaterStatus = getUpdaterStatus || (async () => null);
+    this.reconcileTenantDeviceRemoval = reconcileTenantDeviceRemoval;
     this.pendingEndpointHeartbeat = false;
     this.queuedImmediateSync = false;
     this.runtime = {
@@ -625,6 +626,15 @@ class PlatformPairing {
           throw Object.assign(new Error("Platform returned an invalid native sync acknowledgement/configuration"), { code: "sync_response_invalid" });
         }
         await applyCloudConfiguration(this.store, syncResult.configuration);
+        const pendingTenantRemovals = this.store.listPendingTenantDeviceRemovals?.() || [];
+        if (pendingTenantRemovals.length && typeof this.reconcileTenantDeviceRemoval !== "function") {
+          throw Object.assign(new Error("The current hub cannot yet enforce a tenant-device removal policy"), { code: "tenant_device_removal_unavailable" });
+        }
+        for (const removal of pendingTenantRemovals) {
+          const enforced = await this.reconcileTenantDeviceRemoval(removal);
+          if (enforced !== true) throw Object.assign(new Error("The hub has not confirmed the current tenant-device removal policy"), { code: "tenant_device_removal_pending" });
+          await this.store.acknowledgeTenantDeviceRemoval?.(removal.osDeviceId);
+        }
         if (syncBatch) {
           await this.store.acknowledgeSyncBatch({
             streamId: syncResult.streamId,

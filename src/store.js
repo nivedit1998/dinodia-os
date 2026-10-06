@@ -396,6 +396,7 @@ function initialState() {
       cloudConfigurationChecksum: null,
       cloudConfiguration: null,
       devicePolicies: {},
+      pendingTenantDeviceRemovals: [],
       updaterStatus: null,
       updaterStatusRevision: 0,
       operatorCredentialStates: [],
@@ -585,6 +586,9 @@ function normalizeState(value) {
       cloudConfiguration: validateCloudConfiguration(persistedPlatform.cloudConfiguration, persistedPlatform) ? persistedPlatform.cloudConfiguration : null,
       devicePolicies: validateCloudConfiguration(persistedPlatform.cloudConfiguration, persistedPlatform)
         ? Object.fromEntries(persistedPlatform.cloudConfiguration.devicePolicies.map((policy) => [String(policy.osDeviceId), clone(policy)])) : {},
+      pendingTenantDeviceRemovals: Array.isArray(persistedPlatform.pendingTenantDeviceRemovals)
+        ? persistedPlatform.pendingTenantDeviceRemovals.filter((entry) => entry && typeof entry.osDeviceId === "string" && entry.osDeviceId.length > 0 && entry.osDeviceId.length <= 160 && typeof entry.ownerMembershipId === "string" && entry.ownerMembershipId.length > 0 && entry.ownerMembershipId.length <= 160 && Number.isSafeInteger(entry.cloudRevision) && entry.cloudRevision >= 0).slice(-500).map((entry) => ({ osDeviceId: entry.osDeviceId, ownerMembershipId: entry.ownerMembershipId, cloudRevision: entry.cloudRevision }))
+        : [],
       updaterStatus: persistedPlatform.updaterStatus && typeof persistedPlatform.updaterStatus === "object" ? clone(persistedPlatform.updaterStatus) : null,
       updaterStatusRevision: Math.max(0, Number(persistedPlatform.updaterStatusRevision) || 0),
       operatorCredentialStates: Array.isArray(persistedPlatform.operatorCredentialStates)
@@ -897,7 +901,48 @@ class Store {
 
   async applyCloudConfigurationSnapshot(platformPatch, runtimeAutomations = []) {
     return this.withAutomationPolicyLock(() => this.mutateAtomically((state) => {
+      const previousPolicies = state.platform?.devicePolicies || {};
+      const incomingPolicies = platformPatch.devicePolicies || {};
+      const pendingRemovals = new Map((state.platform?.pendingTenantDeviceRemovals || []).map((entry) => [String(entry.osDeviceId), clone(entry)]));
+      for (const [osDeviceId, previous] of Object.entries(previousPolicies)) {
+        const next = incomingPolicies[osDeviceId];
+        const previousOwner = String(previous?.ownerMembershipId || "");
+        if (previous?.managementClass === "TENANT_DEVICE" && previousOwner
+          && (!next || next.managementClass !== "TENANT_DEVICE" || String(next.ownerMembershipId || "") !== previousOwner
+            || ["REMOVAL_PENDING", "REMOVED", "RETIRED", "RECOMMISSION_REQUIRED"].includes(String(next.lifecycle)))) {
+          const local = state.devices?.[osDeviceId];
+          const localOwner = String(local?.tenantOwnerMembershipId || local?.metadata?.tenantOwnerMembershipId || "");
+          if (local && localOwner === previousOwner) pendingRemovals.set(osDeviceId, {
+            osDeviceId, ownerMembershipId: previousOwner, cloudRevision: Number(platformPatch.cloudRevision || 0),
+          });
+        }
+      }
+      for (const [osDeviceId, policy] of Object.entries(incomingPolicies)) {
+        if (policy?.managementClass !== "TENANT_DEVICE") continue;
+        const local = state.devices?.[osDeviceId];
+        if (!local) continue;
+        const localOwner = String(local.tenantOwnerMembershipId || local.metadata?.tenantOwnerMembershipId || "");
+        if (localOwner && localOwner !== String(policy.ownerMembershipId || "")) {
+          pendingRemovals.set(osDeviceId, {
+            osDeviceId, ownerMembershipId: localOwner, cloudRevision: Number(platformPatch.cloudRevision || 0),
+          });
+        }
+        if (["INSTALLED", "VIEW_ONLY"].includes(String(policy.lifecycle)) && localOwner === String(policy.ownerMembershipId || "")
+          && Array.isArray(policy.osAreaIds) && policy.osAreaIds.length === 1) {
+          const nextAreaId = String(policy.osAreaIds[0]);
+          if (String(local.areaId || local.metadata?.areaId || "") !== nextAreaId) {
+            local.areaId = nextAreaId;
+            local.metadata = { ...(local.metadata || {}), areaId: nextAreaId };
+          }
+        }
+        if (["REMOVAL_PENDING", "REMOVED", "RETIRED", "RECOMMISSION_REQUIRED"].includes(String(policy.lifecycle)) && localOwner) {
+          pendingRemovals.set(osDeviceId, {
+            osDeviceId, ownerMembershipId: localOwner, cloudRevision: Number(platformPatch.cloudRevision || 0),
+          });
+        }
+      }
       state.platform = { ...(state.platform || {}), ...clone(platformPatch) };
+      state.platform.pendingTenantDeviceRemovals = [...pendingRemovals.values()].slice(-500);
       state.automations = state.automations || {};
       state.automationTriggers = state.automationTriggers || {};
       state.automationActions = state.automationActions || {};
@@ -927,6 +972,22 @@ class Store {
       }
       return { revision: Number(platformPatch.cloudRevision), activeAutomationCount: incoming.size };
     }));
+  }
+
+  listPendingTenantDeviceRemovals() {
+    return clone(this.state.platform?.pendingTenantDeviceRemovals || []);
+  }
+
+  async acknowledgeTenantDeviceRemoval(osDeviceId) {
+    const id = String(osDeviceId || "");
+    if (!id) return false;
+    return this.mutateAtomically((state) => {
+      const current = state.platform?.pendingTenantDeviceRemovals || [];
+      const next = current.filter((entry) => String(entry.osDeviceId) !== id);
+      if (next.length === current.length) return false;
+      state.platform.pendingTenantDeviceRemovals = next;
+      return true;
+    });
   }
 
   async persist() {

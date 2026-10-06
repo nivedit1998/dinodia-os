@@ -377,6 +377,70 @@ test("Native v1 device route emits a home-bound contract envelope and never retu
   } finally { await hub.stop(); }
 });
 
+test("tenant-owned Native V1 removal requires exact fresh proof and creates one physical unpair plus durable tombstone", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-native-tenant-remove-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const keys = crypto.generateKeyPairSync("ed25519");
+  const hubId = "native-tenant-remove-hub";
+  let adapterRemovals = 0;
+  const matterBridge = { ...mockIntegration(), async remove(deviceId) { assert.equal(deviceId, "tenant-matter-lamp"); adapterRemovals += 1; return true; }, forgetDevice() {} };
+  const hub = createHub({
+    config: { nodeEnv: "production", appPublicKeys: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), hubId, port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    mqttBridge: mockIntegration(), matterBridge,
+    cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
+    platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
+  });
+  await hub.store.savePlatform({ hubInstallId: hubId, homeId: "home-remove-a", policyRevision: 4,
+    areaBindings: [{ areaId: "area-uuid-remove-kitchen", hubAreaId: "os-area-remove-kitchen" }],
+    devicePolicies: { "tenant-matter-lamp": { osDeviceId: "tenant-matter-lamp", managementClass: "TENANT_DEVICE", ownerMembershipId: "membership-remove-a", lifecycle: "INSTALLED", analyticsCategory: "NONE", descriptorRevision: 1, descriptorDigest: null, osAreaIds: ["os-area-remove-kitchen"] } },
+  });
+  await hub.store.upsertDevice({ id: "tenant-matter-lamp", name: "Private tenant lamp", protocol: "matter", areaId: "os-area-remove-kitchen", descriptorRevision: 1, managementClass: "tenant_device", tenantOwnerMembershipId: "membership-remove-a", metadata: { managementClass: "tenant_device", tenantOwnerMembershipId: "membership-remove-a" } });
+  const descriptorRevision = Number(hub.store.getDevice("tenant-matter-lamp")?.presentation?.descriptorRevision || hub.store.getDevice("tenant-matter-lamp")?.descriptorRevision || 1);
+  await hub.start();
+  const base = `http://127.0.0.1:${hub.server.address().port}`;
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const targetIds = ["tenant-matter-lamp"];
+  const value = { operation: "remove_tenant_device", descriptorRevision };
+  const operationDigest = digestOperation({ actorId: "account-remove-a", trustedDeviceId: "trusted-account-remove-a", customerSessionId: "session-remove-a", homeId: "home-remove-a", membershipId: "membership-remove-a", hubInstallId: hubId, operationKind: "tenant_device_remove", targetIds, value });
+  const unsignedProof = { jti: "tenant-remove-proof-0001", actorId: "account-remove-a", trustedDeviceId: "trusted-account-remove-a", customerSessionId: "session-remove-a", homeId: "home-remove-a", membershipId: "membership-remove-a", hubInstallId: hubId, operationDigest, issuedAt, expiresAt: issuedAt + 60 };
+  const proof = `${Buffer.from(JSON.stringify(unsignedProof)).toString("base64url")}.${crypto.sign(null, Buffer.from(JSON.stringify(unsignedProof)), keys.privateKey).toString("base64url")}`;
+  const now = issuedAt;
+  const makeToken = (accountId, membershipId, sessionId) => appToken({ iss: "dinodia-platform-v2", aud: `dinodia-hub:${hubId}`, sub: accountId, sid: sessionId, jti: `jti-${sessionId}`, membershipId, trustedDeviceId: `trusted-${accountId}`, hubInstallationId: hubId, iat: now, exp: now + 300, homeId: "home-remove-a", householdRole: "TENANT", areaIds: ["area-uuid-remove-kitchen"], policyRevision: 4, scope: ["tenant:device-command"] }, keys.privateKey);
+  const ownerToken = makeToken("account-remove-a", "membership-remove-a", "session-remove-a");
+  const otherToken = makeToken("account-remove-b", "membership-remove-b", "session-remove-b");
+  const idempotencyKey = "tenant-device-remove-once-0001";
+  const body = { schemaVersion: "dinodia.v1", homeId: "home-remove-a", homeMembershipId: "membership-remove-a", deviceId: "tenant-matter-lamp", descriptorRevision, idempotencyKey };
+  const beforeEvents = hub.store.getSyncOutbox().events.length;
+  try {
+    const missingProof = await request(base, "/api/dinodia/v1/devices/tenant-matter-lamp", { method: "DELETE", headers: { authorization: `Bearer ${ownerToken}`, "idempotency-key": idempotencyKey }, body: JSON.stringify(body) });
+    assert.equal(missingProof.response.status, 400);
+    const wrongTenant = await request(base, "/api/dinodia/v1/devices/tenant-matter-lamp", { method: "DELETE", headers: { authorization: `Bearer ${otherToken}`, "idempotency-key": idempotencyKey, "x-dinodia-step-up-proof": proof }, body: JSON.stringify({ ...body, homeMembershipId: "membership-remove-b" }) });
+    assert.equal(wrongTenant.response.status, 404);
+    assert.equal(JSON.stringify(wrongTenant.body).includes("Private tenant lamp"), false);
+    assert.equal(adapterRemovals, 0);
+    assert.ok(hub.store.getDevice("tenant-matter-lamp"));
+    assert.equal(hub.store.getSyncOutbox().events.length, beforeEvents);
+
+    const removed = await request(base, "/api/dinodia/v1/devices/tenant-matter-lamp", { method: "DELETE", headers: { authorization: `Bearer ${ownerToken}`, "idempotency-key": idempotencyKey, "x-dinodia-step-up-proof": proof }, body: JSON.stringify(body) });
+    assert.equal(removed.response.status, 200, JSON.stringify(removed.body));
+    assert.equal(removed.body.state, "REMOVED");
+    assert.equal(removed.body.hubEnforcement, "ENFORCED");
+    assert.equal(adapterRemovals, 1);
+    assert.equal(hub.store.getDevice("tenant-matter-lamp"), null);
+    assert.equal(hub.store.getSyncOutbox().events.some((event) => event.type === "device.tombstone" && event.aggregateId === "tenant-matter-lamp"), true);
+
+    const exactRetry = await request(base, "/api/dinodia/v1/devices/tenant-matter-lamp", { method: "DELETE", headers: { authorization: `Bearer ${ownerToken}`, "idempotency-key": idempotencyKey, "x-dinodia-step-up-proof": proof }, body: JSON.stringify(body) });
+    assert.equal(exactRetry.response.status, 200);
+    assert.equal(exactRetry.body.state, "REMOVED");
+    assert.equal(adapterRemovals, 1, "an exact lost-response retry reconciles the durable receipt and does not unpair twice");
+
+    const conflictingRetry = await request(base, "/api/dinodia/v1/devices/tenant-matter-lamp", { method: "DELETE", headers: { authorization: `Bearer ${ownerToken}`, "idempotency-key": idempotencyKey, "x-dinodia-step-up-proof": proof }, body: JSON.stringify({ ...body, descriptorRevision: 8 }) });
+    assert.equal(conflictingRetry.response.status, 409);
+    assert.equal(conflictingRetry.body.error.code, "IDEMPOTENCY_CONFLICT");
+    assert.equal(adapterRemovals, 1);
+  } finally { await hub.stop(); }
+});
+
 test("Native v1 command route enforces current DTO, tenant scope and durable idempotency before dispatch", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-native-v1-command-"));
   const keys = crypto.generateKeyPairSync("ed25519");

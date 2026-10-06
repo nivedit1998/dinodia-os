@@ -1367,7 +1367,7 @@
       "additionalProperties": false
     },
     "stepUpOperationKind": {
-      "enum": ["trusted_device_remove", "customer_password_change", "customer_profile_change", "customer_email_change", "support_ticket_close", "support_access_approve", "support_access_revoke", "alexa_unlink", "heating_sensitive_command", "device_sensitive_command"]
+      "enum": ["trusted_device_remove", "customer_password_change", "customer_profile_change", "customer_email_change", "tenant_membership_remove", "tenant_device_remove", "home.transfer", "support_ticket_close", "support_access_approve", "support_access_revoke", "alexa_unlink", "heating_sensitive_command", "device_sensitive_command"]
     },
     "stepUpDescriptorAttestation": {
       "type": "object",
@@ -1959,6 +1959,70 @@
       "type": "object", "required": ["version", "enabled", "startLocalTime", "endLocalTime", "timeZone", "days"],
       "properties": { "version": { "const": 1 }, "enabled": { "type": "boolean" }, "startLocalTime": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$" }, "endLocalTime": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$" }, "timeZone": { "type": "string", "minLength": 1, "maxLength": 64 }, "days": { "type": "array", "uniqueItems": true, "items": { "type": "integer", "minimum": 1, "maximum": 7 } } },
       "additionalProperties": false
+    },
+    "tenantDeviceContext": {
+      "type": "object", "required": ["schemaVersion", "ok", "revision", "home", "tenant", "membership", "areaAccess", "areaOverrides", "areaGroups", "deviceOverrides", "preferences", "layout", "recovery", "pendingRemovals", "hubSync"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true },
+        "revision": { "type": "object", "required": ["streamId", "sequence"], "properties": { "streamId": { "$ref": "#/$defs/id" }, "sequence": { "type": "integer", "minimum": 0 } }, "additionalProperties": false },
+        "home": { "type": "object", "required": ["id", "postcode"], "properties": { "id": { "$ref": "#/$defs/id" }, "postcode": { "type": ["string", "null"], "maxLength": 24 } }, "additionalProperties": false },
+        "tenant": { "type": "object", "required": ["id", "name", "username"], "properties": { "id": { "$ref": "#/$defs/id" }, "name": { "type": "string", "maxLength": 160 }, "username": { "type": "string", "maxLength": 80 } }, "additionalProperties": false },
+        "membership": { "type": "object", "required": ["membershipId", "homeId", "role", "status", "revision"], "properties": { "membershipId": { "$ref": "#/$defs/id" }, "homeId": { "$ref": "#/$defs/id" }, "role": { "const": "tenant" }, "status": { "const": "active" }, "revision": { "type": "integer", "minimum": 1 } }, "additionalProperties": false },
+        "areaAccess": { "type": "array", "uniqueItems": true, "items": { "type": "object", "required": ["areaId"], "properties": { "areaId": { "$ref": "#/$defs/id" } }, "additionalProperties": false } },
+        "areaOverrides": { "type": "array", "items": { "type": "object", "required": ["areaId", "originalName", "overrideName"], "properties": { "areaId": { "$ref": "#/$defs/id" }, "originalName": { "type": "string", "minLength": 1, "maxLength": 80 }, "overrideName": { "type": ["string", "null"], "maxLength": 80 } }, "additionalProperties": false } },
+        "areaGroups": { "type": "array", "items": { "type": "object", "required": ["name", "areaIds"], "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 80 }, "areaIds": { "type": "array", "minItems": 2, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } } }, "additionalProperties": false } },
+        "deviceOverrides": { "type": "array", "items": { "$ref": "#/$defs/tenantDeviceOverride" } },
+        "preferences": { "type": "object", "required": ["layoutRevision"], "properties": { "layoutRevision": { "type": "integer", "minimum": 0 } }, "additionalProperties": false },
+        "layout": { "type": "object", "required": ["revision", "document", "updatedAt"], "properties": { "revision": { "type": "integer", "minimum": 0 }, "document": { "$ref": "#/$defs/tenantDashboardLayout" }, "updatedAt": { "type": ["string", "null"], "format": "date-time" } }, "additionalProperties": false },
+        "recovery": { "type": "array", "items": { "type": "object", "required": ["deviceId", "displayName", "expiresAt"], "properties": { "deviceId": { "$ref": "#/$defs/id" }, "displayName": { "type": "string", "maxLength": 160 }, "expiresAt": { "$ref": "#/$defs/timestamp" } }, "additionalProperties": false } },
+        "pendingRemovals": { "type": "array", "items": { "$ref": "#/$defs/tenantDevicePendingRemoval" } },
+        "hubSync": { "oneOf": [{ "$ref": "#/$defs/tenantHubSync" }, { "type": "null" }] }
+      }, "additionalProperties": false
+    },
+    "tenantDeviceOverride": {
+      "type": "object", "required": ["id", "osDeviceId", "inventoryRevision", "descriptorRevision", "managementClass", "ownerMembershipId", "areaIds", "overrideName", "customerLabel", "canManage", "canRename", "canRelabel", "canMove", "canRemove"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" }, "osDeviceId": { "$ref": "#/$defs/id" },
+        "inventoryRevision": { "type": "integer", "minimum": 1 }, "descriptorRevision": { "type": "integer", "minimum": 0 },
+        "managementClass": { "enum": ["tenant_device", "property_device"] }, "ownerMembershipId": { "type": ["string", "null"], "maxLength": 160 },
+        "areaIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "overrideName": { "type": ["string", "null"], "maxLength": 80 }, "customerLabel": { "type": ["string", "null"], "maxLength": 40 },
+        "canManage": { "type": "boolean" }, "canRename": { "type": "boolean" }, "canRelabel": { "type": "boolean" }, "canMove": { "type": "boolean" }, "canRemove": { "type": "boolean" }
+      }, "additionalProperties": false
+    },
+    "tenantDashboardLayout": {
+      "type": "object", "required": ["version", "tiles"],
+      "properties": {
+        "version": { "const": 1 },
+        "tiles": { "type": "array", "maxItems": 500, "items": { "type": "object", "required": ["deviceId", "size"], "properties": { "deviceId": { "$ref": "#/$defs/id" }, "size": { "enum": ["COMPACT", "STANDARD", "LARGE"] }, "position": { "type": "integer", "minimum": 0, "maximum": 499 }, "label": { "type": "string", "minLength": 1, "maxLength": 40 } }, "additionalProperties": false } },
+        "labelColours": { "type": "object", "maxProperties": 64, "propertyNames": { "minLength": 1, "maxLength": 40, "pattern": "^\\S(?:.*\\S)?$" }, "additionalProperties": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" } }
+      }, "additionalProperties": false
+    },
+    "tenantDevicePresentationMutationRequest": {
+      "oneOf": [
+        { "type": "object", "required": ["action", "expectedInventoryRevision", "overrideName"], "properties": { "action": { "const": "rename" }, "expectedInventoryRevision": { "type": "integer", "minimum": 1 }, "overrideName": { "type": ["string", "null"], "maxLength": 80 } }, "additionalProperties": false },
+        { "type": "object", "required": ["action", "expectedInventoryRevision", "customerLabel"], "properties": { "action": { "const": "relabel" }, "expectedInventoryRevision": { "type": "integer", "minimum": 1 }, "customerLabel": { "type": ["string", "null"], "maxLength": 40 } }, "additionalProperties": false },
+        { "type": "object", "required": ["action", "expectedInventoryRevision", "areaId"], "properties": { "action": { "const": "move" }, "expectedInventoryRevision": { "type": "integer", "minimum": 1 }, "areaId": { "$ref": "#/$defs/id" } }, "additionalProperties": false }
+      ]
+    },
+    "tenantDeviceRemovalRequest": {
+      "type": "object", "required": ["expectedDescriptorRevision", "expectedInventoryRevision", "proof"],
+      "properties": { "expectedDescriptorRevision": { "type": "integer", "minimum": 1 }, "expectedInventoryRevision": { "type": "integer", "minimum": 1 }, "proof": { "type": "string", "minLength": 40, "maxLength": 8192 } }, "additionalProperties": false
+    },
+    "tenantDeviceMutationReceipt": {
+      "type": "object", "required": ["schemaVersion", "ok", "homeId", "deviceId", "action", "inventoryRevision"],
+      "properties": { "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "homeId": { "$ref": "#/$defs/id" }, "deviceId": { "$ref": "#/$defs/id" }, "action": { "enum": ["rename", "relabel", "move"] }, "inventoryRevision": { "type": "integer", "minimum": 1 }, "areaId": { "$ref": "#/$defs/id" }, "hubEnforcement": { "enum": ["PENDING", "ENFORCED"] } }, "additionalProperties": false
+    },
+    "tenantDeviceRemovalReceipt": {
+      "type": "object", "required": ["schemaVersion", "ok", "homeId", "deviceId", "osDeviceId", "state", "inventoryRevision", "hubEnforcement"],
+      "properties": { "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "homeId": { "$ref": "#/$defs/id" }, "deviceId": { "$ref": "#/$defs/id" }, "osDeviceId": { "$ref": "#/$defs/id" }, "state": { "enum": ["REMOVAL_PENDING", "REMOVED"] }, "inventoryRevision": { "type": "integer", "minimum": 1 }, "hubEnforcement": { "enum": ["PENDING", "ENFORCED"] } }, "additionalProperties": false
+    },
+    "tenantDevicePendingRemoval": {
+      "type": "object", "required": ["deviceId", "displayName", "requestedAt"], "properties": { "deviceId": { "$ref": "#/$defs/id" }, "displayName": { "type": "string", "maxLength": 160 }, "requestedAt": { "type": ["string", "null"], "format": "date-time" } }, "additionalProperties": false
+    },
+    "tenantHubSync": {
+      "type": "object", "required": ["configurationRevision", "appliedRevision", "lastSuccessfulSyncAt", "lastErrorCode"],
+      "properties": { "configurationRevision": { "type": "integer", "minimum": 0 }, "appliedRevision": { "type": "integer", "minimum": 0 }, "lastSuccessfulSyncAt": { "type": ["string", "null"], "format": "date-time" }, "lastErrorCode": { "type": ["string", "null"], "maxLength": 80 } }, "additionalProperties": false
     },
     "uiState": { "enum": ["restoring_session", "loading", "ready", "empty", "stale", "offline", "denied", "expired", "uncertain", "maintenance", "error"] },
     "error": {

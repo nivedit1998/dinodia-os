@@ -578,6 +578,119 @@ paths:
       responses:
         "200": { description: Preferences saved }
         "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/homes/{homeId}/tenant-device-context:
+    get:
+      summary: "Get Selected Tenant Device Context"
+      operationId: getSelectedTenantDeviceContext
+      tags: [Devices]
+      security: [{ MobileAccessBearer: [] }]
+      description: >-
+        Returns only cloud-owned tenant membership, active Area grants, authorized
+        device metadata, tenant-owned management flags, scoped dashboard preference
+        revision and owner-only recovery summaries. It never returns device state or
+        controls; those are fetched directly from the selected Native V2 hub. Requires
+        an account-global customer session, X-Dinodia-Home-Id matching the path and an
+        active TENANT membership. Private tenant devices are filtered before response.
+      parameters:
+        - { $ref: "#/components/parameters/HomeId" }
+        - { name: X-Dinodia-Home-Id, in: header, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Selected tenant projection; no-store and membership-scoped
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TenantDeviceContext" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/Forbidden" }
+  /api/v2/homes/{homeId}/tenant-devices/{deviceId}:
+    patch:
+      summary: "Update an owned tenant device presentation"
+      operationId: updateOwnedTenantDevicePresentation
+      tags: [Devices]
+      security: [{ MobileAccessBearer: [] }]
+      description: >-
+        Rename, relabel or move only a tenant_device owned by the currently selected
+        active tenant membership. The server verifies the current session,
+        owner membership, Home/hub identity and expected inventory revision.
+        Idempotency-Key reconciles an exact retry. Permanent property devices,
+        other tenants' devices, technical labels and live hub state are immutable
+        through this operation. A move must target one currently granted Area and
+        remains pending until the signed hub configuration is applied.
+      parameters:
+        - { $ref: "#/components/parameters/HomeId" }
+        - { name: deviceId, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: X-Dinodia-Home-Id, in: header, required: true, schema: { type: string, format: uuid } }
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 16, maxLength: 128 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  additionalProperties: false
+                  required: [action, expectedInventoryRevision, overrideName]
+                  properties:
+                    action: { const: rename }
+                    expectedInventoryRevision: { type: integer, minimum: 1 }
+                    overrideName: { type: [string, 'null'], maxLength: 80 }
+                - type: object
+                  additionalProperties: false
+                  required: [action, expectedInventoryRevision, customerLabel]
+                  properties:
+                    action: { const: relabel }
+                    expectedInventoryRevision: { type: integer, minimum: 1 }
+                    customerLabel: { type: [string, 'null'], maxLength: 40 }
+                - type: object
+                  additionalProperties: false
+                  required: [action, expectedInventoryRevision, areaId]
+                  properties:
+                    action: { const: move }
+                    expectedInventoryRevision: { type: integer, minimum: 1 }
+                    areaId: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Tenant-owned presentation updated or exact retry reconciled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TenantDeviceMutationReceipt" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/homes/{homeId}/tenant-devices/{deviceId}/remove:
+    post:
+      summary: "Request removal of the current tenant's own device"
+      operationId: requestTenantOwnedDeviceRemoval
+      tags: [Devices]
+      security: [{ MobileAccessBearer: [] }]
+      description: >-
+        Requires a fresh operation-bound confirmation for this exact device and
+        current descriptor revision. The cloud first revokes its selected-tenant
+        authority and returns REMOVAL_PENDING; only the direct Native V2 OS removal
+        and tombstone acknowledgement may report enforcement complete. Property
+        devices and another tenant's devices are never removable by this route.
+      parameters:
+        - { $ref: "#/components/parameters/HomeId" }
+        - { name: deviceId, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: X-Dinodia-Home-Id, in: header, required: true, schema: { type: string, format: uuid } }
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 16, maxLength: 128 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TenantDeviceRemovalRequest" }
+      responses:
+        "202":
+          description: Cloud authority is removed and hub enforcement is pending, or an exact retry is reconciled.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TenantDeviceRemovalReceipt" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /api/v2/me/push-registration:
     put:
       summary: "Register or rotate the current trusted installation APNs token"
@@ -1948,6 +2061,16 @@ components:
       $ref: "./contract.json#/$defs/stepUpIssueRequest"
     AccountStepUpProofReceipt:
       $ref: "./contract.json#/$defs/stepUpProofReceipt"
+    TenantDeviceContext:
+      $ref: "./contract.json#/$defs/tenantDeviceContext"
+    TenantDevicePresentationMutationRequest:
+      $ref: "./contract.json#/$defs/tenantDevicePresentationMutationRequest"
+    TenantDeviceMutationReceipt:
+      $ref: "./contract.json#/$defs/tenantDeviceMutationReceipt"
+    TenantDeviceRemovalRequest:
+      $ref: "./contract.json#/$defs/tenantDeviceRemovalRequest"
+    TenantDeviceRemovalReceipt:
+      $ref: "./contract.json#/$defs/tenantDeviceRemovalReceipt"
   responses:
     BadRequest:
       description: The canonical request DTO is malformed or violates a bounded field constraint.

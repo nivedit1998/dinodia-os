@@ -52,6 +52,22 @@ function validateCloudConfiguration(value, current = {}) {
   if (new Set(value.areas.map((area) => area?.id)).size !== value.areas.length || value.areas.some((area) => !validText(area?.id, 160) || !validText(area?.osAreaId, 160) || !validText(area?.originalName, 160) || !(area.overrideName === null || validText(area.overrideName, 160)) || !Number.isSafeInteger(area.revision) || area.revision < 1)) return false;
   if (new Set(value.memberships.map((membership) => membership?.id)).size !== value.memberships.length || value.memberships.some((membership) => !validText(membership?.id, 160) || !["OWNER", "PROPERTY_MANAGER", "TENANT"].includes(membership.role) || !Number.isSafeInteger(membership.accessRevision) || !Array.isArray(membership.areaIds) || membership.areaIds.some((id) => !value.areas.some((area) => area.id === id)))) return false;
   if (new Set(value.devicePolicies.map((device) => device?.osDeviceId)).size !== value.devicePolicies.length || value.devicePolicies.some((device) => !validText(device?.osDeviceId, 160) || !["PROPERTY_DEVICE", "TENANT_DEVICE"].includes(device.managementClass) || !(device.ownerMembershipId === null || validText(device.ownerMembershipId, 160)) || !["NONE", "LIGHT", "BOILER", "RADIATOR"].includes(device.analyticsCategory) || !["DISCOVERED", "INSTALLED", "VIEW_ONLY", "RETIRED", "REMOVAL_PENDING", "REMOVED", "RECOMMISSION_REQUIRED"].includes(device.lifecycle) || !(device.customerLabel === null || validText(device.customerLabel, 40)) || !(device.overrideName === null || validText(device.overrideName, 160)) || !Number.isSafeInteger(device.descriptorRevision) || device.descriptorRevision < 1 || !(device.descriptorDigest === null || /^[a-f0-9]{64}$/i.test(device.descriptorDigest)) || !Array.isArray(device.osAreaIds) || device.osAreaIds.some((id) => !value.areas.some((area) => area.osAreaId === id)))) return false;
+  for (const policy of value.devicePolicies) {
+    if (policy.managementClass === "PROPERTY_DEVICE") {
+      if (policy.ownerMembershipId !== null) return false;
+      continue;
+    }
+    if (!validText(policy.ownerMembershipId, 160)) return false;
+    // A current private device is bound to exactly one current owner grant.
+    // Revocation/removal policies may intentionally have no remaining Area:
+    // they are delivered only to hide/unpair the prior private device.
+    if (["INSTALLED", "VIEW_ONLY"].includes(policy.lifecycle)) {
+      const owner = value.memberships.find((membership) => membership.id === policy.ownerMembershipId && membership.role === "TENANT");
+      if (!owner || policy.osAreaIds.length !== 1) return false;
+      const area = value.areas.find((candidate) => candidate.osAreaId === policy.osAreaIds[0]);
+      if (!area || !owner.areaIds.includes(area.id)) return false;
+    }
+  }
   const { checksum, ...unsigned } = value;
   if (crypto.createHash("sha256").update(canonical(unsigned), "utf8").digest("hex") !== checksum) return false;
   if (Number(value.revision) === Number(current.cloudRevision || 0) && current.cloudConfigurationChecksum && current.cloudConfigurationChecksum !== checksum) return false;

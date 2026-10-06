@@ -957,6 +957,19 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         return { phase: "unavailable", trustState: "unavailable", activeReleaseVersion: null, lastAttempt: null, busy: false };
       }
     },
+    reconcileTenantDeviceRemoval: async ({ osDeviceId, ownerMembershipId }) => runNativeCommandSerial(async () => {
+      const device = hubStore.getDevice(String(osDeviceId || ""));
+      if (!device) return true;
+      const localOwner = String(device.tenantOwnerMembershipId || device.metadata?.tenantOwnerMembershipId || "");
+      if (String(device.managementClass || device.metadata?.managementClass || "").toLowerCase() !== "tenant_device"
+        || !localOwner || localOwner !== String(ownerMembershipId || "")) return false;
+      const currentPolicy = hubStore.getPlatform?.()?.devicePolicies?.[String(osDeviceId)] || null;
+      if (currentPolicy?.managementClass === "TENANT_DEVICE"
+        && String(currentPolicy.ownerMembershipId || "") === localOwner
+        && ["INSTALLED", "VIEW_ONLY"].includes(String(currentPolicy.lifecycle))) return false;
+      const removed = await haModel.removeDevice({ device_id: String(osDeviceId), force: false });
+      return removed === true || !hubStore.getDevice(String(osDeviceId));
+    }),
     runtime: {
       nodeEnv: runtimeConfig.nodeEnv,
       kind: "dinodia_os",
@@ -1927,6 +1940,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     }
     if (scopedPrincipal && !(
       (req.method === "GET" && (pathname === "/api/status" || pathname === "/api/devices" || pathname.startsWith("/api/devices/") || pathname === "/api/dinodia/v1/health" || pathname === "/api/dinodia/v1/snapshot" || pathname === "/api/dinodia/v1/areas" || pathname === "/api/dinodia/v1/devices" || /^\/api\/dinodia\/v1\/devices\/[^/]+$/.test(pathname) || pathname === "/api/dinodia/v1/control-catalog" || pathname === "/api/dinodia/v1/maintenance/status" || /^\/api\/dinodia\/v1\/commands\/[^/]+$/.test(pathname))) ||
+      (req.method === "DELETE" && /^\/api\/dinodia\/v1\/devices\/[^/]+$/.test(pathname)) ||
       (req.method === "POST" && pathname === "/api/dinodia/v1/commands") ||
       (req.method === "POST" && pathname.includes("/entities/") && pathname.endsWith("/service")) ||
       (req.method === "POST" && pathname === "/api/step-up/descriptor-challenge")
@@ -2073,6 +2087,105 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       const envelope = nativeEnvelopeFor(scopedPrincipal, devices, revision);
       if (!envelope) return nativeContractError(res, 503, "CONTROL_UNAVAILABLE", "The current device catalogue cannot be represented safely", true);
       return json(res, 200, envelope);
+    }
+
+    const nativeTenantDeviceRemoval = pathname.match(/^\/api\/dinodia\/v1\/devices\/([^/]+)$/);
+    if (nativeTenantDeviceRemoval && req.method === "DELETE") {
+      if (!scopedPrincipal || scopedPrincipal.principalType !== "app" || !nativeTenantPrincipal) {
+        return nativeContractError(res, 403, "SCOPE_DENIED", "An online selected tenant session is required for device removal");
+      }
+      let body;
+      try { body = await readBody(req, 8 * 1024); }
+      catch { return nativeContractError(res, 400, "VALIDATION_FAILED", "The tenant device removal request is invalid"); }
+      const deviceId = decodeURIComponent(nativeTenantDeviceRemoval[1]);
+      const idempotencyKey = String(req.headers["idempotency-key"] || "");
+      const proof = String(req.headers["x-dinodia-step-up-proof"] || "");
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).sort().join("\n") !== ["schemaVersion", "homeId", "homeMembershipId", "deviceId", "descriptorRevision", "idempotencyKey"].sort().join("\n")
+        || body.schemaVersion !== "dinodia.v1" || String(body.deviceId) !== deviceId
+        || String(body.homeId) !== String(scopedPrincipal.homeId) || String(body.homeMembershipId) !== String(scopedPrincipal.membershipId)
+        || String(body.idempotencyKey) !== idempotencyKey || !/^[A-Za-z0-9_-]{16,128}$/.test(idempotencyKey)
+        || !Number.isSafeInteger(body.descriptorRevision) || Number(body.descriptorRevision) < 1
+        || proof.length < 32 || proof.length > 8192) {
+        return nativeContractError(res, 400, "VALIDATION_FAILED", "The tenant device removal request is invalid");
+      }
+      const requestDigest = crypto.createHash("sha256").update(stableJson({
+        schemaVersion: body.schemaVersion, homeId: body.homeId, homeMembershipId: body.homeMembershipId,
+        deviceId, descriptorRevision: body.descriptorRevision,
+      }), "utf8").digest("hex");
+      const principalDigest = crypto.createHash("sha256").update(stableJson({ actor: scopedPrincipal.sub,
+        session: scopedPrincipal.sid, trustedDevice: scopedPrincipal.trustedDeviceId,
+        home: scopedPrincipal.homeId, membership: scopedPrincipal.membershipId, hub: scopedPrincipal.hubInstallId }), "utf8").digest("hex");
+      const receiptKey = crypto.createHash("sha256").update(`${principalDigest}\n${idempotencyKey}`, "utf8").digest("hex");
+      return runNativeCommandSerial(async () => {
+        const security = hubStore.getSecurity?.() || {};
+        let receipts = { ...(security.tenantDeviceRemovalReceipts || {}) };
+        const previous = receipts[receiptKey];
+        if (previous) {
+          if (previous.requestDigest !== requestDigest || previous.principalDigest !== principalDigest || previous.osDeviceId !== deviceId) {
+            return nativeContractError(res, 409, "IDEMPOTENCY_CONFLICT", "This removal key is already bound to another operation");
+          }
+          if (!hubStore.getDevice(deviceId)) {
+            const removed = { ...previous, status: "removed", updatedAt: new Date(clock()).toISOString() };
+            receipts[receiptKey] = removed;
+            await hubStore.saveSecurity({ tenantDeviceRemovalReceipts: receipts });
+            return json(res, 200, removed.result);
+          }
+          return json(res, previous.status === "failed" ? 409 : 202, previous.result);
+        }
+        const currentPrincipal = appSessionAuth(bearerToken(req));
+        const device = hubStore.getDevice(deviceId);
+        const policy = hubStore.getPlatform?.()?.devicePolicies?.[deviceId] || null;
+        const canonicalAreaId = device ? canonicalAreaIdForHubArea(device.areaId || device.metadata?.areaId) : "";
+        const finalAuthority = Boolean(currentPrincipal && device && policy
+          && currentPrincipal.principalType === "app" && currentPrincipal.sub === scopedPrincipal.sub
+          && currentPrincipal.sid === scopedPrincipal.sid && currentPrincipal.trustedDeviceId === scopedPrincipal.trustedDeviceId
+          && currentPrincipal.homeId === scopedPrincipal.homeId && currentPrincipal.membershipId === scopedPrincipal.membershipId
+          && currentPrincipal.hubInstallId === scopedPrincipal.hubInstallId && currentPrincipal.householdRole === "TENANT"
+          && currentPrincipal.scope?.includes("tenant:device-command")
+          && policy.managementClass === "TENANT_DEVICE" && String(policy.ownerMembershipId || "") === String(currentPrincipal.membershipId)
+          && ["INSTALLED", "REMOVAL_PENDING"].includes(String(policy.lifecycle))
+          && canonicalAreaId && (currentPrincipal.areaIds || []).map(String).includes(canonicalAreaId)
+          && String(hubStore.getPlatform?.()?.homeId || currentPrincipal.homeId) === String(currentPrincipal.homeId));
+        if (!finalAuthority) return nativeContractError(res, 404, "RESOURCE_NOT_FOUND", "The tenant-owned device is not available to this selected membership");
+        const dto = serializeNativeDevice({ device: nativeDeviceView(currentPrincipal, device), homeId: String(currentPrincipal.homeId),
+          homeMembershipId: String(currentPrincipal.membershipId), role: "TENANT", areaIds: (currentPrincipal.areaIds || []).map(String),
+          surfaces: allProjectedSurfaces(device), revision: Number(device.presentation?.descriptorRevision || device.descriptorRevision || 0) });
+        const descriptorRevision = Number(dto?.descriptorRevision || device.presentation?.descriptorRevision || device.descriptorRevision || 0);
+        if (!dto || descriptorRevision !== Number(body.descriptorRevision)) return nativeContractError(res, 409, "CATALOG_REVISION_MISMATCH", "The current device descriptor changed; refresh before removal");
+        if (!["zigbee", "matter", "hive", "google_nest"].includes(String(device.protocol || "").toLowerCase())) {
+          return nativeContractError(res, 409, "DEVICE_REMOVAL_UNSUPPORTED", "This device adapter cannot confirm safe physical removal");
+        }
+        const operationValue = { operation: "remove_tenant_device", descriptorRevision };
+        const approved = await stepUpVerifier.verify(proof, {
+          actorId: currentPrincipal.sub, trustedDeviceId: currentPrincipal.trustedDeviceId,
+          trustedSessionId: currentPrincipal.sid, homeId: currentPrincipal.homeId,
+          membershipId: currentPrincipal.membershipId, hubInstallId: currentPrincipal.hubInstallId,
+          operationKind: "tenant_device_remove", targetIds: [deviceId], value: operationValue,
+        });
+        if (!approved) return nativeContractError(res, 403, "STEP_UP_REQUIRED", "A fresh confirmation for this exact device removal is required");
+        const startedAt = new Date(clock()).toISOString();
+        const pendingResult = { schemaVersion: "dinodia.v1", ok: true, homeId: currentPrincipal.homeId,
+          homeMembershipId: currentPrincipal.membershipId, deviceId, state: "REMOVAL_PENDING", hubEnforcement: "PENDING" };
+        receipts[receiptKey] = { requestDigest, principalDigest, osDeviceId: deviceId, membershipId: currentPrincipal.membershipId,
+          status: "dispatching", createdAt: startedAt, updatedAt: startedAt, result: pendingResult };
+        const liveEntries = Object.entries(receipts).filter(([, value]) => Date.parse(value?.updatedAt || value?.createdAt || "") > Number(clock()) - 30 * 24 * 60 * 60 * 1000);
+        receipts = Object.fromEntries(liveEntries.sort((a, b) => Date.parse(a[1]?.createdAt || "") - Date.parse(b[1]?.createdAt || "")).slice(-512));
+        await hubStore.saveSecurity({ tenantDeviceRemovalReceipts: receipts });
+        try {
+          const removed = await haModel.removeDevice({ device_id: deviceId, force: false });
+          if (!removed) throw Object.assign(new Error("The hub could not confirm device removal"), { definite: true });
+          const result = { ...pendingResult, state: "REMOVED", hubEnforcement: "ENFORCED", removedAt: new Date(clock()).toISOString() };
+          receipts[receiptKey] = { ...receipts[receiptKey], status: "removed", updatedAt: new Date(clock()).toISOString(), result };
+          await hubStore.saveSecurity({ tenantDeviceRemovalReceipts: receipts });
+          return json(res, 200, result);
+        } catch (error) {
+          const result = { ...pendingResult, errorCode: error?.definite ? "DEVICE_REMOVAL_REJECTED" : "DEVICE_REMOVAL_UNCERTAIN" };
+          receipts[receiptKey] = { ...receipts[receiptKey], status: error?.definite ? "failed" : "uncertain", updatedAt: new Date(clock()).toISOString(), result };
+          await hubStore.saveSecurity({ tenantDeviceRemovalReceipts: receipts });
+          return json(res, error?.definite ? 409 : 202, result);
+        }
+      });
     }
 
     if (pathname === "/api/dinodia/v1/commands" && req.method === "POST") {
@@ -3221,6 +3334,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   }
   function isNativeAppRoute(req, url) {
     return (req.method === "GET" && (url.pathname === "/api/dinodia/v1/snapshot" || url.pathname === "/api/dinodia/v1/areas" || url.pathname === "/api/dinodia/v1/devices" || /^\/api\/dinodia\/v1\/devices\/[^/]+$/.test(url.pathname) || url.pathname === "/api/dinodia/v1/control-catalog" || url.pathname === "/api/dinodia/v1/maintenance/status" || /^\/api\/dinodia\/v1\/commands\/[^/]+$/.test(url.pathname)))
+      || (req.method === "DELETE" && /^\/api\/dinodia\/v1\/devices\/[^/]+$/.test(url.pathname))
       || (req.method === "POST" && (url.pathname === "/api/dinodia/v1/commands" || url.pathname === "/api/dinodia/v1/offline/challenges" || url.pathname === "/api/dinodia/v1/maintenance/update" || url.pathname === "/api/step-up/descriptor-challenge"));
   }
   function isHaCompatibilityPath(pathname) {

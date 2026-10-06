@@ -140,6 +140,51 @@ test("tenant-private devices and their controls never enter the owner/manager sy
   }
 });
 
+test("signed tenant policy moves the OS-owned device and removal waits for an explicit hub enforcement receipt", async () => {
+  const { directory, store } = temporaryStore();
+  try {
+    await store.saveIdentity({ serial: "tenant-policy-hub" });
+    await store.saveArea({ name: "Kitchen" }, "os-kitchen");
+    await store.saveArea({ name: "Bedroom" }, "os-bedroom");
+    await store.upsertDevice({ id: "tenant-policy-device", name: "Private lamp", protocol: "zigbee", areaId: "os-kitchen",
+      managementClass: "tenant_device", tenantOwnerMembershipId: "tenant-membership",
+      metadata: { managementClass: "tenant_device", tenantOwnerMembershipId: "tenant-membership" } });
+    await store.savePlatform({ homeId: "tenant-policy-home" });
+
+    const makeConfiguration = (revision, lifecycle, osAreaIds, includeDevice = true) => {
+      const unsigned = {
+        revision, policyRevision: revision,
+        areas: [
+          { id: "public-kitchen", osAreaId: "os-kitchen", originalName: "Kitchen", overrideName: null, revision: 1 },
+          { id: "public-bedroom", osAreaId: "os-bedroom", originalName: "Bedroom", overrideName: null, revision: 1 },
+        ],
+        memberships: [{ id: "tenant-membership", role: "TENANT", accessRevision: revision, areaIds: ["public-kitchen", "public-bedroom"] }],
+        devicePolicies: includeDevice ? [{ osDeviceId: "tenant-policy-device", managementClass: "TENANT_DEVICE", ownerMembershipId: "tenant-membership", analyticsCategory: "NONE", lifecycle, customerLabel: null, overrideName: null, descriptorRevision: 1, descriptorDigest: null, osAreaIds }] : [],
+        automations: [], releasePolicy: { mode: "MANUAL", automaticInstallEnabled: false, desiredRelease: null },
+      };
+      return { ...unsigned, checksum: configChecksum(unsigned) };
+    };
+
+    await applyCloudConfiguration(store, makeConfiguration(1, "INSTALLED", ["os-kitchen"]));
+    const beforeEvents = store.getSyncOutbox().events.length;
+    await applyCloudConfiguration(store, makeConfiguration(2, "INSTALLED", ["os-bedroom"]));
+    assert.equal(store.getDevice("tenant-policy-device").areaId, "os-bedroom", "a current cloud move applies the mapped OS Area locally");
+    assert.equal(store.getSyncOutbox().events.length, beforeEvents, "private tenant-device identity/state does not leak back into owner/manager inventory sync");
+    assert.deepEqual(store.listPendingTenantDeviceRemovals(), []);
+
+    await applyCloudConfiguration(store, makeConfiguration(3, "REMOVAL_PENDING", []));
+    assert.deepEqual(store.listPendingTenantDeviceRemovals(), [{ osDeviceId: "tenant-policy-device", ownerMembershipId: "tenant-membership", cloudRevision: 3 }]);
+    assert.equal(store.getPlatform().devicePolicies["tenant-policy-device"].lifecycle, "REMOVAL_PENDING");
+    assert.equal(await store.acknowledgeTenantDeviceRemoval("tenant-policy-device"), true);
+    assert.deepEqual(store.listPendingTenantDeviceRemovals(), []);
+
+    await applyCloudConfiguration(store, makeConfiguration(4, "REMOVAL_PENDING", [], false));
+    assert.equal(store.listPendingTenantDeviceRemovals().length, 1, "removing the policy entirely still queues cleanup of its previous private owner device");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("metadata compaction keeps a contiguous cursor and telemetry pressure never drops authority tombstones", async () => {
   const { directory, store } = temporaryStore();
   try {

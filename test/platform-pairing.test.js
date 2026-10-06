@@ -7,6 +7,7 @@ const crypto = require("node:crypto");
 const { Store } = require("../src/store");
 const { SecretVault } = require("../src/secretVault");
 const { PlatformPairing, sign, validateLanEndpointObservation } = require("../src/platformPairing");
+const { applyCloudConfiguration } = require("../src/sync/cloudConfiguration");
 const { SetupDiscovery } = require("../src/setupDiscovery");
 const { generateManufacturingIdentity, vaultIdentityRecord } = require("../src/auth/manufacturingIdentity");
 
@@ -125,6 +126,84 @@ test("incident transitions use the durable native sync stream and retire only af
   assert.equal(seen.filter((entry) => entry.url.endsWith("/v2/sync")).length, 1, "a contradictory authenticated installation binding is rejected before sending another batch");
   assert.equal(store.getPlatform().hubInstallId, "11111111-1111-4111-8111-111111111111", "a paired OS never silently rebinds to another Platform installation");
   pairing.stop();
+});
+
+test("tenant removal policy is not acknowledged until the paired hub completes local device cleanup", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-tenant-removal-sync-"));
+  const store = new Store(path.join(directory, "dinodia.json"));
+  const vault = new SecretVault({ dataDir: directory });
+  const serial = "DINODIA-TENANT-REMOVAL-HUB";
+  const identity = generateManufacturingIdentity({ serial });
+  const record = vaultIdentityRecord(identity);
+  await store.saveIdentity({ serial });
+  await vault.set("platform.identityPrivateKey", record.signingPrivateKey);
+  await vault.set("platform.identityPublicKey", record.signingPublicKey);
+  await vault.set("platform.encryptionPrivateKey", record.encryptionPrivateKey);
+  await vault.set("platform.encryptionPublicKey", record.encryptionPublicKey);
+  await vault.set("platform.identityGeneration", "1");
+  await vault.set("platform.machineCredential", "disposable-tenant-removal-credential");
+  const hubInstallId = "11111111-1111-4111-8111-111111111111";
+  const areaRows = [
+    { id: "public-room", osAreaId: "os-room", originalName: "Room", overrideName: null, revision: 1 },
+  ];
+  const membership = { id: "tenant-membership", role: "TENANT", accessRevision: 1, areaIds: ["public-room"] };
+  const checksum = (value) => {
+    const canonical = (input) => Array.isArray(input) ? `[${input.map(canonical).join(",")}]`
+      : input && typeof input === "object" ? `{${Object.keys(input).sort().map((key) => `${JSON.stringify(key)}:${canonical(input[key])}`).join(",")}}`
+        : JSON.stringify(input);
+    return crypto.createHash("sha256").update(canonical(value), "utf8").digest("hex");
+  };
+  const makeConfiguration = (revision, lifecycle, areaIds) => {
+    const unsigned = { revision, policyRevision: revision, areas: areaRows, memberships: lifecycle === "INSTALLED" ? [membership] : [{ ...membership, areaIds: [] }],
+      devicePolicies: [{ osDeviceId: "tenant-sync-lamp", managementClass: "TENANT_DEVICE", ownerMembershipId: "tenant-membership", analyticsCategory: "NONE", lifecycle, customerLabel: null, overrideName: null, descriptorRevision: 1, descriptorDigest: null, osAreaIds: areaIds }],
+      automations: [], releasePolicy: { mode: "MANUAL", automaticInstallEnabled: false, desiredRelease: null } };
+    return { ...unsigned, checksum: checksum(unsigned) };
+  };
+  await store.savePlatform({ paired: true, provisioningCredentialVersion: 1, hubInstallId, homeId: "tenant-sync-home" });
+  await store.saveArea({ name: "Room" }, "os-room");
+  await applyCloudConfiguration(store, makeConfiguration(1, "INSTALLED", ["os-room"]));
+  await store.upsertDevice({ id: "tenant-sync-lamp", name: "Private lamp", protocol: "zigbee", areaId: "os-room", managementClass: "tenant_device", tenantOwnerMembershipId: "tenant-membership", metadata: { managementClass: "tenant_device", tenantOwnerMembershipId: "tenant-membership" } });
+  const removalConfiguration = makeConfiguration(2, "REMOVAL_PENDING", []);
+  let enforce = false;
+  const seenRemovals = [];
+  const pairing = new PlatformPairing({
+    store, vault, apiUrl: "https://platform.test", serial, intervalMs: 60000,
+    logger: { error() {}, warn() {} },
+    reconcileTenantDeviceRemoval: async (entry) => {
+      seenRemovals.push(entry);
+      if (!enforce) return false;
+      await store.deleteDevice(entry.osDeviceId);
+      return true;
+    },
+    fetchImpl: async (url, options) => {
+      const body = JSON.parse(options.body);
+      if (url.endsWith("/token-state")) return { ok: true, async json() { return { hubInstallId, homeId: "tenant-sync-home", areaBindings: [{ areaId: "public-room", hubAreaId: "os-room" }], latestVersion: 0, publishedVersion: 0, hubTokenHashes: [], operatorCredentialStates: [], offlineAuthorisations: [], syncAcceptedSequence: 0, syncStreamId: null, installationSyncMode: "ACTIVE", policyRevision: 2 }; } };
+      if (url.endsWith("/v2/sync")) return { ok: true, async json() { return { streamId: body.streamId, cloudRevision: 2, configurationAppliedRevision: 2, acceptedThroughSequence: body.toSequence, resnapshotRequired: false, configuration: removalConfiguration }; } };
+      if (url.endsWith("/heartbeat")) return { ok: true, async json() { return { ok: true, online: true, lanEndpoint: { revision: body.lanEndpoint.revision, state: body.lanEndpoint.state } }; } };
+      throw new Error(`Unexpected tenant-removal sync route: ${url}`);
+    },
+  });
+  try {
+    await pairing.syncNow();
+    assert.equal(store.getPlatform().cloudRevision, 2, "the current signed policy may be locally applied before enforcement finishes");
+    assert.equal(store.getSyncOutbox().acknowledgedSequence, 0, "the durable outbox receipt is not advanced before physical removal is confirmed");
+    assert.equal(store.listPendingTenantDeviceRemovals().length, 1, "failed physical enforcement remains durable for retry");
+    assert.ok(store.getDevice("tenant-sync-lamp"));
+    assert.equal(seenRemovals.length, 1);
+
+    enforce = true;
+    pairing.nextRetryAt = 0;
+    await pairing.syncNow();
+    assert.equal(store.getDevice("tenant-sync-lamp"), null);
+    assert.deepEqual(store.listPendingTenantDeviceRemovals(), []);
+    assert.ok(store.getSyncOutbox().acknowledgedSequence > 0, "configuration and outbox receipt are acknowledged only after local removal succeeds");
+    assert.equal(store.getSyncOutbox().events.at(-1).type, "device.tombstone", "physical removal leaves a durable cloud reconciliation tombstone");
+    assert.equal(seenRemovals.length, 2);
+    assert.equal(seenRemovals[0].ownerMembershipId, "tenant-membership");
+  } finally {
+    pairing.stop();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("native provisioning completes the outbound challenge, encrypted credential delivery and acknowledgement", async () => {
