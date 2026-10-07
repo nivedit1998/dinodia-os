@@ -191,6 +191,15 @@ test("physical installer listener serves a bounded authenticated dashboard and i
     assert.equal(JSON.stringify(deniedArea.body).includes("Kitchen"), false);
     assert.equal(hub.store.listAreas().length, areaCount);
 
+    const insecureMatterPayload = await request(physical, `/_dinodia/installer/commissioning/sessions/${crypto.randomUUID()}/matter-payload`, {
+      method: "POST",
+      headers: { origin: new URL(physical).origin, cookie: "dinodia_setup_csrf=disposable-csrf", "x-dinodia-setup-csrf": "disposable-csrf" },
+      body: JSON.stringify({ schemaVersion: "dinodia.v1", setupPayload: "MT:DISPOSABLE-TEST-CODE" }),
+    });
+    assert.equal(insecureMatterPayload.response.status, 403, "Matter setup material is rejected before authentication/body processing on installer HTTP");
+    assert.equal(insecureMatterPayload.body.error?.code, "SECURE_TRANSPORT_REQUIRED");
+    assert.equal(JSON.stringify(insecureMatterPayload.body).includes("DISPOSABLE-TEST-CODE"), false);
+
     const queueBefore = hub.store.getSyncOutbox().events.length;
     assert.equal((await request(physical, "/_dinodia/admin/api/entities/test-device/service", { method: "POST", headers: operator, body: JSON.stringify({ serviceId: "light.turn_on" }) })).response.status, 404);
     assert.equal((await fetch(`${physical}/api/websocket`, { headers: operator })).status, 404);

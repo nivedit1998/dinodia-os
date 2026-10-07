@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Permanent device installation · Dinodia OS</title>
+  <link rel="stylesheet" href="/styles.css">
+  <style>
+    body { min-height:100vh; background:var(--background,#f4f2ee); color:var(--text,#20211f); }
+    main { max-width:900px; margin:0 auto; padding:32px 20px 64px; }
+    .install-card { background:var(--surface,#fff); border:1px solid var(--border,#ddd); border-radius:18px; padding:24px; margin:18px 0; }
+    .row { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-top:14px; }
+    button,select,input { font:inherit; border:1px solid var(--border,#ccc); border-radius:10px; padding:10px 12px; background:#fff; color:inherit; }
+    button.primary { background:#273c35; color:#fff; border-color:#273c35; }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    .muted { color:#62655f; } .error { color:#9b1c1c; } .candidate { border-top:1px solid #e7e5df; padding:16px 0; }
+    .safe-code { font-family:ui-monospace,monospace; overflow-wrap:anywhere; }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="muted">Dinodia Smart Living · Assigned Company Portal work</p>
+    <h1>Permanent device installation</h1>
+    <p id="summary" class="muted">Checking this assigned installation and the paired hub…</p>
+    <section class="install-card" aria-labelledby="protocol-heading">
+      <h2 id="protocol-heading">Add a supported device</h2>
+      <p class="muted">Only protocols enabled for this enrolled hub and its approved device catalogue can start. A device is registered only after the hub completes its interview and the current Area and descriptor are confirmed.</p>
+      <div class="row">
+        <button id="start-zigbee" class="primary" type="button" disabled>Start Zigbee search</button>
+        <button id="start-matter" class="primary" type="button" disabled>Start Matter setup</button>
+        <button id="refresh" type="button">Refresh status</button>
+        <button id="cancel" type="button" disabled>Cancel session</button>
+      </div>
+      <label id="matter-entry" hidden for="matter-payload">Matter QR setup code (only sent over verified secure Dinodia OS)</label>
+      <div id="matter-entry-row" class="row" hidden>
+        <input id="matter-payload" type="password" autocomplete="off" spellcheck="false" maxlength="512" placeholder="Matter setup code">
+        <button id="submit-matter" class="primary" type="button">Submit code securely</button>
+      </div>
+      <p id="status" role="status" aria-live="polite" class="muted">Waiting for the paired hub.</p>
+      <p id="error" role="alert" class="error" hidden></p>
+    </section>
+    <section id="device-result" class="install-card" hidden>
+      <h2>Review discovered device</h2>
+      <div class="row"><label for="area">Original Area</label><select id="area"></select></div>
+      <div class="row"><label for="label">Customer label</label><input id="label" maxlength="40" autocomplete="off"></div>
+      <div class="row"><label for="name">Device name</label><input id="name" maxlength="80" autocomplete="off"></div>
+      <div class="row">
+        <button id="select" class="primary" type="button">Review this device</button>
+        <button id="install" class="primary" type="button" hidden>Install and sync</button>
+        <button id="view-only" type="button" hidden>Keep as view-only</button>
+        <button id="remove" type="button" hidden>Remove unsupported candidate</button>
+      </div>
+    </section>
+    <section id="candidates" class="install-card" hidden aria-label="Discovered devices"><h2>Discovery results</h2><div id="candidate-list"></div></section>
+    <footer class="muted"><p>This workspace is limited to the current assigned request, paired hub, and active original Areas. It does not grant homeowner or tenant ownership.</p>
+      <button id="end-session" type="button">End installation session</button></footer>
+  </main>
+  <script src="/permanent-installation.js" defer></script>
+</body>
+</html>

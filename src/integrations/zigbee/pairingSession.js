@@ -5,15 +5,19 @@ class ZigbeePairingSession {
     this.reset();
   }
 
-  start(expiresAt, seconds = this.ttlSeconds, knownIds = []) {
+  start(expiresAt, seconds = this.ttlSeconds, knownIds = [], options = {}) {
+    const sessionExpiresAt = options.sessionExpiresAt || expiresAt || new Date(Date.now() + seconds * 1000).toISOString();
     this.state = {
+      id: options.sessionId || null,
       active: true,
       startedAt: new Date().toISOString(),
-      expiresAt: expiresAt || new Date(Date.now() + seconds * 1000).toISOString(),
+      expiresAt: sessionExpiresAt,
+      permitJoinExpiresAt: expiresAt || new Date(Date.now() + seconds * 1000).toISOString(),
       found: [],
       foundDetails: {},
     };
-    this.baseline = new Set((Array.isArray(knownIds) ? knownIds : []).map(String));
+    this.baseline = new Set((Array.isArray(knownIds) ? knownIds : []).flatMap((item) => item && typeof item === "object"
+      ? [String(item.id || ""), String(item.identity || "")].filter(Boolean) : [String(item)]));
     return this.status();
   }
 
@@ -24,15 +28,18 @@ class ZigbeePairingSession {
 
   add(deviceId, details = {}) {
     const id = String(deviceId || "");
-    if (this.state.active && id && !this.baseline.has(id) && !this.state.found.includes(id)) this.state.found.push(id);
+    const identity = String(details.identity || "");
+    if (this.state.active && id && !this.baseline.has(id) && !(identity && this.baseline.has(identity)) && !this.state.found.includes(id)) this.state.found.push(id);
     if (this.state.active && id && this.state.found.includes(id) && details && typeof details === "object") this.state.foundDetails[id] = { ...this.state.foundDetails[id], ...details };
     return this.status();
   }
 
-  isNew(deviceId) {
+  isNew(deviceId, identity = "") {
     const id = String(deviceId || "");
-    return Boolean(id && !this.baseline.has(id));
+    return Boolean(id && !this.baseline.has(id) && !(identity && this.baseline.has(String(identity))));
   }
+
+  isCandidate(deviceId) { return this.state.found.includes(String(deviceId || "")); }
 
   forget(deviceId) {
     const id = String(deviceId || "");
@@ -44,7 +51,7 @@ class ZigbeePairingSession {
 
   status() {
     if (this.state.active && this.state.expiresAt && Date.parse(this.state.expiresAt) <= Date.now()) this.stop();
-    return { ...this.state, found: [...this.state.found] };
+    return { ...this.state, found: [...this.state.found], foundDetails: { ...this.state.foundDetails } };
   }
 
   reset() {

@@ -135,7 +135,10 @@ class MqttBridge {
         const id = normalized.id;
         if (!id) continue;
         const existing = this.store.getDevice(String(id)) || this.store.listDevices().find((device) => String(device.metadata?.ieee_address || device.protocolIdentity?.ieeeAddress || "") === String(item.ieee_address || "") || String(device.metadata?.friendly_name || device.name || "") === String(item.friendly_name || ""));
-        const pairingActive = this.pairingSession.status().active;
+        const pairingState = this.pairingSession.status();
+        const identity = String(normalized.metadata?.ieee_address || normalized.metadata?.ieee || item.ieee_address || "").toLowerCase();
+        const permitJoinOpen = Boolean(this.permitJoinUntil && Date.parse(this.permitJoinUntil) > Date.now());
+        const pairingActive = pairingState.active && (permitJoinOpen || this.pairingSession.isCandidate(id));
         // Zigbee2MQTT publishes its entire inventory on startup. Inventory is
         // not permission to pair a household device; only an explicit pairing
         // session may create a new registry record.
@@ -150,8 +153,9 @@ class MqttBridge {
         const updated = existing && existing.id !== id && typeof this.store.migrateDeviceIdentity === "function"
           ? await this.store.migrateDeviceIdentity(existing.id, id, incoming)
           : await this.store.upsertDevice(incoming);
-        const newForPairing = pairingActive && this.pairingSession.isNew(updated.id);
+        const newForPairing = pairingActive && this.pairingSession.isNew(updated.id, identity);
         this.pairingSession.add(updated.id, {
+          identity,
           stage: "needs_setup",
           manufacturer: updated.metadata?.manufacturer || updated.metadata?.manufacturer_name || "",
           model: updated.metadata?.model || updated.metadata?.model_id || "",
@@ -159,7 +163,7 @@ class MqttBridge {
           interviewStatus: updated.interviewStatus || "successful",
           surfacePreview: { count: Object.keys(updated.presentation?.surfaces || {}).length, types: Object.values(updated.presentation?.surfaces || {}).map((surface) => surface.inferredType || surface.domain) },
         });
-        if (newForPairing && updated.interviewStatus === "successful") stopPairingAfterSync = true;
+        if (newForPairing && updated.interviewStatus === "successful" && !pairingState.id) stopPairingAfterSync = true;
         if (this.onDeviceChanged) await this.onDeviceChanged(updated, existing);
       }
       if (stopPairingAfterSync && this.pairingSession.status().active) {
@@ -256,11 +260,11 @@ class MqttBridge {
     await this.store.addEvent({ type: "zigbee_permit_join", seconds: bounded });
   }
 
-  async startPairing(seconds = 120) {
+  async startPairing(seconds = 120, options = {}) {
     const bounded = Math.max(30, Math.min(Number(seconds) || 120, 254));
     await this.permitJoin(bounded);
-    const knownIds = this.store?.listDevices ? this.store.listDevices().map((device) => device.id) : [];
-    this.pairingSession.start(this.permitJoinUntil, bounded, knownIds);
+    const knownIds = this.store?.listDevices ? this.store.listDevices().map((device) => ({ id: device.id, identity: String(device.protocolIdentity?.ieeeAddress || device.metadata?.ieee_address || device.metadata?.ieee || "").toLowerCase() })) : [];
+    this.pairingSession.start(this.permitJoinUntil, bounded, knownIds, options);
     return this.pairingStatus();
   }
 
@@ -274,6 +278,15 @@ class MqttBridge {
     return this.pairingSession.status();
   }
 
+  async removeCommissioningCandidate(deviceId) {
+    const result = await this.remove(deviceId);
+    if (result?.ok === false || result?.status === "error") throw new Error("Zigbee adapter did not confirm candidate removal");
+    if (typeof this.store.removeDevice === "function") await this.store.removeDevice(deviceId);
+    else if (typeof this.store.removeDeviceFromState === "function") await this.store.removeDeviceFromState(deviceId);
+    this.pairingSession.forget(deviceId);
+    return { acknowledged: true };
+  }
+
   async remove(deviceId, force = false) {
     if (!this.client || !this.connected) throw new Error("MQTT is not connected");
     const device = this.store.getDevice(deviceId);
@@ -282,7 +295,7 @@ class MqttBridge {
     const removalId = device.metadata?.friendly_name || device.metadata?.friendlyName || device.metadata?.ieee_address || device.protocolIdentity?.ieeeAddress || deviceId;
     const transaction = crypto.randomUUID();
     const payload = JSON.stringify({ id: String(removalId), clear_cache: true, transaction, ...(force ? { force: true } : {}) });
-    await new Promise((resolve, reject) => {
+    const acknowledgement = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingRemovals.delete(transaction);
         reject(new Error("Timed out waiting for Zigbee2MQTT to remove the device"));
@@ -296,6 +309,7 @@ class MqttBridge {
       });
     });
     await this.store.addEvent({ type: "zigbee_device_remove_requested", deviceId: String(deviceId) });
+    return acknowledgement;
   }
 
   forgetDevice(deviceId) {

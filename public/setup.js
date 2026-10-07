@@ -6,7 +6,7 @@ const supportCode = document.getElementById("support-code");
 const supportRedeem = document.getElementById("support-redeem");
 const supportRevoke = document.getElementById("support-revoke");
 const supportStatus = document.getElementById("support-status");
-const supportOnly = window.location.pathname === "/support-access";
+const supportOnly = window.location.pathname === "/support-access" || window.location.pathname === "/permanent-installation";
 const operatorWindow = supportOnly && Boolean(window.opener);
 const supportSection = document.getElementById("support-access");
 let supportExpiryTimer = null;
@@ -187,10 +187,11 @@ window.addEventListener("message", (event) => {
       if (result.state !== "established") throw handoffFailure({ handoffPhase: "hub", errorCode: "operator_handoff_invalid_state", correlationId: result.correlationId });
       // Verify the newly set HttpOnly cookie with an authenticated, read-only
       // OS endpoint before telling Company Portal the session works.
-      const sessionCheck = await fetch("/_dinodia/admin/api/status", { cache: "no-store", credentials: "same-origin" });
+      const destination = result.destination === "/permanent-installation" ? "/permanent-installation" : "/";
+      const sessionCheck = await fetch(destination === "/permanent-installation" ? "/_dinodia/installer/commissioning" : "/_dinodia/admin/api/status", { cache: "no-store", credentials: "same-origin" });
       if (!sessionCheck.ok) throw handoffFailure({ handoffPhase: "hub", errorCode: "operator_session_protected_read_failed", correlationId: result.correlationId });
       if (window.opener) window.opener.postMessage({ type: "dinodia-operator-session-established" }, "https://dinodia-platform-v2.vercel.app");
-      window.location.assign("/");
+      window.location.assign(destination);
     };
     startHandoff().catch((error) => {
       const phase = error?.phase === "prepare" || error?.phase === "consume" ? error.phase : "hub";

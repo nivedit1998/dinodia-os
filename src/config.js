@@ -40,6 +40,8 @@ const platformApiUrl = nodeEnv === "production"
 // Match Platform's exact opt-in semantics. Whitespace or any other malformed
 // value is OFF, avoiding a policy-mode disagreement between the two runtimes.
 const stage1InternalOperatorDaySession = process.env.STAGE1_INTERNAL_OPERATOR_DAY_SESSION === "true";
+const nativeCommissioningCatalogueVersion = stringEnv("DINODIA_NATIVE_COMMISSIONING_CATALOGUE_VERSION", "");
+const nativeCommissioningCatalogueApproved = nativeCommissioningCatalogueVersion === "DINODIA-NATIVE-COMMISSIONING-V1";
 const configuredSetupInterface = stringEnv("DINODIA_SETUP_INTERFACE", "");
 // Keep a stable interface selector, never a DHCP address from the previous
 // router. Legacy IPv4 values are ignored and physical-interface discovery
@@ -71,6 +73,11 @@ module.exports = {
   // signed policy marker or the OS verifier rejects them. Stage 14 Section 7.2
   // removes this branch and restores the 15-minute bound.
   stage1InternalOperatorDaySession,
+  nativeCommissioningCapabilities: Object.freeze({
+    nativeZigbeeCommissioningV1: nativeCommissioningCatalogueApproved && stringEnv("DINODIA_NATIVE_ZIGBEE_COMMISSIONING_ENABLED", "false") === "true",
+    nativeMatterCommissioningV1: nativeCommissioningCatalogueApproved && stringEnv("DINODIA_NATIVE_MATTER_COMMISSIONING_ENABLED", "false") === "true",
+    nativeCommissioningCatalogueVersion: nativeCommissioningCatalogueApproved ? nativeCommissioningCatalogueVersion : "",
+  }),
   operatorSessionTtlMs: stage1InternalOperatorDaySession ? 86_400_000 : 900_000,
   manufacturingRootPublicKeys: stringEnv("DINODIA_MANUFACTURING_ROOT_PUBLIC_KEYS", ""),
   mqttUrl: stringEnv("MQTT_URL", ""),

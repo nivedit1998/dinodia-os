@@ -30,6 +30,7 @@ const { ElectricUsageTracker } = require("./electricUsage");
 const { commandForBinding: commandForZigbeeBinding } = require("./integrations/zigbee/commandAdapter");
 const { commandForBinding: commandForMatterBinding } = require("./integrations/matter/commandAdapter");
 const { MatterPairingSession } = require("./integrations/matter/pairingSession");
+const { NativeCommissioningService } = require("./commissioning/nativeCommissioningService");
 const { publicCapability } = require("./capabilities/schema");
 const { allProjectedSurfaces } = require("./capabilities/controlSurfaceProjection");
 const { rawEntityById } = require("./capabilities/devicePresentation");
@@ -456,9 +457,9 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   const operatorSessionAuth = (token) => {
     clearOperatorBrowserSessions();
     const principal = verifyOperatorSessionToken(token, { publicKey: operatorPublicKey, hubId: serial, requiredScope: null, requireRecentAuth: false, now: operatorNow(), internalOperatorDaySession: runtimeConfig.stage1InternalOperatorDaySession === true });
-    if (!principal || !principal.scope.some((scope) => ["os:admin", "os:support"].includes(String(scope))) || revokedOperatorJtis.has(String(principal.jti))) return null;
+    if (!principal || !principal.scope.some((scope) => ["os:admin", "os:support", "os:permanent-installation"].includes(String(scope))) || revokedOperatorJtis.has(String(principal.jti))) return null;
     const activeHandle = [...operatorBrowserSessions.values()].find((entry) => entry.token === String(token));
-    if (principal.scope.includes("os:admin") && runtimeConfig.nodeEnv === "production") {
+    if ((principal.scope.includes("os:admin") || principal.scope.includes("os:permanent-installation")) && runtimeConfig.nodeEnv === "production") {
       if (activeHandle && operatorNow() - Number(activeHandle.lastAuthorizationCheckAt || 0) >= 60_000) return null;
     }
     return { ...principal, principalType: "operator", authToken: String(token), credentialFingerprint: hashTokenValue(token).slice(0, 32) };
@@ -473,7 +474,11 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     if (!principal) return null;
     const identity = hubStore.getIdentity?.() || {};
     const acceptedLineages = new Set([serial, identity.instanceId, platform.hubInstallId].filter(Boolean).map(String));
-    return acceptedLineages.has(String(principal.hubInstallId)) ? principal : null;
+    return acceptedLineages.has(String(principal.hubInstallId)) ? {
+      ...principal,
+      accessTokenHash: crypto.createHash("sha256").update(String(token), "utf8").digest("hex"),
+      identityGeneration: Number(identity.generation || 0),
+    } : null;
   };
 
   let automation;
@@ -883,6 +888,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   });
 
   let pairing;
+  let nativeCommissioningService;
   alexaIntegration = new AlexaIntegration({
     store: hubStore,
     pairing,
@@ -974,7 +980,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       nodeEnv: runtimeConfig.nodeEnv,
       kind: "dinodia_os",
       version: VERSION,
-      capabilities: { managedAreaProvisioningV1: true, managedDevicePresentationV1: true, activityIncidentReportingV1: true, alexaNativeProjectionV1: true, alexaNativeDirectiveV1: true },
+      capabilities: { managedAreaProvisioningV1: true, managedDevicePresentationV1: true, activityIncidentReportingV1: true, alexaNativeProjectionV1: true, alexaNativeDirectiveV1: true,
+        ...runtimeConfig.nativeCommissioningCapabilities },
     },
     getAreaSnapshot: () => ({ schemaVersion: 1, capturedAt: new Date().toISOString(), areas: hubStore.listAreas().map((area) => ({ areaId: area.id, name: area.name })) }),
     getHeatingUsage: () => heating.payload(),
@@ -1004,6 +1011,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   });
   alexaIntegration.pairing = pairing;
   if (alexaIntegration.platformSync) alexaIntegration.platformSync.pairing = pairing;
+  nativeCommissioningService = new NativeCommissioningService({ store: hubStore, mqtt, matter, pairing, vault, eventBus,
+    commissioningCapabilities: runtimeConfig.nativeCommissioningCapabilities, clock, logger });
   eventBus.on("registry_updated", (event) => {
     if (event?.registry === "area") pairing.syncNow().catch(() => {});
   });
@@ -1403,7 +1412,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     return matches.length === 1 ? String(matches[0].areaId || "") : "";
   }
 
-  function nativeDeviceView(principal, device) {
+function nativeDeviceView(principal, device) {
     const canonicalAreaId = canonicalAreaIdForHubArea(device?.areaId || device?.metadata?.areaId);
     if (!canonicalAreaId || !(principal?.areaIds || []).map(String).includes(canonicalAreaId)) return null;
     const policy = hubStore.getPlatform?.()?.devicePolicies?.[String(device.id)] || null;
@@ -1413,7 +1422,9 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       ...(policy ? {
         managementClass: policy.managementClass === "TENANT_DEVICE" ? "tenant_device" : "property_device",
         tenantOwnerMembershipId: policy.ownerMembershipId || null,
-        name: policy.customerLabel || policy.overrideName || device.name,
+        name: policy.overrideName || device.name,
+        customerLabel: policy.customerLabel || device.customerLabel,
+        setup: { ...(device.setup || {}), viewOnly: String(policy.lifecycle || "").toUpperCase() === "VIEW_ONLY" },
         retired: ["RETIRED", "REMOVED", "REMOVAL_PENDING", "RECOMMISSION_REQUIRED"].includes(String(policy.lifecycle)),
       } : {}),
     };
@@ -1444,7 +1455,9 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     const homeId = String(principal.homeId || "");
     const areaIds = (principal.areaIds || []).map(String);
     return hubStore.listDevices()
-      .filter((device) => !nativeDeviceIsRetired(device) && appCanReadDevice(principal, device))
+      .filter((device) => !nativeDeviceIsRetired(device) && !nativeCommissioningService?.isQuarantinedDevice(device.id)
+        && !["needs_setup", "interviewing", "commissioning"].includes(String(device.setup?.status || "").toLowerCase())
+        && appCanReadDevice(principal, device))
       .map((device) => serializeNativeDevice({
         device: nativeDeviceView(principal, device), homeId, homeMembershipId: String(principal.membershipId),
         role: String(principal.householdRole), areaIds, surfaces: allProjectedSurfaces(device),
@@ -1454,7 +1467,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   }
 
   function nativeDeviceIsRetired(device) {
-    return device?.retired === true || ["RETIRED", "REMOVED", "REPLACED", "DEREGISTERED"].includes(String(device?.lifecycle || "").toUpperCase());
+    return device?.retired === true || ["RETIRED", "REMOVED", "REPLACED", "DEREGISTERED", "RECOMMISSION_REQUIRED"].includes(String(device?.lifecycle || "").toUpperCase());
   }
 
   function rememberNativeCatalog(devices) {
@@ -1942,6 +1955,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       (req.method === "GET" && (pathname === "/api/status" || pathname === "/api/devices" || pathname.startsWith("/api/devices/") || pathname === "/api/dinodia/v1/health" || pathname === "/api/dinodia/v1/snapshot" || pathname === "/api/dinodia/v1/areas" || pathname === "/api/dinodia/v1/devices" || /^\/api\/dinodia\/v1\/devices\/[^/]+$/.test(pathname) || pathname === "/api/dinodia/v1/control-catalog" || pathname === "/api/dinodia/v1/maintenance/status" || /^\/api\/dinodia\/v1\/commands\/[^/]+$/.test(pathname))) ||
       (req.method === "DELETE" && /^\/api\/dinodia\/v1\/devices\/[^/]+$/.test(pathname)) ||
       (req.method === "POST" && pathname === "/api/dinodia/v1/commands") ||
+      (nativeTenantPrincipal && req.method === "POST" && /^\/api\/dinodia\/v1\/commissioning\/sessions(?:\/[^/]+(?:\/(?:matter-payload|select|complete|cancel|resume))?)?$/.test(pathname)) ||
+      (nativeTenantPrincipal && req.method === "GET" && /^\/api\/dinodia\/v1\/commissioning\/sessions\/[^/]+$/.test(pathname)) ||
       (req.method === "POST" && pathname.includes("/entities/") && pathname.endsWith("/service")) ||
       (req.method === "POST" && pathname === "/api/step-up/descriptor-challenge")
     )) {
@@ -2016,6 +2031,50 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     // device, identity-key or credential material.
     if (pathname === "/api/dinodia/v1/health" && req.method === "GET") {
       return json(res, 200, { ok: true, schemaVersion: "dinodia.v1", mode: "native-v2" });
+    }
+
+    const commissioningPath = pathname.match(/^\/api\/dinodia\/v1\/commissioning\/sessions(?:\/([^/]+)(?:\/(matter-payload|select|complete|cancel|resume))?)?$/);
+    if (commissioningPath) {
+      if (!nativeTenantPrincipal || offlinePrincipal || !nativeCommissioningService) return nativeContractError(res, 403, "SCOPE_DENIED", "A current selected tenant session is required for commissioning");
+      try {
+        const sessionId = commissioningPath[1] ? decodeURIComponent(commissioningPath[1]) : "";
+        const action = commissioningPath[2] || "";
+        if (req.method === "POST" && !sessionId && !action) {
+          const body = await readBody(req, 4096);
+          if (Object.keys(body).sort().join("\n") !== "protocol\nschemaVersion" || body.schemaVersion !== "dinodia.v1") return nativeContractError(res, 400, "VALIDATION_FAILED", "The commissioning request is invalid");
+          return json(res, 201, await nativeCommissioningService.start(scopedPrincipal, { protocol: body.protocol }, String(req.headers["idempotency-key"] || "")));
+        }
+        if (req.method === "GET" && sessionId && !action) {
+          const after = Number(url.searchParams.get("after") || 0);
+          const candidateAfter = url.searchParams.get("candidateAfter") || null;
+          if (!Number.isSafeInteger(after) || after < 0 || candidateAfter !== null && !/^[0-9a-f-]{36}$/i.test(candidateAfter)) return nativeContractError(res, 400, "VALIDATION_FAILED", "The commissioning page cursor is invalid");
+          return json(res, 200, await nativeCommissioningService.status(sessionId, scopedPrincipal, after, candidateAfter));
+        }
+        if (req.method === "POST" && sessionId && action) {
+          const body = await readBody(req, 4096);
+          if (action === "matter-payload") {
+            if (Object.keys(body).sort().join("\n") !== "schemaVersion\nsetupPayload" || body.schemaVersion !== "dinodia.v1") return nativeContractError(res, 400, "VALIDATION_FAILED", "The Matter setup payload request is invalid");
+            return json(res, 202, await nativeCommissioningService.matterPayload(sessionId, scopedPrincipal, body.setupPayload));
+          }
+          if (action === "select") return json(res, 200, await nativeCommissioningService.select(sessionId, scopedPrincipal, body));
+          if (["complete", "cancel", "resume"].includes(action)) {
+            const expectedKeys = action === "complete" ? "disposition\nschemaVersion" : "schemaVersion";
+            if (Object.keys(body).sort().join("\n") !== expectedKeys || body.schemaVersion !== "dinodia.v1"
+              || action === "complete" && !["install", "view_only", "remove"].includes(String(body.disposition))) return nativeContractError(res, 400, "VALIDATION_FAILED", "The commissioning action request is invalid");
+            const result = action === "complete" ? await nativeCommissioningService.complete(sessionId, scopedPrincipal, String(body.disposition))
+              : action === "cancel" ? await nativeCommissioningService.cancel(sessionId, scopedPrincipal)
+                : await nativeCommissioningService.resume(sessionId, scopedPrincipal);
+            return json(res, 200, result);
+          }
+        }
+        return nativeContractError(res, 405, "METHOD_NOT_ALLOWED", "The commissioning method is not allowed");
+      } catch (error) {
+        const status = Number(error?.statusCode);
+        const code = String(error?.code || "");
+        if ([400, 403, 404, 409, 410, 413, 503].includes(status) && /^[a-z0-9_]{1,80}$/i.test(code)) return nativeContractError(res, status, code, String(error.message || "The commissioning operation is unavailable").slice(0, 180), status === 503 || status === 409);
+        logger.warn(`[commissioning] request failed (${/^[a-z0-9_]{1,80}$/i.test(code) ? code : "internal_error"})`);
+        return nativeContractError(res, 503, "HUB_UNAVAILABLE", "The commissioning service is temporarily unavailable", true);
+      }
     }
 
     if (["/api/dinodia/v1/snapshot", "/api/dinodia/v1/areas", "/api/dinodia/v1/devices", "/api/dinodia/v1/control-catalog"].includes(pathname) && req.method === "GET") {
@@ -3335,7 +3394,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   function isNativeAppRoute(req, url) {
     return (req.method === "GET" && (url.pathname === "/api/dinodia/v1/snapshot" || url.pathname === "/api/dinodia/v1/areas" || url.pathname === "/api/dinodia/v1/devices" || /^\/api\/dinodia\/v1\/devices\/[^/]+$/.test(url.pathname) || url.pathname === "/api/dinodia/v1/control-catalog" || url.pathname === "/api/dinodia/v1/maintenance/status" || /^\/api\/dinodia\/v1\/commands\/[^/]+$/.test(url.pathname)))
       || (req.method === "DELETE" && /^\/api\/dinodia\/v1\/devices\/[^/]+$/.test(url.pathname))
-      || (req.method === "POST" && (url.pathname === "/api/dinodia/v1/commands" || url.pathname === "/api/dinodia/v1/offline/challenges" || url.pathname === "/api/dinodia/v1/maintenance/update" || url.pathname === "/api/step-up/descriptor-challenge"));
+      || (req.method === "POST" && (url.pathname === "/api/dinodia/v1/commands" || url.pathname === "/api/dinodia/v1/offline/challenges" || url.pathname === "/api/dinodia/v1/maintenance/update" || url.pathname === "/api/step-up/descriptor-challenge" || /^\/api\/dinodia\/v1\/commissioning\/sessions(?:\/[^/]+(?:\/(?:matter-payload|select|complete|cancel|resume))?)?$/.test(url.pathname)))
+      || (req.method === "GET" && /^\/api\/dinodia\/v1\/commissioning\/sessions\/[^/]+$/.test(url.pathname));
   }
   function isHaCompatibilityPath(pathname) {
     return pathname === "/api" || pathname.startsWith("/api/") || pathname.startsWith("/_dinodia/zha/") || pathname === "/_dinodia/sync-status";
@@ -3607,6 +3667,128 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     return json(res, 400, { error: "Support access action must be redeem or revoke" });
   }
 
+  async function currentPermanentInstallationPrincipal(req) {
+    const cookie = String(req.headers.cookie || "").split(";").map((part) => part.trim()).find((part) => part.startsWith("dinodia_os_operator_session="));
+    const handle = cookie ? decodeURIComponent(cookie.slice("dinodia_os_operator_session=".length)) : "";
+    const session = operatorBrowserSessions.get(handle);
+    if (!session || !session.handoffId || !session.jti || revokedOperatorJtis.has(String(session.jti)) || operatorNow() >= Number(session.expiresAt || 0)) return null;
+    const principal = operatorSessionAuth(session.token);
+    if (!principal || principal.scope.length !== 1 || principal.scope[0] !== "os:permanent-installation") return null;
+    try {
+      const result = await pairing.requestWithHubIdentity("/api/hub-agent/operator-session/revalidate", { handoffId: session.handoffId, jti: session.jti, credentialVersion: session.credentialVersion });
+      if (result?.active !== true) {
+        await revokeLocalOperatorSession(session, "operator_installation_authority_changed");
+        return null;
+      }
+      session.lastAuthorizationCheckAt = operatorNow();
+      return operatorSessionAuth(session.token);
+    } catch {
+      // An installer mutation must have a fresh Platform authorization result;
+      // unlike a dashboard session, an old successful check is not sufficient.
+      return null;
+    }
+  }
+
+  function operatorRequestTransportAllowed(req) {
+    const local = localSetupHostAllowed(req);
+    const remote = isHiveCredentialTransportAllowed(req, { nodeEnv: runtimeConfig.nodeEnv, configuredHostname: runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "", allowLoopback: false });
+    const tlsReport = lanTlsIdentity?.publicReport?.() || null;
+    const expectedLanHost = tlsReport?.state === "CURRENT" ? `${String(tlsReport.host || "").toLowerCase()}:${lanListenerPort}` : "";
+    const directLanTls = isTrustedOfflineLanTransport(req)
+      && Boolean(expectedLanHost)
+      && String(req.headers.host || "").toLowerCase() === expectedLanHost
+      && Number(req.socket?.localPort) === lanListenerPort
+      && Boolean(physicalLanAddress)
+      && String(req.socket?.localAddress || "").replace(/^::ffff:/, "") === String(physicalLanAddress).replace(/^::ffff:/, "")
+      && isPrivateLanRequest(req);
+    if (!local && !remote && !directLanTls) return null;
+    const expectedProtocol = remote || directLanTls ? "https" : "http";
+    if (req.headers.origin && String(req.headers.origin) !== `${expectedProtocol}://${req.headers.host}`) return null;
+    // Forwarded headers are trusted only on the already authenticated local
+    // Cloudflare connector path. A LAN/browser client cannot manufacture a
+    // secure CloudURL origin by adding them to an HTTP request.
+    if (!remote && (req.headers["x-forwarded-host"] || req.headers["x-forwarded-proto"])) return null;
+    return { local, remote, directLanTls, expectedProtocol };
+  }
+
+  async function handlePermanentInstallationCommissioning(req, res, url) {
+    const transport = operatorRequestTransportAllowed(req);
+    if (!transport) return nativeContractError(res, 404, "SCOPE_DENIED", "The assigned installation workspace is unavailable on this endpoint");
+    if (req.method !== "GET" && req.method !== "POST") return nativeContractError(res, 405, "METHOD_NOT_ALLOWED", "The commissioning method is not allowed");
+    if (req.method === "POST" && (String(req.headers.origin || "") !== `${transport.expectedProtocol}://${req.headers.host}` || !String(req.headers["content-type"] || "").toLowerCase().startsWith("application/json")
+      || String(req.headers["x-dinodia-setup-csrf"] || "") !== setupCookie(req, "dinodia_setup_csrf"))) return nativeContractError(res, 403, "AUTH_REQUIRED", "The assigned installation browser context is not valid");
+    const pathMatch = url.pathname.match(/^\/_dinodia\/installer\/commissioning(?:\/sessions(?:\/([^/]+)(?:\/(matter-payload|select|complete|cancel|resume))?)?)?$/);
+    if (!pathMatch) return nativeContractError(res, 404, "RESOURCE_NOT_FOUND", "The commissioning route is unavailable");
+    const sessionId = pathMatch[1] ? decodeURIComponent(pathMatch[1]) : "";
+    const action = pathMatch[2] || "";
+    // Matter setup codes are network credentials. Never accept them over the
+    // physical installer HTTP listener, even for an otherwise valid staff
+    // handoff. The approved CloudURL or current pinned LAN TLS listener is
+    // required before a request body is read.
+    if (req.method === "POST" && action === "matter-payload" && !transport.remote && !transport.directLanTls) {
+      return nativeContractError(res, 403, "SECURE_TRANSPORT_REQUIRED", "Matter setup codes require the verified secure hub connection");
+    }
+    const principal = await currentPermanentInstallationPrincipal(req);
+    if (!principal) return nativeContractError(res, 401, "AUTH_REQUIRED", "The assigned work or Company Portal session expired. Close this window and reopen the work from Company Portal.");
+    try {
+      if (req.method === "GET" && !sessionId && !action) {
+        return json(res, 200, { schemaVersion: "dinodia.v1", requestId: principal.requestId, workflowId: principal.workflow,
+          areas: (Array.isArray(principal.areaOptions) ? principal.areaOptions : []).map((area) => ({ id: area.id, name: area.name })),
+          protocols: {
+            zigbee: { enabled: runtimeConfig.nativeCommissioningCapabilities.nativeZigbeeCommissioningV1 === true, adapterReady: mqtt.status().connected === true && Boolean(hubStore.getZigbee?.().adapterPath) },
+            matter: { enabled: runtimeConfig.nativeCommissioningCapabilities.nativeMatterCommissioningV1 === true, adapterReady: matter.status().connected === true && hubStore.getThread?.().configured === true },
+          } }, { "Cache-Control": "no-store" });
+      }
+      if (!nativeCommissioningService) return nativeContractError(res, 503, "HUB_UNAVAILABLE", "The hub commissioning service is unavailable", true);
+      if (req.method === "POST" && !sessionId && !action) {
+        const body = await readBody(req, 4096);
+        if (Object.keys(body).sort().join("\n") !== "protocol\nschemaVersion" || body.schemaVersion !== "dinodia.v1") return nativeContractError(res, 400, "VALIDATION_FAILED", "The commissioning request is invalid");
+        return json(res, 201, await nativeCommissioningService.start(principal, { protocol: body.protocol }, String(req.headers["idempotency-key"] || "")), { "Cache-Control": "no-store" });
+      }
+      if (req.method === "GET" && sessionId && !action) {
+        const after = Number(url.searchParams.get("after") || 0);
+        const candidateAfter = url.searchParams.get("candidateAfter") || null;
+        if (!Number.isSafeInteger(after) || after < 0 || candidateAfter !== null && !/^[0-9a-f-]{36}$/i.test(candidateAfter)) return nativeContractError(res, 400, "VALIDATION_FAILED", "The commissioning cursor is invalid");
+        return json(res, 200, await nativeCommissioningService.status(sessionId, principal, after, candidateAfter), { "Cache-Control": "no-store" });
+      }
+      if (req.method === "POST" && sessionId && action) {
+        const body = await readBody(req, 4096);
+        if (action === "matter-payload") {
+          if (Object.keys(body).sort().join("\n") !== "schemaVersion\nsetupPayload" || body.schemaVersion !== "dinodia.v1") return nativeContractError(res, 400, "VALIDATION_FAILED", "The Matter setup payload request is invalid");
+          return json(res, 202, await nativeCommissioningService.matterPayload(sessionId, principal, body.setupPayload), { "Cache-Control": "no-store" });
+        }
+        if (action === "select") return json(res, 200, await nativeCommissioningService.select(sessionId, principal, body), { "Cache-Control": "no-store" });
+        if (["complete", "cancel", "resume"].includes(action)) {
+          const expected = action === "complete" ? "disposition\nschemaVersion" : "schemaVersion";
+          if (Object.keys(body).sort().join("\n") !== expected || body.schemaVersion !== "dinodia.v1") return nativeContractError(res, 400, "VALIDATION_FAILED", "The commissioning action request is invalid");
+          const result = action === "complete" ? await nativeCommissioningService.complete(sessionId, principal, String(body.disposition))
+            : action === "cancel" ? await nativeCommissioningService.cancel(sessionId, principal) : await nativeCommissioningService.resume(sessionId, principal);
+          return json(res, 200, result, { "Cache-Control": "no-store" });
+        }
+      }
+      return nativeContractError(res, 405, "METHOD_NOT_ALLOWED", "The commissioning method is not allowed");
+    } catch (error) {
+      const status = Number(error?.statusCode) || 503;
+      const code = /^[a-z0-9_]{1,64}$/i.test(String(error?.code || "")) ? String(error.code).toUpperCase() : "COMMISSIONING_UNAVAILABLE";
+      return nativeContractError(res, status, code, status >= 500 ? "The commissioning service is temporarily unavailable" : String(error.message || "The commissioning request was rejected"), status >= 500);
+    }
+  }
+
+  async function handlePermanentInstallationPage(req, res) {
+    const transport = operatorRequestTransportAllowed(req);
+    if (!transport) return text(res, 404, "Not found");
+    if (req.method !== "GET") return text(res, 405, "Method not allowed");
+    const principal = await currentPermanentInstallationPrincipal(req);
+    if (!principal) return handleRemoteSupportPage(req, res);
+    const asset = req.url?.split("?")[0] === "/permanent-installation.js";
+    const filePath = path.resolve(runtimeConfig.staticDir, asset ? "permanent-installation.js" : "permanent-installation.html");
+    const content = await fs.promises.readFile(filePath, "utf8").catch(() => null);
+    if (content === null) return text(res, 404, "Not found");
+    setupHeaders(res);
+    res.writeHead(200, { "content-type": asset ? "application/javascript; charset=utf-8" : "text/html; charset=utf-8", "cache-control": "no-store, private", "content-security-policy": "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" });
+    return res.end(content);
+  }
+
   async function handleRemoteSupportPage(req, res) {
     const local = localSetupHostAllowed(req);
     const remote = isHiveCredentialTransportAllowed(req, { nodeEnv: runtimeConfig.nodeEnv, configuredHostname: runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "", allowLoopback: false });
@@ -3697,7 +3879,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       "dinodia_operator_binding=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
       "dinodia_operator_attempt=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
     ]);
-    return json(res, 200, { ok: true, state: "established", expiresAt: new Date(job.expiresAt).toISOString(), serial, correlationId: job.correlationId });
+    return json(res, 200, { ok: true, state: "established", expiresAt: new Date(job.expiresAt).toISOString(), serial, correlationId: job.correlationId,
+      destination: job.operatorScope === "os:permanent-installation" ? "/permanent-installation" : "/" });
   }
 
   async function runOperatorHandoffJob(job) {
@@ -3757,18 +3940,24 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       const grantedPrincipal = verifyOperatorSessionToken(operatorToken, {
         publicKey: operatorPublicKey,
         hubId: serial,
-        requiredScope: "os:admin",
+        requiredScope: null,
         requireRecentAuth: false,
         now: operatorNow(),
         internalOperatorDaySession: runtimeConfig.stage1InternalOperatorDaySession === true,
       });
-      if (!grantedPrincipal || grantedPrincipal.handoffId !== job.handoffId || grantedPrincipal.homeId == null || !grantedPrincipal.employeeSessionId) {
+      const scopeList = Array.isArray(grantedPrincipal?.scope) ? grantedPrincipal.scope.map(String) : [];
+      const operatorScope = scopeList.length === 1 && ["os:admin", "os:permanent-installation"].includes(scopeList[0]) ? scopeList[0] : "";
+      const grantBound = Boolean(grantedPrincipal && grantedPrincipal.handoffId === job.handoffId && grantedPrincipal.homeId && grantedPrincipal.employeeSessionId);
+      const staffGrantComplete = operatorScope !== "os:permanent-installation" || Boolean(grantedPrincipal?.workflow && grantedPrincipal?.requestId
+        && Array.isArray(grantedPrincipal?.areaIds) && Array.isArray(grantedPrincipal?.areaOptions) && Number.isSafeInteger(Number(grantedPrincipal?.workRevision)));
+      if (!grantBound || !operatorScope || !staffGrantComplete) {
         throw Object.assign(new Error("grant policy mismatch"), { safeCode: "operator_session_grant_invalid", phase: "consume", statusCode: 502 });
       }
       const expiresAt = Math.min(Number(new Date(consumed.expiresAt).getTime()), Number(grantedPrincipal.exp) * 1000);
       if (!Number.isFinite(expiresAt) || expiresAt <= operatorNow()) throw Object.assign(new Error("grant expired"), { safeCode: "operator_session_expired", phase: "consume", statusCode: 401 });
       job.sessionHandle = issueBrowserOperatorSession(operatorToken, expiresAt, { jti: grantedPrincipal.jti, handoffId: grantedPrincipal.handoffId, credentialVersion: grantedPrincipal.credentialVersion });
       job.expiresAt = expiresAt;
+      job.operatorScope = operatorScope;
       job.state = "established";
       job.phase = null;
       job.retainUntil = Math.min(expiresAt, operatorNow() + 2 * 60_000);
@@ -3851,7 +4040,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     const session = operatorBrowserSessions.get(handle);
     if (session) {
       const principal = operatorSessionAuth(session.token);
-      if (!principal || !principal.scope.includes("os:admin")) return json(res, 401, { error: "This Dinodia OS session has expired or is no longer active", errorCode: "operator_session_expired" });
+      if (!principal || !(principal.scope.includes("os:admin") || principal.scope.includes("os:permanent-installation"))) return json(res, 401, { error: "This Dinodia OS session has expired or is no longer active", errorCode: "operator_session_expired" });
       await revokeLocalOperatorSession(session, "operator_session_ended");
     }
     setupHeaders(res, ["dinodia_os_operator_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"]);
@@ -3906,6 +4095,9 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     const directNativeAppApi = !isDashboardAdminPath(url.pathname) && isNativeAppRoute(req, url);
     const browserToken = browserOperatorToken(req);
     const operator = await refreshedSupportBrowserPrincipal(req) || operatorSessionAuth(browserToken);
+    if (operator?.scope?.includes("os:permanent-installation") && !operator.scope.includes("os:admin")) {
+      return nativeContractError(res, 403, "SCOPE_DENIED", "This assigned-work session can open only its permanent-installation workspace");
+    }
     const app = appSessionAuth(bearerToken(req));
     const nativeAppApi = directNativeAppApi || isDashboardAdminPath(url.pathname) && (
       dashboardUrl.pathname === "/api/status" ||
@@ -4018,6 +4210,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       return json(res, 200, { ok: true, ...responseBody, hubSignature });
     }
     if (url.pathname === runtimeConfig.googleNestCallbackPath) return handleGoogleNestCallback(req, res, url);
+    if (url.pathname === "/permanent-installation" || url.pathname === "/permanent-installation.js") return handlePermanentInstallationPage(req, res);
+    if (url.pathname === "/_dinodia/installer/commissioning" || url.pathname.startsWith("/_dinodia/installer/commissioning/")) return handlePermanentInstallationCommissioning(req, res, url);
     if (url.pathname === "/support-access") return handleRemoteSupportPage(req, res);
     if (url.pathname === "/_dinodia/setup/support-access") return handleSupportAccessRequest(req, res);
     if (url.pathname === "/_dinodia/setup/operator-attempt") return handleOperatorAttemptRegistration(req, res);
@@ -4044,7 +4238,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       || pathname === "/_dinodia/setup/status" && req.method === "GET"
       || ["/_dinodia/setup/operator-attempt", "/_dinodia/setup/pairing", "/_dinodia/setup/support-access", "/_dinodia/setup/operator-session"].includes(pathname)
         && (req.method === "POST" || pathname === "/_dinodia/setup/pairing" && req.method === "DELETE");
-    const staticRoute = req.method === "GET" && (["/", "/index.html", "/styles.css", "/app.js"].includes(pathname)
+    const staticRoute = req.method === "GET" && (["/", "/index.html", "/styles.css", "/app.js", "/permanent-installation", "/permanent-installation.js"].includes(pathname)
       || /^\/js\/[A-Za-z0-9._/-]+$/.test(pathname) && !pathname.split("/").includes(".."));
     const installerReadRoutes = new Set([
       "/api/status", "/api/devices", "/api/automations", "/api/areas", "/api/labels",
@@ -4055,10 +4249,11 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     const operatorReadRoute = req.method === "GET" && installerReadRoutes.has(adminApiPath);
     const operatorAreaCreateRoute = req.method === "POST" && adminApiPath === "/api/areas";
     const operatorEndRoute = req.method === "POST" && pathname === "/_dinodia/operator-session/end";
-    const recognizedPath = setupRoute || staticRoute || operatorReadRoute || operatorAreaCreateRoute || operatorEndRoute;
+    const permanentInstallationRoute = pathname === "/_dinodia/installer/commissioning" || /^\/_dinodia\/installer\/commissioning\/sessions(?:\/[^/]+(?:\/(?:matter-payload|select|complete|cancel|resume))?)?$/.test(pathname);
+    const recognizedPath = setupRoute || staticRoute || operatorReadRoute || operatorAreaCreateRoute || operatorEndRoute || permanentInstallationRoute;
     if (!recognizedPath && ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(req.method)) return json(res, 404, { error: "Not found" });
     if (!recognizedPath) return text(res, 405, "Method not allowed");
-    if (!setupRoute && !staticRoute && !operatorReadRoute && !operatorAreaCreateRoute && !operatorEndRoute) return json(res, 404, { error: "Not found" });
+    if (!setupRoute && !staticRoute && !operatorReadRoute && !operatorAreaCreateRoute && !operatorEndRoute && !permanentInstallationRoute) return json(res, 404, { error: "Not found" });
     return handleUnifiedRequest(req, res);
   });
   let httpsServer = null;
@@ -4272,6 +4467,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     nativeCommandOutcomeTimers.clear();
     if (operatorSessionRevalidationTimer) clearInterval(operatorSessionRevalidationTimer);
     operatorSessionRevalidationTimer = null;
+    await nativeCommissioningService?.close?.();
     mqtt.close();
     matter.close();
     heatingDemandController.stop();
@@ -4299,7 +4495,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     await closeListeningServer(server);
   }
 
-  return { server, start, stop, haServer: server, setupServer, getLanHttpsServer: () => httpsServer, hubAgentServer: hubAgentCompat.server, store: hubStore, mqtt, matter, hive, googleNest, alexa: alexaIntegration, heatingDemandController, cloudflare, sync: heartbeat, pairing, activity, electric, model: haModel, vault, eventBus, config: runtimeConfig, syncOperatorBrowserSessions, nativeAutomationService, nativeAutomationScheduler };
+  return { server, start, stop, haServer: server, setupServer, getLanHttpsServer: () => httpsServer, hubAgentServer: hubAgentCompat.server, store: hubStore, mqtt, matter, hive, googleNest, alexa: alexaIntegration, heatingDemandController, cloudflare, sync: heartbeat, pairing, activity, electric, model: haModel, vault, eventBus, config: runtimeConfig, syncOperatorBrowserSessions, nativeAutomationService, nativeAutomationScheduler, nativeCommissioningService };
 }
 
 if (require.main === module) {

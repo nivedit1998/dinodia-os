@@ -151,7 +151,7 @@ function serializeDevice({ device, homeId, homeMembershipId, role, areaIds, surf
       const options = rawOptions.map((option) => isObject(option) && Object.hasOwn(option, 'value')
         ? { value: option.value, label: String(option.label || option.value).slice(0, 80) }
         : { value: option, label: String(option).slice(0, 80) });
-      const writable = capability.writable === true && bindings.length > 0 && !(valueType === 'option' && options.length === 0);
+      const writable = device.setup?.viewOnly !== true && capability.writable === true && bindings.length > 0 && !(valueType === 'option' && options.length === 0);
       const interactionKind = !writable ? 'read_only' : valueType === 'boolean' ? 'toggle' : valueType === 'number' ? (nativeRole === 'target_temperature' ? 'thermostat' : 'slider') : valueType === 'option' ? 'picker' : valueType === 'invoke' ? 'momentary_action' : 'text_input';
       const stepUpPolicy = capability.stepUpPolicy === 'required' || capability.sensitive === true || ['security_lock','lock_state'].includes(nativeRole) ? 'required' : 'none';
       const revisionForControl = Number(capability.catalogRevision ?? descriptorRevision);
@@ -194,11 +194,11 @@ function serializeDevice({ device, homeId, homeMembershipId, role, areaIds, surf
   }
   const result = {
     id: String(device.id), homeId: String(homeId), managementClass, ownerMembershipId,
-    lifecycle: device.retired === true ? 'retired' : ['ready','complete'].includes(String(device.setup?.status || '')) ? 'installed' : 'commissioning',
+    lifecycle: device.retired === true ? 'retired' : device.setup?.viewOnly === true ? 'view_only' : ['ready','complete'].includes(String(device.setup?.status || '')) ? 'installed' : 'commissioning',
     technicalLabel: String(device.protocol || 'device').slice(0, 80),
     // Legacy/internal display names can predate the public 40-character
     // contract. Bound the projection rather than dropping the device DTO.
-    customerLabel: truncateCodePoints(String(device.name || ''), 40) || null,
+    customerLabel: truncateCodePoints(String(device.customerLabel || device.name || ''), 40) || null,
     areaIds: [areaId], controls, descriptorRevision,
   };
   return validateDevice(result, { homeId, homeMembershipId, role, areaIds }) ? result : null;

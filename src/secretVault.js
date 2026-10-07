@@ -68,8 +68,12 @@ class SecretVault {
     }
     if (value === undefined || value === null || value === "") delete this.records[key];
     else this.records[key] = this.encrypt(value, key);
-    const serialized = JSON.stringify(this.records, null, 2);
+    await this.persist();
+  }
+
+  async persist() {
     this.writeQueue = this.writeQueue.then(async () => {
+      const serialized = JSON.stringify(this.records, null, 2);
       await fsPromises.mkdir(path.dirname(this.vaultFile), { recursive: true, mode: 0o700 });
       const temp = `${this.vaultFile}.${process.pid}.tmp`;
       await fsPromises.writeFile(temp, serialized, { mode: 0o600 });
@@ -80,12 +84,16 @@ class SecretVault {
   }
 
   async clear(name) { return this.set(name, ""); }
+  async delete(name) {
+    const key = String(name);
+    if (!Object.hasOwn(this.records, key)) return false;
+    delete this.records[key];
+    await this.persist();
+    return true;
+  }
   async clearAll() {
     this.records = {};
-    const temp = `${this.vaultFile}.${process.pid}.tmp`;
-    await fsPromises.writeFile(temp, "{}\n", { mode: 0o600 });
-    await fsPromises.chmod(temp, 0o600);
-    await fsPromises.rename(temp, this.vaultFile);
+    await this.persist();
   }
   has(name) { return Boolean(this.get(name)); }
 }

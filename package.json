@@ -24,12 +24,12 @@
     "restore": "node scripts/restore.js"
   },
   "dependencies": {
+    "@matter/types": "0.17.9",
     "mqtt": "^5.10.4",
     "qrcode": "^1.5.4",
     "ws": "^8.18.3"
   },
   "devDependencies": {
-    "@matter/model": "0.17.9",
-    "@matter/types": "0.17.9"
+    "@matter/model": "0.17.9"
   }
 }

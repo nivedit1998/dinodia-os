@@ -658,6 +658,43 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/homes/{homeId}/installation-requests:
+    get:
+      summary: "List Current Home Permanent-Installation Requests"
+      operationId: listHomeInstallationRequests
+      tags: [Home]
+      security: [{ CustomerSessionCookie: [] }, { MobileAccessBearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }]
+      responses:
+        "200": { description: Current bounded requests visible to the selected owner or manager., content: { application/json: { schema: { $ref: "./contract.json#/$defs/installationRequestListReceipt" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Selected Home or owner/manager membership is unavailable. }
+    post:
+      summary: "Request Permanent Device Installation"
+      operationId: createHomeInstallationRequest
+      tags: [Home]
+      security: [{ CustomerSessionCookie: [] }, { MobileAccessBearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/installationRequestCreate" } } } }
+      responses:
+        "201": { description: Home-scoped installation request created without creating or changing a membership., content: { application/json: { schema: { $ref: "./contract.json#/$defs/installationRequestReceipt" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Selected Home or owner/manager membership is unavailable. }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/homes/{homeId}/installation-requests/{requestId}/cancel:
+    post:
+      summary: "Cancel a Not-Yet-Assigned Installation Request"
+      operationId: cancelHomeInstallationRequest
+      tags: [Home]
+      security: [{ CustomerSessionCookie: [] }, { MobileAccessBearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { name: requestId, in: path, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/installationRequestCancel" } } } }
+      responses:
+        "200": { description: Idempotent cancellation receipt., content: { application/json: { schema: { $ref: "./contract.json#/$defs/installationRequestReceipt" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Request is not visible to the selected Home. }
+        "409": { $ref: "#/components/responses/Conflict" }
   /api/v2/homes/{homeId}/tenant-devices/{deviceId}/remove:
     post:
       summary: "Request removal of the current tenant's own device"
@@ -1788,8 +1825,8 @@ paths:
       tags: [Devices]
       security: [{ CustomerBearer: [] }]
       parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/commissioning" } } } }
-      responses: { "201": { description: Fifteen-minute bounded commissioning session. }, "401": { $ref: "#/components/responses/Unauthorized" }, "403": { $ref: "#/components/responses/Forbidden" } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/nativeCommissioningStartRequest" } } } }
+      responses: { "201": { description: Fifteen-minute bounded commissioning session., content: { application/json: { schema: { $ref: "./contract.json#/$defs/nativeCommissioningSession" } } } }, "400": { $ref: "#/components/responses/BadRequest" }, "401": { $ref: "#/components/responses/Unauthorized" }, "403": { $ref: "#/components/responses/Forbidden" }, "409": { $ref: "#/components/responses/Conflict" }, "503": { description: Protocol disabled or radio unavailable; no fallback is attempted. } }
   /api/dinodia/v1/commissioning/sessions/{sessionId}:
     servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
     get:
@@ -1797,15 +1834,101 @@ paths:
       operationId: getCommissioningSession
       tags: [Devices]
       security: [{ CustomerBearer: [] }]
-      parameters: [{ name: sessionId, in: path, required: true, schema: { type: string } }]
-      responses: { "200": { description: Current bounded commissioning candidates and terminal state. }, "404": { description: Session is unavailable or outside current membership scope. } }
-    delete:
-      summary: "Cancel Commissioning Session"
-      operationId: cancelCommissioningSession
+      parameters: [{ name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }, { name: after, in: query, required: false, schema: { type: integer, minimum: 0 } }, { name: candidateAfter, in: query, required: false, schema: { type: string, format: uuid } }]
+      responses:
+        "200":
+          description: Current bounded commissioning page and event projection.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/nativeCommissioningSession" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Session is unavailable or outside current membership scope. }
+  /api/dinodia/v1/commissioning/sessions/{sessionId}/matter-payload:
+    servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
+    post:
+      summary: "Submit Matter Setup Payload"
+      operationId: submitMatterCommissioningPayload
       tags: [Devices]
       security: [{ CustomerBearer: [] }]
-      parameters: [{ name: sessionId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IdempotencyKey" }]
-      responses: { "204": { description: Session cancelled and setup material removed. }, "404": { description: Session is unavailable or outside current membership scope. } }
+      parameters: [{ name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/nativeCommissioningMatterPayload" } } } }
+      responses:
+        "202":
+          description: Payload accepted for bounded local commissioning only.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/nativeCommissioningSession" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/dinodia/v1/commissioning/sessions/{sessionId}/select:
+    servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
+    post:
+      summary: "Select a Discovered Device and Original Area"
+      operationId: selectCommissioningCandidate
+      tags: [Devices]
+      security: [{ CustomerBearer: [] }]
+      parameters: [{ name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/nativeCommissioningSelectRequest" } } } }
+      responses:
+        "200":
+          description: Revision-bound selected candidate projection.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/nativeCommissioningSession" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/dinodia/v1/commissioning/sessions/{sessionId}/complete:
+    servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
+    post:
+      summary: "Complete or Safely Remove the Commissioned Device"
+      operationId: completeNativeCommissioning
+      tags: [Devices]
+      security: [{ CustomerBearer: [] }]
+      parameters: [{ name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/nativeCommissioningCompletion" } } } }
+      responses:
+        "200":
+          description: Current terminal state and cleanup receipt.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/nativeCommissioningSession" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/dinodia/v1/commissioning/sessions/{sessionId}/cancel:
+    servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
+    post:
+      summary: "Cancel Native Commissioning"
+      operationId: cancelNativeCommissioning
+      tags: [Devices]
+      security: [{ CustomerBearer: [] }]
+      parameters: [{ name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/nativeCommissioningAction" } } } }
+      responses:
+        "200":
+          description: Cancelled state and cleanup status.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/nativeCommissioningSession" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/dinodia/v1/commissioning/sessions/{sessionId}/resume:
+    servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
+    post:
+      summary: "Resume Recoverable Native Commissioning"
+      operationId: resumeNativeCommissioning
+      tags: [Devices]
+      security: [{ CustomerBearer: [] }]
+      parameters: [{ name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/nativeCommissioningAction" } } } }
+      responses:
+        "200":
+          description: Resumed bounded session projection.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/nativeCommissioningSession" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /api/dinodia/v1/support/exchange:
     servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
     post:
@@ -1841,6 +1964,31 @@ paths:
       parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [pairingCode, workflowId], properties: { pairingCode: { type: string, minLength: 1 }, workflowId: { type: string, minLength: 1 } }, additionalProperties: false } } } }
       responses: { "200": { description: Assigned-workflow-bound Home and HubInstallation result; pairing secret is not returned. }, "401": { description: Employee session required. }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/installer/installation-requests:
+    get:
+      summary: "List Assigned Permanent-Installation Requests"
+      operationId: listStaffInstallationRequests
+      tags: [Home]
+      security: [{ EmployeeBearer: [] }]
+      responses: { "200": { description: Staff-scoped request queue and bounded assignment options. }, "401": { description: Current Company Portal employee session required. }, "403": { $ref: "#/components/responses/Forbidden" } }
+  /api/installer/installation-requests/{requestId}/start:
+    post:
+      summary: "Start or Assign Permanent-Installation Work"
+      operationId: startStaffInstallationRequest
+      tags: [Home]
+      security: [{ EmployeeBearer: [] }]
+      parameters: [{ name: requestId, in: path, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/installationRequestStart" } } } }
+      responses: { "200": { description: Exact replay or current assigned-work result. }, "201": { description: Work assigned or started. }, "401": { description: Current Company Portal employee session required. }, "403": { $ref: "#/components/responses/Forbidden" }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/installer/installation-requests/{requestId}/complete:
+    post:
+      summary: "Complete Assigned Permanent-Installation Work"
+      operationId: completeStaffInstallationRequest
+      tags: [Home]
+      security: [{ EmployeeBearer: [] }]
+      parameters: [{ name: requestId, in: path, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/installationRequestComplete" } } } }
+      responses: { "200": { description: Completed only after a qualifying permanent-device result has synced. }, "401": { description: Current Company Portal employee session required. }, "403": { $ref: "#/components/responses/Forbidden" }, "409": { $ref: "#/components/responses/Conflict" } }
   /api/installer/hubs/{hubInstallationId}/provisioning-status:
     get:
       summary: "Get Hub Provisioning Status"

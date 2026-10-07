@@ -954,6 +954,161 @@
       },
       "additionalProperties": false
     },
+    "nativeCommissioningStartRequest": {
+      "type": "object",
+      "required": ["schemaVersion", "protocol"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "protocol": { "enum": ["zigbee", "matter"] }
+      },
+      "additionalProperties": false
+    },
+    "nativeCommissioningMatterPayload": {
+      "type": "object",
+      "required": ["schemaVersion", "setupPayload"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "setupPayload": { "type": "string", "minLength": 4, "maxLength": 512, "pattern": "^MT:" }
+      },
+      "additionalProperties": false
+    },
+    "nativeCommissioningSelectRequest": {
+      "type": "object",
+      "required": ["schemaVersion", "expectedRevision", "candidateRef", "areaId", "name", "customerLabel"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "expectedRevision": { "type": "integer", "minimum": 1 },
+        "candidateRef": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "areaId": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "maxLength": 80 },
+        "customerLabel": { "type": "string", "minLength": 1, "maxLength": 40 }
+      },
+      "additionalProperties": false
+    },
+    "nativeCommissioningCompletion": {
+      "type": "object",
+      "required": ["schemaVersion", "disposition"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "disposition": { "enum": ["install", "view_only", "remove"] }
+      },
+      "additionalProperties": false
+    },
+    "nativeCommissioningAction": {
+      "type": "object",
+      "required": ["schemaVersion"],
+      "properties": { "schemaVersion": { "const": "dinodia.v1" } },
+      "additionalProperties": false
+    },
+    "nativeCommissioningCandidate": {
+      "type": "object",
+      "required": ["candidateRef", "name", "stage", "observedAt"],
+      "properties": {
+        "candidateRef": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "name": { "type": "string", "maxLength": 80 },
+        "manufacturer": { "type": "string", "maxLength": 80 },
+        "model": { "type": "string", "maxLength": 80 },
+        "stage": { "type": "string", "maxLength": 40 },
+        "observedAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "nativeCommissioningEvent": {
+      "type": "object",
+      "required": ["sequence", "type", "at"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "type": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "at": { "$ref": "#/$defs/timestamp" },
+        "count": { "type": "integer", "minimum": 0 },
+        "protocol": { "enum": ["zigbee", "matter"] },
+        "cleanupState": { "type": "string", "maxLength": 40 }
+      },
+      "additionalProperties": false
+    },
+    "nativeCommissioningSession": {
+      "type": "object",
+      "required": ["schemaVersion", "sessionId", "protocol", "status", "createdAt", "updatedAt", "expiresAt", "revision", "candidates", "nextCandidateCursor", "selectedCandidateRef", "selectedAreaId", "selectedName", "selectedCustomerLabel", "catalogueStatus", "catalogueUsefulReadings", "finalDeviceId", "finalDisposition", "cleanup", "events"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "sessionId": { "$ref": "#/$defs/id" },
+        "protocol": { "enum": ["zigbee", "matter"] },
+        "status": { "enum": ["requested", "advertising", "awaiting_payload", "commissioning", "searching", "interrupted", "selected", "completed", "completed_cleanup_pending", "cancelled", "expired", "failed", "cancelled_cleanup_pending", "expired_cleanup_pending", "failed_cleanup_pending"] },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "updatedAt": { "$ref": "#/$defs/timestamp" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "candidates": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/nativeCommissioningCandidate" } },
+        "nextCandidateCursor": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "selectedCandidateRef": { "anyOf": [{ "type": "string", "maxLength": 80 }, { "type": "null" }] },
+        "selectedAreaId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "selectedName": { "anyOf": [{ "type": "string", "maxLength": 80 }, { "type": "null" }] },
+        "selectedCustomerLabel": { "anyOf": [{ "type": "string", "maxLength": 40 }, { "type": "null" }] },
+        "catalogueStatus": { "anyOf": [{ "type": "string", "maxLength": 40 }, { "type": "null" }] },
+        "catalogueUsefulReadings": { "type": "boolean" },
+        "finalDeviceId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "finalDisposition": { "anyOf": [{ "enum": ["install", "view_only", "remove"] }, { "type": "null" }] },
+        "cleanup": { "type": "object", "required": ["state", "pendingCount"], "properties": { "state": { "type": "string", "maxLength": 40 }, "pendingCount": { "type": "integer", "minimum": 0 } }, "additionalProperties": false },
+        "events": { "type": "array", "maxItems": 40, "items": { "$ref": "#/$defs/nativeCommissioningEvent" } }
+      },
+      "additionalProperties": false
+    },
+    "installationRequestCreate": {
+      "type": "object",
+      "required": ["category", "notes", "areaId"],
+      "properties": {
+        "category": { "enum": ["LIGHTING", "HEATING", "SECURITY", "OTHER"] },
+        "notes": { "type": "string", "maxLength": 1000 },
+        "areaId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] }
+      },
+      "additionalProperties": false
+    },
+    "installationRequestCancel": {
+      "type": "object",
+      "required": ["expectedRevision"],
+      "properties": { "expectedRevision": { "type": "integer", "minimum": 1 } },
+      "additionalProperties": false
+    },
+    "installationRequestStart": {
+      "type": "object",
+      "required": ["expectedRevision"],
+      "properties": {
+        "expectedRevision": { "type": "integer", "minimum": 1 },
+        "assignedEmployeeId": { "$ref": "#/$defs/id" }
+      },
+      "additionalProperties": false
+    },
+    "installationRequestComplete": {
+      "type": "object",
+      "required": ["expectedRevision"],
+      "properties": { "expectedRevision": { "type": "integer", "minimum": 1 } },
+      "additionalProperties": false
+    },
+    "installationRequestSummary": {
+      "type": "object",
+      "required": ["id", "reference", "status", "revision", "createdAt", "canCancel"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "reference": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "status": { "enum": ["SUBMITTED", "IN_PROGRESS", "CANCELLED", "COMPLETED"] },
+        "revision": { "type": "integer", "minimum": 1 },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "canCancel": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "installationRequestListReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "requests"],
+      "properties": { "schemaVersion": { "const": "dinodia.v1" }, "requests": { "type": "array", "maxItems": 25, "items": { "$ref": "#/$defs/installationRequestSummary" } } },
+      "additionalProperties": false
+    },
+    "installationRequestReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "request"],
+      "properties": { "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "request": { "$ref": "#/$defs/installationRequestSummary" } },
+      "additionalProperties": false
+    },
     "supportTicketCreateRequest": {
       "type": "object",
       "required": ["category", "description"],
