@@ -1522,7 +1522,7 @@
       "additionalProperties": false
     },
     "stepUpOperationKind": {
-      "enum": ["trusted_device_remove", "customer_password_change", "customer_profile_change", "customer_email_change", "tenant_membership_remove", "tenant_device_remove", "home.transfer", "support_ticket_close", "support_access_approve", "support_access_revoke", "alexa_unlink", "heating_sensitive_command", "device_sensitive_command"]
+      "enum": ["trusted_device_remove", "customer_password_change", "customer_profile_change", "customer_email_change", "tenant_membership_remove", "home_tenant_remove", "home_property_manager_remove", "tenant_device_remove", "tenant_area_grants_replace", "home.transfer", "home_room_access_decision", "support_ticket_close", "support_access_approve", "support_access_revoke", "alexa_unlink", "heating_sensitive_command", "device_sensitive_command"]
     },
     "stepUpDescriptorAttestation": {
       "type": "object",
@@ -1894,8 +1894,8 @@
       "properties": { "expectedRevision": { "$ref": "#/$defs/timestamp" }, "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]{16,160}$" } }, "additionalProperties": false
     },
     "customerRoomAccessDecisionRequest": {
-      "type": "object", "required": ["requestId", "decision", "expectedRevision", "idempotencyKey"],
-      "properties": { "requestId": { "$ref": "#/$defs/id" }, "decision": { "enum": ["APPROVE", "REJECT"] }, "expectedRevision": { "$ref": "#/$defs/timestamp" }, "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]{16,160}$" } }, "additionalProperties": false
+      "type": "object", "required": ["requestId", "decision", "expectedRevision", "idempotencyKey", "proof"],
+      "properties": { "requestId": { "$ref": "#/$defs/id" }, "decision": { "enum": ["APPROVE", "REJECT"] }, "expectedRevision": { "$ref": "#/$defs/timestamp" }, "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]{16,160}$" }, "proof": { "type": "string", "minLength": 40, "maxLength": 8192 } }, "additionalProperties": false
     },
     "customerRoomAccessDecisionReceipt": {
       "type": "object", "required": ["schemaVersion", "ok", "requestId", "state", "membershipId", "idempotentReplay"],
@@ -2109,6 +2109,77 @@
       "type": "object", "required": ["version", "assignments"],
       "properties": { "version": { "const": 1 }, "assignments": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "object", "required": ["membershipId", "enabledFamilies"], "properties": { "membershipId": { "type": "string", "format": "uuid" }, "enabledFamilies": { "type": "array", "maxItems": 6, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 80 } } }, "additionalProperties": false } } },
       "additionalProperties": false
+    },
+    "homeownerTenantAreaGrantsRequest": {
+      "type": "object", "required": ["areaIds", "expectedAccessRevision", "expectedManagementRevision", "proof"],
+      "properties": {
+        "areaIds": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "expectedAccessRevision": { "type": "integer", "minimum": 0 },
+        "expectedManagementRevision": { "type": "integer", "minimum": 1 },
+        "proof": { "type": "string", "minLength": 32, "maxLength": 16384 }
+      }, "additionalProperties": false
+    },
+    "homeownerTenantAreaGrantsReceipt": {
+      "type": "object", "required": ["schemaVersion", "ok", "homeId", "tenantMembershipId", "areaIds", "changed", "managementRevision", "accessRevision", "decommissionTombstoneCount"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true },
+        "homeId": { "$ref": "#/$defs/id" }, "tenantMembershipId": { "$ref": "#/$defs/id" },
+        "areaIds": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "changed": { "type": "boolean" }, "managementRevision": { "type": "integer", "minimum": 1 },
+        "accessRevision": { "type": "integer", "minimum": 0 }, "decommissionTombstoneCount": { "type": "integer", "minimum": 0 }
+      }, "additionalProperties": false
+    },
+    "homeownerTenantRemovalRequest": {
+      "type": "object", "required": ["expectedAccessRevision", "expectedManagementRevision", "proof", "idempotencyKey"],
+      "properties": {
+        "expectedAccessRevision": { "type": "integer", "minimum": 0 },
+        "expectedManagementRevision": { "type": "integer", "minimum": 1 },
+        "proof": { "type": "string", "minLength": 32, "maxLength": 16384 },
+        "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]+$" }
+      }, "additionalProperties": false
+    },
+    "homeownerTenantRemovalReceipt": {
+      "type": "object", "required": ["schemaVersion", "ok", "homeId", "tenantMembershipId", "state", "managementRevision", "accessRevision", "hubEnforcement", "idempotentReplay"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true },
+        "homeId": { "$ref": "#/$defs/id" }, "tenantMembershipId": { "$ref": "#/$defs/id" }, "state": { "const": "REMOVED" },
+        "managementRevision": { "type": "integer", "minimum": 1 }, "accessRevision": { "type": "integer", "minimum": 1 },
+        "hubEnforcement": { "const": "PENDING" }, "idempotentReplay": { "type": "boolean" }
+      }, "additionalProperties": false
+    },
+    "homeownerManagerRemovalRequest": {
+      "type": "object", "required": ["expectedManagementRevision", "proof", "idempotencyKey"],
+      "properties": {
+        "expectedManagementRevision": { "type": "integer", "minimum": 1 },
+        "proof": { "type": "string", "minLength": 32, "maxLength": 16384 },
+        "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]+$" }
+      }, "additionalProperties": false
+    },
+    "homeownerManagerRemovalReceipt": {
+      "type": "object", "required": ["schemaVersion", "ok", "homeId", "managerMembershipId", "state", "managementRevision", "idempotentReplay"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true },
+        "homeId": { "$ref": "#/$defs/id" }, "managerMembershipId": { "$ref": "#/$defs/id" }, "state": { "const": "REMOVED" },
+        "managementRevision": { "type": "integer", "minimum": 1 }, "idempotentReplay": { "type": "boolean" }
+      }, "additionalProperties": false
+    },
+    "homeownerManagementActivityItem": {
+      "type": "object", "required": ["id", "occurredAt", "activity", "actor", "target"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" }, "occurredAt": { "$ref": "#/$defs/timestamp" },
+        "activity": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "actor": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "target": { "type": "string", "minLength": 1, "maxLength": 80 }
+      }, "additionalProperties": false
+    },
+    "homeownerManagementActivityPage": {
+      "type": "object", "required": ["schemaVersion", "ok", "homeId", "items", "nextCursor", "retentionStartAt", "asOf"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "homeId": { "$ref": "#/$defs/id" },
+        "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/homeownerManagementActivityItem" } },
+        "nextCursor": { "type": ["string", "null"], "maxLength": 256, "pattern": "^[A-Za-z0-9_-]*$" },
+        "retentionStartAt": { "$ref": "#/$defs/timestamp" }, "asOf": { "$ref": "#/$defs/timestamp" }
+      }, "additionalProperties": false
     },
     "quietHoursPreference": {
       "type": "object", "required": ["version", "enabled", "startLocalTime", "endLocalTime", "timeZone", "days"],

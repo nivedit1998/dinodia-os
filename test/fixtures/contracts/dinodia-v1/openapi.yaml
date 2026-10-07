@@ -2054,6 +2054,227 @@ paths:
       parameters: [{ name: attemptId, in: path, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
       responses: { "200": { description: Exact machine-credential version acknowledged by the paired hub. }, "401": { $ref: "#/components/responses/Unauthorized" }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/v2/homes/{homeId}/activity/export:
+    get:
+      summary: Export bounded Home management activity as CSV
+      operationId: exportHomeManagementActivityCsv
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }]
+      responses: { "200": { description: Selected-membership, bounded CSV export; no tenant-private device data. }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/Forbidden" } }
+  /api/v2/homes/{homeId}/areas/{areaId}/override:
+    patch:
+      summary: Update an authorized Area presentation override
+      operationId: updateHomeAreaPresentationOverride
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { name: areaId, in: path, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "200": { description: Revision-bound customer-facing Area name saved without changing the canonical Area identity or grants. }, "401": { $ref: "#/components/responses/Unauthorized" }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/v2/homes/{homeId}/deregister-full-home/commit:
+    post:
+      summary: Deregister Full Home (Stage 13 gated)
+      operationId: commitHomeDeregistration
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "503": { description: Intentionally unavailable until the Stage 13 safety rehearsal is approved. }, "401": { $ref: "#/components/responses/Unauthorized" } }
+  /api/v2/homes/{homeId}/deregister-full-home/preview:
+    post:
+      summary: Preview Home deregistration (Stage 13 gated)
+      operationId: previewHomeDeregistration
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "503": { description: Intentionally unavailable until the Stage 13 safety rehearsal is approved. }, "401": { $ref: "#/components/responses/Unauthorized" } }
+  /api/v2/homes/{homeId}/devices/{deviceId}/information:
+    get:
+      summary: Read authorized permanent-device information
+      operationId: readHomePermanentDeviceInformation
+      tags: [Devices]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { $ref: "#/components/parameters/DeviceId" }]
+      responses: { "200": { description: Current selected-home permanent-device information only; no controls or tenant-owned device details. }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/Forbidden" } }
+  /api/v2/homes/{homeId}/devices/{deviceId}/override:
+    patch:
+      summary: Update permanent-device presentation metadata
+      operationId: updatePermanentDevicePresentationOverride
+      tags: [Devices]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { $ref: "#/components/parameters/DeviceId" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "200": { description: Authorized customer-facing label update; technical identity and controls are unchanged. }, "401": { $ref: "#/components/responses/Unauthorized" }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/v2/homes/{homeId}/floorplan:
+    get:
+      summary: Read the current Home floorplan
+      operationId: readHomeFloorplan
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }]
+      responses: { "200": { description: Revisioned canonical-Area layout for the selected Home. }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/Forbidden" } }
+    put:
+      summary: Save the Home floorplan with compare-and-set revision
+      operationId: updateHomeFloorplan
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "200": { description: Floorplan saved atomically for the selected Home. }, "401": { $ref: "#/components/responses/Unauthorized" }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/v2/homes/{homeId}/homeowner-context:
+    get:
+      summary: Read owner/property-manager Home projection
+      operationId: readHomeownerContext
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }]
+      responses: { "200": { description: Selected Home, Areas and permanent-device projection; tenant-owned devices are excluded. }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/Forbidden" } }
+  /api/v2/homes/{homeId}/hub-status:
+    get:
+      summary: Read heartbeat-derived Hub status
+      operationId: readHomeHubStatus
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }]
+      responses: { "200": { description: Current heartbeat status and last accepted online timestamp. }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/Forbidden" } }
+  /api/v2/homes/{homeId}/notification-preferences:
+    get:
+      summary: Read role-scoped Home notification catalogue and preferences
+      operationId: readHomeNotificationPreferences
+      tags: [Notifications]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }]
+      responses: { "200": { description: Server-owned role catalogue, locked mandatory families and current preference revision. }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/Forbidden" } }
+    put:
+      summary: Save authorized Home notification preferences
+      operationId: updateHomeNotificationPreferences
+      tags: [Notifications]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { $ref: "#/components/parameters/IfMatch" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "200": { description: Preferences saved under the current owner/manager policy. }, "401": { $ref: "#/components/responses/Unauthorized" }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/v2/homes/{homeId}/ownership-transfer/cancel:
+    post:
+      summary: Cancel ownership transfer (Stage 13 gated)
+      operationId: cancelHomeOwnershipTransfer
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "503": { description: Intentionally unavailable until the Stage 13 safety rehearsal is approved. }, "401": { $ref: "#/components/responses/Unauthorized" } }
+  /api/v2/homes/{homeId}/ownership-transfer/commit:
+    post:
+      summary: Commit ownership transfer (Stage 13 gated)
+      operationId: commitHomeOwnershipTransfer
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "503": { description: Intentionally unavailable until the Stage 13 safety rehearsal is approved. }, "401": { $ref: "#/components/responses/Unauthorized" } }
+  /api/v2/homes/{homeId}/ownership-transfer/preview:
+    post:
+      summary: Preview ownership transfer (Stage 13 gated)
+      operationId: previewHomeOwnershipTransfer
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "503": { description: Intentionally unavailable until the Stage 13 safety rehearsal is approved. }, "401": { $ref: "#/components/responses/Unauthorized" } }
+  /api/v2/homes/{homeId}/property-managers/{managerId}:
+    delete:
+      summary: Remove a property manager
+      operationId: removeHomePropertyManager
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { name: managerId, in: path, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/StepUpProof" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "200": { description: Authorized property-manager removal receipt. }, "401": { $ref: "#/components/responses/Unauthorized" }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/v2/homes/{homeId}/property-managers/invitations:
+    post:
+      summary: Invite a property manager
+      operationId: inviteHomePropertyManager
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "202": { description: Seven-day invitation created; no membership is granted until acceptance. }, "401": { $ref: "#/components/responses/Unauthorized" }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/v2/homes/{homeId}/property-managers/invitations/{invitationId}/resend:
+    post:
+      summary: Resend a property-manager invitation
+      operationId: resendHomePropertyManagerInvitation
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { name: invitationId, in: path, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses: { "202": { description: New invitation generation issued; the prior generation is invalidated. }, "401": { $ref: "#/components/responses/Unauthorized" }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/v2/homes/{homeId}/room-access-requests:
+    get:
+      summary: List selected-Home Room access requests
+      operationId: listHomeRoomAccessRequests
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }]
+      responses: { "200": { description: Selected-home pending requests visible to authorized owner/managers. }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/Forbidden" } }
+    post:
+      summary: Create a Room access request
+      operationId: createHomeRoomAccessRequest
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "201": { description: Exact requested Area access request created or coalesced. }, "401": { $ref: "#/components/responses/Unauthorized" }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/v2/homes/{homeId}/room-access-requests/{requestId}/decision:
+    post:
+      summary: Decide a Room access request
+      operationId: decideHomeRoomAccessRequest
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { name: requestId, in: path, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/StepUpProof" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "200": { description: Revision-checked approve or reject receipt with exactly the requested Area grant. }, "401": { $ref: "#/components/responses/Unauthorized" }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/v2/homes/{homeId}/tenants:
+    get:
+      summary: List Home tenant membership summaries
+      operationId: listHomeTenants
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }]
+      responses: { "200": { description: Selected-home tenant summaries and grants; no private device state. }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/Forbidden" } }
+  /api/v2/homes/{homeId}/tenants/invitations:
+    post:
+      summary: Invite a tenant to exact selected-Home Areas
+      operationId: inviteHomeTenant
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "202": { description: Seven-day invitation created; selected Area grants apply only after explicit acceptance. }, "401": { $ref: "#/components/responses/Unauthorized" }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/v2/homes/{homeId}/tenants/invitations/{invitationId}/resend:
+    post:
+      summary: Resend a tenant invitation
+      operationId: resendHomeTenantInvitation
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { name: invitationId, in: path, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses: { "202": { description: New invitation generation issued; the prior generation is invalidated. }, "401": { $ref: "#/components/responses/Unauthorized" }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/v2/homes/{homeId}/tenants/{tenantId}:
+    delete:
+      summary: Remove a tenant membership from this Home
+      operationId: removeHomeTenant
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { name: tenantId, in: path, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/StepUpProof" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "200": { description: Selected relationship removed; other valid Home relationships are preserved. }, "401": { $ref: "#/components/responses/Unauthorized" }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/v2/homes/{homeId}/tenants/{tenantId}/area-grants:
+    put:
+      summary: Replace a tenant's selected Home Area grants
+      operationId: replaceHomeTenantAreaGrants
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { name: tenantId, in: path, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/StepUpProof" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "200": { description: Exact current Area-grant replacement receipt. }, "401": { $ref: "#/components/responses/Unauthorized" }, "409": { $ref: "#/components/responses/Conflict" } }
 components:
   securitySchemes:
     CustomerSessionCookie:
