@@ -490,6 +490,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   let haModel;
   let nativeCommandQueue = Promise.resolve();
   const nativeEventClients = new Set();
+  const commissioningEventClients = new Set();
   const nativeCommandOutcomeTimers = new Map();
   let nativeEventQueue = Promise.resolve();
   const persistedNativeStreamId = String(hubStore.getSecurity?.()?.nativeStreamId || "");
@@ -4230,7 +4231,45 @@ function nativeDeviceView(principal, device) {
     return handleDashboardRequest(req, res, url);
   }
   const nativeEventServer = new WebSocket.Server({ noServer: true, maxPayload: 16 * 1024 });
+  const commissioningEventServer = new WebSocket.Server({ noServer: true, maxPayload: 16 * 1024 });
   const server = http.createServer(handleUnifiedRequest);
+  function queueCommissioningSnapshot(client) {
+    client.sendQueue = client.sendQueue.then(async () => {
+      if (client.socket.readyState !== WebSocket.OPEN) return;
+      const principal = appSessionAuth(client.token);
+      if (!principal || principal.householdRole !== "TENANT" || principal.scope?.includes("tenant:device-command") !== true
+        || principal.sub !== client.principal.sub || principal.sid !== client.principal.sid
+        || principal.membershipId !== client.principal.membershipId || principal.homeId !== client.principal.homeId
+        || !nativeCommissioningService) {
+        client.socket.close(4401, "Session expired or revoked");
+        return;
+      }
+      try {
+        await nativeCommissioningService.requireSession(client.sessionId, principal);
+        const snapshot = await nativeCommissioningService.status(client.sessionId, principal, client.afterSequence, null);
+        if (client.socket.readyState !== WebSocket.OPEN) return;
+        const encoded = JSON.stringify(snapshot);
+        if (Buffer.byteLength(encoded, "utf8") > 16 * 1024) {
+          client.socket.close(1009, "Commissioning update too large");
+          return;
+        }
+        client.socket.send(encoded);
+        client.afterSequence = Math.max(client.afterSequence, ...(snapshot.events || []).map((event) => Number(event.sequence) || 0));
+        if (["completed", "cancelled", "expired", "failed"].includes(snapshot.status) && snapshot.cleanup?.pendingCount === 0) {
+          client.socket.close(1000, "Commissioning session complete");
+        }
+      } catch (error) {
+        logger.warn(`[commissioning-events] projection failed (${String(error?.code || "unavailable").slice(0, 48)})`);
+        if (client.socket.readyState === WebSocket.OPEN) client.socket.close(4403, "Commissioning authority changed");
+      }
+    }).catch(() => {
+      if (client.socket.readyState === WebSocket.OPEN) client.socket.close(1011, "Commissioning event unavailable");
+    });
+  }
+  eventBus.on("dinodia_dashboard_updated", (event = {}) => {
+    if (event.kind !== "commissioning" || !/^[0-9a-f-]{36}$/i.test(String(event.sessionId || ""))) return;
+    for (const client of commissioningEventClients) if (client.sessionId === String(event.sessionId)) queueCommissioningSnapshot(client);
+  });
   const setupServer = http.createServer((req, res) => {
     let pathname = "";
     try { pathname = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`).pathname; } catch {}
@@ -4264,6 +4303,31 @@ function nativeDeviceView(principal, device) {
     let url;
     try { url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`); }
     catch { socket.destroy(); return; }
+    const commissioningEvents = url.pathname.match(/^\/api\/dinodia\/v1\/commissioning\/sessions\/([0-9a-f-]{36})\/events$/i);
+    if (commissioningEvents) {
+      const token = bearerToken(req);
+      const principal = appSessionAuth(token);
+      const afterText = url.searchParams.get("after") || "0";
+      const after = /^(?:0|[1-9]\d{0,15})$/.test(afterText) ? Number(afterText) : NaN;
+      const productionTransportAllowed = runtimeConfig.nodeEnv !== "production"
+        || req.socket?.encrypted === true
+        || isHiveCredentialTransportAllowed(req, { nodeEnv: "production", configuredHostname: runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "", allowLoopback: true });
+      const onlyAfter = [...url.searchParams.keys()].every((key) => key === "after") && url.searchParams.getAll("after").length <= 1;
+      if (!productionTransportAllowed) { socket.end("HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\n\r\n"); return; }
+      if (!principal || principal.householdRole !== "TENANT" || principal.scope?.includes("tenant:device-command") !== true) { socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n"); return; }
+      if (!Number.isSafeInteger(after) || after < 0 || !onlyAfter || !nativeCommissioningService) { socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"); return; }
+      try { await nativeCommissioningService.requireSession(commissioningEvents[1], principal); }
+      catch { socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n"); return; }
+      commissioningEventServer.handleUpgrade(req, socket, head, (clientSocket) => {
+        const client = { socket: clientSocket, token, principal, sessionId: commissioningEvents[1], afterSequence: after, sendQueue: Promise.resolve() };
+        commissioningEventClients.add(client);
+        clientSocket.once("close", () => { commissioningEventClients.delete(client); clearInterval(client.authTimer); });
+        client.authTimer = setInterval(() => queueCommissioningSnapshot(client), 5000);
+        client.authTimer.unref?.();
+        queueCommissioningSnapshot(client);
+      });
+      return;
+    }
     if (url.pathname === "/api/dinodia/v1/events") {
       const token = bearerToken(req);
       let principal = appSessionAuth(token);
@@ -4463,6 +4527,8 @@ function nativeDeviceView(principal, device) {
   }
 
   async function stop() {
+    for (const client of commissioningEventClients) client.socket.close(1001, "Hub stopping");
+    commissioningEventClients.clear();
     for (const timer of nativeCommandOutcomeTimers.values()) clearTimeout(timer);
     nativeCommandOutcomeTimers.clear();
     if (operatorSessionRevalidationTimer) clearInterval(operatorSessionRevalidationTimer);

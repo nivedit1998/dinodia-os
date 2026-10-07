@@ -1843,6 +1843,21 @@ paths:
               schema: { $ref: "./contract.json#/$defs/nativeCommissioningSession" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { description: Session is unavailable or outside current membership scope. }
+  /api/dinodia/v1/commissioning/sessions/{sessionId}/events:
+    servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
+    get:
+      summary: "Subscribe to Current Commissioning Session Events"
+      description: "Upgrade to an authenticated WebSocket. Every message is a bounded current session projection; the hub revalidates the same selected tenant and session authority before delivery."
+      operationId: subscribeCommissioningSessionEvents
+      tags: [Devices]
+      security: [{ CustomerBearer: [] }]
+      parameters: [{ name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }, { name: after, in: query, required: false, schema: { type: integer, minimum: 0 } }]
+      responses:
+        "101": { description: Authenticated WebSocket upgrade; messages use the bounded nativeCommissioningSession projection. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Session is unavailable or outside current membership scope. }
   /api/dinodia/v1/commissioning/sessions/{sessionId}/matter-payload:
     servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]
     post:
