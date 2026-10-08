@@ -63,6 +63,8 @@
     "operator_credential_lifecycle": ["fixtures/customer-hub-session-test-only.json", "fixtures/stage2-decision-matrix.json"],
     "support_expiry_and_revocation": ["fixtures/support-session-revoked.json", "fixtures/support-access-property-scope.json", "fixtures/support-lifecycle.json"],
     "claim_reservation_expiry": ["fixtures/claim-first-wins.json", "fixtures/claim-lifecycle.json"],
-    "expired_dispatch_lease_cleanup": ["fixtures/stage2-decision-matrix.json"]
+    "expired_dispatch_lease_cleanup": ["fixtures/stage2-decision-matrix.json"],
+    "retentionCleanup": ["fixtures/analytics-semantics.json"],
+    "analyticsAndStorageMaintenance": ["fixtures/analytics-semantics.json"]
   }
 }

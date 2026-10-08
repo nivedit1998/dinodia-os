@@ -10,10 +10,13 @@ function observed(overrides = {}) {
   };
 }
 
-test("activity needs the actual semantic signal; target, mode and missing light power stay unknown", () => {
+test("activity needs the actual semantic signal; target/mode stay unknown and Light power or brightness is measured", () => {
   assert.equal(activityFor({ category: "RADIATOR", role: "target_temperature", value: 22 }), "unknown");
   assert.equal(activityFor({ category: "BOILER", role: "operating_mode", value: "heating" }), "unknown");
-  assert.equal(activityFor({ category: "LIGHT", role: "brightness", value: 80 }), "unknown");
+  assert.equal(activityFor({ category: "LIGHT", role: "brightness", value: 80 }), "on");
+  assert.equal(activityFor({ category: "LIGHT", role: "brightness", value: 0 }), "off");
+  assert.equal(activityFor({ category: "LIGHT", role: "brightness", value: "80" }), "unknown");
+  assert.equal(activityFor({ category: "LIGHT", role: "brightness", value: 80, available: false }), "unknown");
   assert.equal(activityFor({ category: "LIGHT", role: "power", value: "ON" }), "on");
   assert.equal(activityFor({ category: "RADIATOR", role: "active_heat_demand", value: false }), "off");
   assert.equal(activityFor({ category: "BOILER", role: "active_heat_production", value: true }), "on");

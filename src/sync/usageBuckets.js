@@ -80,6 +80,10 @@ function activityFor({ category, role, value, available = true }) {
       if (scalar === true || scalar === "on") return "on";
       if (scalar === false || scalar === "off") return "off";
     }
+    if (normalizedRole === "brightness" && typeof scalar === "number" && Number.isFinite(scalar)) {
+      if (scalar > 0) return "on";
+      if (scalar === 0) return "off";
+    }
     return "unknown";
   }
   const expectedRole = category === "RADIATOR" ? "active_heat_demand" : category === "BOILER" ? "active_heat_production" : "";

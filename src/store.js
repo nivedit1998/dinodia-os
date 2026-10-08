@@ -141,21 +141,58 @@ function recordDeviceSyncObservations(state, device, nowMs) {
   if (!catalog) return;
   const entities = Object.values(device.entities || {});
   const usage = state.syncUsage = initialUsageState(state.syncUsage);
-  for (const control of catalog.controls) {
-    if (!control.observable || !Number.isSafeInteger(control.maxStateValiditySeconds) || control.maxStateValiditySeconds <= 0) continue;
+  const usageControls = catalog.controls.filter((control) => control.observable
+    && Number.isSafeInteger(control.maxStateValiditySeconds) && control.maxStateValiditySeconds > 0
+    && (policy.analyticsCategory === "LIGHT" && ["power", "brightness"].includes(String(control.semanticRole || "") )
+      || policy.analyticsCategory === "RADIATOR" && control.semanticRole === "active_heat_demand"
+      || policy.analyticsCategory === "BOILER" && control.semanticRole === "active_heat_production"));
+  // One physical Light produces one activity series even when its descriptor
+  // exposes both power and brightness. The frozen rule is logical OR for On;
+  // independent per-control counters would double-count the same device.
+  const selectedUsageControls = policy.analyticsCategory === "LIGHT"
+    ? usageControls.filter((control) => control.semanticRole === "power").slice(0, 1).length
+      ? usageControls.filter((control) => control.semanticRole === "power").slice(0, 1)
+      : usageControls.filter((control) => control.semanticRole === "brightness").slice(0, 1)
+    : usageControls.slice(0, 1);
+  for (const control of selectedUsageControls) {
     const role = String(control.semanticRole || "");
-    if (!(policy.analyticsCategory === "LIGHT" && role === "power"
-      || policy.analyticsCategory === "RADIATOR" && role === "active_heat_demand"
-      || policy.analyticsCategory === "BOILER" && role === "active_heat_production")) continue;
-    const entity = entities.find((item) => String(item.capability?.controlId || item.controlId || item.id || item.sourceId || "") === control.controlId);
-    const observedAt = sourceTimestamp(entity?.sourceObservedAt || entity?.lastChanged || entity?.last_changed || entity?.updatedAt || "");
-    if (!entity || !observedAt) continue;
-    const observedMs = Date.parse(observedAt);
-    if (observedMs > nowMs || nowMs - observedMs > 30 * 60 * 1000) continue;
-    const validityMs = Math.min(control.maxStateValiditySeconds * 1000, policy.analyticsCategory === "RADIATOR" ? 30 * 60 * 1000 : Number.MAX_SAFE_INTEGER);
-    const validUntil = new Date(observedMs + validityMs).toISOString();
-    const value = currentEntityValue(entity);
-    const activity = activityFor({ category: policy.analyticsCategory, role, value, available: device.available !== false });
+    const entityFor = (item) => entities.find((entity) => String(entity.capability?.controlId || entity.controlId || entity.id || entity.sourceId || "") === item.controlId);
+    let entity = entityFor(control);
+    // Only adapter/source observation times establish telemetry freshness.
+    // Entity update/snapshot read time is not evidence that the physical value
+    // was observed now and must never renew analytics validity.
+    let observedAt = sourceTimestamp(entity?.sourceObservedAt || entity?.lastChanged || entity?.last_changed || "");
+    let validUntil = null;
+    let activity;
+    if (policy.analyticsCategory === "LIGHT") {
+      const signals = usageControls.filter((item) => ["power", "brightness"].includes(item.semanticRole)).map((item) => {
+        const source = entityFor(item);
+        const timestamp = sourceTimestamp(source?.sourceObservedAt || source?.lastChanged || source?.last_changed || "");
+        const observedMs = timestamp ? Date.parse(timestamp) : NaN;
+        const validityMs = Math.min(item.maxStateValiditySeconds * 1000, 30 * 60 * 1000);
+        if (!source || !Number.isFinite(observedMs) || observedMs > nowMs || nowMs - observedMs > 30 * 60 * 1000 || observedMs + validityMs <= nowMs) return null;
+        return { role: item.semanticRole, value: currentEntityValue(source), observedAt: timestamp, validUntilMs: observedMs + validityMs };
+      }).filter(Boolean);
+      if (!signals.length) continue;
+      const active = signals.some((signal) => signal.role === "power"
+        ? signal.value === true || String(signal.value || "").trim().toLowerCase() === "on"
+        : typeof signal.value === "number" && Number.isFinite(signal.value) && signal.value > 0);
+      const inactive = signals.every((signal) => signal.role === "power"
+        ? signal.value === false || String(signal.value || "").trim().toLowerCase() === "off"
+        : typeof signal.value === "number" && Number.isFinite(signal.value) && signal.value === 0);
+      activity = device.available === false ? "unknown" : active ? "on" : inactive ? "off" : "unknown";
+      observedAt = signals.map((signal) => signal.observedAt).sort().at(-1);
+      validUntil = new Date(Math.min(...signals.map((signal) => signal.validUntilMs))).toISOString();
+      entity = entityFor(control);
+    } else {
+      if (!entity || !observedAt) continue;
+      const observedMs = Date.parse(observedAt);
+      if (observedMs > nowMs || nowMs - observedMs > 30 * 60 * 1000) continue;
+      const validityMs = Math.min(control.maxStateValiditySeconds * 1000, policy.analyticsCategory === "RADIATOR" ? 30 * 60 * 1000 : Number.MAX_SAFE_INTEGER);
+      validUntil = new Date(observedMs + validityMs).toISOString();
+      activity = activityFor({ category: policy.analyticsCategory, role, value: currentEntityValue(entity), available: device.available !== false });
+    }
+    if (!observedAt || !validUntil || !activity) continue;
     const result = observeUsage(usage, {
       osDeviceId: deviceId,
       osAreaId: String(device.areaId || ""),
@@ -178,7 +215,7 @@ function recordDeviceSyncObservations(state, device, nowMs) {
     for (const control of catalog.controls) {
       if (control.semanticRole !== "ambient_temperature" || !control.observable || !Number.isSafeInteger(control.maxStateValiditySeconds)) continue;
       const entity = entities.find((item) => String(item.capability?.controlId || item.controlId || item.id || item.sourceId || "") === control.controlId);
-      const observedAt = sourceTimestamp(entity?.sourceObservedAt || entity?.lastChanged || entity?.last_changed || entity?.updatedAt || "");
+      const observedAt = sourceTimestamp(entity?.sourceObservedAt || entity?.lastChanged || entity?.last_changed || "");
       const value = currentEntityValue(entity);
       if (!observedAt || typeof value !== "number" || !Number.isFinite(value) || value < -50 || value > 80) continue;
       const observedMs = Date.parse(observedAt);

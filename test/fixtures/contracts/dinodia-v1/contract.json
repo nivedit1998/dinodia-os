@@ -696,6 +696,71 @@
       },
       "additionalProperties": false
     },
+    "analyticsUsageBucket": {
+      "type": "object",
+      "required": ["id", "start", "end", "label", "onMinutes", "offMinutes", "unknownMinutes", "coverageSeconds", "contributingDeviceDays", "isPartial"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "start": { "$ref": "#/$defs/timestamp" },
+        "end": { "$ref": "#/$defs/timestamp" },
+        "label": { "type": "string", "maxLength": 120 },
+        "onMinutes": { "type": "integer", "minimum": 0 },
+        "offMinutes": { "type": "integer", "minimum": 0 },
+        "unknownMinutes": { "type": "integer", "minimum": 0 },
+        "coverageSeconds": { "type": "integer", "minimum": 0 },
+        "contributingDeviceDays": { "type": "integer", "minimum": 0 },
+        "isPartial": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "analyticsBootstrap": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "homeId", "timezone", "generatedAt", "retentionStartAt", "earliestAvailableAt", "areas", "displayGroups", "devices", "historicalDevices", "summaries", "temperature", "historyState"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "ok": { "const": true },
+        "homeId": { "$ref": "#/$defs/id" },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "generatedAt": { "$ref": "#/$defs/timestamp" },
+        "retentionStartAt": { "$ref": "#/$defs/timestamp" },
+        "earliestAvailableAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+        "areas": { "type": "array", "maxItems": 64, "items": { "type": "object", "required": ["id", "name", "revision"], "properties": { "id": { "$ref": "#/$defs/id" }, "name": { "type": "string", "maxLength": 120 }, "revision": { "type": "integer", "minimum": 0 } }, "additionalProperties": false } },
+        "displayGroups": { "type": "array", "maxItems": 64, "items": { "type": "object", "required": ["id", "label", "areaIds"], "properties": { "id": { "type": "string", "pattern": "^analytics-group-[a-f0-9]{24}$" }, "label": { "type": "string", "maxLength": 120 }, "areaIds": { "type": "array", "minItems": 2, "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } } }, "additionalProperties": false } },
+        "devices": { "type": "array", "maxItems": 100, "items": { "type": "object", "required": ["id", "label", "category", "deviceType", "areaIds"], "properties": { "id": { "$ref": "#/$defs/id" }, "label": { "type": "string", "maxLength": 120 }, "category": { "enum": ["light", "radiator", "boiler"] }, "deviceType": { "type": "string", "maxLength": 100 }, "areaIds": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } } }, "additionalProperties": false } },
+        "historicalDevices": { "type": "array", "maxItems": 100, "items": { "type": "object", "required": ["id", "label", "category", "retiredAt"], "properties": { "id": { "$ref": "#/$defs/id" }, "label": { "const": "Retired device" }, "category": { "enum": ["light", "radiator", "boiler"] }, "retiredAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] } }, "additionalProperties": false } },
+        "summaries": { "type": "array", "maxItems": 3, "items": { "type": "object", "required": ["metric", "buckets"], "properties": { "metric": { "enum": ["light", "radiator", "boiler"] }, "buckets": { "type": "array", "maxItems": 366, "items": { "$ref": "#/$defs/analyticsUsageBucket" } } }, "additionalProperties": false } },
+        "temperature": { "type": "object", "required": ["latestCelsius", "quality", "sourceAt"], "properties": { "latestCelsius": { "type": ["number", "null"], "minimum": -50, "maximum": 80 }, "quality": { "enum": ["unknown", "fresh", "stale"] }, "sourceAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] } }, "additionalProperties": false },
+        "historyState": { "enum": ["available", "empty"] }
+      },
+      "additionalProperties": false
+    },
+    "analyticsUsageResponse": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "homeId", "metric", "level", "timezone", "from", "to", "retentionStartAt", "generatedAt", "selectedDeviceCount", "devices", "buckets"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "homeId": { "$ref": "#/$defs/id" },
+        "metric": { "enum": ["light", "radiator", "boiler"] }, "level": { "enum": ["hour", "day", "week", "month", "year"] },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 80 }, "from": { "$ref": "#/$defs/timestamp" }, "to": { "$ref": "#/$defs/timestamp" },
+        "retentionStartAt": { "$ref": "#/$defs/timestamp" }, "generatedAt": { "$ref": "#/$defs/timestamp" },
+        "selectedDeviceCount": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "devices": { "type": "array", "maxItems": 100, "items": { "type": "object", "required": ["id", "label", "historicalOnly"], "properties": { "id": { "$ref": "#/$defs/id" }, "label": { "type": "string", "maxLength": 120 }, "historicalOnly": { "type": "boolean" } }, "additionalProperties": false } },
+        "buckets": { "type": "array", "maxItems": 50000, "items": { "$ref": "#/$defs/analyticsUsageBucket" } }
+      },
+      "additionalProperties": false
+    },
+    "analyticsTemperatureResponse": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "homeId", "metric", "level", "timezone", "from", "to", "retentionStartAt", "generatedAt", "selectedDeviceCount", "points"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "homeId": { "$ref": "#/$defs/id" },
+        "metric": { "const": "temperature" }, "level": { "enum": ["hour", "day", "week", "month", "year"] },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 80 }, "from": { "$ref": "#/$defs/timestamp" }, "to": { "$ref": "#/$defs/timestamp" },
+        "retentionStartAt": { "$ref": "#/$defs/timestamp" }, "generatedAt": { "$ref": "#/$defs/timestamp" },
+        "selectedDeviceCount": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "points": { "type": "array", "maxItems": 50000, "items": { "type": "object", "required": ["id", "start", "end", "label", "celsius", "sampleCount", "sourceAt", "currentFresh"], "properties": { "id": { "type": "string", "minLength": 1, "maxLength": 160 }, "start": { "$ref": "#/$defs/timestamp" }, "end": { "$ref": "#/$defs/timestamp" }, "label": { "type": "string", "maxLength": 120 }, "celsius": { "type": "number", "minimum": -50, "maximum": 80 }, "sampleCount": { "type": "integer", "minimum": 1 }, "sourceAt": { "$ref": "#/$defs/timestamp" }, "currentFresh": { "type": "boolean" } }, "additionalProperties": false } }
+      },
+      "additionalProperties": false
+    },
     "alexaDiscoveryProjection": {
       "type": "object",
       "required": [

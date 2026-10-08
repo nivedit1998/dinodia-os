@@ -786,31 +786,73 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/Conflict" }
-  /api/v2/homes/{homeId}/analytics/{period}:
+  /api/v2/homes/{homeId}/analytics/bootstrap:
     get:
-      summary: "Get Home Analytics"
-      operationId: getHomeAnalytics
+      summary: "Get Bounded Home Analytics Catalogue and Summary"
+      operationId: getNativeAnalyticsBootstrap
       tags: [Home]
+      security: [{ CustomerSessionCookie: [] }, { MobileAccessBearer: [] }]
       parameters:
         - { $ref: "#/components/parameters/HomeId" }
-        - name: period
-          in: path
+        - in: header
+          name: X-Dinodia-Home-Id
           required: true
-          schema: { type: string, enum: [year, month, week, day, hour] }
+          description: Selected-home selector only; the server independently resolves current account membership and role.
+          schema: { type: string, format: uuid }
       responses:
-        "200":
-          {
-            description: Sample-based Native analytics,
-            content:
-              {
-                application/json:
-                  {
-                    schema:
-                      { $ref: "./contract.json#/$defs/analyticsObservation" },
-                  },
-              },
-          }
-        "403": { $ref: "#/components/responses/Forbidden" }
+        "200": { description: Bounded current catalogue, explicit display groups, recent summaries and truthful freshness state., content: { application/json: { schema: { $ref: "./contract.json#/$defs/analyticsBootstrap" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/homes/{homeId}/analytics/usage:
+    get:
+      summary: "Get Bounded Home Device-Activity History"
+      operationId: getNativeAnalyticsUsage
+      tags: [Home]
+      security: [{ CustomerSessionCookie: [] }, { MobileAccessBearer: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/HomeId" }
+        - { in: header, name: X-Dinodia-Home-Id, required: true, description: Selected-home selector only; it grants no membership or role., schema: { type: string, format: uuid } }
+        - { in: query, name: metric, required: true, schema: { type: string, enum: [light, radiator, boiler] } }
+        - { in: query, name: level, required: false, schema: { type: string, enum: [hour, day, week, month, year], default: day } }
+        - { in: query, name: from, required: false, description: Inclusive RFC 3339 instant within the retained 12-month range., schema: { type: string, format: date-time } }
+        - { in: query, name: to, required: false, description: Exclusive RFC 3339 instant no later than request time., schema: { type: string, format: date-time } }
+        - { in: query, name: areaIds, required: false, description: Comma-separated selected-Home Area UUIDs; mutually exclusive with groupId., schema: { type: string, maxLength: 2400 } }
+        - { in: query, name: deviceIds, required: false, description: Comma-separated permanent property-device UUIDs, maximum 100., schema: { type: string, maxLength: 3700 } }
+        - { in: query, name: groupId, required: false, description: Current server-derived display group identifier; mutually exclusive with areaIds., schema: { type: string, pattern: "^analytics-group-[a-f0-9]{24}$" } }
+      responses:
+        "200": { description: Measured device activity; missing evidence remains a gap and is never synthesized as Off., content: { application/json: { schema: { $ref: "./contract.json#/$defs/analyticsUsageResponse" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { description: Query exceeds bounded row/filter limits; choose a shorter period or fewer devices. }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/homes/{homeId}/analytics/temperature:
+    get:
+      summary: "Get Bounded Home Radiator-Temperature History"
+      operationId: getNativeAnalyticsTemperature
+      tags: [Home]
+      security: [{ CustomerSessionCookie: [] }, { MobileAccessBearer: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/HomeId" }
+        - { in: header, name: X-Dinodia-Home-Id, required: true, description: Selected-home selector only; it grants no membership or role., schema: { type: string, format: uuid } }
+        - { in: query, name: level, required: false, schema: { type: string, enum: [hour, day, week, month, year], default: day } }
+        - { in: query, name: from, required: false, description: Inclusive RFC 3339 instant within the retained 12-month range., schema: { type: string, format: date-time } }
+        - { in: query, name: to, required: false, description: Exclusive RFC 3339 instant no later than request time., schema: { type: string, format: date-time } }
+        - { in: query, name: areaIds, required: false, description: Comma-separated selected-Home Area UUIDs; mutually exclusive with groupId., schema: { type: string, maxLength: 2400 } }
+        - { in: query, name: deviceIds, required: false, description: Comma-separated permanent Radiator UUIDs, maximum 100., schema: { type: string, maxLength: 3700 } }
+        - { in: query, name: groupId, required: false, description: Current server-derived display group identifier; mutually exclusive with areaIds., schema: { type: string, pattern: "^analytics-group-[a-f0-9]{24}$" } }
+      responses:
+        "200": { description: Bounded source-timestamped Radiator observations with honest freshness., content: { application/json: { schema: { $ref: "./contract.json#/$defs/analyticsTemperatureResponse" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { description: Query exceeds bounded row/filter limits; choose a shorter period or fewer devices. }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /api/v2/homes/{homeId}/areas:
     get:
       summary: "List Invitation Areas for Current Home Managers"
@@ -2477,6 +2519,11 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/NativeError" }
+    NotFound:
+      description: The selected Home or requested resource is unavailable to this account.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/NativeError" }
     Conflict:
       description: Revision, descriptor, idempotency, trusted-device identity or lifecycle conflict.
       content:
@@ -2488,4 +2535,7 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/NativeError" }
     ServiceUnavailable:
-      { description: The selected home hub or required Native V2 authority is unavailable; no alternate backend is attempted }
+      description: The selected Home or required Native V2 authority is unavailable; no alternate backend is attempted.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/NativeError" }

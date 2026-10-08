@@ -74,7 +74,9 @@
       { "taskId": "operator_credential_lifecycle", "owner": "supabase_pg_cron_two_minute" },
       { "taskId": "support_expiry_and_revocation", "owner": "supabase_pg_cron_two_minute" },
       { "taskId": "claim_reservation_expiry", "owner": "supabase_pg_cron_two_minute" },
-      { "taskId": "expired_dispatch_lease_cleanup", "owner": "vercel_hobby_daily" }
+      { "taskId": "expired_dispatch_lease_cleanup", "owner": "vercel_hobby_daily" },
+      { "taskId": "retentionCleanup", "owner": "vercel_hobby_daily" },
+      { "taskId": "analyticsAndStorageMaintenance", "owner": "vercel_hobby_daily" }
     ],
     "stage2TaskAllocation": [
       { "taskId": "healthAndIncidentQualification", "dispatcher": "operations", "primaryPath": "signed_heartbeat_or_incident_ingestion", "implementationStage": 4 },

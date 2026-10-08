@@ -363,6 +363,7 @@ test("platform-owned activity sync preserves source time, expires to Unknown, an
     await store.saveArea({ name: "Kitchen" }, "area-a");
     await store.savePlatform({ homeId: "home-a", devicePolicies: {
       "os-light": { osDeviceId: "os-light", managementClass: "PROPERTY_DEVICE", analyticsCategory: "LIGHT", lifecycle: "INSTALLED", ownerMembershipId: null, descriptorRevision: 1, descriptorDigest: "a".repeat(64), osAreaIds: ["area-a"] },
+      "os-brightness": { osDeviceId: "os-brightness", managementClass: "PROPERTY_DEVICE", analyticsCategory: "LIGHT", lifecycle: "INSTALLED", ownerMembershipId: null, descriptorRevision: 1, descriptorDigest: "b".repeat(64), osAreaIds: ["area-a"] },
     } });
     const device = await store.upsertDevice({
       id: "os-light", name: "Kitchen Light", protocol: "zigbee", areaId: "area-a",
@@ -381,10 +382,29 @@ test("platform-owned activity sync preserves source time, expires to Unknown, an
     assert.equal(latest.payload.unknownSeconds, 180);
 
     const missing = await store.upsertDevice({ id: "missing-time", name: "No timestamp", protocol: "zigbee", areaId: "area-a", state: { power: "on" }, entities: {
-      "entity-no-time": { id: "entity-no-time", name: "Power", state: "on", domain: "light", capability: { controlId: "control-no-time", kind: "binary", readable: true, writable: true, observable: true, semanticRole: "power", bindings: [] } },
+      "entity-no-time": { id: "entity-no-time", name: "Power", state: "on", updatedAt: "2026-10-04T11:10:00.000Z", domain: "light", capability: { controlId: "control-no-time", kind: "binary", readable: true, writable: true, observable: true, semanticRole: "power", maxStateValiditySeconds: 420, bindings: [] } },
     } }, { nowMs: Date.parse("2026-10-04T11:10:00.000Z") });
     assert.equal(missing.entities["entity-no-time"].sourceObservedAt, null);
     assert.equal(store.getSyncOutbox().events.some((event) => event.type === "usage.bucket" && event.payload.osDeviceId === "missing-time"), false);
+
+    await store.upsertDevice({ id: "os-brightness", name: "Measured dimmer", protocol: "zigbee", areaId: "area-a", setup: { status: "ready", assignmentMode: "device_inherited_v1", completedAt: "2026-10-04T10:00:00.000Z" }, state: { brightness: 80 }, entities: {
+      power: { id: "power", name: "Power", state: "on", sourceObservedAt: "2026-10-04T11:12:00.000Z", updatedAt: "2026-10-04T11:12:00.000Z", domain: "light", capability: { controlId: "control-power", kind: "binary", readable: true, writable: true, observable: true, semanticRole: "power", maxStateValiditySeconds: 420, bindings: [] } },
+      brightness: { id: "brightness", name: "Brightness", state: 80, sourceObservedAt: "2026-10-04T11:12:00.000Z", updatedAt: "2026-10-04T11:12:00.000Z", domain: "number", capability: { controlId: "control-brightness", kind: "number", readable: true, writable: true, observable: true, semanticRole: "brightness", maxStateValiditySeconds: 420, bindings: [] } },
+    } }, { nowMs: Date.parse("2026-10-04T11:12:30.000Z") });
+    const brightnessRows = store.getSyncOutbox().events.filter((event) => event.type === "usage.bucket" && event.payload.osDeviceId === "os-brightness");
+    assert.ok(store.getDevice("os-brightness"), "brightness fixture device persisted");
+    assert.equal(brightnessRows.length, 1, "power and brightness signals from one physical Light must not double-count the device");
+    assert.equal(brightnessRows[0].payload.analyticsCategory, "LIGHT");
+    assert.equal(brightnessRows[0].payload.onSeconds, 30);
+    assert.equal(brightnessRows[0].payload.controlId, "control-power", "one stable canonical activity series is retained for the combined Light signal");
+    const sourceKey = "os-brightness|LIGHT|control-power|2";
+    const originalValidity = store.snapshot().syncUsage.sources[sourceKey].validUntil;
+
+    await store.upsertDevice({ id: "os-brightness", name: "Measured dimmer", protocol: "zigbee", areaId: "area-a", state: { brightness: 50 }, entities: {
+      brightness: { id: "brightness", name: "Brightness", state: 50, updatedAt: "2026-10-04T11:15:00.000Z", domain: "number", capability: { controlId: "control-brightness", kind: "number", readable: true, writable: true, observable: true, semanticRole: "brightness", maxStateValiditySeconds: 420, bindings: [] } },
+    } }, { nowMs: Date.parse("2026-10-04T11:15:30.000Z") });
+    assert.equal(store.snapshot().syncUsage.sources[sourceKey].validUntil, originalValidity,
+      "a snapshot read/update timestamp alone cannot renew a Light observation");
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
