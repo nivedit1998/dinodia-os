@@ -2073,22 +2073,28 @@ paths:
       responses: { "200": { description: Revision-bound customer-facing Area name saved without changing the canonical Area identity or grants. }, "401": { $ref: "#/components/responses/Unauthorized" }, "409": { $ref: "#/components/responses/Conflict" } }
   /api/v2/homes/{homeId}/deregister-full-home/commit:
     post:
-      summary: Deregister Full Home (Stage 13 gated)
+      summary: Deregister Full Home (destructive commit remains Stage 13 gated)
       operationId: commitHomeDeregistration
       tags: [Home]
       security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
       parameters: [{ $ref: "#/components/parameters/HomeId" }]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
-      responses: { "503": { description: Intentionally unavailable until the Stage 13 safety rehearsal is approved. }, "401": { $ref: "#/components/responses/Unauthorized" } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/homeDeregistrationRequest" } } } }
+      responses:
+        "202": { description: Customer authority was removed and hub enforcement remains pending; account cleanup is separately reported, content: { application/json: { schema: { $ref: "./contract.json#/$defs/homeDeregistrationReceipt" } } } }
+        "503": { description: Commit is intentionally unavailable until the Stage 13 safety release. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /api/v2/homes/{homeId}/deregister-full-home/preview:
     post:
-      summary: Preview Home deregistration (Stage 13 gated)
+      summary: Preview Full Home deregistration consequences (read-only)
       operationId: previewHomeDeregistration
       tags: [Home]
       security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
       parameters: [{ $ref: "#/components/parameters/HomeId" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
-      responses: { "503": { description: Intentionally unavailable until the Stage 13 safety rehearsal is approved. }, "401": { $ref: "#/components/responses/Unauthorized" } }
+      responses:
+        "200": { description: Current selected-owner consequences; this preview performs no mutation, content: { application/json: { schema: { $ref: "./contract.json#/$defs/homeDeregistrationPreview" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Selected Home is not currently authorised for this owner, content: { application/json: { schema: { $ref: "#/components/schemas/NativeError" } } } }
   /api/v2/homes/{homeId}/devices/{deviceId}/information:
     get:
       summary: Read authorized permanent-device information

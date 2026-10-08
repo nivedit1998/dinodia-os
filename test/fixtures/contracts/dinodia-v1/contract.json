@@ -1522,7 +1522,7 @@
       "additionalProperties": false
     },
     "stepUpOperationKind": {
-      "enum": ["trusted_device_remove", "customer_password_change", "customer_profile_change", "customer_email_change", "tenant_membership_remove", "home_tenant_remove", "home_property_manager_remove", "tenant_device_remove", "tenant_area_grants_replace", "home.transfer", "home_room_access_decision", "support_ticket_close", "support_access_approve", "support_access_revoke", "alexa_unlink", "heating_sensitive_command", "device_sensitive_command"]
+      "enum": ["trusted_device_remove", "customer_password_change", "customer_profile_change", "customer_email_change", "tenant_membership_remove", "home_tenant_remove", "home_property_manager_remove", "tenant_device_remove", "tenant_area_grants_replace", "home.transfer", "home.deregister", "home_room_access_decision", "support_ticket_close", "support_access_approve", "support_access_revoke", "alexa_unlink", "heating_sensitive_command", "device_sensitive_command"]
     },
     "stepUpDescriptorAttestation": {
       "type": "object",
@@ -2088,6 +2088,51 @@
         "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "transferId": { "$ref": "#/$defs/id" },
         "homeId": { "$ref": "#/$defs/id" }, "homeMembershipId": { "$ref": "#/$defs/id" },
         "state": { "const": "TRANSFERRED" }, "idempotentReplay": { "type": "boolean" }
+      }, "additionalProperties": false
+    },
+    "homeDeregistrationEffects": {
+      "type": "object", "required": ["activeMembershipsRemoved", "pendingInvitationsCancelled", "invitationRecordsPurged", "pendingRoomRequestsCancelled", "supportAccessRevoked", "privateDevicesRemoved", "permanentDevicesPreserved", "areasPreserved", "inProgressInstallationWorkPreserved", "hubCleanupGeneration"],
+      "properties": {
+        "activeMembershipsRemoved": { "type": "integer", "minimum": 1 },
+        "pendingInvitationsCancelled": { "type": "integer", "minimum": 0 },
+        "invitationRecordsPurged": { "type": "integer", "minimum": 0 },
+        "pendingRoomRequestsCancelled": { "type": "integer", "minimum": 0 },
+        "supportAccessRevoked": { "type": "integer", "minimum": 0 },
+        "privateDevicesRemoved": { "type": "integer", "minimum": 0 },
+        "permanentDevicesPreserved": { "type": "integer", "minimum": 0 },
+        "areasPreserved": { "type": "integer", "minimum": 0 },
+        "inProgressInstallationWorkPreserved": { "type": "integer", "minimum": 0 },
+        "hubCleanupGeneration": { "type": "integer", "minimum": 1 }
+      }, "additionalProperties": false
+    },
+    "homeDeregistrationPreview": {
+      "type": "object", "required": ["schemaVersion", "ok", "homeId", "managementRevision", "state", "actionAvailable", "retainedAddress", "retainsTimezone", "effects", "warning"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "homeId": { "$ref": "#/$defs/id" },
+        "managementRevision": { "type": "integer", "minimum": 1 }, "state": { "const": "PREVIEW" },
+        "actionAvailable": { "type": "boolean" }, "retainedAddress": { "type": ["string", "null"], "maxLength": 1000 },
+        "retainsTimezone": { "type": "boolean" }, "effects": { "$ref": "#/$defs/homeDeregistrationEffects" },
+        "warning": { "type": "string", "minLength": 1, "maxLength": 1000 }
+      }, "additionalProperties": false
+    },
+    "homeDeregistrationRequest": {
+      "type": "object", "required": ["expectedManagementRevision", "confirmation", "proof", "idempotencyKey"],
+      "properties": {
+        "expectedManagementRevision": { "type": "integer", "minimum": 1 },
+        "confirmation": { "const": "DEREGISTER FULL HOME" },
+        "proof": { "type": "string", "minLength": 40, "maxLength": 8192 },
+        "idempotencyKey": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{16,160}$", "minLength": 16, "maxLength": 160 }
+      }, "additionalProperties": false
+    },
+    "homeDeregistrationReceipt": {
+      "type": "object", "required": ["schemaVersion", "ok", "homeId", "state", "managementRevision", "cleanupGeneration", "hubEnforcement", "removedMembershipCount", "accountsQueuedForCleanup", "accountCleanupState", "accountCleanupProcessed", "idempotentReplay"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "homeId": { "$ref": "#/$defs/id" },
+        "state": { "const": "WAITING_FOR_HUB_CLEANUP" }, "managementRevision": { "type": "integer", "minimum": 2 },
+        "cleanupGeneration": { "type": "integer", "minimum": 1 }, "hubEnforcement": { "const": "PENDING" },
+        "removedMembershipCount": { "type": "integer", "minimum": 1 }, "accountsQueuedForCleanup": { "type": "integer", "minimum": 1 },
+        "accountCleanupState": { "enum": ["PENDING", "COMPLETE", "ATTENTION_REQUIRED"] },
+        "accountCleanupProcessed": { "type": "integer", "minimum": 0 }, "idempotentReplay": { "type": "boolean" }
       }, "additionalProperties": false
     },
     "apnsRegistrationRequest": {
