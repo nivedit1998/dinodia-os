@@ -87,6 +87,14 @@ function normalizeCapability(input = {}, fallback = {}) {
   const bindings = normalizeBindings(input.bindings || fallback.bindings || input.services?.map((serviceId) => ({ serviceId })) || fallback.services?.map((serviceId) => ({ serviceId })));
   const services = [...new Set(bindings.map((binding) => binding.serviceId))].slice(0, MAX_MANIFEST_SERVICES);
   const constraints = normalizeConstraints(input.constraints || fallback.constraints || {});
+  const expectedReportingIntervalSeconds = Number.isSafeInteger(input.expectedReportingIntervalSeconds)
+    && input.expectedReportingIntervalSeconds > 0 ? input.expectedReportingIntervalSeconds
+    : Number.isSafeInteger(fallback.expectedReportingIntervalSeconds) && fallback.expectedReportingIntervalSeconds > 0
+      ? fallback.expectedReportingIntervalSeconds : 120;
+  const maxStateValiditySeconds = Number.isSafeInteger(input.maxStateValiditySeconds)
+    && input.maxStateValiditySeconds > 0 ? input.maxStateValiditySeconds
+    : Number.isSafeInteger(fallback.maxStateValiditySeconds) && fallback.maxStateValiditySeconds > 0
+      ? fallback.maxStateValiditySeconds : 420;
   const semanticRole = String(input.semanticRole || fallback.semanticRole || "unknown");
   const sensitiveInput = input.sensitive === undefined ? fallback.sensitive : input.sensitive;
   const stepUpInput = input.stepUpPolicy === undefined ? fallback.stepUpPolicy : input.stepUpPolicy;
@@ -104,6 +112,8 @@ function normalizeCapability(input = {}, fallback = {}) {
     stepUpPolicy: requiresStepUp ? "required" : "none",
     idempotency: input.idempotency === "invoke" || fallback.idempotency === "invoke" ? "invoke" : "set_value",
     observable: input.observable === undefined ? fallback.observable !== false : Boolean(input.observable),
+    expectedReportingIntervalSeconds,
+    maxStateValiditySeconds,
     primary: input.primary === undefined ? Boolean(fallback.primary) : Boolean(input.primary),
     services,
     bindings,
@@ -154,6 +164,10 @@ function manifestFromCapability(capability, entity = {}) {
     observable: normalized.observable,
     primary: normalized.primary,
     semanticRole: normalized.semanticRole,
+    ...(normalized.observable ? {
+      expectedReportingIntervalSeconds: normalized.expectedReportingIntervalSeconds,
+      maxStateValiditySeconds: normalized.maxStateValiditySeconds,
+    } : {}),
     service: normalized.bindings.length === 1 ? {
       id: normalized.bindings[0].serviceId,
       ...(normalized.bindings[0].parameter ? { parameter: clone(normalized.bindings[0].parameter) } : {}),
@@ -180,6 +194,8 @@ function validateManifest(input) {
   if (input.runtime !== "dinodia_os") return { ok: false, reason: "unknown capability runtime" };
   if (!KINDS.has(String(input.kind || ""))) return { ok: false, reason: "unsupported capability kind" };
   if (input.semanticRole !== undefined && !NATIVE_SEMANTIC_ROLES.has(String(input.semanticRole))) return { ok: false, reason: "unsupported semantic role" };
+  if (input.observable !== false && [input.expectedReportingIntervalSeconds, input.maxStateValiditySeconds].some((value) =>
+    value !== undefined && (!Number.isSafeInteger(value) || value <= 0))) return { ok: false, reason: "invalid observation validity" };
   if (input.sensitive !== undefined && typeof input.sensitive !== "boolean") return { ok: false, reason: "invalid sensitive-operation flag" };
   if (input.stepUpPolicy !== undefined && !["none", "required"].includes(String(input.stepUpPolicy))) return { ok: false, reason: "invalid step-up policy" };
   const serviceItems = Array.isArray(input.services) ? input.services : input.service ? [input.service] : [];
@@ -212,6 +228,10 @@ function validateManifest(input) {
     stepUpPolicy: requiresStepUp ? "required" : "none",
     idempotency: input.idempotency === "invoke" ? "invoke" : "set_value",
     observable: input.observable !== false,
+    ...(input.observable === false ? {} : {
+      expectedReportingIntervalSeconds: input.expectedReportingIntervalSeconds ?? 120,
+      maxStateValiditySeconds: input.maxStateValiditySeconds ?? 420,
+    }),
     primary: Boolean(input.primary),
     semanticRole,
     ...(bindings.length === 1 ? { service: { id: bindings[0].serviceId, ...(bindings[0].parameter ? { parameter: bindings[0].parameter } : {}) } } : {}),

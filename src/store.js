@@ -111,6 +111,7 @@ function bucketEventProjection(bucket) {
   return {
     osDeviceId: bucket.osDeviceId, osAreaId: bucket.osAreaId, analyticsCategory: bucket.category,
     controlId: bucket.controlId, sourceGeneration: bucket.sourceGeneration, bucketStart: bucket.bucketStart,
+    coverageStartAt: bucket.coverageStartAt, coverageEndAt: bucket.coverageEndAt,
     revision: bucket.revision, onSeconds: bucket.onSeconds, offSeconds: bucket.offSeconds,
     unknownSeconds: bucket.unknownSeconds, closedAt: bucket.closedAt, purgeAt: bucket.purgeAt,
   };
@@ -220,7 +221,10 @@ function recordDeviceSyncObservations(state, device, nowMs) {
       if (!observedAt || typeof value !== "number" || !Number.isFinite(value) || value < -50 || value > 80) continue;
       const observedMs = Date.parse(observedAt);
       const validUntil = observedMs + Math.min(30 * 60 * 1000, control.maxStateValiditySeconds * 1000);
-      if (observedMs > nowMs || nowMs >= validUntil) continue;
+      // Current freshness expires at validUntil, but a delayed signed sync may
+      // still carry legitimate historical evidence for the bounded retention
+      // period. Do not replace source time with queue/delivery time.
+      if (observedMs > nowMs || nowMs - observedMs > 366 * 24 * 60 * 60 * 1000) continue;
       const sourceEventKey = crypto.createHash("sha256").update([deviceId, control.controlId, generation, observedAt].join("\n"), "utf8").digest("hex");
       usage.temperatureQueuedKeys = usage.temperatureQueuedKeys || [];
       if (usage.temperatureQueuedKeys.includes(sourceEventKey)) continue;

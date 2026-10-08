@@ -12,10 +12,30 @@ function validInstant(value) {
 
 function initialUsageState(value) {
   const input = value && typeof value === "object" ? value : {};
+  const buckets = input.buckets && typeof input.buckets === "object" ? input.buckets : {};
+  const sources = input.sources && typeof input.sources === "object" ? input.sources : {};
+  // Older persisted buckets did not store their covered interval. Recover the
+  // contiguous accounted span from the existing absolute counters and the
+  // known close/accounted-through boundary; never expand a partial bucket to
+  // an hour merely because its containing hour has ended.
+  for (const bucket of Object.values(buckets)) {
+    if (!bucket || typeof bucket !== "object" || bucket.coverageStartAt && bucket.coverageEndAt) continue;
+    const start = validInstant(bucket.bucketStart);
+    const seconds = Number(bucket.onSeconds || 0) + Number(bucket.offSeconds || 0) + Number(bucket.unknownSeconds || 0);
+    if (start === null || !Number.isSafeInteger(seconds) || seconds < 0 || seconds > 3600) continue;
+    const source = Object.values(sources).find((candidate) => candidate
+      && candidate.osDeviceId === bucket.osDeviceId && candidate.osAreaId === bucket.osAreaId
+      && candidate.controlId === bucket.controlId && candidate.sourceGeneration === bucket.sourceGeneration
+      && validInstant(candidate.accountedThroughAt) !== null
+      && validInstant(candidate.accountedThroughAt) >= start && validInstant(candidate.accountedThroughAt) <= start + 3600000);
+    const end = validInstant(bucket.closedAt) ?? (source ? validInstant(source.accountedThroughAt) : null) ?? start + seconds * 1000;
+    bucket.coverageEndAt = new Date(end).toISOString();
+    bucket.coverageStartAt = new Date(end - seconds * 1000).toISOString();
+  }
   return {
     schemaVersion: 1,
-    sources: input.sources && typeof input.sources === "object" ? input.sources : {},
-    buckets: input.buckets && typeof input.buckets === "object" ? input.buckets : {},
+    sources,
+    buckets,
     queuedRevisions: input.queuedRevisions && typeof input.queuedRevisions === "object" ? input.queuedRevisions : {},
     temperatureQueuedKeys: Array.isArray(input.temperatureQueuedKeys) ? input.temperatureQueuedKeys.slice(-1024) : [],
   };
@@ -57,11 +77,19 @@ function addInterval(state, source, startMs, endMs, activity) {
         onSeconds: 0,
         offSeconds: 0,
         unknownSeconds: 0,
+        coverageStartAt: null,
+        coverageEndAt: null,
         closedAt: null,
         purgeAt: oneYearAfter(start).toISOString(),
       });
       const field = activity === "on" ? "onSeconds" : activity === "off" ? "offSeconds" : "unknownSeconds";
       bucket[field] += seconds;
+      const coveredStart = Math.ceil(cursor / 1000) * 1000;
+      const coveredEnd = coveredStart + seconds * 1000;
+      const previousStart = validInstant(bucket.coverageStartAt);
+      const previousEnd = validInstant(bucket.coverageEndAt);
+      bucket.coverageStartAt = new Date(previousStart === null ? coveredStart : Math.min(previousStart, coveredStart)).toISOString();
+      bucket.coverageEndAt = new Date(previousEnd === null ? coveredEnd : Math.max(previousEnd, coveredEnd)).toISOString();
       if (stop === start + 3_600_000) bucket.closedAt = new Date(stop).toISOString();
       bucket.revision += 1;
       changed.add(key);

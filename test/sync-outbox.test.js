@@ -409,3 +409,89 @@ test("platform-owned activity sync preserves source time, expires to Unknown, an
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("partial closed-hour coverage survives Store restart and retries the identical signed envelope", async () => {
+  const { directory, store } = temporaryStore();
+  try {
+    const storePath = path.join(directory, "store.json");
+    const observedAt = "2026-10-04T10:30:00.000Z";
+    const validUntil = "2026-10-04T10:32:00.000Z";
+    const closeAt = "2026-10-04T11:00:00.000Z";
+    await store.saveIdentity({ serial: "hub-partial", generation: 3 });
+    await store.saveArea({ name: "Kitchen" }, "area-partial");
+    await store.savePlatform({ homeId: "home-partial", devicePolicies: {
+      "os-radiator-partial": { osDeviceId: "os-radiator-partial", managementClass: "PROPERTY_DEVICE", analyticsCategory: "RADIATOR",
+        lifecycle: "INSTALLED", ownerMembershipId: null, descriptorRevision: 1, descriptorDigest: "c".repeat(64), osAreaIds: ["area-partial"] },
+    } });
+    await store.upsertDevice({
+      id: "os-radiator-partial", name: "Disposable radiator", protocol: "zigbee", areaId: "area-partial",
+      setup: { status: "ready", assignmentMode: "device_inherited_v1", completedAt: observedAt },
+      state: { heatDemand: "on" },
+      entities: { heatDemand: { id: "heat-demand", name: "Heat demand", state: "on", sourceObservedAt: observedAt,
+        domain: "climate", capability: { controlId: "heat-demand", kind: "binary", readable: true, writable: false,
+          observable: true, semanticRole: "active_heat_demand", maxStateValiditySeconds: 120, bindings: [] } } },
+    }, { nowMs: Date.parse(observedAt) });
+    await store.advanceSyncUsage(Date.parse(closeAt));
+    const first = store.getSyncOutbox();
+    const event = first.events.find((item) => item.type === "usage.bucket" && item.payload.osDeviceId === "os-radiator-partial");
+    assert.ok(event);
+    assert.deepEqual([event.payload.onSeconds, event.payload.offSeconds, event.payload.unknownSeconds], [120, 0, 1680]);
+    assert.equal(event.payload.closedAt, closeAt);
+    assert.equal(event.payload.coverageStartAt, observedAt);
+    assert.equal(event.payload.coverageEndAt, closeAt);
+    assert.equal(event.payload.onSeconds + event.payload.offSeconds + event.payload.unknownSeconds, 1800);
+
+    const runtime = { kind: "dinodia_os", version: "stage10-test", capabilities: { nativeSyncOutbox: true } };
+    const originalBatch = await store.prepareSyncBatch("00000000-0000-4000-8000-000000000010", runtime, Date.parse(closeAt));
+    const restarted = new Store(storePath);
+    const retryBatch = await restarted.prepareSyncBatch("00000000-0000-4000-8000-000000000010", runtime, Date.parse("2026-10-04T11:05:00.000Z"));
+    assert.deepEqual(retryBatch, originalBatch, "a lost acknowledgement after restart retries the exact same byte-equivalent batch and range");
+    const restoredEvent = restarted.getSyncOutbox().events.find((item) => item.type === "usage.bucket" && item.payload.osDeviceId === "os-radiator-partial");
+    assert.deepEqual(restoredEvent.payload, event.payload);
+    await restarted.acknowledgeSyncBatch({ streamId: retryBatch.streamId, acceptedThroughSequence: retryBatch.toSequence,
+      cloudRevision: 7, configurationAppliedRevision: 4 }, Date.parse("2026-10-04T11:06:00.000Z"));
+    assert.equal(restarted.getSyncOutbox().acknowledgedSequence, retryBatch.toSequence);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("delayed signed Radiator temperature keeps source time and deadline and deduplicates after expiry", async () => {
+  const { directory, store } = temporaryStore();
+  try {
+    const sourceAt = "2026-10-04T12:00:00.000Z";
+    const deliveryAt = "2026-10-04T12:31:00.000Z";
+    await store.saveIdentity({ serial: "hub-delayed-temperature", generation: 2 });
+    await store.saveArea({ name: "Study" }, "area-temperature");
+    await store.savePlatform({ homeId: "home-temperature", devicePolicies: {
+      "os-radiator-delayed": { osDeviceId: "os-radiator-delayed", managementClass: "PROPERTY_DEVICE", analyticsCategory: "RADIATOR",
+        lifecycle: "INSTALLED", ownerMembershipId: null, descriptorRevision: 1, descriptorDigest: "d".repeat(64), osAreaIds: ["area-temperature"] },
+    } });
+    // Model the real adapter shape: the climate surface is anchored by its
+    // writable setpoint while the independently described read-only sensor
+    // remains a member of that same canonical surface/catalogue.
+    const sample = { id: "ambient", name: "Ambient temperature", state: 20.5, sourceObservedAt: sourceAt,
+      domain: "climate", category: "diagnostic", capability: { controlId: "ambient-temperature", kind: "sensor", category: "diagnostic", readable: true, writable: false,
+        observable: true, semanticRole: "ambient_temperature", expectedReportingIntervalSeconds: 120, maxStateValiditySeconds: 1800, bindings: [] } };
+    const setpoint = { id: "setpoint", name: "Target temperature", state: 21, sourceObservedAt: sourceAt,
+      domain: "climate", capability: { controlId: "target-temperature", kind: "number", readable: true, writable: true,
+        observable: true, semanticRole: "target_temperature", maxStateValiditySeconds: 1800,
+        bindings: [{ serviceId: "climate.set_temperature", parameter: { key: "temperature", type: "number", min: 5, max: 35, step: 0.5 } }] } };
+    const device = { id: "os-radiator-delayed", name: "Disposable radiator", protocol: "zigbee", deviceType: "radiator",
+      technicalLabel: "radiator", areaId: "area-temperature",
+      setup: { status: "ready", assignmentMode: "device_inherited_v1", completedAt: sourceAt },
+      state: { ambient: 20.5, setpoint: 21 }, entities: { ambient: sample, setpoint } };
+    await store.upsertDevice(device, { nowMs: Date.parse(deliveryAt) });
+    const queued = store.getSyncOutbox().events.filter((item) => item.type === "temperature.sample");
+    assert.equal(queued.length, 1, `delivery after the 12:30 validity deadline remains eligible within bounded history retention; catalog=${JSON.stringify(store.getSyncOutbox().events.find((item) => item.type === "control.catalog.upsert")?.payload?.controls)}; device=${JSON.stringify(store.getDevice("os-radiator-delayed")?.entities)}`);
+    assert.equal(queued[0].payload.temperature, 20.5);
+    assert.equal(queued[0].payload.sourceObservedAt, sourceAt);
+    assert.equal(queued[0].payload.validUntil, "2026-10-04T12:30:00.000Z");
+    assert.equal(queued[0].payload.quality, "fresh", "quality describes source-time quality; the consumer computes current freshness from the deadline");
+    await store.upsertDevice(device, { nowMs: Date.parse("2026-10-04T12:32:00.000Z") });
+    assert.equal(store.getSyncOutbox().events.filter((item) => item.type === "temperature.sample").length, 1,
+      "an exact delayed observation retry is deduplicated by stable source identity");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

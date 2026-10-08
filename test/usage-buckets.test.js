@@ -32,8 +32,27 @@ test("source validity expires at its exact deadline and later coverage is Unknow
   const bucket = Object.values(advanced.state.buckets)[0];
   assert.equal(bucket.onSeconds, 120);
   assert.equal(bucket.unknownSeconds, 1680);
+  assert.equal(bucket.coverageStartAt, "2026-10-04T10:30:00.000Z");
+  assert.equal(bucket.coverageEndAt, "2026-10-04T11:00:00.000Z");
+  assert.equal(bucket.onSeconds + bucket.offSeconds + bucket.unknownSeconds,
+    (Date.parse(bucket.coverageEndAt) - Date.parse(bucket.coverageStartAt)) / 1000);
   assert.equal(bucket.closedAt, "2026-10-04T11:00:00.000Z");
   assert.equal(advanced.changedBuckets.length, 1);
+});
+
+test("legacy closed partial bucket recovers its bounded covered span without padding to a full hour", () => {
+  const legacy = initialUsageState({
+    sources: {}, buckets: { "legacy": {
+      osDeviceId: "device-a", osAreaId: "area-a", category: "LIGHT", controlId: "control-power",
+      sourceGeneration: 2, bucketStart: "2026-10-04T10:00:00.000Z", revision: 3,
+      onSeconds: 120, offSeconds: 0, unknownSeconds: 1680,
+      closedAt: "2026-10-04T11:00:00.000Z", purgeAt: "2027-10-04T10:00:00.000Z",
+    } },
+  });
+  const bucket = legacy.buckets.legacy;
+  assert.equal(bucket.coverageStartAt, "2026-10-04T10:30:00.000Z");
+  assert.equal(bucket.coverageEndAt, "2026-10-04T11:00:00.000Z");
+  assert.equal(bucket.onSeconds + bucket.offSeconds + bucket.unknownSeconds, 1800);
 });
 
 test("out-of-order observations cannot move source coverage backward or alter newer counters", () => {
