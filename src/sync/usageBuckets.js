@@ -123,14 +123,38 @@ function activityFor({ category, role, value, available = true }) {
 
 function advanceSource(state, source, untilMs) {
   const start = validInstant(source.accountedThroughAt);
-  if (start === null || untilMs <= start) return [];
+  const assignmentEnd = source.assignmentEndedAt == null ? null : validInstant(source.assignmentEndedAt);
+  const boundedUntil = assignmentEnd === null ? untilMs : Math.min(untilMs, assignmentEnd);
+  if (start === null || boundedUntil <= start) return [];
   const expiry = source.validUntil == null ? start : validInstant(source.validUntil);
-  const knownUntil = expiry === null ? start : Math.min(untilMs, Math.max(start, expiry));
+  const knownUntil = expiry === null ? start : Math.min(boundedUntil, Math.max(start, expiry));
   const changed = [];
   if (knownUntil > start) changed.push(...addInterval(state, source, start, knownUntil, source.activity));
-  if (untilMs > knownUntil) changed.push(...addInterval(state, source, knownUntil, untilMs, "unknown"));
-  source.accountedThroughAt = new Date(untilMs).toISOString();
+  if (boundedUntil > knownUntil) changed.push(...addInterval(state, source, knownUntil, boundedUntil, "unknown"));
+  source.accountedThroughAt = new Date(boundedUntil).toISOString();
   return [...new Set(changed)];
+}
+
+function endUsageAssignment(stateValue, input) {
+  const state = initialUsageState(stateValue);
+  const endedAtMs = Number(input?.endedAtMs);
+  if (!input?.osDeviceId || !input?.osAreaId || !Number.isSafeInteger(endedAtMs) || endedAtMs < 0) {
+    throw new Error("Invalid native usage assignment boundary");
+  }
+  const changed = new Set();
+  const sources = Object.values(state.sources).filter((source) => source.osDeviceId === String(input.osDeviceId)
+    && source.osAreaId === String(input.osAreaId) && source.assignmentEndedAt == null);
+  for (const source of sources) {
+    const accountedThrough = validInstant(source.accountedThroughAt);
+    if (accountedThrough === null || endedAtMs < accountedThrough) {
+      throw new Error("Native usage assignment boundary precedes accounted coverage");
+    }
+  }
+  for (const source of sources) {
+    for (const key of advanceSource(state, source, endedAtMs)) changed.add(key);
+    source.assignmentEndedAt = new Date(endedAtMs).toISOString();
+  }
+  return { state, changedBuckets: [...changed] };
 }
 
 function observeUsage(stateValue, input) {
@@ -150,14 +174,28 @@ function observeUsage(stateValue, input) {
   if (prior) {
     const priorObserved = validInstant(prior.lastObservedAt);
     const accountedThrough = validInstant(prior.accountedThroughAt);
-    if (priorObserved === observedAt) {
-      if (prior.activity !== input.activity || prior.validUntil !== (validUntil === null ? null : new Date(validUntil).toISOString())) throw new Error("Conflicting native activity observation timestamp");
-      return { state, changedBuckets: [], stale: false };
-    }
-    if (priorObserved !== null && observedAt < priorObserved || accountedThrough !== null && observedAt < accountedThrough) {
+    const hasAssignmentEnd = prior.assignmentEndedAt != null;
+    const priorAssignmentEnd = prior.assignmentEndedAt == null ? null : validInstant(prior.assignmentEndedAt);
+    if (hasAssignmentEnd && priorAssignmentEnd === null) return { state, changedBuckets: [], stale: true };
+    if (prior.osAreaId !== String(input.osAreaId) && priorAssignmentEnd === null) {
       return { state, changedBuckets: [], stale: true };
     }
-    modified.push(...advanceSource(state, prior, observedAt));
+    if (priorAssignmentEnd !== null) {
+      if (observedAt < priorAssignmentEnd || accountedThrough !== priorAssignmentEnd) {
+        return { state, changedBuckets: [], stale: true };
+      }
+      // A source sample from the new assignment starts a distinct coverage
+      // interval. Never advance the ended Area's source across the move.
+    } else {
+      if (priorObserved === observedAt) {
+        if (prior.activity !== input.activity || prior.validUntil !== (validUntil === null ? null : new Date(validUntil).toISOString())) throw new Error("Conflicting native activity observation timestamp");
+        return { state, changedBuckets: [], stale: false };
+      }
+      if (priorObserved !== null && observedAt < priorObserved || accountedThrough !== null && observedAt < accountedThrough) {
+        return { state, changedBuckets: [], stale: true };
+      }
+      modified.push(...advanceSource(state, prior, observedAt));
+    }
   }
   const source = {
     osDeviceId: String(input.osDeviceId), osAreaId: String(input.osAreaId), category: input.category,
@@ -179,4 +217,4 @@ function advanceUsage(stateValue, nowMs) {
   return { state, changedBuckets: [...changed] };
 }
 
-module.exports = { activityFor, advanceUsage, initialUsageState, observeUsage };
+module.exports = { activityFor, advanceUsage, endUsageAssignment, initialUsageState, observeUsage };

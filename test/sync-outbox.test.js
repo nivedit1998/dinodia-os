@@ -364,6 +364,8 @@ test("platform-owned activity sync preserves source time, expires to Unknown, an
     await store.savePlatform({ homeId: "home-a", devicePolicies: {
       "os-light": { osDeviceId: "os-light", managementClass: "PROPERTY_DEVICE", analyticsCategory: "LIGHT", lifecycle: "INSTALLED", ownerMembershipId: null, descriptorRevision: 1, descriptorDigest: "a".repeat(64), osAreaIds: ["area-a"] },
       "os-brightness": { osDeviceId: "os-brightness", managementClass: "PROPERTY_DEVICE", analyticsCategory: "LIGHT", lifecycle: "INSTALLED", ownerMembershipId: null, descriptorRevision: 1, descriptorDigest: "b".repeat(64), osAreaIds: ["area-a"] },
+      "os-missing-time-light": { osDeviceId: "os-missing-time-light", managementClass: "PROPERTY_DEVICE", analyticsCategory: "LIGHT", lifecycle: "INSTALLED", ownerMembershipId: null, descriptorRevision: 1, descriptorDigest: "d".repeat(64), osAreaIds: ["area-a"] },
+      "os-missing-time-radiator": { osDeviceId: "os-missing-time-radiator", managementClass: "PROPERTY_DEVICE", analyticsCategory: "RADIATOR", lifecycle: "INSTALLED", ownerMembershipId: null, descriptorRevision: 1, descriptorDigest: "e".repeat(64), osAreaIds: ["area-a"] },
     } });
     const device = await store.upsertDevice({
       id: "os-light", name: "Kitchen Light", protocol: "zigbee", areaId: "area-a",
@@ -381,11 +383,28 @@ test("platform-owned activity sync preserves source time, expires to Unknown, an
     assert.equal(latest.payload.onSeconds, 420);
     assert.equal(latest.payload.unknownSeconds, 180);
 
-    const missing = await store.upsertDevice({ id: "missing-time", name: "No timestamp", protocol: "zigbee", areaId: "area-a", state: { power: "on" }, entities: {
+    const missing = await store.upsertDevice({ id: "os-missing-time-light", name: "No timestamp", protocol: "zigbee", areaId: "area-a", state: { power: "on" }, entities: {
       "entity-no-time": { id: "entity-no-time", name: "Power", state: "on", updatedAt: "2026-10-04T11:10:00.000Z", domain: "light", capability: { controlId: "control-no-time", kind: "binary", readable: true, writable: true, observable: true, semanticRole: "power", maxStateValiditySeconds: 420, bindings: [] } },
     } }, { nowMs: Date.parse("2026-10-04T11:10:00.000Z") });
     assert.equal(missing.entities["entity-no-time"].sourceObservedAt, null);
-    assert.equal(store.getSyncOutbox().events.some((event) => event.type === "usage.bucket" && event.payload.osDeviceId === "missing-time"), false);
+    assert.ok(missing.entities["entity-no-time"].lastChanged, "the Store may record local state-change time without treating it as a source observation");
+    assert.equal(store.getSyncOutbox().events.some((event) => event.payload?.osDeviceId === "os-missing-time-light" && ["usage.bucket", "temperature.sample"].includes(event.type)), false);
+
+    const missingRadiatorTime = await store.upsertDevice({
+      id: "os-missing-time-radiator", name: "Radiator without source time", protocol: "zigbee", areaId: "area-a",
+      state: { heatDemand: "on", ambientTemperature: 20.5 },
+      entities: {
+        heat: { id: "heat", name: "Heat demand", state: "on", updatedAt: "2026-10-04T11:11:00.000Z", domain: "climate",
+          capability: { controlId: "missing-heat-time", kind: "binary", readable: true, writable: false, observable: true, semanticRole: "active_heat_demand", maxStateValiditySeconds: 1_800, bindings: [] } },
+        ambient: { id: "ambient", name: "Ambient temperature", state: 20.5, updatedAt: "2026-10-04T11:11:00.000Z", domain: "sensor",
+          capability: { controlId: "missing-temperature-time", kind: "number", readable: true, writable: false, observable: true, semanticRole: "ambient_temperature", maxStateValiditySeconds: 1_800, bindings: [] } },
+      },
+    }, { nowMs: Date.parse("2026-10-04T11:11:00.000Z") });
+    assert.equal(missingRadiatorTime.entities.heat.sourceObservedAt, null);
+    assert.equal(missingRadiatorTime.entities.ambient.sourceObservedAt, null);
+    assert.ok(missingRadiatorTime.entities.heat.lastChanged);
+    assert.equal(store.getSyncOutbox().events.some((event) => event.payload?.osDeviceId === "os-missing-time-radiator" && ["usage.bucket", "temperature.sample"].includes(event.type)), false,
+      "local lastChanged timestamps must never manufacture activity or temperature history");
 
     await store.upsertDevice({ id: "os-brightness", name: "Measured dimmer", protocol: "zigbee", areaId: "area-a", setup: { status: "ready", assignmentMode: "device_inherited_v1", completedAt: "2026-10-04T10:00:00.000Z" }, state: { brightness: 80 }, entities: {
       power: { id: "power", name: "Power", state: "on", sourceObservedAt: "2026-10-04T11:12:00.000Z", updatedAt: "2026-10-04T11:12:00.000Z", domain: "light", capability: { controlId: "control-power", kind: "binary", readable: true, writable: true, observable: true, semanticRole: "power", maxStateValiditySeconds: 420, bindings: [] } },
@@ -451,6 +470,86 @@ test("partial closed-hour coverage survives Store restart and retries the identi
     await restarted.acknowledgeSyncBatch({ streamId: retryBatch.streamId, acceptedThroughSequence: retryBatch.toSequence,
       cloudRevision: 7, configurationAppliedRevision: 4 }, Date.parse("2026-10-04T11:06:00.000Z"));
     assert.equal(restarted.getSyncOutbox().acknowledgedSequence, retryBatch.toSequence);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Area movement closes old analytics coverage and never reattributes stale activity or temperature to the new Area", async () => {
+  const { directory, store } = temporaryStore();
+  try {
+    const sourceAt = "2026-10-08T10:30:00.000Z";
+    const moveAt = Date.parse("2026-10-08T10:45:00.000Z");
+    const deviceId = "os-radiator-area-move";
+    await store.saveIdentity({ serial: "hub-area-move", generation: 1 });
+    await store.saveArea({ name: "Old room" }, "area-old");
+    await store.saveArea({ name: "New room" }, "area-new");
+    const configuration = {
+      revision: 1, policyRevision: 1,
+      areas: [
+        { id: "public-old", osAreaId: "area-old", originalName: "Old room", overrideName: null, revision: 1 },
+        { id: "public-new", osAreaId: "area-new", originalName: "New room", overrideName: null, revision: 1 },
+      ],
+      memberships: [],
+      devicePolicies: [{ osDeviceId: deviceId, managementClass: "PROPERTY_DEVICE", ownerMembershipId: null,
+        analyticsCategory: "RADIATOR", lifecycle: "INSTALLED", customerLabel: null, overrideName: null,
+        descriptorRevision: 1, descriptorDigest: "e".repeat(64), osAreaIds: ["area-old", "area-new"] }],
+      automations: [], releasePolicy: { mode: "MANUAL", automaticInstallEnabled: false, desiredRelease: null },
+    };
+    await applyCloudConfiguration(store, { ...configuration, checksum: configChecksum(configuration) });
+    await store.savePlatform({ homeId: "home-area-move" });
+    const device = {
+      id: deviceId, name: "Disposable radiator", protocol: "zigbee", areaId: "area-old",
+      setup: { status: "ready", assignmentMode: "device_inherited_v1", completedAt: sourceAt },
+      state: { heatDemand: "on" },
+      entities: {
+        heat: { id: "heat", name: "Heat demand", state: "on", sourceObservedAt: sourceAt, domain: "climate",
+          capability: { controlId: "heat-demand", kind: "binary", readable: true, writable: false, observable: true,
+            semanticRole: "active_heat_demand", maxStateValiditySeconds: 1800, bindings: [] } },
+        ambient: { id: "ambient", name: "Ambient temperature", state: 20.5, sourceObservedAt: sourceAt, domain: "climate",
+          capability: { controlId: "ambient-temperature", kind: "sensor", readable: true, writable: false, observable: true,
+            semanticRole: "ambient_temperature", maxStateValiditySeconds: 1800, bindings: [] } },
+        setpoint: { id: "setpoint", name: "Target temperature", state: 21, sourceObservedAt: sourceAt, domain: "climate",
+          capability: { controlId: "target-temperature", kind: "number", readable: true, writable: true, observable: true,
+            semanticRole: "target_temperature", maxStateValiditySeconds: 1800,
+            bindings: [{ serviceId: "climate.set_temperature", parameter: { key: "temperature", type: "number", min: 5, max: 35, step: 0.5 } }] } },
+      },
+    };
+    await store.upsertDevice(device, { nowMs: Date.parse(sourceAt) });
+
+    await store.upsertDevice({ ...device, areaId: "area-new" }, { nowMs: moveAt });
+    const restarted = new Store(path.join(directory, "store.json"));
+    const oldSource = Object.values(restarted.snapshot().syncUsage.sources).find((source) => source.osDeviceId === deviceId);
+    assert.equal(oldSource.osAreaId, "area-old");
+    assert.equal(oldSource.assignmentEndedAt, new Date(moveAt).toISOString());
+    assert.equal(oldSource.accountedThroughAt, new Date(moveAt).toISOString());
+    await restarted.advanceSyncUsage(Date.parse("2026-10-08T11:00:00.000Z"));
+    const oldBucket = Object.values(restarted.snapshot().syncUsage.buckets).find((bucket) => bucket.osDeviceId === deviceId);
+    assert.equal(oldBucket.osAreaId, "area-old");
+    assert.equal(oldBucket.coverageStartAt, sourceAt);
+    assert.equal(oldBucket.coverageEndAt, new Date(moveAt).toISOString());
+    assert.deepEqual([oldBucket.onSeconds, oldBucket.offSeconds, oldBucket.unknownSeconds], [900, 0, 0]);
+    assert.equal(restarted.getSyncOutbox().events.some((event) => event.type === "temperature.sample" && event.payload.osAreaId === "area-new"), false,
+      "the old sensor timestamp cannot be reattributed to the new Area");
+
+    const nextSourceAt = "2026-10-08T11:05:00.000Z";
+    const nextDevice = {
+      ...device, areaId: "area-new", state: { heatDemand: "off" },
+      entities: Object.fromEntries(Object.entries(device.entities).map(([key, entity]) => [key, {
+        ...entity, state: key === "heat" ? "off" : key === "ambient" ? 20.7 : entity.state, sourceObservedAt: nextSourceAt,
+      }])),
+    };
+    await restarted.upsertDevice(nextDevice, { nowMs: Date.parse(nextSourceAt) });
+    await restarted.advanceSyncUsage(Date.parse("2026-10-08T11:10:00.000Z"));
+    const buckets = Object.values(restarted.snapshot().syncUsage.buckets).filter((bucket) => bucket.osDeviceId === deviceId);
+    const newBucket = buckets.find((bucket) => bucket.osAreaId === "area-new");
+    assert.ok(newBucket);
+    assert.equal(newBucket.coverageStartAt, nextSourceAt);
+    assert.equal(newBucket.coverageEndAt, "2026-10-08T11:10:00.000Z");
+    assert.deepEqual([newBucket.onSeconds, newBucket.offSeconds, newBucket.unknownSeconds], [0, 300, 0]);
+    assert.deepEqual(buckets.map((bucket) => bucket.coverageEndAt).sort(), [new Date(moveAt).toISOString(), "2026-10-08T11:10:00.000Z"].sort());
+    assert.ok(restarted.getSyncOutbox().events.some((event) => event.type === "temperature.sample" && event.payload.osAreaId === "area-new"
+      && event.payload.sourceObservedAt === nextSourceAt));
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

@@ -11,7 +11,7 @@ const { getSurfaces } = require("./capabilities/devicePresentation");
 const { serializeDevice } = require("./contracts/dinodiaV1");
 const { enqueueSyncEventInState, initialSyncOutbox, nextSyncBatch, normalizeSyncOutbox } = require("./sync/syncOutbox");
 const { validateCloudConfiguration } = require("./sync/cloudConfiguration");
-const { activityFor, advanceUsage, initialUsageState, observeUsage } = require("./sync/usageBuckets");
+const { activityFor, advanceUsage, endUsageAssignment, initialUsageState, observeUsage } = require("./sync/usageBuckets");
 
 function sourceTimestamp(value) {
   if (typeof value !== "string") return null;
@@ -130,7 +130,7 @@ function queueUsageBucket(state, bucketKey, now) {
   return true;
 }
 
-function recordDeviceSyncObservations(state, device, nowMs) {
+function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
   const deviceId = String(device?.id || "");
   const policy = state.platform?.devicePolicies?.[deviceId];
   const generation = Number(state.identity?.generation || 0);
@@ -162,13 +162,13 @@ function recordDeviceSyncObservations(state, device, nowMs) {
     // Only adapter/source observation times establish telemetry freshness.
     // Entity update/snapshot read time is not evidence that the physical value
     // was observed now and must never renew analytics validity.
-    let observedAt = sourceTimestamp(entity?.sourceObservedAt || entity?.lastChanged || entity?.last_changed || "");
+    let observedAt = sourceTimestamp(entity?.sourceObservedAt || "");
     let validUntil = null;
     let activity;
     if (policy.analyticsCategory === "LIGHT") {
       const signals = usageControls.filter((item) => ["power", "brightness"].includes(item.semanticRole)).map((item) => {
         const source = entityFor(item);
-        const timestamp = sourceTimestamp(source?.sourceObservedAt || source?.lastChanged || source?.last_changed || "");
+        const timestamp = sourceTimestamp(source?.sourceObservedAt || "");
         const observedMs = timestamp ? Date.parse(timestamp) : NaN;
         const validityMs = Math.min(item.maxStateValiditySeconds * 1000, 30 * 60 * 1000);
         if (!source || !Number.isFinite(observedMs) || observedMs > nowMs || nowMs - observedMs > 30 * 60 * 1000 || observedMs + validityMs <= nowMs) return null;
@@ -194,6 +194,7 @@ function recordDeviceSyncObservations(state, device, nowMs) {
       activity = activityFor({ category: policy.analyticsCategory, role, value: currentEntityValue(entity), available: device.available !== false });
     }
     if (!observedAt || !validUntil || !activity) continue;
+    if (Number.isSafeInteger(options.ignoreThroughMs) && Date.parse(observedAt) <= options.ignoreThroughMs) continue;
     const result = observeUsage(usage, {
       osDeviceId: deviceId,
       osAreaId: String(device.areaId || ""),
@@ -216,7 +217,7 @@ function recordDeviceSyncObservations(state, device, nowMs) {
     for (const control of catalog.controls) {
       if (control.semanticRole !== "ambient_temperature" || !control.observable || !Number.isSafeInteger(control.maxStateValiditySeconds)) continue;
       const entity = entities.find((item) => String(item.capability?.controlId || item.controlId || item.id || item.sourceId || "") === control.controlId);
-      const observedAt = sourceTimestamp(entity?.sourceObservedAt || entity?.lastChanged || entity?.last_changed || "");
+      const observedAt = sourceTimestamp(entity?.sourceObservedAt || "");
       const value = currentEntityValue(entity);
       if (!observedAt || typeof value !== "number" || !Number.isFinite(value) || value < -50 || value > 80) continue;
       const observedMs = Date.parse(observedAt);
@@ -225,6 +226,7 @@ function recordDeviceSyncObservations(state, device, nowMs) {
       // still carry legitimate historical evidence for the bounded retention
       // period. Do not replace source time with queue/delivery time.
       if (observedMs > nowMs || nowMs - observedMs > 366 * 24 * 60 * 60 * 1000) continue;
+      if (Number.isSafeInteger(options.ignoreThroughMs) && observedMs <= options.ignoreThroughMs) continue;
       const sourceEventKey = crypto.createHash("sha256").update([deviceId, control.controlId, generation, observedAt].join("\n"), "utf8").digest("hex");
       usage.temperatureQueuedKeys = usage.temperatureQueuedKeys || [];
       if (usage.temperatureQueuedKeys.includes(sourceEventKey)) continue;
@@ -1106,6 +1108,18 @@ class Store {
     };
     next.setup = normalizeSetup(device.setup || existing.setup, { status: "needs_setup", reason: "area_and_label_required" });
     next.presentation = buildPresentation({ ...next, presentation: existing.presentation || null });
+    const observationNow = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
+    const areaChanged = Boolean(existing.id) && String(existing.areaId || "") !== String(next.areaId || "");
+    if (areaChanged && existing.areaId) {
+      const usage = this.state.syncUsage = initialUsageState(this.state.syncUsage);
+      // Usage is recorded in integer seconds. Floor the assignment boundary
+      // to that same precision so the serialized interval can never extend
+      // past a millisecond-precision Area move.
+      const assignmentEndMs = Math.floor(observationNow / 1000) * 1000;
+      const ended = endUsageAssignment(usage, { osDeviceId: id, osAreaId: String(existing.areaId), endedAtMs: assignmentEndMs });
+      this.state.syncUsage = ended.state;
+      for (const key of ended.changedBuckets) queueUsageBucket(this.state, key, assignmentEndMs);
+    }
     this.state.devices[id] = next;
     const previousProjection = existing.id ? nativeSyncDeviceProjection(existing) : null;
     const syncProjection = nativeSyncDeviceProjection(next);
@@ -1113,8 +1127,7 @@ class Store {
       || JSON.stringify(nativeSyncControlCatalogProjection(this.state, existing)?.controls || []) !== JSON.stringify(nativeSyncControlCatalogProjection(this.state, next)?.controls || []))) {
       enqueueNativeDeviceSync(this.state, existing.id ? existing : null, next, { critical: !previousProjection });
     }
-    const observationNow = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
-    recordDeviceSyncObservations(this.state, next, observationNow);
+    recordDeviceSyncObservations(this.state, next, observationNow, areaChanged ? { ignoreThroughMs: observationNow } : {});
     for (const legacyId of this.state.devices[id].legacyIds) this.state.aliases[String(legacyId)] = id;
     if (device.metadata?.friendly_name && String(device.metadata.friendly_name) !== id) this.state.aliases[String(device.metadata.friendly_name)] = id;
     try {
