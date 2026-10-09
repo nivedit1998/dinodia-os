@@ -1003,13 +1003,216 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "503": { description: Current catalogue cannot be represented without losing safety or authority fields }
+  /api/v2/alexa/link-status:
+    get:
+      summary: "Read Current Tenant Alexa Links and Authorized Area Choices"
+      operationId: getNativeAlexaLinkStatus
+      tags: [Devices]
+      security: [{ CustomerSessionCookie: [] }, { MobileAccessBearer: [] }]
+      description: Returns only the caller's active tenant memberships, current granted canonical Areas, and complete authorized display groups. It never treats the app's selected Home or client role as Alexa authority.
+      responses:
+        "200":
+          description: Current account-global skill connection and membership-scoped selections
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/alexaLinkStatusResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: "Create a One-Time Tenant Alexa Connect Intent"
+      operationId: createNativeAlexaConnectIntent
+      tags: [Devices]
+      security: [{ CustomerSessionCookie: [] }, { MobileAccessBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./contract.json#/$defs/alexaConnectIntentRequest" }
+      responses:
+        "201":
+          description: Short-lived, single-use connect intent for the explicitly authorized Area set
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/alexaConnectIntentReceipt" }
+        "400": { description: Invalid request or additional authority fields rejected }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { description: Native Alexa is intentionally held until its approved activation stage }
+  /api/v2/alexa/home-scope:
+    post:
+      summary: "Save Exact Current Tenant Alexa Area Selection"
+      operationId: saveNativeAlexaHomeScope
+      tags: [Devices]
+      security: [{ CustomerSessionCookie: [] }, { MobileAccessBearer: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/HomeId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./contract.json#/$defs/alexaHomeScopeSaveRequest" }
+      responses:
+        "200":
+          description: Server-confirmed selection and new scope/link revisions
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/alexaHomeScopeSaveReceipt" }
+        "400": { description: Invalid request or additional authority fields rejected }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { description: Native Alexa is intentionally held until its approved activation stage }
+  /api/v2/alexa/home-scope/unlink:
+    post:
+      summary: "Unlink One Tenant Property from Alexa"
+      operationId: unlinkNativeAlexaHome
+      tags: [Devices]
+      security: [{ CustomerSessionCookie: [] }, { MobileAccessBearer: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/HomeId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./contract.json#/$defs/alexaUnlinkRequest" }
+      responses:
+        "200":
+          description: Exact selected tenant property was unlinked; remaining account connections are preserved
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/alexaUnlinkReceipt" }
+        "400": { description: Invalid request or additional authority fields rejected }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { description: Native Alexa is intentionally held until its approved activation stage }
+  /api/v2/alexa/accept-grant:
+    post:
+      summary: Complete Alexa Event-Gateway Grant
+      operationId: acceptNativeAlexaGrant
+      tags: [Devices]
+      security: [{ AlexaBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./contract.json#/$defs/alexaAcceptGrantRequest" }
+      responses:
+        "200":
+          description: The provider grant was accepted once and the linked token material was safely refreshed.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/alexaAcceptGrantReceipt" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/alexa/oauth/authorize:
+    get:
+      summary: Begin Tenant-Authorized Alexa OAuth
+      operationId: beginNativeAlexaOAuthAuthorization
+      tags: [Devices]
+      security: []
+      parameters:
+        - { name: client_id, in: query, required: true, schema: { type: string, maxLength: 160 } }
+        - { name: redirect_uri, in: query, required: true, schema: { type: string, format: uri, maxLength: 500 } }
+        - { name: response_type, in: query, required: true, schema: { const: code } }
+        - { name: state, in: query, required: true, schema: { type: string, pattern: "^[A-Za-z0-9._~-]{1,512}$" } }
+        - { name: scope, in: query, required: true, schema: { const: "alexa::skills:account_linking" } }
+        - { name: code_challenge, in: query, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" } }
+        - { name: code_challenge_method, in: query, required: true, schema: { const: S256 } }
+      responses:
+        "200": { description: No-store HTML page asking the tenant to enter and review a one-time Dinodia connect intent, content: { text/html: { schema: { type: string } } } }
+        "400": { description: Invalid OAuth request; no access is granted }
+        "503": { description: Alexa OAuth is not enabled or its exact client configuration is unavailable }
+    post:
+      summary: Review and Explicitly Approve Alexa Linking
+      operationId: approveNativeAlexaOAuthAuthorization
+      tags: [Devices]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [client_id, redirect_uri, response_type, state, scope, code_challenge, code_challenge_method, connect_intent]
+              properties:
+                client_id: { type: string, maxLength: 160 }
+                redirect_uri: { type: string, format: uri, maxLength: 500 }
+                response_type: { const: code }
+                state: { type: string, pattern: "^[A-Za-z0-9._~-]{1,512}$" }
+                scope: { const: "alexa::skills:account_linking" }
+                code_challenge: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+                code_challenge_method: { const: S256 }
+                connect_intent: { type: string, pattern: "^[A-Za-z0-9_-]{40,128}$" }
+                approve: { const: authorize }
+              additionalProperties: false
+      responses:
+        "200": { description: No-store HTML review page after exact live tenant authority is revalidated, content: { text/html: { schema: { type: string } } } }
+        "303": { description: Explicit approval consumed the one-time intent and redirects only to the previously allowed HTTPS callback with code and original state }
+        "400": { description: Invalid, expired, revoked or replayed connect intent; no link is granted }
+        "503": { description: Alexa OAuth is intentionally held or unavailable }
+  /api/v2/alexa/oauth/token:
+    post:
+      summary: Exchange or Rotate Native Alexa OAuth Tokens
+      operationId: exchangeNativeAlexaOAuthToken
+      tags: [Devices]
+      security: [{ AlexaOAuthClientBasic: [] }]
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type]
+              properties:
+                grant_type: { enum: [authorization_code, refresh_token] }
+                client_id: { type: string, maxLength: 160 }
+                code: { type: string, maxLength: 256 }
+                redirect_uri: { type: string, format: uri, maxLength: 500 }
+                code_verifier: { type: string, maxLength: 128 }
+                refresh_token: { type: string, maxLength: 160 }
+              additionalProperties: false
+      responses:
+        "200":
+          description: Short-lived access token and rotating refresh token; plaintext credentials are never stored.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/alexaOAuthTokenResponse" }
+        "400": { description: Invalid client, grant, PKCE verifier, expired or replayed one-use credential }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v2/alexa/oauth/revoke:
+    post:
+      summary: Revoke Native Alexa OAuth Link
+      operationId: revokeNativeAlexaOAuthToken
+      tags: [Devices]
+      security: [{ AlexaOAuthClientBasic: [] }]
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, minLength: 40, maxLength: 160 }
+                token_type_hint: { enum: [access_token, refresh_token] }
+                client_id: { type: string, maxLength: 160 }
+              additionalProperties: false
+      responses:
+        "200":
+          description: Non-enumerating provider revocation response; all link scopes and token families are revoked.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/alexaOAuthRevokeReceipt" }
   /api/v2/alexa/discovery:
     get:
       summary: "Get Native Alexa Discovery Projection"
       operationId: getNativeAlexaDiscoveryProjection
       tags: [Devices]
       security: [{ AlexaBearer: [] }]
-      description: Stage 2 contract boundary. Account linking and live projection execution are owned by the later Alexa integration stage; until enabled, consumers must fail closed and must not fall back to HA or static data.
+      description: Native Alexa discovery is server-filtered to current tenant-granted and explicitly selected canonical Areas, supported current descriptors and private-device ownership. No HA or static fallback is permitted.
       responses:
         "200":
           description: Current selected-home and area-scoped canonical discovery projection
@@ -1018,7 +1221,7 @@ paths:
               schema: { $ref: "./contract.json#/$defs/alexaDiscoveryProjection" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
-        "501": { description: Alexa account-linking/projection feature is not enabled in this stage; no fallback is permitted }
+        "503": { description: Native Alexa activation is intentionally held until its approved activation stage }
   /api/v2/alexa/directives:
     post:
       summary: "Dispatch Native Alexa Directive"
@@ -1035,7 +1238,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/Conflict" }
-        "501": { description: Alexa directive execution is not enabled in this stage; no HA/entity fallback is permitted }
+        "503": { description: Native Alexa activation is intentionally held until its approved activation stage; no fallback is permitted }
   /api/v2/alexa/report-state:
     post:
       summary: "Report Native Alexa State"
@@ -1051,7 +1254,7 @@ paths:
         "200": { description: Current canonical control state projection }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
-        "501": { description: Alexa report-state projection is not enabled in this stage; no static fallback is permitted }
+        "503": { description: Native Alexa activation is intentionally held until its approved activation stage; no static fallback is permitted }
   /api/dinodia/v1/commands:
     post:
       summary: "Issue Dinodia OSCommand"
@@ -2428,6 +2631,8 @@ components:
       { type: http, scheme: bearer, bearerFormat: short-lived-account-session-access }
     AlexaBearer:
       { type: http, scheme: bearer, bearerFormat: linked-alexa-account }
+    AlexaOAuthClientBasic:
+      { type: http, scheme: basic, description: Exact configured OAuth client; never use customer credentials here. }
     EmployeeBearer:
       { type: http, scheme: bearer, bearerFormat: signed-employee-session }
     HubSignature:

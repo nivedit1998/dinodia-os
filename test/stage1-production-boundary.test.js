@@ -9,6 +9,7 @@ const tls = require("node:tls");
 const net = require("node:net");
 const { createUpdaterControlServer } = require("../src/updater/service");
 const { parsePublicKeys, verifyAppAccessToken } = require("../src/auth/appTokenVerifier");
+const { verifyAlexaCommandToken, verifyAlexaStateToken } = require("../src/auth/alexaCommandTokenVerifier");
 const { createHub } = require("../src/server");
 const crypto = require("node:crypto");
 const { createOperatorSessionToken } = require("../src/auth/operatorSession");
@@ -33,6 +34,34 @@ function appToken(claims, privateKey) {
   const encode = (value) => Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
   const input = `${encode({ alg: "EdDSA", typ: "DNO-APP-1", v: 1 })}.${encode(claims)}`;
   return `dno-app-1.${input}.${crypto.sign(null, Buffer.from(input), privateKey).toString("base64url")}`;
+}
+
+function alexaCommandToken(claims, privateKey) {
+  const encode = (value) => Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+  const input = `${encode({ alg: "EdDSA", typ: "DNO-ALEXA-CMD-1", v: 1 })}.${encode({
+    iss: "dinodia-platform-v2", aud: `dinodia-hub:${claims.hubInstallationId}`,
+    sub: claims.accountId, linkId: claims.linkId, endpointId: claims.endpointId,
+    homeId: claims.homeId, membershipId: claims.membershipId, hubInstallationId: claims.hubInstallationId,
+    areaId: claims.areaId, deviceId: claims.deviceId, controlId: claims.controlId,
+    descriptorRevision: claims.descriptorRevision, commandId: claims.commandId,
+    idempotencyKey: claims.idempotencyKey, valueDigest: claims.valueDigest,
+    policyRevision: claims.policyRevision, jti: claims.jti, iat: claims.issuedAt, exp: claims.expiresAt,
+    ...(claims.extraPayload || {}),
+  })}`;
+  return `dno-alexa-command-1.${input}.${crypto.sign(null, Buffer.from(input), privateKey).toString("base64url")}`;
+}
+
+function alexaStateToken(claims, privateKey) {
+  const encode = (value) => Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+  const input = `${encode({ alg: "EdDSA", typ: "DNO-ALEXA-STATE-1", v: 1 })}.${encode({
+    iss: "dinodia-platform-v2", aud: `dinodia-hub:${claims.hubInstallationId}`,
+    sub: claims.accountId, linkId: claims.linkId, endpointId: claims.endpointId,
+    homeId: claims.homeId, membershipId: claims.membershipId, hubInstallationId: claims.hubInstallationId,
+    areaId: claims.areaId, deviceId: claims.deviceId, controlIds: claims.controlIds,
+    descriptorRevision: claims.descriptorRevision, policyRevision: claims.policyRevision,
+    jti: claims.jti, iat: claims.issuedAt, exp: claims.expiresAt,
+  })}`;
+  return `dno-alexa-state-1.${input}.${crypto.sign(null, Buffer.from(input), privateKey).toString("base64url")}`;
 }
 
 async function request(base, route, options = {}) {
@@ -701,6 +730,69 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     const streamedCommand = await websocketMessageMatching(nativeSocket, (item) => item.data?.commandId === command.commandId);
     assert.equal(streamedCommand.homeId, "home-command");
     assert.ok(streamedCommand.sequence > nativeSnapshot.body.sequence, "Native events have monotonic resume sequence after the snapshot cursor");
+    const alexaCommand = { ...command, commandId: "alexa-command-native-test-1", value: true, issuedAt: new Date().toISOString(), idempotencyKey: "alexa-command-native-idempotency-0001" };
+    const alexaNow = Math.floor(Date.now() / 1000);
+    const alexaClaims = {
+      accountId: "account-command-tenant", linkId: "alexa-link-native-test", endpointId: "dos_NativeAlexaEndpoint0000000001",
+      homeId: alexaCommand.homeId, membershipId: alexaCommand.homeMembershipId, hubInstallationId: "native-command-hub",
+      areaId: dto.areaIds[0], deviceId, controlId: power.controlId, descriptorRevision: dto.descriptorRevision,
+      commandId: alexaCommand.commandId, idempotencyKey: alexaCommand.idempotencyKey,
+      valueDigest: crypto.createHash("sha256").update(JSON.stringify(alexaCommand.value), "utf8").digest("hex"),
+      policyRevision: 0, jti: "alexa-command-jti-native-test-1", issuedAt: alexaNow, expiresAt: alexaNow + 15,
+    };
+    const alexaToken = alexaCommandToken(alexaClaims, keys.privateKey);
+    const publicKeys = parsePublicKeys(keys.publicKey.export({ type: "spki", format: "pem" }).toString());
+    assert.ok(verifyAlexaCommandToken(alexaToken, { publicKeys, hubId: "native-command-hub", policyRevision: 0 }));
+    assert.equal(verifyAlexaCommandToken(alexaToken, { publicKeys, hubId: "other-hub", policyRevision: 0 }), null, "Alexa command delegation cannot cross hubs");
+    const extraClaimToken = alexaCommandToken({ ...alexaClaims, extraPayload: { householdRole: "OWNER" } }, keys.privateKey);
+    assert.equal(verifyAlexaCommandToken(extraClaimToken, { publicKeys, hubId: "native-command-hub", policyRevision: 0 }), null, "Alexa command delegation rejects caller-added authority claims");
+    const beforeAlexaEffects = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
+    const sendAlexa = (token, payload = alexaCommand, route = "/api/dinodia/v1/alexa/commands") => request(base, route, {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "idempotency-key": payload.idempotencyKey }, body: JSON.stringify(payload),
+    });
+    const alexaAccepted = await sendAlexa(alexaToken);
+    assert.equal(alexaAccepted.response.status, 202, JSON.stringify(alexaAccepted.body));
+    assert.equal(alexaAccepted.body.status, "applied", "Alexa delegates through the same native descriptor and virtual adapter");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON");
+    const stateClaims = {
+      accountId: "account-command-tenant", linkId: "alexa-link-native-test", endpointId: "dos_NativeAlexaEndpoint0000000001",
+      homeId: command.homeId, membershipId: command.homeMembershipId, hubInstallationId: "native-command-hub",
+      areaId: dto.areaIds[0], deviceId, controlIds: [power.controlId], descriptorRevision: dto.descriptorRevision,
+      policyRevision: 0, jti: "alexa-state-jti-native-test-1", issuedAt: Math.floor(Date.now() / 1000), expiresAt: Math.floor(Date.now() / 1000) + 15,
+    };
+    const alexaStateBearer = alexaStateToken(stateClaims, keys.privateKey);
+    assert.ok(verifyAlexaStateToken(alexaStateBearer, { publicKeys, hubId: "native-command-hub", policyRevision: 0 }));
+    const alexaState = await request(base, "/api/dinodia/v1/alexa/state", { method: "POST",
+      headers: { authorization: `Bearer ${alexaStateBearer}` }, body: JSON.stringify({ deviceId, controlIds: stateClaims.controlIds }) });
+    assert.equal(alexaState.response.status, 200, JSON.stringify(alexaState.body));
+    assert.equal(alexaState.body.endpointId, stateClaims.endpointId);
+    assert.equal(alexaState.body.descriptorRevision, dto.descriptorRevision);
+    assert.equal(alexaState.body.states.every((state) => state.deviceId === deviceId && state.controlId === power.controlId), true);
+    assert.equal(JSON.stringify(alexaState.body).includes("tenantOwnerMembershipId"), false, "ReportState returns only the bound native observation, not device metadata");
+    const alteredState = await request(base, "/api/dinodia/v1/alexa/state", { method: "POST",
+      headers: { authorization: `Bearer ${alexaStateBearer}` }, body: JSON.stringify({ deviceId, controlIds: [lock.controlId] }) });
+    assert.equal(alteredState.response.status, 403, "the state delegation cannot widen to an unapproved control");
+    const alexaStateGenericRead = await request(base, "/api/dinodia/v1/snapshot", { headers: { authorization: `Bearer ${alexaStateBearer}` } });
+    assert.equal(alexaStateGenericRead.response.status, 401, "Alexa state authority cannot read a household snapshot");
+    const afterAlexaEffects = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
+    assert.equal(afterAlexaEffects, beforeAlexaEffects + 1);
+    const alexaRetry = await sendAlexa(alexaToken);
+    assert.equal(alexaRetry.response.status, 202);
+    assert.equal(alexaRetry.body.commandId, alexaCommand.commandId);
+    assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, afterAlexaEffects, "Alexa retry reconciles the exact durable command without redispatch");
+    const alexaAltered = await sendAlexa(alexaToken, { ...alexaCommand, value: false });
+    assert.equal(alexaAltered.response.status, 403, "the delegation cannot be changed to a different value");
+    const wrongAreaCommand = { ...alexaCommand, commandId: "alexa-command-wrong-area", idempotencyKey: "alexa-command-wrong-area-idempotency-0001" };
+    const alexaWrongArea = alexaCommandToken({ ...alexaClaims, areaId: "area-uuid-command-other", commandId: wrongAreaCommand.commandId, idempotencyKey: wrongAreaCommand.idempotencyKey }, keys.privateKey);
+    const wrongAreaResult = await sendAlexa(alexaWrongArea, wrongAreaCommand);
+    assert.equal(wrongAreaResult.response.status, 404, "a signed delegation for another Area cannot resolve this device");
+    const appRouteAttempt = await sendAlexa(alexaToken, alexaCommand, "/api/dinodia/v1/commands");
+    assert.equal(appRouteAttempt.response.status, 401, "an Alexa-purpose token is not an app-session token");
+    const alexaExpired = alexaCommandToken({ ...alexaClaims, commandId: "alexa-command-expired", idempotencyKey: "alexa-command-expired-idempotency-0001", issuedAt: now - 30, expiresAt: now - 1 }, keys.privateKey);
+    const expiredResult = await sendAlexa(alexaExpired, { ...alexaCommand, commandId: "alexa-command-expired", idempotencyKey: "alexa-command-expired-idempotency-0001" });
+    assert.equal(expiredResult.response.status, 401, "an expired Alexa delegation is rejected before effect");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON");
+    assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, afterAlexaEffects, "altered, wrong-area, wrong-route and expired delegation attempts have zero dispatch effects");
     const commandReceipt = await request(base, `/api/dinodia/v1/commands/${encodeURIComponent(command.commandId)}`, { headers });
     assert.equal(commandReceipt.response.status, 200);
     assert.equal(commandReceipt.body.status, "applied");

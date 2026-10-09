@@ -6,7 +6,7 @@ const SYNC_OUTBOX_MAX_BYTES = 256 * 1024 * 1024;
 const SYNC_BATCH_MAX_EVENTS = 200;
 const SYNC_BATCH_MAX_BYTES = 512 * 1024;
 const CRITICAL_TYPES = new Set(["area.tombstone", "device.tombstone", "control.catalog.upsert", "control.catalog.tombstone", "incident.transition", "automation.outcome", "update.status"]);
-const COALESCIBLE_TYPES = new Set(["area.upsert", "device.upsert", "control.catalog.upsert", "usage.bucket"]);
+const COALESCIBLE_TYPES = new Set(["area.upsert", "device.upsert", "control.catalog.upsert", "usage.bucket", "device.state"]);
 
 function initialSyncOutbox() {
   return {

@@ -763,34 +763,247 @@
     },
     "alexaDiscoveryProjection": {
       "type": "object",
-      "required": [
-        "schemaVersion",
-        "homeId",
-        "membership",
-        "selectedAreaIds",
-        "exposureGeneration",
-        "data"
-      ],
+      "required": ["schemaVersion", "properties"],
       "properties": {
         "schemaVersion": { "const": "dinodia.v1" },
+        "properties": {
+          "type": "array", "maxItems": 100,
+          "items": { "$ref": "#/$defs/alexaDiscoveryProperty" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "alexaDiscoveryProperty": {
+      "type": "object",
+      "required": ["homeId", "membership", "selectedAreaIds", "exposureGeneration", "postcode", "data"],
+      "properties": {
         "homeId": { "$ref": "#/$defs/id" },
         "membership": {
-          "type": "object",
-          "required": ["homeMembershipId", "role"],
-          "properties": {
-            "homeMembershipId": { "$ref": "#/$defs/id" },
-            "role": { "const": "TENANT" }
-          },
+          "type": "object", "required": ["homeMembershipId", "role"],
+          "properties": { "homeMembershipId": { "$ref": "#/$defs/id" }, "role": { "const": "TENANT" } },
           "additionalProperties": false
         },
-        "selectedAreaIds": {
-          "type": "array",
-          "uniqueItems": true,
-          "items": { "$ref": "#/$defs/id" }
-        },
-        "exposureGeneration": { "type": "integer", "minimum": 0 },
-        "data": { "type": "array", "items": { "$ref": "#/$defs/device" } }
+        "selectedAreaIds": { "type": "array", "minItems": 1, "maxItems": 200, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "exposureGeneration": { "type": "integer", "minimum": 1 },
+        "postcode": { "type": "string", "maxLength": 24 },
+        "data": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/alexaDiscoveredDevice" } }
       },
+      "additionalProperties": false
+    },
+    "alexaDiscoveredDevice": {
+      "type": "object",
+      "required": ["endpointId", "id", "homeId", "managementClass", "ownerMembershipId", "lifecycle", "technicalLabel", "customerLabel", "friendlyName", "propertyPostcode", "areaName", "areaIds", "controls", "descriptorRevision"],
+      "properties": {
+        "endpointId": { "type": "string", "pattern": "^dos_[A-Za-z0-9_-]{16,80}$" },
+        "id": { "$ref": "#/$defs/id" },
+        "homeId": { "$ref": "#/$defs/id" },
+        "managementClass": { "$ref": "#/$defs/managementClass" },
+        "ownerMembershipId": { "type": ["string", "null"], "maxLength": 160 },
+        "lifecycle": { "const": "installed" },
+        "technicalLabel": { "type": "string", "maxLength": 80 },
+        "customerLabel": { "type": ["string", "null"], "maxLength": 40 },
+        "friendlyName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "propertyPostcode": { "type": "string", "maxLength": 24 },
+        "areaName": { "type": "string", "maxLength": 160 },
+        "areaIds": { "type": "array", "minItems": 1, "maxItems": 200, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "controls": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/control" } },
+        "descriptorRevision": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "alexaLinkStatusResponse": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "enabled", "disabledReason", "homes", "checkedAt"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" },
+        "ok": { "const": true },
+        "enabled": { "type": "boolean" },
+        "disabledReason": { "anyOf": [{ "type": "string", "maxLength": 120 }, { "type": "null" }] },
+        "checkedAt": { "$ref": "#/$defs/timestamp" },
+        "homes": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/alexaLinkStatusHome" } }
+      },
+      "additionalProperties": false
+    },
+    "alexaLinkStatusHome": {
+      "type": "object",
+      "required": ["homeId", "homeMembershipId", "postcode", "address", "role", "membershipRevision", "connectionState", "connectionId", "linkUpdatedAt", "linkRevision", "scopeRevision", "areas", "areaGroups"],
+      "properties": {
+        "homeId": { "$ref": "#/$defs/id" },
+        "homeMembershipId": { "$ref": "#/$defs/id" },
+        "postcode": { "anyOf": [{ "type": "string", "maxLength": 24 }, { "type": "null" }] },
+        "address": { "type": "string", "maxLength": 512 },
+        "role": { "const": "TENANT" },
+        "membershipRevision": { "type": "integer", "minimum": 1 },
+        "connectionState": { "enum": ["LINKED", "AVAILABLE"] },
+        "connectionId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "linkUpdatedAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+        "linkRevision": { "anyOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+        "scopeRevision": { "anyOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+        "areas": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/alexaLinkStatusArea" } },
+        "areaGroups": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/alexaAreaDisplayGroup" } }
+      },
+      "additionalProperties": false
+    },
+    "alexaLinkStatusArea": {
+      "type": "object",
+      "required": ["areaId", "name", "state"],
+      "properties": {
+        "areaId": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "state": { "enum": ["LINKED", "AVAILABLE"] },
+        "exposureGeneration": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "alexaAreaDisplayGroup": {
+      "type": "object",
+      "required": ["id", "name", "areaIds"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^display-[a-f0-9]{20}$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "areaIds": { "type": "array", "minItems": 2, "maxItems": 200, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } }
+      },
+      "additionalProperties": false
+    },
+    "alexaConnectIntentReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "intentId", "intent", "expiresAt"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true },
+        "intentId": { "$ref": "#/$defs/id" }, "intent": { "type": "string", "minLength": 40, "maxLength": 128 },
+        "expiresAt": { "$ref": "#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "alexaConnectIntentRequest": {
+      "type": "object",
+      "required": ["homeMembershipId", "areaIds"],
+      "properties": {
+        "homeMembershipId": { "$ref": "#/$defs/id" },
+        "areaIds": { "type": "array", "minItems": 1, "maxItems": 200, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } }
+      },
+      "additionalProperties": false
+    },
+    "alexaHomeScopeSaveRequest": {
+      "type": "object",
+      "required": ["homeMembershipId", "areaIds", "expectedLinkRevision", "expectedScopeRevision"],
+      "properties": {
+        "homeMembershipId": { "$ref": "#/$defs/id" },
+        "areaIds": { "type": "array", "maxItems": 200, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "expectedLinkRevision": { "type": "integer", "minimum": 1 },
+        "expectedScopeRevision": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "alexaUnlinkRequest": {
+      "type": "object",
+      "required": ["connectionId", "expectedLinkRevision", "expectedScopeRevision", "proof"],
+      "properties": {
+        "connectionId": { "$ref": "#/$defs/id" },
+        "expectedLinkRevision": { "type": "integer", "minimum": 1 },
+        "expectedScopeRevision": { "type": "integer", "minimum": 1 },
+        "proof": { "type": "string", "minLength": 20, "maxLength": 8192 }
+      },
+      "additionalProperties": false
+    },
+    "alexaHomeScopeSaveReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "homeId", "homeMembershipId", "linkRevision", "scopeRevision", "selectedAreaIds", "changed"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true },
+        "homeId": { "$ref": "#/$defs/id" }, "homeMembershipId": { "$ref": "#/$defs/id" },
+        "linkRevision": { "type": "integer", "minimum": 1 }, "scopeRevision": { "type": "integer", "minimum": 1 },
+        "selectedAreaIds": { "type": "array", "maxItems": 200, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "changed": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "alexaUnlinkReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "homeId", "homeMembershipId", "state", "remainingHomes", "accountLinkRevoked"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true },
+        "homeId": { "$ref": "#/$defs/id" }, "homeMembershipId": { "$ref": "#/$defs/id" },
+        "state": { "const": "UNLINKED" }, "remainingHomes": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "accountLinkRevoked": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "alexaAcceptGrantRequest": {
+      "type": "object",
+      "required": ["messageId", "grantCode"],
+      "properties": {
+        "messageId": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,180}$" },
+        "grantCode": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      },
+      "additionalProperties": false
+    },
+    "alexaAcceptGrantReceipt": {
+      "type": "object",
+      "required": ["accepted"],
+      "properties": { "accepted": { "const": true } },
+      "additionalProperties": false
+    },
+    "alexaDirectiveRequest": {
+      "type": "object",
+      "required": ["directive"],
+      "properties": {
+        "directive": {
+          "type": "object",
+          "required": ["header", "endpoint"],
+          "properties": {
+            "header": {
+              "type": "object",
+              "required": ["namespace", "name", "messageId", "payloadVersion"],
+              "properties": {
+                "namespace": { "type": "string", "minLength": 1, "maxLength": 80 },
+                "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+                "messageId": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,180}$" },
+                "payloadVersion": { "const": "3" },
+                "correlationToken": { "type": "string", "maxLength": 2048 }
+              },
+              "additionalProperties": true
+            },
+            "endpoint": {
+              "type": "object",
+              "required": ["endpointId", "scope"],
+              "properties": {
+                "endpointId": { "type": "string", "pattern": "^dos_[A-Za-z0-9_-]{16,80}$" },
+                "scope": {
+                  "type": "object",
+                  "required": ["type", "token"],
+                  "properties": {
+                    "type": { "const": "BearerToken" },
+                    "token": { "type": "string", "pattern": "^dno-alexa-access-[A-Za-z0-9_-]{40,128}$" }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": true
+            },
+            "payload": { "type": "object", "maxProperties": 32 }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "alexaOAuthTokenResponse": {
+      "type": "object",
+      "required": ["access_token", "token_type", "expires_in", "refresh_token", "scope"],
+      "properties": {
+        "access_token": { "type": "string", "pattern": "^dno-alexa-access-[A-Za-z0-9_-]{40,128}$" },
+        "token_type": { "const": "Bearer" },
+        "expires_in": { "type": "integer", "minimum": 1, "maximum": 3600 },
+        "refresh_token": { "type": "string", "pattern": "^dno-alexa-refresh-[A-Za-z0-9_-]{40,128}$" },
+        "scope": { "const": "alexa::skills:account_linking" }
+      },
+      "additionalProperties": false
+    },
+    "alexaOAuthRevokeReceipt": {
+      "type": "object",
+      "required": ["revoked"],
+      "properties": { "revoked": { "const": true } },
       "additionalProperties": false
     },
     "controlCatalog": {
@@ -2549,10 +2762,23 @@
                 "SUPPORT_CODE_EXPIRED",
                 "SUPPORT_CODE_USED",
                 "SUPPORT_EMPLOYEE_MISMATCH",
-      "SUPPORT_SCOPE_CHANGED",
-      "SUPPORT_REMOTE_UNAVAILABLE",
-      "FEATURE_NOT_ENABLED",
-      "INTERNAL_ERROR"
+                "SUPPORT_SCOPE_CHANGED",
+                "SUPPORT_REMOTE_UNAVAILABLE",
+                "FEATURE_NOT_ENABLED",
+                "INTERNAL_ERROR",
+                "AUTOMATION_INVALID",
+                "AUTOMATION_TRIGGER_INVALID",
+                "AUTOMATION_ACTIONS_INVALID",
+                "AUTOMATION_ACTION_INVALID",
+                "AUTOMATION_ACTION_DUPLICATE",
+                "AUTOMATION_SCOPE_DENIED",
+                "AUTOMATION_DESCRIPTOR_STALE",
+                "AUTOMATION_CONTROL_APP_ONLY",
+                "AUTOMATION_CONTROL_UNAVAILABLE",
+                "AUTOMATION_CONFLICT",
+                "AUTOMATION_NOT_FOUND",
+                "AUTOMATION_REVISION_CONFLICT",
+                "AUTOMATION_IDEMPOTENCY_CONFLICT"
               ]
             },
             "message": { "type": "string", "maxLength": 240 },

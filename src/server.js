@@ -48,6 +48,7 @@ const { AutomationScheduler } = require("./automations/scheduler");
 const { compileTarget, findControl, resolveExecutionRoute } = require("./automations/controlCatalog");
 const { verifyOperatorSessionToken } = require("./auth/operatorSession");
 const { parsePublicKeys, verifyAppAccessToken } = require("./auth/appTokenVerifier");
+const { verifyAlexaCommandToken, verifyAlexaStateToken } = require("./auth/alexaCommandTokenVerifier");
 const { ProvisioningPairingService } = require("./auth/provisioningPairing");
 const { SetupDiscovery, privateInterface } = require("./setupDiscovery");
 const { RevocationCoordinator } = require("./auth/revocationCoordinator");
@@ -301,6 +302,10 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     : null;
   const physicalLanListenersEnabled = runtimeConfig.nodeEnv === "production" && Number(runtimeConfig.haPort) > 0 && config.disablePhysicalLanListenersForTest !== true;
   const eventBus = new EventEmitter();
+  // Marks the one in-process descriptor projection used for Alexa state sync.
+  // A JSON/WebSocket/client principal cannot manufacture this Symbol.
+  const alexaObservationAuthority = Symbol("native-alexa-observation-authority");
+  const nativeAlexaChangeCauses = new Set(["APP_INTERACTION", "PERIODIC_POLL", "PHYSICAL_INTERACTION", "VOICE_INTERACTION"]);
   const vault = new SecretVault({ dataDir: config.dataDir || path.dirname(runtimeConfig.dataFile), logger });
   // The integration harness may inject a disposable broker only when it
   // explicitly selects its test-only runtime marker. Production always uses
@@ -480,6 +485,30 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       identityGeneration: Number(identity.generation || 0),
     } : null;
   };
+  const alexaCommandAuth = (token, expectedCommandId = null) => {
+    const platform = hubStore.getPlatform?.() || {};
+    const principal = verifyAlexaCommandToken(token, {
+      publicKeys: appPublicKeys,
+      hubId: platform.hubInstallId || serial,
+      policyRevision: Math.max(Number(platform.policyRevision || 0), Number(hubStore?.getAuth?.().policyRevision || 0)),
+    });
+    if (!principal || expectedCommandId && principal.commandId !== expectedCommandId) return null;
+    const identity = hubStore.getIdentity?.() || {};
+    const acceptedLineages = new Set([serial, identity.instanceId, platform.hubInstallId].filter(Boolean).map(String));
+    return acceptedLineages.has(String(principal.hubInstallId)) ? principal : null;
+  };
+  const alexaStateAuth = (token) => {
+    const platform = hubStore.getPlatform?.() || {};
+    const principal = verifyAlexaStateToken(token, {
+      publicKeys: appPublicKeys,
+      hubId: platform.hubInstallId || serial,
+      policyRevision: Math.max(Number(platform.policyRevision || 0), Number(hubStore?.getAuth?.().policyRevision || 0)),
+    });
+    if (!principal) return null;
+    const identity = hubStore.getIdentity?.() || {};
+    const acceptedLineages = new Set([serial, identity.instanceId, platform.hubInstallId].filter(Boolean).map(String));
+    return acceptedLineages.has(String(principal.hubInstallId)) ? principal : null;
+  };
 
   let automation;
   let nativeAutomationService;
@@ -510,7 +539,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   });
   const electric = new ElectricUsageTracker({ store: hubStore, logger });
   const stateNotifier = new StateChangeNotifier({ url: runtimeConfig.stateChangeUrl, secret: runtimeConfig.stateChangeSecret, logger });
-  async function notifyDeviceChanged(device, previous = null) {
+  async function notifyDeviceChanged(device, previous = null, causeType = null) {
     if (automation) await automation.onDeviceChanged(device, previous);
     await heating.onDeviceChanged(device);
     await electric.onDeviceChanged(device);
@@ -527,7 +556,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         const state = haModel.stateFor(item);
         const oldEntity = previous && Object.values(previous.entities || {}).find((candidate) => candidate.sourceId === item.rawId || candidate.id === item.rawId || candidate.stateKey === item.entity.stateKey);
         const oldState = previous && oldEntity ? { ...state, state: oldEntity.available === false || previous.available === false ? "unavailable" : normalizeHaState(oldEntity.state), attributes: { ...state.attributes, friendly_name: oldEntity.name || state.attributes.friendly_name } } : null;
-        eventBus.emit("state_changed", { entity_id: state.entity_id, old_state: oldState, new_state: state });
+        eventBus.emit("state_changed", { entity_id: state.entity_id, old_state: oldState, new_state: state,
+          ...(nativeAlexaChangeCauses.has(String(causeType || "")) ? { causeType } : {}) });
         stateNotifier.enqueue(state.entity_id);
       }
     }
@@ -717,7 +747,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     return hubStore.getDevice(id);
   }
 
-  async function commandEntity(device, entity, serviceId, data = {}, fallbackCommand = {}) {
+  async function commandEntity(device, entity, serviceId, data = {}, fallbackCommand = {}, observationCause = null) {
     if (device.protocol === "zigbee" && entity.capability?.bindings?.length) {
       return mqtt.command(device.id, commandForZigbeeBinding(entity, serviceId, data));
     }
@@ -765,7 +795,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         });
         const updated = updatedEntity ? hubStore.getDevice(device.id) : null;
         if (!updated) return commandDevice(device.id, device.protocol, fallbackCommand);
-        await notifyDeviceChanged(updated, previous);
+        await notifyDeviceChanged(updated, previous, observationCause);
         await hubStore.addEvent({ type: "device_command", deviceId: device.id, protocol: "virtual" });
         return updated;
       }
@@ -1371,9 +1401,28 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   }
 
   function appCanReadDevice(principal, device) {
-    if (!principal || !["app", "offline"].includes(principal.principalType) || !device) return false;
+    if (!principal || !["app", "offline", "alexa", "alexa_state", "alexa_observation"].includes(principal.principalType) || !device) return false;
     const platformHomeId = String(hubStore.getPlatform?.()?.homeId || "");
     if (platformHomeId && String(principal.homeId || "") !== platformHomeId) return false;
+    if (principal.principalType === "alexa_observation") {
+      // This principal is constructed only by the in-process OS observation
+      // listener. It is never accepted by an HTTP token verifier. Keep its
+      // authority narrower than a tenant session: one current Home, one
+      // current hub identity, a property-owned installed device, and its
+      // currently assigned canonical Area.
+      const platform = hubStore.getPlatform?.() || {};
+      const policy = platform.devicePolicies?.[String(device.id)] || null;
+      const hubAreaId = String(device.areaId || device.metadata?.areaId || "");
+      const areaId = canonicalAreaIdForHubArea(hubAreaId);
+      return Boolean(platform.homeId && String(principal.homeId || "") === String(platform.homeId)
+        && principal[alexaObservationAuthority] === true
+        && String(principal.hubInstallId || "") === String(platform.hubInstallId || "")
+        && Number.isSafeInteger(Number(principal.identityGeneration)) && Number(principal.identityGeneration) >= 1
+        && policy?.managementClass === "PROPERTY_DEVICE" && policy.ownerMembershipId == null
+        && !["RETIRED", "REMOVED", "REMOVAL_PENDING", "RECOMMISSION_REQUIRED"].includes(String(policy.lifecycle || ""))
+        && hubAreaId && Array.isArray(policy.osAreaIds) && policy.osAreaIds.map(String).includes(hubAreaId)
+        && Array.isArray(principal.areaIds) && principal.areaIds.map(String).includes(areaId));
+    }
     if (!validateNativeMembership({
       accountId: String(principal.sub || ""),
       homeId: String(principal.homeId || ""),
@@ -1551,7 +1600,7 @@ function nativeDeviceView(principal, device) {
   const nativeCommandConfirmationTimeoutMs = Math.max(50, Math.min(60_000, Number(config.nativeCommandConfirmationTimeoutMs) || 15_000));
   function nativeCommandPrincipalFingerprint(principal) {
     return crypto.createHash("sha256")
-      .update(stableJson({ sub: String(principal?.sub || ""), homeId: String(principal?.homeId || ""), membershipId: String(principal?.membershipId || "") }), "utf8")
+      .update(stableJson({ sub: String(principal?.sub || ""), homeId: String(principal?.homeId || ""), membershipId: String(principal?.membershipId || ""), ...(principal?.principalType === "alexa" ? { alexaLinkId: String(principal?.linkId || "") } : {}) }), "utf8")
       .digest("hex");
   }
   function nativeCommandIdKey(principal, commandId) {
@@ -1617,6 +1666,52 @@ function nativeDeviceView(principal, device) {
       entity?.id,
       entity?.sourceId,
     ].some((value) => value != null && String(value) === requested)) || null;
+  }
+
+  async function enqueueAlexaStateObservation(device, entity, causeType) {
+    // Amazon requires a truthful ChangeReport cause. Unknown-origin adapter
+    // observations still update the OS UI but cannot be represented as a
+    // physical, app, poll, or voice action and therefore are not reported.
+    if (!nativeAlexaChangeCauses.has(String(causeType || ""))) return;
+    const policy = hubStore.getPlatform?.()?.devicePolicies?.[String(device.id)] || null;
+    const platform = hubStore.getPlatform?.() || {};
+    const areaId = canonicalAreaIdForHubArea(device.areaId || device.metadata?.areaId);
+    if (policy?.managementClass !== "PROPERTY_DEVICE"
+      || ["RETIRED", "REMOVED", "REMOVAL_PENDING", "RECOMMISSION_REQUIRED"].includes(String(policy.lifecycle || ""))
+      || !platform.homeId || !platform.hubInstallId || !areaId) return;
+
+    // The identity broker—not the local descriptive Store identity—is the
+    // authoritative source of the current enrolled generation in Production.
+    const identity = await pairing?.getPublicIdentity?.();
+    const identityGeneration = Number(identity?.generation || 0);
+    if (!identity || String(identity.serial || "") !== String(pairing?.serial || "")
+      || !Number.isSafeInteger(identityGeneration) || identityGeneration < 1) return;
+
+    const principal = {
+      principalType: "alexa_observation", sub: "00000000-0000-4000-8000-000000000001", homeId: String(platform.homeId),
+      membershipId: "00000000-0000-4000-8000-000000000001", hubInstallId: String(platform.hubInstallId),
+      identityGeneration, householdRole: "TENANT", areaIds: [areaId],
+      policyRevision: Math.max(1, Number(platform.policyRevision) || 1), scope: ["tenant:device-read"],
+    };
+    Object.defineProperty(principal, alexaObservationAuthority, { value: true });
+    const dto = nativeDevicesFor(principal).find((entry) => entry.id === String(device.id));
+    if (!dto) return;
+    const controlId = String(entity?.capability?.controlId || entity?.controlId || entity?.id || "");
+    const control = dto.controls.find((entry) => entry.controlId === controlId);
+    const safeRoles = new Set(["power", "brightness", "target_temperature", "ambient_temperature", "opening_percentage", "position"]);
+    if (!control || !control.readable || !control.observable || control.stepUpPolicy === "required"
+      || ["sensitive", "critical"].includes(String(control.riskLevel))
+      || control.interactionKind === "momentary_action" || !safeRoles.has(String(control.semanticRole))) return;
+    const state = nativeControlStates(principal, [dto], dto.id).find((entry) => entry.controlId === controlId);
+    if (!state || !state.observedAt || !state.validUntil) return;
+    const aggregateId = crypto.createHash("sha256").update(`${dto.id}\n${controlId}`, "utf8").digest("hex");
+    await hubStore.queueSyncEvent("device.state", aggregateId, {
+      osDeviceId: dto.id, osAreaId: String(device.areaId || device.metadata?.areaId || ""),
+      controlId, sourceGeneration: identityGeneration, descriptorRevision: dto.descriptorRevision,
+      revision: state.revision, observedAt: state.observedAt, receivedAt: state.receivedAt,
+      validUntil: state.validUntil, quality: state.quality, value: state.value, causeType,
+      deviceAvailability: state.deviceAvailability,
+    }, { now: new Date(clock()) });
   }
 
   function nativeCommandValueMatches(control, requested, observed) {
@@ -1739,11 +1834,36 @@ function nativeDeviceView(principal, device) {
   eventBus.on("state_changed", (event = {}) => {
     const entityId = String(event.entity_id || "");
     if (!entityId) return;
-    const device = hubStore.listDevices().find((item) => Object.values(item.entities || {}).some((entity) => String(entity.id || entity.sourceId || "") === entityId));
+    // Home Assistant emits the projected surface ID, not necessarily the
+    // underlying Store entity ID. Resolve through the live model and then
+    // bind the observation back to one of that surface's declared sources.
+    // This preserves the actual control identity used by Native descriptors
+    // and prevents a presentation-only ID from becoming sync authority.
+    const modelEntity = (haModel?.entities?.() || []).find((item) =>
+      item.haId === entityId || item.entityId === entityId || item.rawId === entityId);
+    const device = modelEntity?.device || hubStore.listDevices().find((item) => Object.values(item.entities || {}).some((entity) =>
+      String(entity.id || entity.sourceId || "") === entityId));
     if (!device) return;
-    const entity = Object.values(device.entities || {}).find((item) => String(item.id || item.sourceId || "") === entityId);
-    reconcileNativeCommandObservation(device.id, String(entity?.capability?.controlId || entity?.controlId || entity?.id || entityId)).catch(() => {});
-    queueNativeEvent({ kind: "state", deviceId: String(device.id), controlId: String(entity?.capability?.controlId || entity?.controlId || entity?.id || entityId) });
+    const sourceIds = new Set([
+      ...(Array.isArray(modelEntity?.surface?.sourceEntityIds) ? modelEntity.surface.sourceEntityIds.map(String) : []),
+      ...(modelEntity?.rawId ? [String(modelEntity.rawId)] : []),
+      ...(!modelEntity ? [entityId] : []),
+    ]);
+    const entity = Object.values(device.entities || {}).find((item) =>
+      [item.id, item.sourceId, item.entityId].some((value) => value != null && sourceIds.has(String(value)))) || null;
+    // A projected surface with no current source entity is stale. Do not
+    // synthesize a control identity from its display/Home Assistant ID.
+    if (!entity) return;
+    const controlId = String(modelEntity?.surface?.capability?.controlId
+      || modelEntity?.surface?.controlId
+      || entity.capability?.controlId || entity.controlId || entity.id || "");
+    if (!controlId) return;
+    reconcileNativeCommandObservation(device.id, controlId).catch(() => {});
+    queueNativeEvent({ kind: "state", deviceId: String(device.id), controlId });
+    // Alexa state is synchronized only from the current identity-broker
+    // generation, live descriptor and property-device policy. Tenant-owned
+    // devices and app-only controls never enter the Platform event stream.
+    enqueueAlexaStateObservation(device, entity, event.causeType).catch((error) => logger.warn(`[native-alexa-state] observation projection failed (${String(error?.code || "projection_unavailable")})`));
   });
   eventBus.on("registry_updated", (event = {}) => {
     if (event.registry !== "device") return;
@@ -1822,7 +1942,9 @@ function nativeDeviceView(principal, device) {
     const serviceId = String(binding?.serviceId || "").toLowerCase();
     const dot = serviceId.indexOf(".");
     if (!binding || dot < 1 || !appCanCommandDevice(principal, device, { controlId: control.controlId }, raw, serviceId)) return false;
-    const adapterResult = await commandEntity(device, raw, serviceId, nativeCommandData(serviceId, value), {});
+    const observationCause = principal.principalType === "alexa" ? "VOICE_INTERACTION"
+      : ["app", "offline"].includes(principal.principalType) ? "APP_INTERACTION" : null;
+    const adapterResult = await commandEntity(device, raw, serviceId, nativeCommandData(serviceId, value), {}, observationCause);
     return { dispatched: true, protocol: String(device.protocol || "unknown"), adapterResult };
   }
 
@@ -1859,6 +1981,14 @@ function nativeDeviceView(principal, device) {
       : null;
     const operatorPrincipal = await refreshedSupportBrowserPrincipal(req) || operatorSessionAuth(token) || developmentCompatibilityPrincipal;
     const appPrincipal = operatorPrincipal ? null : appSessionAuth(token);
+    const alexaReceiptMatch = pathname.match(/^\/api\/dinodia\/v1\/commands\/([^/]+)$/);
+    const alexaCommandRoute = req.method === "POST" && pathname === "/api/dinodia/v1/alexa/commands";
+    const alexaStateRoute = req.method === "POST" && pathname === "/api/dinodia/v1/alexa/state";
+    const alexaReceiptRoute = req.method === "GET" && Boolean(alexaReceiptMatch);
+    const alexaPrincipal = !operatorPrincipal && !appPrincipal && (alexaCommandRoute || alexaReceiptRoute)
+      ? alexaCommandAuth(token, alexaReceiptRoute ? decodeURIComponent(alexaReceiptMatch[1]) : null)
+      : null;
+    const alexaStatePrincipal = !operatorPrincipal && !appPrincipal && alexaStateRoute ? alexaStateAuth(token) : null;
     if (pathname === "/api/dinodia/v1/offline/challenges" && req.method === "POST"
       && !operatorPrincipal && !appPrincipal && !bearerToken(req)
       && isTrustedOfflineLanTransport(req)) {
@@ -1926,7 +2056,7 @@ function nativeDeviceView(principal, device) {
     }
     let offlinePrincipal = null;
     let offlineChallenge = null;
-    if (!operatorPrincipal && !appPrincipal) {
+    if (!operatorPrincipal && !appPrincipal && !alexaPrincipal && !alexaStatePrincipal) {
       const challengeHeader = String(req.headers["x-dinodia-offline-challenge"] || "");
       const signature = String(req.headers["x-dinodia-offline-signature"] || "");
       const grantId = String(req.headers["x-dinodia-offline-grant"] || "");
@@ -1942,11 +2072,11 @@ function nativeDeviceView(principal, device) {
         } catch { offlinePrincipal = null; }
       }
     }
-    if (!operatorPrincipal && !appPrincipal && !offlinePrincipal) {
+    if (!operatorPrincipal && !appPrincipal && !offlinePrincipal && !alexaPrincipal && !alexaStatePrincipal) {
       return json(res, 401, { error: "Authentication required" });
     }
-    const scopedPrincipal = appPrincipal || offlinePrincipal;
-    const nativeTenantPrincipal = Boolean(scopedPrincipal && ["app", "offline"].includes(scopedPrincipal.principalType)
+    const scopedPrincipal = appPrincipal || offlinePrincipal || alexaPrincipal || alexaStatePrincipal;
+    const nativeTenantPrincipal = Boolean(scopedPrincipal && ["app", "offline", "alexa"].includes(scopedPrincipal.principalType)
       && scopedPrincipal.householdRole === "TENANT" && scopedPrincipal.scope?.includes("tenant:device-command"));
     const supportOperator = isSupportOperator(operatorPrincipal);
     if (supportOperator && (req.method !== "GET" || !supportPathAllowed(pathname))) {
@@ -1955,7 +2085,9 @@ function nativeDeviceView(principal, device) {
     if (scopedPrincipal && !(
       (req.method === "GET" && (pathname === "/api/status" || pathname === "/api/devices" || pathname.startsWith("/api/devices/") || pathname === "/api/dinodia/v1/health" || pathname === "/api/dinodia/v1/snapshot" || pathname === "/api/dinodia/v1/areas" || pathname === "/api/dinodia/v1/devices" || /^\/api\/dinodia\/v1\/devices\/[^/]+$/.test(pathname) || pathname === "/api/dinodia/v1/control-catalog" || pathname === "/api/dinodia/v1/maintenance/status" || /^\/api\/dinodia\/v1\/commands\/[^/]+$/.test(pathname))) ||
       (req.method === "DELETE" && /^\/api\/dinodia\/v1\/devices\/[^/]+$/.test(pathname)) ||
-      (req.method === "POST" && pathname === "/api/dinodia/v1/commands") ||
+      (req.method === "POST" && pathname === "/api/dinodia/v1/commands" && ["app", "offline"].includes(scopedPrincipal.principalType)) ||
+      (req.method === "POST" && pathname === "/api/dinodia/v1/alexa/commands" && scopedPrincipal.principalType === "alexa") ||
+      (req.method === "POST" && pathname === "/api/dinodia/v1/alexa/state" && scopedPrincipal.principalType === "alexa_state") ||
       (nativeTenantPrincipal && req.method === "POST" && /^\/api\/dinodia\/v1\/commissioning\/sessions(?:\/[^/]+(?:\/(?:matter-payload|select|complete|cancel|resume))?)?$/.test(pathname)) ||
       (nativeTenantPrincipal && req.method === "GET" && /^\/api\/dinodia\/v1\/commissioning\/sessions\/[^/]+$/.test(pathname)) ||
       (req.method === "POST" && pathname.includes("/entities/") && pathname.endsWith("/service")) ||
@@ -2248,11 +2380,48 @@ function nativeDeviceView(principal, device) {
       });
     }
 
-    if (pathname === "/api/dinodia/v1/commands" && req.method === "POST") {
-      if (!scopedPrincipal || !["app", "offline"].includes(scopedPrincipal.principalType) || scopedPrincipal.householdRole !== "TENANT" || !scopedPrincipal.scope.includes("tenant:device-command")) {
+    if (pathname === "/api/dinodia/v1/alexa/state" && req.method === "POST") {
+      if (!scopedPrincipal || scopedPrincipal.principalType !== "alexa_state") return nativeContractError(res, 403, "SCOPE_DENIED", "A single-endpoint Alexa state delegation is required");
+      const body = await readBody(req);
+      if (!body || typeof body !== "object" || Array.isArray(body)
+        || Object.keys(body).sort().join(",") !== "controlIds,deviceId"
+        || body.deviceId !== scopedPrincipal.deviceId || !Array.isArray(body.controlIds)
+        || JSON.stringify(body.controlIds) !== JSON.stringify(scopedPrincipal.controlIds)) {
+        return nativeContractError(res, 403, "SCOPE_DENIED", "The Alexa state request is not bound to this endpoint and control set");
+      }
+      const device = hubStore.getDevice(String(scopedPrincipal.deviceId));
+      if (!device || !appCanReadDevice(scopedPrincipal, device)) return nativeContractError(res, 404, "RESOURCE_NOT_FOUND", "The selected endpoint is unavailable");
+      const dto = serializeNativeDevice({ device: nativeDeviceView(scopedPrincipal, device), homeId: String(scopedPrincipal.homeId), homeMembershipId: String(scopedPrincipal.membershipId), role: "TENANT", areaIds: scopedPrincipal.areaIds, surfaces: allProjectedSurfaces(device), revision: Number(device.presentation?.descriptorRevision || 0) });
+      if (!dto || dto.lifecycle !== "installed" || dto.descriptorRevision !== scopedPrincipal.descriptorRevision
+        || !dto.areaIds.includes(scopedPrincipal.areaId)) return nativeContractError(res, 409, "CATALOG_REVISION_MISMATCH", "The endpoint scope or descriptor changed; rediscover Alexa devices");
+      const stateRoles = new Set(["power", "brightness", "target_temperature", "ambient_temperature", "opening_percentage", "position", "volume"]);
+      const controls = dto.controls.filter((control) => scopedPrincipal.controlIds.includes(control.controlId));
+      if (controls.length !== scopedPrincipal.controlIds.length || controls.some((control) => !control.readable || !control.observable
+        || !stateRoles.has(control.semanticRole) || control.stepUpPolicy === "required"
+        || ["security_lock", "lock_state"].includes(control.semanticRole))) {
+        return nativeContractError(res, 403, "SCOPE_DENIED", "The requested Alexa state surface is not permitted");
+      }
+      const states = nativeControlStates(scopedPrincipal, [dto], dto.id).filter((state) => scopedPrincipal.controlIds.includes(state.controlId));
+      return json(res, 200, { schemaVersion: "dinodia.v1", endpointId: scopedPrincipal.endpointId, homeId: scopedPrincipal.homeId,
+        membershipId: scopedPrincipal.membershipId, deviceId: scopedPrincipal.deviceId, descriptorRevision: dto.descriptorRevision, states });
+    }
+
+    if ((pathname === "/api/dinodia/v1/commands" || pathname === "/api/dinodia/v1/alexa/commands") && req.method === "POST") {
+      const alexaPath = pathname === "/api/dinodia/v1/alexa/commands";
+      if (!scopedPrincipal || (alexaPath ? scopedPrincipal.principalType !== "alexa" : !["app", "offline"].includes(scopedPrincipal.principalType)) || scopedPrincipal.householdRole !== "TENANT" || !scopedPrincipal.scope.includes("tenant:device-command")) {
         return nativeContractError(res, 403, "SCOPE_DENIED", "A selected tenant command permission is required");
       }
       const command = await readBody(req);
+      if (alexaPath && (scopedPrincipal.commandId !== command.commandId
+        || scopedPrincipal.idempotencyKey !== command.idempotencyKey
+        || scopedPrincipal.homeId !== command.homeId
+        || scopedPrincipal.membershipId !== command.homeMembershipId
+        || scopedPrincipal.deviceId !== command.deviceId
+        || scopedPrincipal.controlId !== command.controlId
+        || scopedPrincipal.descriptorRevision !== Number(command.descriptorRevision)
+        || scopedPrincipal.valueDigest !== crypto.createHash("sha256").update(stableJson(command.value), "utf8").digest("hex"))) {
+        return nativeContractError(res, 403, "SCOPE_DENIED", "The signed Alexa delegation is not bound to this exact command");
+      }
       if (offlinePrincipal && (offlineChallenge?.purpose !== "native.command"
         || offlineChallenge.deviceId !== String(command.deviceId || "")
         || offlineChallenge.controlId !== String(command.controlId || "")
@@ -2276,6 +2445,10 @@ function nativeDeviceView(principal, device) {
       const binding = nativeCommandBinding({ ...control, value: command.value }, rawEntity);
       const serviceId = String(binding?.serviceId || "").toLowerCase();
       if (!rawEntity || !binding || !appCanCommandDevice(scopedPrincipal, device, { controlId: control.controlId }, rawEntity, serviceId)) return nativeContractError(res, 403, "SCOPE_DENIED", "The current control is not writable for this membership");
+      if (alexaPath && (scopedPrincipal.areaId !== canonicalAreaIdForHubArea(device.areaId || device.metadata?.areaId)
+        || control.stepUpPolicy === "required" || ["security_lock", "lock_state"].includes(control.semanticRole))) {
+        return nativeContractError(res, 403, "SCOPE_DENIED", "The Alexa delegation is outside the current permitted device scope");
+      }
 
       return runNativeCommandSerial(async () => {
         const security = hubStore.getSecurity?.() || {};
@@ -2327,7 +2500,7 @@ function nativeDeviceView(principal, device) {
         }
 
         const requiresStepUp = liveControl.stepUpPolicy === "required" || ["security_lock", "lock_state"].includes(liveControl.semanticRole);
-        if (requiresStepUp && !offlinePrincipal) {
+        if (requiresStepUp && (!offlinePrincipal || alexaPath)) {
           const proof = String(req.headers["x-dinodia-step-up-proof"] || "");
           const descriptorDigest = stepUpDescriptorDigest(liveDevice);
           if (!descriptorDigest) return nativeContractError(res, 409, "CATALOG_REVISION_MISMATCH", "Refresh the current device controls before confirming this operation");
@@ -2366,15 +2539,20 @@ function nativeDeviceView(principal, device) {
           // the final effect boundary; otherwise a grant revocation or a
           // control becoming read-only during persistence could still
           // dispatch the stale snapshot captured above.
-          const currentPrincipal = offlinePrincipal ? (offlineLanAuthorisations.isCurrent(scopedPrincipal) ? scopedPrincipal : null) : appSessionAuth(bearerToken(req));
+          const currentPrincipal = offlinePrincipal ? (offlineLanAuthorisations.isCurrent(scopedPrincipal) ? scopedPrincipal : null)
+            : alexaPath ? alexaCommandAuth(bearerToken(req), String(command.commandId))
+              : appSessionAuth(bearerToken(req));
           const principalStillMatches = currentPrincipal &&
+            currentPrincipal.principalType === scopedPrincipal.principalType &&
             currentPrincipal.sub === scopedPrincipal.sub &&
             currentPrincipal.sid === scopedPrincipal.sid &&
             currentPrincipal.membershipId === scopedPrincipal.membershipId &&
             currentPrincipal.homeId === scopedPrincipal.homeId &&
             currentPrincipal.hubInstallId === scopedPrincipal.hubInstallId &&
             currentPrincipal.householdRole === "TENANT" &&
-            currentPrincipal.scope.includes("tenant:device-command");
+            currentPrincipal.scope.includes("tenant:device-command") && (!alexaPath ||
+              currentPrincipal.linkId === scopedPrincipal.linkId && currentPrincipal.endpointId === scopedPrincipal.endpointId &&
+              currentPrincipal.valueDigest === scopedPrincipal.valueDigest && currentPrincipal.idempotencyKey === command.idempotencyKey);
           const dispatchDevice = principalStillMatches ? hubStore.getDevice(String(command.deviceId || "")) : null;
           const dispatchDto = dispatchDevice && appCanReadDevice(currentPrincipal, dispatchDevice)
             ? serializeNativeDevice({ device: nativeDeviceView(currentPrincipal, dispatchDevice), homeId: String(currentPrincipal.homeId), homeMembershipId: String(currentPrincipal.membershipId), role: String(currentPrincipal.householdRole), areaIds: (currentPrincipal.areaIds || []).map(String), surfaces: allProjectedSurfaces(dispatchDevice), revision: Number(dispatchDevice.presentation?.descriptorRevision || 0) })
@@ -3395,7 +3573,7 @@ function nativeDeviceView(principal, device) {
   function isNativeAppRoute(req, url) {
     return (req.method === "GET" && (url.pathname === "/api/dinodia/v1/snapshot" || url.pathname === "/api/dinodia/v1/areas" || url.pathname === "/api/dinodia/v1/devices" || /^\/api\/dinodia\/v1\/devices\/[^/]+$/.test(url.pathname) || url.pathname === "/api/dinodia/v1/control-catalog" || url.pathname === "/api/dinodia/v1/maintenance/status" || /^\/api\/dinodia\/v1\/commands\/[^/]+$/.test(url.pathname)))
       || (req.method === "DELETE" && /^\/api\/dinodia\/v1\/devices\/[^/]+$/.test(url.pathname))
-      || (req.method === "POST" && (url.pathname === "/api/dinodia/v1/commands" || url.pathname === "/api/dinodia/v1/offline/challenges" || url.pathname === "/api/dinodia/v1/maintenance/update" || url.pathname === "/api/step-up/descriptor-challenge" || /^\/api\/dinodia\/v1\/commissioning\/sessions(?:\/[^/]+(?:\/(?:matter-payload|select|complete|cancel|resume))?)?$/.test(url.pathname)))
+      || (req.method === "POST" && (url.pathname === "/api/dinodia/v1/commands" || url.pathname === "/api/dinodia/v1/alexa/commands" || url.pathname === "/api/dinodia/v1/alexa/state" || url.pathname === "/api/dinodia/v1/offline/challenges" || url.pathname === "/api/dinodia/v1/maintenance/update" || url.pathname === "/api/step-up/descriptor-challenge" || /^\/api\/dinodia\/v1\/commissioning\/sessions(?:\/[^/]+(?:\/(?:matter-payload|select|complete|cancel|resume))?)?$/.test(url.pathname)))
       || (req.method === "GET" && /^\/api\/dinodia\/v1\/commissioning\/sessions\/[^/]+$/.test(url.pathname));
   }
   function isHaCompatibilityPath(pathname) {
@@ -4100,6 +4278,13 @@ function nativeDeviceView(principal, device) {
       return nativeContractError(res, 403, "SCOPE_DENIED", "This assigned-work session can open only its permanent-installation workspace");
     }
     const app = appSessionAuth(bearerToken(req));
+    const alexaReceiptMatch = dashboardUrl.pathname.match(/^\/api\/dinodia\/v1\/commands\/([^/]+)$/);
+    const alexaCommandPath = req.method === "POST" && dashboardUrl.pathname === "/api/dinodia/v1/alexa/commands";
+    const alexaStatePath = req.method === "POST" && dashboardUrl.pathname === "/api/dinodia/v1/alexa/state";
+    const alexaReceiptPath = req.method === "GET" && Boolean(alexaReceiptMatch);
+    const alexaNativeRoute = runtimeConfig.nodeEnv === "production" && !operator && !app && (
+      (alexaCommandPath || alexaReceiptPath) && Boolean(alexaCommandAuth(bearerToken(req), alexaReceiptPath ? decodeURIComponent(alexaReceiptMatch[1]) : null))
+      || alexaStatePath && Boolean(alexaStateAuth(bearerToken(req))));
     const nativeAppApi = directNativeAppApi || isDashboardAdminPath(url.pathname) && (
       dashboardUrl.pathname === "/api/status" ||
       dashboardUrl.pathname === "/api/devices" ||
@@ -4123,7 +4308,7 @@ function nativeDeviceView(principal, device) {
       && directNativeAppApi
       && (offlineChallengeRequest || (req.method === "GET" && (url.pathname === "/api/dinodia/v1/snapshot" || url.pathname === "/api/dinodia/v1/areas" || url.pathname === "/api/dinodia/v1/devices" || /^\/api\/dinodia\/v1\/devices\/[^/]+$/.test(url.pathname) || url.pathname === "/api/dinodia/v1/control-catalog" || /^\/api\/dinodia\/v1\/commands\/[^/]+$/.test(url.pathname)))
         || (req.method === "POST" && url.pathname === "/api/dinodia/v1/commands"));
-    if (runtimeConfig.nodeEnv === "production" && !operator && !app && !offlineNativeRoute) {
+    if (runtimeConfig.nodeEnv === "production" && !operator && !app && !offlineNativeRoute && !alexaNativeRoute) {
       if (directNativeAppApi) return nativeContractError(res, 401, "AUTH_REQUIRED", "A valid selected-home app session is required");
       const hasOperatorCookie = String(req.headers.cookie || "").split(";").some((item) => item.trim().startsWith("dinodia_os_operator_session="));
       if (hasOperatorCookie) {
