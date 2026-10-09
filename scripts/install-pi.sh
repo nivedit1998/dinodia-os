@@ -20,7 +20,9 @@ DISCOVERY_TIMER_FILE="/etc/systemd/system/dinodia-setup-discovery-sync.timer"
 AVAHI_CONFIG="/etc/avahi/avahi-daemon.conf"
 INSTALL_USER="${SUDO_USER:-${USER:-dinodia}}"
 CURRENT_ENV="${DINODIA_ENV_FILE:-$INSTALL_DIR/.env}"
+HIVE_WHEELHOUSE_SOURCE="${DINODIA_HIVE_WHEELHOUSE:-}"
 STAGE_DIR=""
+HIVE_WHEELHOUSE_STAGE=""
 OLD_RELEASE=""
 SWITCHED=0
 SERVICES_STOPPED=0
@@ -63,6 +65,21 @@ identity_owner="$(stat -c '%U:%G' "$IDENTITY_DIR")"
 
 candidate_files=(src public scripts docker systemd docs Dockerfile docker-compose.yml package.json package-lock.json .env.example requirements-hive.in requirements-hive.lock THIRD_PARTY_NOTICES.md)
 for relative in "${candidate_files[@]}"; do [[ -e "$APP_SOURCE/$relative" ]] || die "candidate is missing $relative"; done
+
+# A disconnected/filtered Pi network can make a fresh venv unable to reach
+# PyPI even when the currently installed venv has every locked package cached.
+# An optional, separately transferred wheelhouse is accepted only as a flat
+# directory of exactly one wheel per locked requirement. pip still enforces
+# every lock hash, and the offline path never consults an index or builds sdist.
+if [[ -n "$HIVE_WHEELHOUSE_SOURCE" ]]; then
+  [[ -d "$HIVE_WHEELHOUSE_SOURCE" && ! -L "$HIVE_WHEELHOUSE_SOURCE" ]] || die "the optional Hive wheelhouse must be an existing real directory"
+  HIVE_WHEELHOUSE_SOURCE="$(realpath -e -- "$HIVE_WHEELHOUSE_SOURCE")"
+  invalid_wheelhouse_entry="$(find "$HIVE_WHEELHOUSE_SOURCE" -mindepth 1 -maxdepth 1 \( ! -type f -o ! -name '*.whl' \) -print -quit)"
+  [[ -z "$invalid_wheelhouse_entry" ]] || die "the Hive wheelhouse may contain only top-level wheel files"
+  expected_wheel_count="$(grep -Ec '^[A-Za-z0-9][A-Za-z0-9_.-]*==[^[:space:]]+' "$APP_SOURCE/requirements-hive.lock")"
+  actual_wheel_count="$(find "$HIVE_WHEELHOUSE_SOURCE" -mindepth 1 -maxdepth 1 -type f -name '*.whl' -printf '.' | wc -c | tr -d '[:space:]')"
+  [[ "$actual_wheel_count" == "$expected_wheel_count" ]] || die "the Hive wheelhouse wheel count does not match the locked requirement count"
+fi
 
 # This validator parses physical dotenv assignments and compares the URL as a
 # value. It rejects Preview/old/fallback origins and malformed multiline PEMs.
@@ -164,6 +181,15 @@ install -o "$INSTALL_USER" -g "$INSTALL_USER" -m 0600 "$CURRENT_ENV" "$STAGE_DIR
 # atomic switch below.
 chown -R "$INSTALL_USER":"$INSTALL_USER" "$STAGE_DIR"
 
+if [[ -n "$HIVE_WHEELHOUSE_SOURCE" ]]; then
+  HIVE_WHEELHOUSE_STAGE="$STAGE_DIR/.hive-wheelhouse"
+  install -d -o root -g root -m 0755 "$HIVE_WHEELHOUSE_STAGE"
+  cp -- "$HIVE_WHEELHOUSE_SOURCE"/*.whl "$HIVE_WHEELHOUSE_STAGE/"
+  chown root:root "$HIVE_WHEELHOUSE_STAGE" "$HIVE_WHEELHOUSE_STAGE"/*.whl
+  chmod 0555 "$HIVE_WHEELHOUSE_STAGE"
+  chmod 0444 "$HIVE_WHEELHOUSE_STAGE"/*.whl
+fi
+
 # Put the immutable build identity into the staged environment without
 # printing any existing secret values. A same-directory rename keeps the file
 # valid for systemd and Docker Compose throughout the transition.
@@ -189,9 +215,17 @@ runuser -u "$INSTALL_USER" -- npm --prefix "$STAGE_DIR" ci --omit=dev
 test -s "$STAGE_DIR/src/generated/matterCatalog.json"
 runuser -u "$INSTALL_USER" -- node -e 'const c=require(process.argv[1]); if(c.schemaVersion!==1||!c.clusters||!c.deviceTypes) process.exit(1)' "$STAGE_DIR/src/generated/matterCatalog.json"
 if [[ ! -x "$STAGE_DIR/.venv-hive/bin/python" ]]; then runuser -u "$INSTALL_USER" -- python3 -m venv "$STAGE_DIR/.venv-hive"; fi
-runuser -u "$INSTALL_USER" -- "$STAGE_DIR/.venv-hive/bin/python" -m pip install --disable-pip-version-check --require-hashes -r "$STAGE_DIR/requirements-hive.lock"
+if [[ -n "$HIVE_WHEELHOUSE_STAGE" ]]; then
+  runuser -u "$INSTALL_USER" -- "$STAGE_DIR/.venv-hive/bin/python" -m pip install --disable-pip-version-check --no-index --find-links "$HIVE_WHEELHOUSE_STAGE" --only-binary=:all: --require-hashes -r "$STAGE_DIR/requirements-hive.lock"
+else
+  runuser -u "$INSTALL_USER" -- "$STAGE_DIR/.venv-hive/bin/python" -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes -r "$STAGE_DIR/requirements-hive.lock"
+fi
 runuser -u "$INSTALL_USER" -- "$STAGE_DIR/.venv-hive/bin/python" -c 'from apyhiveapi import Hive; print("Hive adapter ready")'
 chmod 0555 "$STAGE_DIR/src/integrations/hive/python"/*.py
+if [[ -n "$HIVE_WHEELHOUSE_STAGE" ]]; then
+  rm -rf -- "$HIVE_WHEELHOUSE_STAGE"
+  HIVE_WHEELHOUSE_STAGE=""
+fi
 
 # Validate the staged candidate again before any active path or service unit
 # changes. This catches an accidental copy/formatting defect in the staged env.

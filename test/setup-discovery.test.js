@@ -213,6 +213,14 @@ test("Pi installer preflights candidate before installing Avahi publisher depend
   assert.match(installer, /DISCOVERY_RELEASE_ROOT="\/usr\/local\/lib\/dinodia-setup-discovery-releases"/);
   assert.match(installer, /DISCOVERY_CURRENT_LINK="\/usr\/local\/lib\/dinodia-setup-discovery-current"/);
   assert.match(installer, /DISCOVERY_LINK_SWITCHED/);
+  assert.match(installer, /DINODIA_HIVE_WHEELHOUSE/);
+  assert.match(installer, /the Hive wheelhouse may contain only top-level wheel files/);
+  assert.match(installer, /wheel count does not match the locked requirement count/);
+  assert.match(installer, /--no-index --find-links .*--only-binary=:all: --require-hashes/);
+  const offlinePipInstall = installer.indexOf("--no-index --find-links");
+  const wheelhouseRemoval = installer.indexOf('rm -rf -- "$HIVE_WHEELHOUSE_STAGE"');
+  const releaseCopy = installer.indexOf('cp -a "$STAGE_DIR" "$RELEASE_DIR"');
+  assert.ok(offlinePipInstall > stageCopy && wheelhouseRemoval > offlinePipInstall && releaseCopy > wheelhouseRemoval);
   const serviceUnit = fs.readFileSync(path.join(__dirname, "..", "systemd", "dinodia-setup-discovery-sync.service"), "utf8");
   const timerUnit = fs.readFileSync(path.join(__dirname, "..", "systemd", "dinodia-setup-discovery-sync.timer"), "utf8");
   assert.match(serviceUnit, /User=root/);
