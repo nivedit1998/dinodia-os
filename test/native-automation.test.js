@@ -10,7 +10,8 @@ const { AutomationService } = require("../src/automations/service");
 const { AutomationExecutor } = require("../src/automations/executor");
 const { AutomationScheduler } = require("../src/automations/scheduler");
 const { dateParts, scheduledOccurrence } = require("../src/automations/schedule");
-const { publicCatalog } = require("../src/automations/controlCatalog");
+const { createBindingControl, publicCatalog } = require("../src/automations/controlCatalog");
+const { validateAgainstCatalogue } = require("../src/automations/validator");
 const { createBackup, decryptBackup } = require("../src/backup");
 const execFileAsync = promisify(execFile);
 const { createHub } = require("../src/server");
@@ -67,7 +68,8 @@ test("native domain uses explicit timezone and ISO weekday semantics", () => {
   assert.equal(parts.hour, 10);
   assert.equal(parts.weekday, 4);
   const occurrence = scheduledOccurrence({ id: "automation-a", revision: 1 }, { payload: { minuteOfDay: 600, weekdays: [4], timeZoneIdentifier: "Europe/London" } }, NOW);
-  assert.equal(occurrence.id, "automation-a:1:2026-09-17:10:00");
+  assert.equal(occurrence.id, "automation-a:1:2026-09-17:10:00:+0100");
+  assert.equal(occurrence.utcOffsetMinutes, 60);
 });
 
 test("native service persists normalized rows and makes create idempotent", async () => {
@@ -101,6 +103,32 @@ test("native catalogue is public-safe and never exposes execution routes", () =>
   assert.equal(value.devices[0].controls[0].execution, undefined);
 });
 
+test("lock and interactive security controls are excluded even from a malformed native catalogue", async () => {
+  const lockControl = {
+    controlId: "lock-surface::lock",
+    deviceId: "device-1",
+    surfaceId: "lock-surface",
+    label: "Lock",
+    kind: "momentaryAction",
+    valueType: "invoke",
+    writable: true,
+    allowsAutomation: true,
+    semanticRole: "security_lock",
+    stepUpPolicy: "required",
+    execution: { serviceId: "lock.lock", idempotency: "invoke" },
+  };
+  assert.equal(createBindingControl({}, { id: "lock-surface", capability: { automatable: true } }, "lock.lock", {}), null);
+  assert.ok(validateAgainstCatalogue({ actions: [{ id: "lock-action", deviceId: "device-1", controlId: lockControl.controlId, targetValue: { type: "invoke" } }] }, [
+    { deviceId: "device-1", configured: true, controls: [lockControl] },
+  ]).some((item) => item.code === "automation_control_app_only"));
+
+  const { service, store } = await makeService();
+  service.internalCatalogue = () => [{ deviceId: "device-1", configured: true, controls: [lockControl] }];
+  await assert.rejects(() => service.create({ ...definition(), actions: [{ deviceId: "device-1", controlId: lockControl.controlId, targetValue: { type: "invoke" } }] }),
+    (error) => error.code === "automation_control_app_only");
+  assert.equal(store.listNativeAutomations().length, 0);
+});
+
 test("scheduler claims one durable occurrence and executor preserves action order", async () => {
   const { service, store } = await makeService(() => new Date(NOW));
   const created = await service.create(definition());
@@ -113,7 +141,7 @@ test("scheduler claims one durable occurrence and executor preserves action orde
   assert.equal(second.claimed, 0);
   assert.deepEqual(order, [created.actions[0].id]);
   assert.equal(store.state.automationExecutions[0].status, "succeeded");
-  assert.equal(store.state.automationOccurrences[`${created.id}:1:2026-09-17:10:00`].status, "succeeded");
+  assert.equal(store.state.automationOccurrences[`${created.id}:1:2026-09-17:10:00:+0100`].status, "succeeded");
 });
 
 test("scheduler catches a missed scheduled minute inside the grace window", async () => {
@@ -127,6 +155,43 @@ test("scheduler catches a missed scheduled minute inside the grace window", asyn
   assert.equal(result.claimed, 1);
   assert.equal(calls, 1);
   assert.equal(store.state.automationExecutions[0].status, "succeeded");
+});
+
+test("five-minute execution boundary is inclusive at 4:59 and 5:00 and skips at 5:01 without commands", async (t) => {
+  for (const scenario of [
+    { name: "4:59", now: new Date("2026-09-17T09:04:59.000Z"), expected: "succeeded", calls: 1 },
+    { name: "5:00", now: new Date("2026-09-17T09:05:00.000Z"), expected: "succeeded", calls: 1 },
+    { name: "5:01", now: new Date("2026-09-17T09:05:01.000Z"), expected: "skipped", calls: 0 },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const { service, store, directory } = await makeService(() => new Date(scenario.now));
+      const created = await service.create(definition());
+      let calls = 0;
+      const executor = new AutomationExecutor({ store, now: () => new Date(scenario.now), executeControl: async () => { calls += 1; } });
+      const scheduler = new AutomationScheduler({ store, service, executor, now: () => new Date(scenario.now), intervalMs: 10000, setIntervalFn: () => null, clearIntervalFn() {} });
+      const result = await scheduler.tick(new Date(scenario.now));
+      assert.equal(result.claimed, scenario.calls);
+      assert.equal(calls, scenario.calls);
+      assert.equal(store.state.automationExecutions[0].status, scenario.expected);
+      if (scenario.expected === "skipped") {
+        assert.equal(store.state.automationExecutions[0].actionOutcomes[0].errorCode, "missed_run_window");
+        assert.equal(store.state.automationOccurrences[store.state.automationExecutions[0].occurrenceId].status, "skipped");
+        const reopened = new Store(path.join(directory, "dinodia.json"));
+        assert.equal(reopened.state.automationOccurrences[store.state.automationExecutions[0].occurrenceId].status, "skipped");
+      }
+    });
+  }
+});
+
+test("fall-back repeated local schedule executes only at the earlier offset with distinct stable identity", () => {
+  const automation = { id: "automation-dst", revision: 2 };
+  const trigger = { payload: { minuteOfDay: 90, weekdays: [7], timeZoneIdentifier: "Europe/London" } };
+  const first = scheduledOccurrence(automation, trigger, new Date("2026-10-25T00:30:00.000Z"));
+  const second = scheduledOccurrence(automation, trigger, new Date("2026-10-25T01:30:00.000Z"));
+  assert.ok(first);
+  assert.equal(first.utcOffsetMinutes, 60);
+  assert.equal(first.id, "automation-dst:2:2026-10-25:01:30:+0100");
+  assert.equal(second, null);
 });
 
 test("restart recovery marks claimed work uncertain instead of replaying it", async () => {
@@ -227,6 +292,24 @@ test("native admin API exposes catalogue, CRUD, revision conflicts, and executio
     assert.equal(conflict.status, 409);
     const history = await fetch(`${base}/_dinodia/admin/api/automations/${encodeURIComponent(created.id)}/executions`, { headers }).then((response) => response.json());
     assert.deepEqual(history.executions, []);
+    await hub.store.saveAutomation({ name: "Legacy test row", trigger: { type: "legacy_state" }, actions: [{ deviceId: "device-1" }] });
+    const list = await fetch(`${base}/_dinodia/admin/api/automations`, { headers }).then((response) => response.json());
+    assert.equal(list.automations.some((item) => item.name === "Legacy test row"), false);
+    assert.equal(Object.hasOwn(list, "legacyAutomations"), false);
+
+    const nativeCountBeforeDeniedLock = hub.store.listNativeAutomations().length;
+    hub.nativeAutomationService.internalCatalogue = () => [{ deviceId: "device-1", configured: true, controls: [{
+      controlId: "lock-surface::lock", deviceId: "device-1", surfaceId: "lock-surface", label: "Lock", kind: "momentaryAction",
+      valueType: "invoke", writable: true, allowsAutomation: true, semanticRole: "security_lock", stepUpPolicy: "required",
+      execution: { serviceId: "lock.lock", idempotency: "invoke" },
+    }] }];
+    const deniedLock = await fetch(`${base}/_dinodia/admin/api/automations`, { method: "POST", headers: { ...headers, "idempotency-key": "lock-create-1" }, body: JSON.stringify({
+      schemaVersion: 1, name: "Lock schedule", trigger: { type: "schedule", payload: { minuteOfDay: 600, weekdays: [1], timeZoneIdentifier: "Europe/London" } },
+      actions: [{ deviceId: "device-1", controlId: "lock-surface::lock", targetValue: { type: "invoke" } }],
+    }) });
+    assert.equal(deniedLock.status, 422);
+    assert.equal(hub.store.listNativeAutomations().length, nativeCountBeforeDeniedLock);
+
     const deleted = await fetch(`${base}/_dinodia/admin/api/automations/${encodeURIComponent(created.id)}`, { method: "DELETE", headers, body: JSON.stringify({ expectedRevision: 2 }) });
     assert.equal(deleted.status, 204);
   } finally {

@@ -337,6 +337,14 @@ test('custom presentation labels never infer control semantics and descriptor co
 
 test('OS executes every indexed direct-device fixture through its Native V1 validators', () => {
   const index = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/index.json'), 'utf8'));
+  // These selected-membership dashboard envelopes are owned by the iOS
+  // production provider/UI tests, not by the OS Native V1 device DTO
+  // validator. Keep them in the canonical shared inventory without
+  // pretending the OS validates a Platform projection it does not consume.
+  const presentationOwnedFixtures = new Set([
+    'fixtures/tenant-device-dashboard.json',
+    'fixtures/tenant-device-removal-pending.json',
+  ]);
   const indexedCases = {
     'tenant.devices.list': [
       'fixtures/selected-tenant-property-device.json',
@@ -500,7 +508,8 @@ test('OS executes every indexed direct-device fixture through its Native V1 vali
   };
 
   for (const [screen, expectedReferences] of Object.entries(indexedCases)) {
-    assert.deepEqual(index.screenFixtures[screen], expectedReferences, `${screen}: update the OS executor when its canonical fixture inventory changes`);
+    const indexedForOs = (index.screenFixtures[screen] || []).filter((reference) => !presentationOwnedFixtures.has(reference));
+    assert.deepEqual(indexedForOs, expectedReferences, `${screen}: update the OS executor when its canonical OS fixture inventory changes`);
     let osOwned = 0;
     for (const reference of expectedReferences) {
       const owner = execute(screen, reference);

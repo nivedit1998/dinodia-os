@@ -1958,7 +1958,7 @@ class Store {
           else if (["uncertain", "running"].includes(String(outcome.status))) actionStatuses.uncertain += 1;
           else actionStatuses.skipped += 1;
         }
-        const status = ["succeeded", "partial", "failed", "interrupted"].includes(String(execution.status))
+        const status = ["succeeded", "partial", "failed", "interrupted", "skipped"].includes(String(execution.status))
           ? String(execution.status) : actionStatuses.failed || actionStatuses.uncertain ? "partial" : "succeeded";
         const sequenceBefore = Number(this.state.syncOutbox.nextSequence);
         enqueueSyncEventInState(this.state, "automation.outcome", occurrenceId, {

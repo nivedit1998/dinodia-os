@@ -93,6 +93,7 @@ async function applyCloudConfiguration(store, value) {
     // initialization; the catalogue module references Store predicates.
     const { buildControlCatalog } = require("../automations/controlCatalog");
     const { normalizeDefinition, validateAgainstCatalogue } = require("../automations/validator");
+    const { findBundleConflict } = require("../automations/bundleConflict");
     const areas = new Map(store.listAreas().map((area) => [String(area.id), area]));
     const labels = new Map(store.listLabels().map((label) => [String(label.id), label]));
     const catalogue = buildControlCatalog({ devices: store.listDevices(), getArea: (id) => areas.get(String(id)), getLabel: (id) => labels.get(String(id)) });
@@ -128,6 +129,10 @@ async function applyCloudConfiguration(store, value) {
       normalized.automation.platformDefinitionChecksum = String(definition.definitionChecksum);
       normalized.automation.platformStatus = String(definition.status);
       runtimeAutomations.push(normalized);
+    }
+    const conflict = findBundleConflict(runtimeAutomations, catalogue);
+    if (conflict) {
+      throw Object.assign(new Error("The complete active automation bundle contains a conflicting device action"), { code: conflict.code });
     }
   }
   if (typeof store.applyCloudConfigurationSnapshot === "function") {

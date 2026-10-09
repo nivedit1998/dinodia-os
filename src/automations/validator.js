@@ -2,6 +2,7 @@ const {
   LIMITS,
   NATIVE_AUTOMATION_SCHEMA_VERSION,
   HEALTH_STATES,
+  FORBIDDEN_AUTOMATION_SERVICES,
 } = require("./constants");
 const {
   clone,
@@ -115,6 +116,13 @@ function validateAgainstCatalogue(definition, catalogue = [], { authorizedDevice
       errors.push(issue("missing_control", "The selected control is no longer available.", { actionId: action.id, controlId: action.controlId }));
       continue;
     }
+    const serviceIds = [control.execution?.serviceId, control.execution?.onServiceId, control.execution?.offServiceId]
+      .map((serviceId) => String(serviceId || "").toLowerCase());
+    const appOnlyControl = serviceIds.some((serviceId) => FORBIDDEN_AUTOMATION_SERVICES.has(serviceId))
+      || ["security_lock", "lock_state"].includes(String(control.semanticRole || "").toLowerCase())
+      || control.sensitive === true
+      || control.stepUpPolicy === "required";
+    if (appOnlyControl) errors.push(issue("automation_control_app_only", "This control requires an interactive app action and cannot be scheduled.", { actionId: action.id }));
     if (control.writable !== true || control.allowsAutomation !== true) errors.push(issue("control_not_automatable", "The selected control is not safe for automation.", { actionId: action.id, controlId: action.controlId }));
     const value = action.targetValue || {};
     if (value.type !== control.valueType) errors.push(issue("invalid_value_type", `${control.label || "This control"} expects a ${control.valueType} value.`, { actionId: action.id }));

@@ -69,7 +69,7 @@ class AutomationService {
     const triggers = native.map((item) => item.trigger).filter(Boolean);
     const actions = native.flatMap((item) => item.actions || []);
     const projections = native.map((item) => ({ automationId: item.id, triggerSummary: item.trigger?.payload ? `At ${String(Math.floor(item.trigger.payload.minuteOfDay / 60)).padStart(2, "0")}:${String(item.trigger.payload.minuteOfDay % 60).padStart(2, "0")}` : "Schedule", actionSummary: `${item.actions?.length || 0} action${item.actions?.length === 1 ? "" : "s"} · ${new Set((item.actions || []).map((action) => action.deviceId)).size} device${new Set((item.actions || []).map((action) => action.deviceId)).size === 1 ? "" : "s"}`, nextRunAt: item.health?.nextRunAt || null, health: item.health, lastExecution: (this.store.state.automationExecutions || []).find((execution) => execution.automationId === item.id) || null }));
-    return { schemaVersion: 1, automations: native, triggers, actions, projections, legacyAutomations: this.store.listAutomations(), mode: "native_v2" };
+    return { schemaVersion: 1, automations: native, triggers, actions, projections, mode: "native_v2" };
   }
 
   detail(id, context = {}) {

@@ -1787,21 +1787,116 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
   /api/automations:
     get:
-      summary: "List Home Automations"
-      operationId: listHomeAutomations
+      summary: "List Selected Tenant Automations"
+      operationId: listSelectedTenantAutomations
       tags: [Home]
-      parameters: [{ name: homeId, in: query, required: true, schema: { type: string } }, { name: homeMembershipId, in: query, required: true, schema: { type: string } }]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ name: X-Dinodia-Home-Id, in: header, required: true, schema: { type: string, format: uuid } }]
       responses:
-        "200": { description: Current membership-authorized full automation bundle and revision. }
+        "200": { description: Selected-tenant-only current projection; includes truthful delivery state and no other membership's definitions., content: { application/json: { schema: { $ref: "./contract.json#/$defs/tenantAutomationProjection" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
-    put:
-      summary: "Replace Home Automations"
-      operationId: replaceHomeAutomations
+    post:
+      summary: "Create Selected Tenant Automation"
+      operationId: createSelectedTenantAutomation
       tags: [Home]
-      parameters: [{ name: homeId, in: query, required: true, schema: { type: string } }, { name: homeMembershipId, in: query, required: true, schema: { type: string } }, { $ref: "#/components/parameters/IfMatch" }, { $ref: "#/components/parameters/IdempotencyKey" }]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/automation" } } } }
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ name: X-Dinodia-Home-Id, in: header, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/tenantAutomationDefinition" } } } }
       responses:
-        "200": { description: Atomically replaced complete revisioned automation set. }
+        "201": { description: Definition saved; deliveryState does not claim OS activation., content: { application/json: { schema: { $ref: "./contract.json#/$defs/tenantAutomationCreateReceipt" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/automations/{automationId}:
+    parameters: [{ name: automationId, in: path, required: true, schema: { type: string, format: uuid } }]
+    get:
+      summary: "Read Selected Tenant Automation"
+      operationId: readSelectedTenantAutomation
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ name: X-Dinodia-Home-Id, in: header, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        "200": { description: Full definition for its owning selected tenant only., content: { application/json: { schema: { $ref: "./contract.json#/$defs/tenantAutomationDetailEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      summary: "Update Selected Tenant Automation"
+      operationId: updateSelectedTenantAutomation
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ name: X-Dinodia-Home-Id, in: header, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/tenantAutomationUpdateRequest" } } } }
+      responses:
+        "200": { description: Revisioned definition update; hub/application state is explicit., content: { application/json: { schema: { $ref: "./contract.json#/$defs/tenantAutomationMutationReceipt" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      summary: "Delete Selected Tenant Automation"
+      operationId: deleteSelectedTenantAutomation
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ name: X-Dinodia-Home-Id, in: header, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/tenantAutomationDeleteRequest" } } } }
+      responses:
+        "200": { description: Cloud authority is removed immediately; OS removal remains pending until its matching acknowledgement., content: { application/json: { schema: { $ref: "./contract.json#/$defs/tenantAutomationMutationReceipt" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/automations/{automationId}/enabled:
+    post:
+      summary: "Set Selected Tenant Automation Enabled State"
+      operationId: setSelectedTenantAutomationEnabled
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ name: automationId, in: path, required: true, schema: { type: string, format: uuid } }, { name: X-Dinodia-Home-Id, in: header, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/tenantAutomationEnableRequest" } } } }
+      responses:
+        "200": { description: Enabling is accepted only after current validation and hub delivery state checks., content: { application/json: { schema: { $ref: "./contract.json#/$defs/tenantAutomationMutationReceipt" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/homes/{homeId}/property-automations:
+    get:
+      summary: "List Selected Home Property-Affecting Tenant Automations"
+      operationId: listPropertyAutomationOversight
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { name: X-Dinodia-Home-Id, in: header, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        "200": { description: Current owner/manager projection; private-only rules and private action fragments are excluded., content: { application/json: { schema: { $ref: "./contract.json#/$defs/propertyAutomationLiveProjection" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v2/homes/{homeId}/property-automations/{automationId}/disable:
+    post:
+      summary: "Disable Tenant Automation Affecting Permanent Devices"
+      operationId: disablePropertyAutomation
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { name: automationId, in: path, required: true, schema: { type: string, format: uuid } }, { name: X-Dinodia-Home-Id, in: header, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/propertyAutomationInterventionRequest" } } } }
+      responses:
+        "200": { description: Cloud execution authority is blocked now; OS enforcement and mandatory tenant notice are reported separately., content: { application/json: { schema: { $ref: "./contract.json#/$defs/propertyAutomationInterventionReceipt" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/homes/{homeId}/property-automations/{automationId}:
+    delete:
+      summary: "Delete Tenant Automation Affecting Permanent Devices"
+      operationId: deletePropertyAutomation
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { name: automationId, in: path, required: true, schema: { type: string, format: uuid } }, { name: X-Dinodia-Home-Id, in: header, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "./contract.json#/$defs/propertyAutomationInterventionRequest" } } } }
+      responses:
+        "200": { description: Irreversible cloud removal is immediate; bounded OS tombstone acknowledgement is shown separately., content: { application/json: { schema: { $ref: "./contract.json#/$defs/propertyAutomationInterventionReceipt" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
   /api/dinodia/v1/snapshot:
     servers: [{ url: "https://{hubHost}:8123", variables: { hubHost: { default: "dinodia-example.local" } } }]

@@ -3106,8 +3106,8 @@ function nativeDeviceView(principal, device) {
     }
     if (resource === "automations" && id && !parts[3] && req.method === "GET" && hubStore.getNativeAutomation(id)) return json(res, 200, nativeAutomationService.detail(id, { homeId: serial, owner: { type: "local_admin", subjectId: "local-admin" } }));
     if (resource === "automations" && req.method === "GET" && !id) {
-      const native = runtimeConfig.nativeAutomationsMode === "off" ? { automations: [], legacyAutomations: hubStore.listAutomations(), mode: "off" } : nativeAutomationService.list({ homeId: serial, owner: { type: "local_admin", subjectId: "local-admin" } });
-      return json(res, 200, { schemaVersion: 1, automations: [...native.automations, ...native.legacyAutomations], nativeAutomations: native.automations, legacyAutomations: native.legacyAutomations, triggers: native.triggers || [], actions: native.actions || [], projections: native.projections || [], mode: runtimeConfig.nativeAutomationsMode });
+      const native = runtimeConfig.nativeAutomationsMode === "off" ? { automations: [], triggers: [], actions: [], projections: [] } : nativeAutomationService.list({ homeId: serial, owner: { type: "local_admin", subjectId: "local-admin" } });
+      return json(res, 200, { schemaVersion: 1, automations: native.automations, nativeAutomations: native.automations, triggers: native.triggers || [], actions: native.actions || [], projections: native.projections || [], mode: runtimeConfig.nativeAutomationsMode });
     }
     if (resource === "automations" && req.method === "POST" && !id) {
       const body = await readBody(req);

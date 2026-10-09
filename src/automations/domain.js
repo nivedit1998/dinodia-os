@@ -86,10 +86,11 @@ function makeAutomationId() { return `automation-${crypto.randomUUID().toLowerCa
 function makeTriggerId() { return `trigger-${crypto.randomUUID().toLowerCase()}`; }
 function makeActionId() { return `action-${crypto.randomUUID().toLowerCase()}`; }
 
-function occurrenceId(automationId, revision, localDate, minuteOfDay) {
+function occurrenceId(automationId, revision, localDate, minuteOfDay, utcOffsetMinutes = null) {
   const hour = String(Math.floor(Number(minuteOfDay) / 60)).padStart(2, "0");
   const minute = String(Number(minuteOfDay) % 60).padStart(2, "0");
-  return `${automationId}:${revision}:${localDate}:${hour}:${minute}`;
+  const localIdentity = `${automationId}:${revision}:${localDate}:${hour}:${minute}`;
+  return Number.isInteger(utcOffsetMinutes) ? `${localIdentity}:${utcOffsetMinutes >= 0 ? "+" : "-"}${String(Math.floor(Math.abs(utcOffsetMinutes) / 60)).padStart(2, "0")}${String(Math.abs(utcOffsetMinutes) % 60).padStart(2, "0")}` : localIdentity;
 }
 
 module.exports = {

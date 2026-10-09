@@ -14,7 +14,15 @@ function dateParts(date = new Date(), timeZoneIdentifier = "UTC") {
   // `Intl.DateTimeFormat` does not support a numeric weekday option.
   const sundayZero = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
   const localWeekday = ((sundayZero + 6) % 7) + 1;
-  return { year, month, day, hour, minute, minuteOfDay: hour * 60 + minute, localDate, weekday: localWeekday, iso: `${localDate}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}` };
+  const offsetMinutes = Math.round((Date.UTC(year, month - 1, day, hour, minute) - Math.floor(value.getTime() / 60000) * 60000) / 60000);
+  return { year, month, day, hour, minute, minuteOfDay: hour * 60 + minute, localDate, weekday: localWeekday, offsetMinutes, iso: `${localDate}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}` };
+}
+
+function isSecondOccurrenceOfRepeatedMinute(date, timeZoneIdentifier) {
+  const current = dateParts(date, timeZoneIdentifier);
+  const previousFold = new Date(date.getTime() - 60 * 60 * 1000);
+  const prior = dateParts(previousFold, timeZoneIdentifier);
+  return current.localDate === prior.localDate && current.minuteOfDay === prior.minuteOfDay && current.offsetMinutes !== prior.offsetMinutes;
 }
 
 function scheduleMatches(payload, date = new Date()) {
@@ -25,9 +33,9 @@ function scheduleMatches(payload, date = new Date()) {
 function scheduledOccurrence(automation, trigger, date = new Date()) {
   const payload = trigger?.payload || {};
   const parts = dateParts(date, payload.timeZoneIdentifier);
-  if (!scheduleMatches(payload, date)) return null;
-  const id = occurrenceId(automation.id, automation.revision, parts.localDate, payload.minuteOfDay);
-  return { id, automationId: automation.id, revision: automation.revision, scheduledFor: date instanceof Date ? date.toISOString() : new Date(date).toISOString(), localDate: parts.localDate, localTime: `${String(Math.floor(payload.minuteOfDay / 60)).padStart(2, "0")}:${String(payload.minuteOfDay % 60).padStart(2, "0")}`, timeZoneIdentifier: payload.timeZoneIdentifier };
+  if (!scheduleMatches(payload, date) || isSecondOccurrenceOfRepeatedMinute(date, payload.timeZoneIdentifier)) return null;
+  const id = occurrenceId(automation.id, automation.revision, parts.localDate, payload.minuteOfDay, parts.offsetMinutes);
+  return { id, automationId: automation.id, revision: automation.revision, scheduledFor: date instanceof Date ? date.toISOString() : new Date(date).toISOString(), localDate: parts.localDate, localTime: `${String(Math.floor(payload.minuteOfDay / 60)).padStart(2, "0")}:${String(payload.minuteOfDay % 60).padStart(2, "0")}`, utcOffsetMinutes: parts.offsetMinutes, timeZoneIdentifier: payload.timeZoneIdentifier };
 }
 
 function nextRunAt(automation, trigger, from = new Date(), horizonDays = 8) {
@@ -44,4 +52,4 @@ function nextRunAt(automation, trigger, from = new Date(), horizonDays = 8) {
   return null;
 }
 
-module.exports = { dateParts, nextRunAt, scheduleMatches, scheduledOccurrence };
+module.exports = { dateParts, isSecondOccurrenceOfRepeatedMinute, nextRunAt, scheduleMatches, scheduledOccurrence };

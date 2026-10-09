@@ -8,8 +8,22 @@ const { Store } = require("../src/store");
 const { SecretVault } = require("../src/secretVault");
 const { PlatformPairing, sign, validateLanEndpointObservation } = require("../src/platformPairing");
 const { applyCloudConfiguration } = require("../src/sync/cloudConfiguration");
+const { AutomationService } = require("../src/automations/service");
+const { AutomationExecutor } = require("../src/automations/executor");
+const { AutomationScheduler } = require("../src/automations/scheduler");
+const { buildControlCatalog } = require("../src/automations/controlCatalog");
 const { SetupDiscovery } = require("../src/setupDiscovery");
 const { generateManufacturingIdentity, vaultIdentityRecord } = require("../src/auth/manufacturingIdentity");
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (!value || typeof value !== "object") return JSON.stringify(value);
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+}
+
+function signedConfiguration(unsigned) {
+  return { ...unsigned, checksum: crypto.createHash("sha256").update(canonicalJson(unsigned), "utf8").digest("hex") };
+}
 
 function encryptedMachineEnvelope(identity, credential, version, purpose = "machine-credential") {
   const ephemeral = crypto.generateKeyPairSync("x25519");
@@ -128,6 +142,86 @@ test("incident transitions use the durable native sync stream and retire only af
   pairing.stop();
 });
 
+test("an atomically applied Platform automation survives OS restart, executes once on a virtual descriptor, and creates one durable outcome event", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-platform-automation-sync-"));
+  const dataFile = path.join(directory, "dinodia.json");
+  const serial = "DINODIA-AUTOMATION-SYNC-HUB";
+  const hubInstallId = "11111111-1111-4111-8111-111111111111";
+  const now = new Date("2026-10-09T09:00:00.000Z"); // 10:00 Europe/London, Friday
+  try {
+    let store = new Store(dataFile);
+    await store.saveIdentity({ serial, instanceId: "automation-home" });
+    await store.saveArea({ name: "Kitchen" }, "os-kitchen");
+    await store.upsertDevice({
+      id: "automation-lamp", name: "Virtual automation lamp", protocol: "virtual", areaId: "os-kitchen",
+      labels: ["property_device"], managementClass: "PROPERTY_DEVICE", setup: { status: "ready" },
+      entities: { "automation-lamp-state": {
+        id: "automation-lamp-state", name: "Virtual automation lamp", stateKey: "state", domain: "light", category: "control",
+        capability: { readable: true, writable: true, primary: true, category: "control", semanticRole: "power", automatable: true,
+          bindings: [{ serviceId: "light.turn_on" }, { serviceId: "light.turn_off" }] },
+      } },
+    });
+    const areaById = new Map(store.listAreas().map((area) => [String(area.id), area]));
+    const lamp = store.getDevice("automation-lamp");
+    const catalog = buildControlCatalog({ devices: [lamp], getArea: (id) => areaById.get(String(id)) });
+    const power = catalog[0]?.controls.find((control) => control.valueType === "boolean" && control.allowsAutomation);
+    assert.ok(power, "the current OS descriptor provides a real permitted typed control");
+    const sourceFingerprint = String(lamp.presentation.sourceFingerprint || "");
+    const descriptorDigest = crypto.createHash("sha256").update(sourceFingerprint, "utf8").digest("hex");
+    const automationId = "platform-automation-breakfast";
+    const automation = {
+      id: automationId, name: "Morning lamp", status: "ACTIVE", revision: 1,
+      definitionChecksum: crypto.createHash("sha256").update("stage11-platform-definition").digest("hex"),
+      timezone: "Europe/London",
+      triggers: [{ id: "platform-trigger-morning", kind: "SCHEDULE", configuration: { minuteOfDay: 600, weekdays: [5] }, revision: 1 }],
+      actions: [{ id: "platform-action-lamp", osDeviceId: "automation-lamp", osAreaId: "os-kitchen", controlId: power.controlId,
+        descriptorRevision: lamp.presentation.descriptorRevision, actionValue: { type: "boolean", boolean: true }, needsAttention: false }],
+    };
+    const configuration = signedConfiguration({
+      revision: 1, policyRevision: 1,
+      areas: [{ id: "platform-area-kitchen", osAreaId: "os-kitchen", originalName: "Kitchen", overrideName: null, revision: 1 }],
+      memberships: [{ id: "platform-tenant", role: "TENANT", accessRevision: 1, areaIds: ["platform-area-kitchen"], grantRevisions: [{ areaId: "platform-area-kitchen", revision: 1 }] }],
+      devicePolicies: [{ osDeviceId: "automation-lamp", managementClass: "PROPERTY_DEVICE", ownerMembershipId: null, analyticsCategory: "LIGHT",
+        lifecycle: "INSTALLED", customerLabel: null, overrideName: null, descriptorRevision: lamp.presentation.descriptorRevision, descriptorDigest, osAreaIds: ["os-kitchen"] }],
+      automations: [automation],
+      releasePolicy: { mode: "MANUAL", automaticInstallEnabled: false, desiredRelease: null },
+    });
+    await applyCloudConfiguration(store, configuration);
+    assert.equal(store.getPlatform().cloudRevision, 1, "the complete configuration revision is persisted");
+    assert.equal(store.getNativeAutomation(automationId).automation.source, "platform_sync");
+    assert.equal(store.getNativeAutomation(automationId).actions[0].controlId, power.controlId);
+
+    // Reopen the exact persisted Store before execution to cover process restart
+    // between atomic policy application and the scheduled occurrence.
+    store = new Store(dataFile);
+    const service = new AutomationService({ store, homeId: "automation-home", now: () => new Date(now) });
+    const effects = [];
+    const executor = new AutomationExecutor({ store, now: () => new Date(now), executeControl: async (input) => { effects.push(input.action.id); } });
+    const scheduler = new AutomationScheduler({ store, service, executor, now: () => new Date(now), setIntervalFn: () => null, clearIntervalFn() {} });
+    assert.deepEqual(await scheduler.tick(now), { claimed: 1 });
+    assert.deepEqual(effects, ["platform-action-lamp"]);
+    assert.equal(store.state.automationExecutions[0].status, "succeeded");
+
+    const restartedStore = new Store(dataFile);
+    const restartedService = new AutomationService({ store: restartedStore, homeId: "automation-home", now: () => new Date(now) });
+    const restartedScheduler = new AutomationScheduler({ store: restartedStore, service: restartedService,
+      executor: new AutomationExecutor({ store: restartedStore, now: () => new Date(now), executeControl: async () => { effects.push("duplicate"); } }),
+      now: () => new Date(now), setIntervalFn: () => null, clearIntervalFn() {} });
+    assert.deepEqual(await restartedScheduler.tick(now), { claimed: 0 });
+    assert.deepEqual(effects, ["platform-action-lamp"], "restart/retry cannot repeat the stable scheduled occurrence");
+    assert.equal(await restartedStore.ensureAutomationOutcomeEvents(now.getTime() + 1000), 1);
+    assert.equal(await restartedStore.ensureAutomationOutcomeEvents(now.getTime() + 1000), 0);
+    const outcomeEvents = restartedStore.getSyncOutbox().events.filter((event) => event.type === "automation.outcome");
+    assert.equal(outcomeEvents.length, 1);
+    assert.equal(outcomeEvents[0].payload.occurrenceId, restartedStore.state.automationExecutions[0].occurrenceId);
+    assert.equal(outcomeEvents[0].critical, true);
+    assert.equal(Object.hasOwn(outcomeEvents[0].payload, "name"), false, "cloud outcome omits routine and device names");
+    assert.equal(Object.hasOwn(outcomeEvents[0].payload, "targetValue"), false, "cloud outcome omits private action values");
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("tenant removal policy is not acknowledged until the paired hub completes local device cleanup", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-tenant-removal-sync-"));
   const store = new Store(path.join(directory, "dinodia.json"));
@@ -200,8 +294,21 @@ test("tenant removal policy is not acknowledged until the paired hub completes l
     assert.equal(store.getSyncOutbox().events.at(-1).type, "device.tombstone", "physical removal leaves a durable cloud reconciliation tombstone");
     assert.equal(seenRemovals.length, 2);
     assert.equal(seenRemovals[0].ownerMembershipId, "tenant-membership");
+    const tombstoneSequence = store.getSyncOutbox().events.at(-1).sequence;
+    const deadline = Date.now() + 2_000;
+    while (store.getSyncOutbox().acknowledgedSequence < tombstoneSequence && Date.now() < deadline) {
+      if (!pairing.syncing) {
+        pairing.nextRetryAt = 0;
+        await pairing.syncNow();
+      }
+      if (store.getSyncOutbox().acknowledgedSequence < tombstoneSequence) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(store.getSyncOutbox().acknowledgedSequence >= tombstoneSequence, "the generated tombstone is delivered and acknowledged through the actual paired sync path");
   } finally {
     pairing.stop();
+    const drainDeadline = Date.now() + 2_000;
+    while (pairing.syncing && Date.now() < drainDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    await store.writeQueue;
     await fs.rm(directory, { recursive: true, force: true });
   }
 });

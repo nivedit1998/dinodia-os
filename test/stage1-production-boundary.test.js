@@ -267,7 +267,7 @@ test("Native v1 device route emits a home-bound contract envelope and never retu
     cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
     platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
   });
-  await hub.store.upsertDevice({ id: "tenant-owned-light", name: "Private lamp", protocol: "virtual", areaId: "area-kitchen", managementClass: "tenant_device", tenantOwnerMembershipId: "membership-tenant-a", metadata: { managementClass: "tenant_device", tenantOwnerMembershipId: "membership-tenant-a" } });
+  await hub.store.upsertDevice({ id: "tenant-owned-light", name: "Private lamp", protocol: "virtual", areaId: "area-kitchen", setup: { status: "installed", completedAt: new Date().toISOString() }, managementClass: "tenant_device", tenantOwnerMembershipId: "membership-tenant-a", metadata: { managementClass: "tenant_device", tenantOwnerMembershipId: "membership-tenant-a" } });
   await hub.store.savePlatform({ homeId: "home-a", areaBindings: [{ areaId: "area-uuid-kitchen", hubAreaId: "area-kitchen" }] });
   await hub.start();
   const base = `http://127.0.0.1:${hub.server.address().port}`;

@@ -3,10 +3,10 @@ const { clone } = require("./domain");
 const { scheduledOccurrence } = require("./schedule");
 
 function dueMinuteCandidates(previous, now, intervalMs) {
-  if (!(previous instanceof Date) || !Number.isFinite(previous.getTime())) return [now];
-  const elapsed = now.getTime() - previous.getTime();
-  if (elapsed < 0 || elapsed > LIMITS.missedRunGraceMs + intervalMs * 2) return [now];
-  const start = new Date(previous);
+  const validPrevious = previous instanceof Date && Number.isFinite(previous.getTime()) && previous.getTime() <= now.getTime();
+  const earliestRelevant = now.getTime() - LIMITS.missedRunGraceMs - 60 * 1000;
+  const startAt = Math.max(validPrevious ? previous.getTime() : earliestRelevant, earliestRelevant);
+  const start = new Date(startAt);
   start.setSeconds(0, 0);
   const end = new Date(now);
   end.setSeconds(0, 0);
@@ -66,7 +66,7 @@ class AutomationScheduler {
       if (state.automationOccurrences[occurrence.id]) return false;
       state.automationOccurrences[occurrence.id] = { ...occurrence, source: automation?.source || "native_v2", status: "claimed", claimedAt: this.now().toISOString(), completedAt: null, actionOutcomes: (actions || []).map((action) => ({ actionId: action.id, deviceId: action.deviceId, controlId: action.controlId, status: "pending", startedAt: null, completedAt: null, errorCode: null, errorMessage: null })) };
       const ids = Object.keys(state.automationOccurrences);
-      const cutoff = Date.now() - LIMITS.maxExecutionAgeMs;
+      const cutoff = this.now().getTime() - LIMITS.maxExecutionAgeMs;
       for (const id of ids) {
         const item = state.automationOccurrences[id];
         if (Date.parse(item.claimedAt || "") < cutoff) delete state.automationOccurrences[id];
@@ -89,11 +89,25 @@ class AutomationScheduler {
         if (!stored?.trigger) continue;
         const projected = this.service.projected(item.id);
         if (!projected?.health?.executable) continue;
-        const candidates = dueMinuteCandidates(previous, now, this.intervalMs);
+      const candidates = dueMinuteCandidates(previous, now, this.intervalMs);
         for (const date of candidates) {
           const occurrence = scheduledOccurrence(stored.automation, stored.trigger, date);
           if (!occurrence) continue;
-          if (await this.claim(occurrence, stored.automation, stored.actions)) due.push({ occurrence, stored });
+          const lateByMs = now.getTime() - Date.parse(occurrence.scheduledFor);
+          if (lateByMs < 0) continue;
+          if (await this.claim(occurrence, stored.automation, stored.actions)) {
+            if (lateByMs > LIMITS.missedRunGraceMs) {
+              const completedAt = now.toISOString();
+              const actionOutcomes = (stored.actions || []).map((action) => ({ actionId: action.id, deviceId: action.deviceId, controlId: action.controlId, status: "skipped", startedAt: null, completedAt, errorCode: "missed_run_window", errorMessage: "The scheduled time passed by more than five minutes." }));
+              const execution = { occurrenceId: occurrence.id, automationId: occurrence.automationId, revision: occurrence.revision, source: occurrence.source || stored.automation.source || "native_v2", status: "skipped", startedAt: occurrence.scheduledFor, completedAt, actionOutcomes };
+              await this.store.mutateNativeAutomation((state) => {
+                const current = state.automationOccurrences[occurrence.id];
+                if (current) Object.assign(current, { status: "skipped", startedAt: occurrence.scheduledFor, completedAt, actionOutcomes: clone(actionOutcomes), skipReason: "missed_run_window" });
+                state.automationExecutions = [execution, ...(state.automationExecutions || []).filter((item) => item.occurrenceId !== occurrence.id)].slice(0, LIMITS.maxExecutionHistory);
+              });
+              await this.service.activity?.record?.({ type: "automation_execution_skipped", detail: `${stored.automation.name} missed its five-minute run window.`, change: { automationId: occurrence.automationId, revision: occurrence.revision, occurrenceId: occurrence.id, reason: "missed_run_window" } }).catch((error) => this.logger.error(`[activity] ${error.message}`));
+            } else due.push({ occurrence, stored });
+          }
         }
       }
       await this.store.mutateNativeAutomation((state) => { state.automationRuntime = { ...(state.automationRuntime || {}), schedulerRunning: Boolean(this.timer), lastTickAt: now.toISOString(), lastError: null }; });

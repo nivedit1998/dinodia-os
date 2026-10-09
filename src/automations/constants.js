@@ -36,13 +36,12 @@ const AUTOMATABLE_SERVICES = Object.freeze(new Set([
   "climate.set_temperature", "climate.set_hvac_mode",
   "fan.turn_on", "fan.turn_off", "fan.set_percentage", "fan.set_preset_mode",
   "cover.open_cover", "cover.close_cover", "cover.stop_cover", "cover.set_cover_position",
-  "lock.lock",
   "number.set_value", "select.select_option", "button.press",
 ]));
 
 const FORBIDDEN_AUTOMATION_SERVICES = Object.freeze(new Set([
   "light.toggle", "switch.toggle", "fan.toggle",
-  "lock.unlock", "homeassistant.reload_config_entry",
+  "lock.lock", "lock.unlock", "homeassistant.reload_config_entry",
   "device.remove", "device.reset", "pairing.start", "config.write",
 ]));
 

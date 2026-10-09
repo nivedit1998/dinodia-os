@@ -325,14 +325,35 @@ test("cloud configuration applies exact active automation revisions and removes 
     assert.equal(imported.actions[0].controlId, control.controlId);
     assert.equal(store.getPlatform().cloudRevision, 1);
 
+    const conflicting = {
+      ...active,
+      id: "88888888-8888-4888-8888-888888888888",
+      name: "Conflicting kitchen light",
+      triggers: [{ ...active.triggers[0], id: "99999999-9999-4999-8999-999999999999" }],
+      actions: [{ ...active.actions[0], id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", actionValue: { type: "boolean", boolean: false } }],
+    };
+    await assert.rejects(() => applyCloudConfiguration(store, makeConfig(2, [active, conflicting])), { code: "sync_automation_conflict" });
+    assert.equal(store.getPlatform().cloudRevision, 1, "conflicting complete bundle cannot advance the durable cloud revision");
+    assert.equal(store.getNativeAutomation(automationId).automation.revision, 4, "rejected bundle retains the previous applied automation");
+    assert.equal(store.getNativeAutomation(conflicting.id), null, "rejected bundle cannot partially install its second rule");
+
+    const identicalTarget = {
+      ...conflicting,
+      actions: [{ ...conflicting.actions[0], actionValue: { type: "boolean", boolean: true } }],
+    };
+    await applyCloudConfiguration(store, makeConfig(2, [active, identicalTarget]));
+    assert.equal(store.getPlatform().cloudRevision, 2, "current automatable set-value descriptor permits an identical target");
+    assert.equal(store.getNativeAutomation(identicalTarget.id).actions[0].targetValue.boolean, true);
+
     const paused = { ...active, status: "PAUSED", revision: 5 };
-    await applyCloudConfiguration(store, makeConfig(2, [paused]));
+    await applyCloudConfiguration(store, makeConfig(3, [paused]));
     assert.equal(store.getNativeAutomation(automationId), null, "an explicit Platform pause removes the runnable local mirror");
-    assert.equal(store.getPlatform().cloudRevision, 2);
+    assert.equal(store.getNativeAutomation(identicalTarget.id), null, "complete replacement bundle removes stale active rules");
+    assert.equal(store.getPlatform().cloudRevision, 3);
 
     const stale = { ...active, revision: 6, actions: [{ ...active.actions[0], descriptorRevision: device.presentation.descriptorRevision + 1 }] };
-    await assert.rejects(() => applyCloudConfiguration(store, makeConfig(3, [stale])), { code: "sync_automation_target_stale" });
-    assert.equal(store.getPlatform().cloudRevision, 2, "invalid active policy cannot partially advance the applied config revision");
+    await assert.rejects(() => applyCloudConfiguration(store, makeConfig(4, [stale])), { code: "sync_automation_target_stale" });
+    assert.equal(store.getPlatform().cloudRevision, 3, "invalid active policy cannot partially advance the applied config revision");
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

@@ -884,6 +884,128 @@
       },
       "additionalProperties": false
     },
+    "automationTypedTargetValue": {
+      "oneOf": [
+        { "type": "object", "required": ["type", "boolean"], "properties": { "type": { "const": "boolean" }, "boolean": { "type": "boolean" } }, "additionalProperties": false },
+        { "type": "object", "required": ["type", "number"], "properties": { "type": { "const": "number" }, "number": { "type": "number" } }, "additionalProperties": false },
+        { "type": "object", "required": ["type", "option"], "properties": { "type": { "const": "option" }, "option": { "type": "string", "maxLength": 128 } }, "additionalProperties": false },
+        { "type": "object", "required": ["type", "text"], "properties": { "type": { "const": "text" }, "text": { "type": "string", "maxLength": 128 } }, "additionalProperties": false }
+      ]
+    },
+    "tenantAutomationDefinition": {
+      "type": "object", "required": ["name", "trigger", "actions"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "trigger": { "type": "object", "required": ["minuteOfDay", "weekdays"], "properties": {
+          "minuteOfDay": { "type": "integer", "minimum": 0, "maximum": 1439 },
+          "weekdays": { "type": "array", "minItems": 1, "maxItems": 7, "uniqueItems": true, "items": { "type": "integer", "minimum": 1, "maximum": 7 } }
+        }, "additionalProperties": false },
+        "actions": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "type": "object", "required": ["deviceId", "areaId", "controlId", "targetValue"], "properties": {
+          "deviceId": { "$ref": "#/$defs/id" }, "areaId": { "$ref": "#/$defs/id" },
+          "controlId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "targetValue": { "$ref": "#/$defs/automationTypedTargetValue" }
+        }, "additionalProperties": false } }
+      }, "additionalProperties": false
+    },
+    "tenantAutomationCreateReceipt": {
+      "type": "object", "required": ["ok", "automationId", "revision", "managementRevision", "deliveryState"],
+      "properties": { "ok": { "const": true }, "automationId": { "$ref": "#/$defs/id" }, "revision": { "type": "integer", "minimum": 1 }, "managementRevision": { "type": "integer", "minimum": 0 }, "deliveryState": { "enum": ["pending_delivery", "waiting_for_activation"] } }, "additionalProperties": false
+    },
+    "tenantAutomationUpdateRequest": {
+      "type": "object", "required": ["expectedRevision", "definition"],
+      "properties": { "expectedRevision": { "type": "integer", "minimum": 1 }, "definition": { "$ref": "#/$defs/tenantAutomationDefinition" } }, "additionalProperties": false
+    },
+    "tenantAutomationDeleteRequest": {
+      "type": "object", "required": ["expectedRevision"],
+      "properties": { "expectedRevision": { "type": "integer", "minimum": 1 } }, "additionalProperties": false
+    },
+    "tenantAutomationEnableRequest": {
+      "type": "object", "required": ["enabled", "expectedRevision"],
+      "properties": { "enabled": { "type": "boolean" }, "expectedRevision": { "type": "integer", "minimum": 1 } }, "additionalProperties": false
+    },
+    "tenantAutomationMutationReceipt": {
+      "type": "object", "required": ["ok", "automationId", "revision"],
+      "properties": {
+        "ok": { "const": true }, "automationId": { "$ref": "#/$defs/id" }, "revision": { "type": "integer", "minimum": 1 },
+        "managementRevision": { "type": "integer", "minimum": 0 },
+        "deliveryState": { "enum": ["pending_delivery", "waiting_for_activation", "pending_hub_removal"] },
+        "status": { "enum": ["waiting_for_hub", "disabled_waiting_for_hub"] }
+      }, "additionalProperties": false
+    },
+    "tenantAutomationDelivery": {
+      "type": "object", "required": ["state", "cloudRevision", "appliedRevision", "lastSuccessfulSyncAt"],
+      "properties": {
+        "state": { "enum": ["activation_disabled", "applied", "pending_delivery"] },
+        "cloudRevision": { "type": "integer", "minimum": 0 }, "appliedRevision": { "type": "integer", "minimum": 0 },
+        "lastSuccessfulSyncAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }
+      }, "additionalProperties": false
+    },
+    "tenantAutomationTriggerSummary": {
+      "type": "object", "required": ["id", "kind", "minuteOfDay", "weekdays", "revision"],
+      "properties": { "id": { "$ref": "#/$defs/id" }, "kind": { "const": "SCHEDULE" }, "minuteOfDay": { "type": "integer", "minimum": 0, "maximum": 1439 }, "weekdays": { "type": "array", "minItems": 1, "maxItems": 7, "uniqueItems": true, "items": { "type": "integer", "minimum": 1, "maximum": 7 } }, "revision": { "type": "integer", "minimum": 1 } }, "additionalProperties": false
+    },
+    "tenantAutomationActionSummary": {
+      "type": "object", "required": ["id", "deviceId", "areaId", "controlId", "sortOrder", "descriptorRevision", "targetValue", "needsAttention", "deviceName", "areaName"],
+      "properties": { "id": { "$ref": "#/$defs/id" }, "deviceId": { "$ref": "#/$defs/id" }, "areaId": { "$ref": "#/$defs/id" }, "controlId": { "type": "string", "minLength": 1, "maxLength": 160 }, "sortOrder": { "type": "integer", "minimum": 0, "maximum": 31 }, "descriptorRevision": { "type": "integer", "minimum": 0 }, "targetValue": { "$ref": "#/$defs/automationTypedTargetValue" }, "needsAttention": { "type": "boolean" }, "deviceName": { "type": "string", "maxLength": 120 }, "areaName": { "type": "string", "maxLength": 120 } }, "additionalProperties": false
+    },
+    "tenantAutomationSummary": {
+      "type": "object", "required": ["id", "name", "status", "revision", "definitionChecksum", "timeZone", "trigger", "actions", "createdAt", "updatedAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" }, "name": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "status": { "enum": ["active", "waiting_for_activation", "waiting_for_hub", "disabled_waiting_for_hub", "disabled", "needs_attention", "removal_pending"] },
+        "revision": { "type": "integer", "minimum": 1 }, "definitionChecksum": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "timeZone": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "trigger": { "anyOf": [{ "$ref": "#/$defs/tenantAutomationTriggerSummary" }, { "type": "null" }] },
+        "actions": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/tenantAutomationActionSummary" } },
+        "createdAt": { "$ref": "#/$defs/timestamp" }, "updatedAt": { "$ref": "#/$defs/timestamp" }
+      }, "additionalProperties": false
+    },
+    "tenantAutomationDetailEnvelope": {
+      "type": "object", "required": ["ok", "automation"],
+      "properties": { "ok": { "const": true }, "automation": { "type": "object", "required": ["id", "name", "status", "revision", "definitionChecksum", "timezone", "triggers", "actions"], "properties": {
+        "id": { "$ref": "#/$defs/id" }, "name": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "status": { "enum": ["ACTIVE", "PAUSED", "NEEDS_ATTENTION", "RETIRED"] }, "revision": { "type": "integer", "minimum": 1 },
+        "definitionChecksum": { "type": "string", "pattern": "^[a-f0-9]{64}$" }, "timezone": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "triggers": { "type": "array", "maxItems": 1, "items": { "type": "object", "required": ["id", "kind", "configuration", "revision"], "properties": { "id": { "$ref": "#/$defs/id" }, "kind": { "const": "SCHEDULE" }, "configuration": { "type": "object" }, "revision": { "type": "integer", "minimum": 1 } }, "additionalProperties": false } },
+        "actions": { "type": "array", "maxItems": 32, "items": { "type": "object", "required": ["id", "deviceId", "areaId", "controlId", "sortOrder", "descriptorRevision", "actionValue", "needsAttention"], "properties": { "id": { "$ref": "#/$defs/id" }, "deviceId": { "$ref": "#/$defs/id" }, "areaId": { "$ref": "#/$defs/id" }, "controlId": { "type": "string", "minLength": 1, "maxLength": 160 }, "sortOrder": { "type": "integer", "minimum": 0, "maximum": 31 }, "descriptorRevision": { "type": "integer", "minimum": 0 }, "actionValue": { "$ref": "#/$defs/automationTypedTargetValue" }, "needsAttention": { "type": "boolean" } }, "additionalProperties": false } }
+      }, "additionalProperties": false } }, "additionalProperties": false
+    },
+    "tenantAutomationProjection": {
+      "type": "object", "required": ["ok", "homeId", "membershipId", "membershipRevision", "managementRevision", "propertyTimeZone", "delivery", "automations"],
+      "properties": {
+        "ok": { "const": true }, "homeId": { "$ref": "#/$defs/id" }, "membershipId": { "$ref": "#/$defs/id" },
+        "membershipRevision": { "type": "integer", "minimum": 0 }, "managementRevision": { "type": "integer", "minimum": 0 },
+        "propertyTimeZone": { "type": ["string", "null"], "maxLength": 64 }, "delivery": { "$ref": "#/$defs/tenantAutomationDelivery" },
+        "automations": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/tenantAutomationSummary" } }
+      }, "additionalProperties": false
+    },
+    "propertyAutomationLiveProjection": {
+      "type": "object", "required": ["ok", "homeId", "membershipId", "managementRevision", "delivery", "automations"],
+      "properties": {
+        "ok": { "const": true }, "homeId": { "$ref": "#/$defs/id" }, "membershipId": { "$ref": "#/$defs/id" },
+        "managementRevision": { "type": "integer", "minimum": 0 }, "delivery": { "$ref": "#/$defs/tenantAutomationDelivery" },
+        "automations": { "type": "array", "maxItems": 100, "items": { "type": "object", "required": ["id", "tenantName", "name", "status", "revision", "timeZone", "trigger", "actions", "lastOutcome", "canDisable", "canDelete", "createdAt", "updatedAt"], "properties": {
+          "id": { "$ref": "#/$defs/id" }, "tenantName": { "type": "string", "minLength": 1, "maxLength": 120 }, "name": { "type": "string", "minLength": 1, "maxLength": 60 },
+          "status": { "enum": ["active", "waiting_for_activation", "waiting_for_hub", "disabled_waiting_for_hub", "disabled", "needs_attention", "removal_pending"] },
+          "revision": { "type": "integer", "minimum": 1 }, "timeZone": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "trigger": { "anyOf": [{ "$ref": "#/$defs/tenantAutomationTriggerSummary" }, { "type": "null" }] },
+          "actions": { "type": "array", "maxItems": 32, "items": { "type": "object", "required": ["id", "deviceId", "areaId", "controlId", "sortOrder", "deviceName", "areaName", "needsAttention"], "properties": {
+            "id": { "$ref": "#/$defs/id" }, "deviceId": { "$ref": "#/$defs/id" }, "areaId": { "$ref": "#/$defs/id" }, "controlId": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "sortOrder": { "type": "integer", "minimum": 0, "maximum": 31 }, "deviceName": { "type": "string", "maxLength": 120 }, "areaName": { "type": "string", "maxLength": 120 }, "needsAttention": { "type": "boolean" }
+          }, "additionalProperties": false } },
+          "lastOutcome": { "anyOf": [{ "type": "object", "required": ["status", "startedAt", "completedAt"], "properties": { "status": { "type": "string", "maxLength": 40 }, "startedAt": { "$ref": "#/$defs/timestamp" }, "completedAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] } }, "additionalProperties": false }, { "type": "null" }] },
+          "canDisable": { "type": "boolean" }, "canDelete": { "type": "boolean" }, "createdAt": { "$ref": "#/$defs/timestamp" }, "updatedAt": { "$ref": "#/$defs/timestamp" }
+        }, "additionalProperties": false } }
+      }, "additionalProperties": false
+    },
+    "propertyAutomationInterventionRequest": {
+      "type": "object", "required": ["expectedAutomationRevision", "expectedManagementRevision", "proof", "reason"],
+      "properties": { "expectedAutomationRevision": { "type": "integer", "minimum": 1 }, "expectedManagementRevision": { "type": "integer", "minimum": 1 }, "proof": { "type": "string", "minLength": 20, "maxLength": 4096 }, "reason": { "enum": ["safety", "conflict", "access", "other"] } }, "additionalProperties": false
+    },
+    "propertyAutomationInterventionReceipt": {
+      "type": "object", "required": ["ok", "homeId", "automationId", "revision", "status", "managementRevision", "tenantNoticeQueued"],
+      "properties": { "ok": { "const": true }, "homeId": { "$ref": "#/$defs/id" }, "automationId": { "$ref": "#/$defs/id" }, "revision": { "type": "integer", "minimum": 1 }, "status": { "enum": ["disabled_waiting_for_hub", "disabled", "removal_pending", "removed"] }, "managementRevision": { "type": "integer", "minimum": 0 }, "tenantNoticeQueued": { "type": "boolean" } }, "additionalProperties": false
+    },
     "automation": {
       "type": "object",
       "required": [
@@ -1587,7 +1709,7 @@
       "additionalProperties": false
     },
     "stepUpOperationKind": {
-      "enum": ["trusted_device_remove", "customer_password_change", "customer_profile_change", "customer_email_change", "tenant_membership_remove", "home_tenant_remove", "home_property_manager_remove", "tenant_device_remove", "tenant_area_grants_replace", "home.transfer", "home.deregister", "home_room_access_decision", "support_ticket_close", "support_access_approve", "support_access_revoke", "alexa_unlink", "heating_sensitive_command", "device_sensitive_command"]
+      "enum": ["trusted_device_remove", "customer_password_change", "customer_profile_change", "customer_email_change", "tenant_membership_remove", "home_tenant_remove", "home_property_manager_remove", "home.tenant_automation_disable", "home.tenant_automation_delete", "tenant_device_remove", "tenant_area_grants_replace", "home.transfer", "home.deregister", "home_room_access_decision", "support_ticket_close", "support_access_approve", "support_access_revoke", "alexa_unlink", "heating_sensitive_command", "device_sensitive_command"]
     },
     "stepUpDescriptorAttestation": {
       "type": "object",

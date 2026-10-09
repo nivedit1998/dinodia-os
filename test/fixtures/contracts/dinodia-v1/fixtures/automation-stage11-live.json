@@ -1,0 +1,35 @@
+{
+  "definition": {
+    "name": "Weekday lights",
+    "trigger": { "minuteOfDay": 1140, "weekdays": [1, 2, 3, 4, 5] },
+    "actions": [{ "deviceId": "device:stage11-fixture-light", "areaId": "area:stage11-fixture-living-room", "controlId": "control:power", "targetValue": { "type": "boolean", "boolean": true } }]
+  },
+  "tenantProjection": {
+    "ok": true,
+    "homeId": "home:stage11-fixture",
+    "membershipId": "membership:stage11-fixture-tenant",
+    "membershipRevision": 2,
+    "managementRevision": 8,
+    "propertyTimeZone": "Europe/London",
+    "delivery": { "state": "activation_disabled", "cloudRevision": 5, "appliedRevision": 5, "lastSuccessfulSyncAt": "2026-10-09T12:00:00Z" },
+    "automations": [{
+      "id": "automation:stage11-fixture", "name": "Weekday lights", "status": "waiting_for_activation", "revision": 3,
+      "definitionChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "timeZone": "Europe/London",
+      "trigger": { "id": "trigger:stage11-fixture", "kind": "SCHEDULE", "minuteOfDay": 1140, "weekdays": [1, 2, 3, 4, 5], "revision": 3 },
+      "actions": [{ "id": "action:stage11-fixture", "deviceId": "device:stage11-fixture-light", "areaId": "area:stage11-fixture-living-room", "controlId": "control:power", "sortOrder": 0, "descriptorRevision": 2, "targetValue": { "type": "boolean", "boolean": true }, "needsAttention": false, "deviceName": "Living room light", "areaName": "Living Room" }],
+      "createdAt": "2026-10-09T10:00:00Z", "updatedAt": "2026-10-09T11:00:00Z"
+    }]
+  },
+  "propertyProjection": {
+    "ok": true, "homeId": "home:stage11-fixture", "membershipId": "membership:stage11-fixture-owner", "managementRevision": 8,
+    "delivery": { "state": "activation_disabled", "cloudRevision": 5, "appliedRevision": 5, "lastSuccessfulSyncAt": "2026-10-09T12:00:00Z" },
+    "automations": [{
+      "id": "automation:stage11-fixture", "tenantName": "Example tenant", "name": "Weekday lights", "status": "waiting_for_activation", "revision": 3, "timeZone": "Europe/London",
+      "trigger": { "id": "trigger:stage11-fixture", "kind": "SCHEDULE", "minuteOfDay": 1140, "weekdays": [1, 2, 3, 4, 5], "revision": 3 },
+      "actions": [{ "id": "action:stage11-fixture", "deviceId": "device:stage11-fixture-light", "areaId": "area:stage11-fixture-living-room", "controlId": "control:power", "sortOrder": 0, "deviceName": "Living room light", "areaName": "Living Room", "needsAttention": false }],
+      "lastOutcome": null, "canDisable": true, "canDelete": true, "createdAt": "2026-10-09T10:00:00Z", "updatedAt": "2026-10-09T11:00:00Z"
+    }]
+  },
+  "propertyInterventionRequest": { "expectedAutomationRevision": 3, "expectedManagementRevision": 8, "proof": "disposable-step-up-proof-value-0123456789", "reason": "safety" },
+  "propertyInterventionReceipt": { "ok": true, "homeId": "home:stage11-fixture", "automationId": "automation:stage11-fixture", "revision": 4, "status": "disabled_waiting_for_hub", "managementRevision": 9, "tenantNoticeQueued": true }
+}

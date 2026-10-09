@@ -32,7 +32,7 @@ function logicalKeyFor(serviceId, binding, surface) {
   if (serviceId === "cover.set_cover_position") return "position";
   if (serviceId === "number.set_value") return parameterKeyFor(serviceId, binding);
   if (serviceId === "select.select_option") return "option";
-  if (serviceId === "button.press" || ["cover.open_cover", "cover.close_cover", "cover.stop_cover", "lock.lock"].includes(serviceId)) return "invoke";
+  if (serviceId === "button.press" || ["cover.open_cover", "cover.close_cover", "cover.stop_cover"].includes(serviceId)) return "invoke";
   return text(binding.parameter?.key, surface.logicalKey || "control");
 }
 
@@ -90,6 +90,7 @@ function createPowerControl(device, surface, services) {
     valueType: "boolean",
     writable: true,
     allowsAutomation: surface.capability?.automatable === true,
+    mutuallyExclusive: surface.capability?.mutuallyExclusive === true,
     constraints: {},
     execution: { onServiceId, offServiceId, idempotency: "set_value" },
   };
@@ -114,6 +115,7 @@ function createBindingControl(device, surface, serviceId, binding) {
     valueType,
     writable: true,
     allowsAutomation: surface.capability?.automatable === true,
+    mutuallyExclusive: surface.capability?.mutuallyExclusive === true,
     constraints: {
       ...constraints,
       ...(valueType === "option" ? { options: [...new Set(options.map(String))].slice(0, 32) } : {}),
@@ -121,7 +123,7 @@ function createBindingControl(device, surface, serviceId, binding) {
     execution: {
       serviceId: normalizedServiceId,
       parameterKey: parameterKeyFor(normalizedServiceId, binding),
-      idempotency: ["button.press", "cover.open_cover", "cover.close_cover", "cover.stop_cover", "lock.lock"].includes(normalizedServiceId) ? "invoke" : "set_value",
+      idempotency: ["button.press", "cover.open_cover", "cover.close_cover", "cover.stop_cover"].includes(normalizedServiceId) ? "invoke" : "set_value",
     },
   };
 }
