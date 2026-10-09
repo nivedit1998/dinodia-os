@@ -85,7 +85,8 @@ function commandValueMatches(control, value) {
   return control.valueType === 'invoke' && value === null;
 }
 function validateCommand(command, device, control, membershipId) {
-  if (!isObject(command) || !hasOnlyKeys(command, ['commandId','homeId','homeMembershipId','deviceId','controlId','descriptorRevision','value','issuedAt','idempotencyKey','stepUpOperationId'])) return false;
+  if (!isObject(command) || !hasOnlyKeys(command, ['commandId','homeId','homeMembershipId','deviceId','controlId','descriptorRevision','value','issuedAt','idempotencyKey','stepUpOperationId','expectedObservationRevision'])
+    || Object.hasOwn(command, 'expectedObservationRevision') && (!Number.isSafeInteger(command.expectedObservationRevision) || command.expectedObservationRevision < 0)) return false;
   if (typeof command.idempotencyKey !== 'string' || codePointLength(command.idempotencyKey) < 16 || codePointLength(command.idempotencyKey) > 160) return false;
   const currentControl = device.controls.find((candidate) => candidate.controlId === control.controlId && candidate.deviceId === control.deviceId);
   if (!validateDevice(device, { homeId: device.homeId, homeMembershipId: membershipId, role: 'TENANT' }) || !currentControl || !sameJsonValue(currentControl, control)) return false;

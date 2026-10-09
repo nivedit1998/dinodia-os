@@ -1408,9 +1408,12 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       // This principal is constructed only by the in-process OS observation
       // listener. It is never accepted by an HTTP token verifier. Keep its
       // authority narrower than a tenant session: one current Home, one
-      // current hub identity, a property-owned installed device, and its
-      // currently assigned canonical Area.
+      // current hub identity, one currently authorized device, and its
+      // currently assigned canonical Area. Tenant-owned observations are
+      // bound to the exact owner membership and are never projected into the
+      // Home-wide property state cache.
       const platform = hubStore.getPlatform?.() || {};
+      const configuredMemberships = platform.cloudConfiguration?.memberships || [];
       const policy = platform.devicePolicies?.[String(device.id)] || null;
       const hubAreaId = String(device.areaId || device.metadata?.areaId || "");
       const areaId = canonicalAreaIdForHubArea(hubAreaId);
@@ -1418,9 +1421,13 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         && principal[alexaObservationAuthority] === true
         && String(principal.hubInstallId || "") === String(platform.hubInstallId || "")
         && Number.isSafeInteger(Number(principal.identityGeneration)) && Number(principal.identityGeneration) >= 1
-        && policy?.managementClass === "PROPERTY_DEVICE" && policy.ownerMembershipId == null
+        && (policy?.managementClass === "PROPERTY_DEVICE" && policy.ownerMembershipId == null
+          || policy?.managementClass === "TENANT_DEVICE" && String(policy.ownerMembershipId || "") === String(principal.membershipId || ""))
         && !["RETIRED", "REMOVED", "REMOVAL_PENDING", "RECOMMISSION_REQUIRED"].includes(String(policy.lifecycle || ""))
         && hubAreaId && Array.isArray(policy.osAreaIds) && policy.osAreaIds.map(String).includes(hubAreaId)
+        && (policy.managementClass !== "TENANT_DEVICE" || configuredMemberships.some((membership) =>
+          membership?.id === policy.ownerMembershipId && membership.role === "TENANT"
+          && Array.isArray(membership.areaIds) && membership.areaIds.map(String).includes(areaId)))
         && Array.isArray(principal.areaIds) && principal.areaIds.map(String).includes(areaId));
     }
     if (!validateNativeMembership({
@@ -1675,8 +1682,14 @@ function nativeDeviceView(principal, device) {
     if (!nativeAlexaChangeCauses.has(String(causeType || ""))) return;
     const policy = hubStore.getPlatform?.()?.devicePolicies?.[String(device.id)] || null;
     const platform = hubStore.getPlatform?.() || {};
+    const configuredMemberships = platform.cloudConfiguration?.memberships || [];
     const areaId = canonicalAreaIdForHubArea(device.areaId || device.metadata?.areaId);
-    if (policy?.managementClass !== "PROPERTY_DEVICE"
+    const tenantOwned = policy?.managementClass === "TENANT_DEVICE";
+    const ownerMembershipId = String(policy?.ownerMembershipId || "");
+    const owner = tenantOwned && configuredMemberships.find((membership) =>
+      membership?.id === ownerMembershipId && membership.role === "TENANT"
+      && Array.isArray(membership.areaIds) && membership.areaIds.some((id) => String(id) === String(canonicalAreaIdForHubArea(device.areaId || device.metadata?.areaId))));
+    if (!(policy?.managementClass === "PROPERTY_DEVICE" && policy.ownerMembershipId == null || tenantOwned && owner)
       || ["RETIRED", "REMOVED", "REMOVAL_PENDING", "RECOMMISSION_REQUIRED"].includes(String(policy.lifecycle || ""))
       || !platform.homeId || !platform.hubInstallId || !areaId) return;
 
@@ -1689,7 +1702,7 @@ function nativeDeviceView(principal, device) {
 
     const principal = {
       principalType: "alexa_observation", sub: "00000000-0000-4000-8000-000000000001", homeId: String(platform.homeId),
-      membershipId: "00000000-0000-4000-8000-000000000001", hubInstallId: String(platform.hubInstallId),
+      membershipId: tenantOwned ? ownerMembershipId : "00000000-0000-4000-8000-000000000001", hubInstallId: String(platform.hubInstallId),
       identityGeneration, householdRole: "TENANT", areaIds: [areaId],
       policyRevision: Math.max(1, Number(platform.policyRevision) || 1), scope: ["tenant:device-read"],
     };
@@ -1861,8 +1874,9 @@ function nativeDeviceView(principal, device) {
     reconcileNativeCommandObservation(device.id, controlId).catch(() => {});
     queueNativeEvent({ kind: "state", deviceId: String(device.id), controlId });
     // Alexa state is synchronized only from the current identity-broker
-    // generation, live descriptor and property-device policy. Tenant-owned
-    // devices and app-only controls never enter the Platform event stream.
+    // generation, live descriptor and exact current owner/Area policy.
+    // Tenant-owned state remains in the owner-bound Alexa route only; it is
+    // never copied into the Home-wide property state projection.
     enqueueAlexaStateObservation(device, entity, event.causeType).catch((error) => logger.warn(`[native-alexa-state] observation projection failed (${String(error?.code || "projection_unavailable")})`));
   });
   eventBus.on("registry_updated", (event = {}) => {
@@ -2419,6 +2433,9 @@ function nativeDeviceView(principal, device) {
         || scopedPrincipal.deviceId !== command.deviceId
         || scopedPrincipal.controlId !== command.controlId
         || scopedPrincipal.descriptorRevision !== Number(command.descriptorRevision)
+        || (scopedPrincipal.expectedObservationRevision !== undefined
+          ? scopedPrincipal.expectedObservationRevision !== command.expectedObservationRevision
+          : Object.hasOwn(command, "expectedObservationRevision"))
         || scopedPrincipal.valueDigest !== crypto.createHash("sha256").update(stableJson(command.value), "utf8").digest("hex"))) {
         return nativeContractError(res, 403, "SCOPE_DENIED", "The signed Alexa delegation is not bound to this exact command");
       }
@@ -2552,12 +2569,19 @@ function nativeDeviceView(principal, device) {
             currentPrincipal.householdRole === "TENANT" &&
             currentPrincipal.scope.includes("tenant:device-command") && (!alexaPath ||
               currentPrincipal.linkId === scopedPrincipal.linkId && currentPrincipal.endpointId === scopedPrincipal.endpointId &&
-              currentPrincipal.valueDigest === scopedPrincipal.valueDigest && currentPrincipal.idempotencyKey === command.idempotencyKey);
+              currentPrincipal.valueDigest === scopedPrincipal.valueDigest && currentPrincipal.idempotencyKey === command.idempotencyKey &&
+              currentPrincipal.expectedObservationRevision === scopedPrincipal.expectedObservationRevision);
           const dispatchDevice = principalStillMatches ? hubStore.getDevice(String(command.deviceId || "")) : null;
           const dispatchDto = dispatchDevice && appCanReadDevice(currentPrincipal, dispatchDevice)
             ? serializeNativeDevice({ device: nativeDeviceView(currentPrincipal, dispatchDevice), homeId: String(currentPrincipal.homeId), homeMembershipId: String(currentPrincipal.membershipId), role: String(currentPrincipal.householdRole), areaIds: (currentPrincipal.areaIds || []).map(String), surfaces: allProjectedSurfaces(dispatchDevice), revision: Number(dispatchDevice.presentation?.descriptorRevision || 0) })
             : null;
           const dispatchControl = dispatchDto?.controls.find((candidate) => candidate.controlId === command.controlId);
+          const dispatchObservation = dispatchControl && Number.isSafeInteger(command.expectedObservationRevision)
+            ? nativeControlStates(currentPrincipal, [dispatchDto], dispatchDevice.id).find((state) => state.controlId === command.controlId)
+            : null;
+          const observationStillCurrent = command.expectedObservationRevision === undefined
+            || Boolean(dispatchObservation && dispatchObservation.quality === "fresh"
+              && dispatchObservation.revision === command.expectedObservationRevision);
           const dispatchEntity = dispatchDevice && dispatchControl
             ? nativeRawEntityForControl(dispatchDevice, dispatchControl.controlId)
             : null;
@@ -2568,6 +2592,7 @@ function nativeDeviceView(principal, device) {
             principalStillMatches && dispatchDevice && dispatchDto?.lifecycle === "installed" &&
             dispatchDto.descriptorRevision === command.descriptorRevision &&
             dispatchControl && stableJson(dispatchControl) === stableJson(control) &&
+            observationStillCurrent &&
             validateNativeCommand(command, dispatchDto, dispatchControl, String(currentPrincipal.membershipId)) &&
             dispatchEntity && dispatchBinding &&
             appCanCommandDevice(currentPrincipal, dispatchDevice, { controlId: dispatchControl.controlId }, dispatchEntity, String(dispatchBinding.serviceId || "").toLowerCase())

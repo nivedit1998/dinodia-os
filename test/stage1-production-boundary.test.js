@@ -730,7 +730,7 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     const streamedCommand = await websocketMessageMatching(nativeSocket, (item) => item.data?.commandId === command.commandId);
     assert.equal(streamedCommand.homeId, "home-command");
     assert.ok(streamedCommand.sequence > nativeSnapshot.body.sequence, "Native events have monotonic resume sequence after the snapshot cursor");
-    const alexaCommand = { ...command, commandId: "alexa-command-native-test-1", value: true, issuedAt: new Date().toISOString(), idempotencyKey: "alexa-command-native-idempotency-0001" };
+    const alexaCommand = { ...command, commandId: "alexa-command-native-test-1", value: false, issuedAt: new Date().toISOString(), idempotencyKey: "alexa-command-native-idempotency-0001" };
     const alexaNow = Math.floor(Date.now() / 1000);
     const alexaClaims = {
       accountId: "account-command-tenant", linkId: "alexa-link-native-test", endpointId: "dos_NativeAlexaEndpoint0000000001",
@@ -753,7 +753,34 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     const alexaAccepted = await sendAlexa(alexaToken);
     assert.equal(alexaAccepted.response.status, 202, JSON.stringify(alexaAccepted.body));
     assert.equal(alexaAccepted.body.status, "applied", "Alexa delegates through the same native descriptor and virtual adapter");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "OFF");
+    const expectedObservationRevision = Number(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].stateRevision);
+    assert.ok(Number.isSafeInteger(expectedObservationRevision) && expectedObservationRevision >= 0, "the test command is bound to the current native state revision");
+    const guardedAlexaCommand = { ...alexaCommand, commandId: "alexa-command-native-revision-guard", value: true,
+      issuedAt: new Date().toISOString(), idempotencyKey: "alexa-command-native-revision-guard-0001", expectedObservationRevision };
+    const guardedAlexaClaims = { ...alexaClaims, commandId: guardedAlexaCommand.commandId, idempotencyKey: guardedAlexaCommand.idempotencyKey,
+      valueDigest: crypto.createHash("sha256").update(JSON.stringify(guardedAlexaCommand.value), "utf8").digest("hex"),
+      jti: "alexa-command-jti-native-revision-guard", issuedAt: Math.floor(Date.now() / 1000), expiresAt: Math.floor(Date.now() / 1000) + 15,
+      extraPayload: { expectedObservationRevision } };
+    const guardedAlexaToken = alexaCommandToken(guardedAlexaClaims, keys.privateKey);
+    assert.ok(verifyAlexaCommandToken(guardedAlexaToken, { publicKeys, hubId: "native-command-hub", policyRevision: 0 }));
+    const guardedAlexaAccepted = await sendAlexa(guardedAlexaToken, guardedAlexaCommand);
+    assert.equal(guardedAlexaAccepted.response.status, 202, JSON.stringify(guardedAlexaAccepted.body));
+    assert.equal(guardedAlexaAccepted.body.status, "applied", "a signed expected observation revision is enforced at the OS effect boundary");
     assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON");
+    const effectsBeforeStaleObservation = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
+    const staleObservationCommand = { ...guardedAlexaCommand, commandId: "alexa-command-stale-observation-revision", value: false,
+      issuedAt: new Date().toISOString(), idempotencyKey: "alexa-stale-observation-revision-0001" };
+    const staleObservationClaims = { ...guardedAlexaClaims, commandId: staleObservationCommand.commandId,
+      idempotencyKey: staleObservationCommand.idempotencyKey,
+      valueDigest: crypto.createHash("sha256").update(JSON.stringify(staleObservationCommand.value), "utf8").digest("hex"),
+      jti: "alexa-command-jti-stale-observation", issuedAt: Math.floor(Date.now() / 1000), expiresAt: Math.floor(Date.now() / 1000) + 15 };
+    const staleObservationToken = alexaCommandToken(staleObservationClaims, keys.privateKey);
+    const staleObservationDenied = await sendAlexa(staleObservationToken, staleObservationCommand);
+    assert.equal(staleObservationDenied.response.status, 409, "an adjustment based on an observation consumed by a prior command is denied at dispatch");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON");
+    assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, effectsBeforeStaleObservation,
+      "stale-observation denial produces zero command effects");
     const stateClaims = {
       accountId: "account-command-tenant", linkId: "alexa-link-native-test", endpointId: "dos_NativeAlexaEndpoint0000000001",
       homeId: command.homeId, membershipId: command.homeMembershipId, hubInstallationId: "native-command-hub",
@@ -775,12 +802,12 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     const alexaStateGenericRead = await request(base, "/api/dinodia/v1/snapshot", { headers: { authorization: `Bearer ${alexaStateBearer}` } });
     assert.equal(alexaStateGenericRead.response.status, 401, "Alexa state authority cannot read a household snapshot");
     const afterAlexaEffects = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
-    assert.equal(afterAlexaEffects, beforeAlexaEffects + 1);
+    assert.equal(afterAlexaEffects, beforeAlexaEffects + 2);
     const alexaRetry = await sendAlexa(alexaToken);
     assert.equal(alexaRetry.response.status, 202);
     assert.equal(alexaRetry.body.commandId, alexaCommand.commandId);
     assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, afterAlexaEffects, "Alexa retry reconciles the exact durable command without redispatch");
-    const alexaAltered = await sendAlexa(alexaToken, { ...alexaCommand, value: false });
+    const alexaAltered = await sendAlexa(alexaToken, { ...alexaCommand, value: !alexaCommand.value });
     assert.equal(alexaAltered.response.status, 403, "the delegation cannot be changed to a different value");
     const wrongAreaCommand = { ...alexaCommand, commandId: "alexa-command-wrong-area", idempotencyKey: "alexa-command-wrong-area-idempotency-0001" };
     const alexaWrongArea = alexaCommandToken({ ...alexaClaims, areaId: "area-uuid-command-other", commandId: wrongAreaCommand.commandId, idempotencyKey: wrongAreaCommand.idempotencyKey }, keys.privateKey);
@@ -791,7 +818,7 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     const alexaExpired = alexaCommandToken({ ...alexaClaims, commandId: "alexa-command-expired", idempotencyKey: "alexa-command-expired-idempotency-0001", issuedAt: now - 30, expiresAt: now - 1 }, keys.privateKey);
     const expiredResult = await sendAlexa(alexaExpired, { ...alexaCommand, commandId: "alexa-command-expired", idempotencyKey: "alexa-command-expired-idempotency-0001" });
     assert.equal(expiredResult.response.status, 401, "an expired Alexa delegation is rejected before effect");
-    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON", "denied Alexa attempts preserve the last state committed by the revision-bound command");
     assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, afterAlexaEffects, "altered, wrong-area, wrong-route and expired delegation attempts have zero dispatch effects");
     const commandReceipt = await request(base, `/api/dinodia/v1/commands/${encodeURIComponent(command.commandId)}`, { headers });
     assert.equal(commandReceipt.response.status, 200);

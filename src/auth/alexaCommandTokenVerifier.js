@@ -22,8 +22,10 @@ function verifyAlexaCommandToken(token, { publicKeys = [], hubId, now = Date.now
   let header; let claims;
   try { header = decode(parts[1]); claims = decode(parts[2]); } catch { return null; }
   if (header?.alg !== "EdDSA" || header?.typ !== "DNO-ALEXA-CMD-1" || header?.v !== 1) return null;
-  const allowed = ["iss", "aud", "sub", "linkId", "endpointId", "homeId", "membershipId", "hubInstallationId", "areaId", "deviceId", "controlId", "descriptorRevision", "commandId", "idempotencyKey", "valueDigest", "policyRevision", "jti", "iat", "exp"];
-  if (Object.keys(claims).some((key) => !allowed.includes(key)) || allowed.some((key) => !Object.hasOwn(claims, key))) return null;
+  const required = ["iss", "aud", "sub", "linkId", "endpointId", "homeId", "membershipId", "hubInstallationId", "areaId", "deviceId", "controlId", "descriptorRevision", "commandId", "idempotencyKey", "valueDigest", "policyRevision", "jti", "iat", "exp"];
+  const allowed = [...required, "expectedObservationRevision"];
+  if (Object.keys(claims).some((key) => !allowed.includes(key)) || required.some((key) => !Object.hasOwn(claims, key))
+    || Object.hasOwn(claims, "expectedObservationRevision") && (!Number.isSafeInteger(claims.expectedObservationRevision) || claims.expectedObservationRevision < 0)) return null;
   const input = `${parts[1]}.${parts[2]}`;
   const signature = Buffer.from(parts[3], "base64url");
   if (!publicKeys.some((key) => { try { return crypto.verify(null, Buffer.from(input), key, signature); } catch { return false; } })) return null;
@@ -59,6 +61,7 @@ function verifyAlexaCommandToken(token, { publicKeys = [], hubId, now = Date.now
     commandId: claims.commandId,
     idempotencyKey: claims.idempotencyKey,
     valueDigest: claims.valueDigest,
+    ...(Object.hasOwn(claims, "expectedObservationRevision") ? { expectedObservationRevision: claims.expectedObservationRevision } : {}),
     policyRevision: claims.policyRevision,
     jti: claims.jti,
     issuedAt,

@@ -652,7 +652,8 @@
           "minLength": 16,
           "maxLength": 160
         },
-        "stepUpOperationId": { "type": ["string", "null"] }
+        "stepUpOperationId": { "type": ["string", "null"] },
+        "expectedObservationRevision": { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": false
     },
