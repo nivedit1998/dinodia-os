@@ -1,6 +1,7 @@
 {
   "definition": {
     "name": "Weekday lights",
+    "enabled": false,
     "trigger": { "minuteOfDay": 1140, "weekdays": [1, 2, 3, 4, 5] },
     "actions": [{ "deviceId": "device:stage11-fixture-light", "areaId": "area:stage11-fixture-living-room", "controlId": "control:power", "targetValue": { "type": "boolean", "boolean": true } }]
   },
@@ -17,6 +18,7 @@
       "definitionChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "timeZone": "Europe/London",
       "trigger": { "id": "trigger:stage11-fixture", "kind": "SCHEDULE", "minuteOfDay": 1140, "weekdays": [1, 2, 3, 4, 5], "revision": 3 },
       "actions": [{ "id": "action:stage11-fixture", "deviceId": "device:stage11-fixture-light", "areaId": "area:stage11-fixture-living-room", "controlId": "control:power", "sortOrder": 0, "descriptorRevision": 2, "targetValue": { "type": "boolean", "boolean": true }, "needsAttention": false, "deviceName": "Living room light", "areaName": "Living Room" }],
+      "lastOutcome": null,
       "createdAt": "2026-10-09T10:00:00Z", "updatedAt": "2026-10-09T11:00:00Z"
     }]
   },

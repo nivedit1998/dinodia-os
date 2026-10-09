@@ -907,6 +907,22 @@
         }, "additionalProperties": false } }
       }, "additionalProperties": false
     },
+    "tenantAutomationCreateDefinition": {
+      "type": "object", "required": ["name", "trigger", "actions"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "enabled": { "type": "boolean", "description": "Optional create-time state; false creates a paused duplicate while omission preserves enabled-by-default behavior." },
+        "trigger": { "type": "object", "required": ["minuteOfDay", "weekdays"], "properties": {
+          "minuteOfDay": { "type": "integer", "minimum": 0, "maximum": 1439 },
+          "weekdays": { "type": "array", "minItems": 1, "maxItems": 7, "uniqueItems": true, "items": { "type": "integer", "minimum": 1, "maximum": 7 } }
+        }, "additionalProperties": false },
+        "actions": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "type": "object", "required": ["deviceId", "areaId", "controlId", "targetValue"], "properties": {
+          "deviceId": { "$ref": "#/$defs/id" }, "areaId": { "$ref": "#/$defs/id" },
+          "controlId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "targetValue": { "$ref": "#/$defs/automationTypedTargetValue" }
+        }, "additionalProperties": false } }
+      }, "additionalProperties": false
+    },
     "tenantAutomationCreateReceipt": {
       "type": "object", "required": ["ok", "automationId", "revision", "managementRevision", "deliveryState"],
       "properties": { "ok": { "const": true }, "automationId": { "$ref": "#/$defs/id" }, "revision": { "type": "integer", "minimum": 1 }, "managementRevision": { "type": "integer", "minimum": 0 }, "deliveryState": { "enum": ["pending_delivery", "waiting_for_activation"] } }, "additionalProperties": false
@@ -949,7 +965,7 @@
       "properties": { "id": { "$ref": "#/$defs/id" }, "deviceId": { "$ref": "#/$defs/id" }, "areaId": { "$ref": "#/$defs/id" }, "controlId": { "type": "string", "minLength": 1, "maxLength": 160 }, "sortOrder": { "type": "integer", "minimum": 0, "maximum": 31 }, "descriptorRevision": { "type": "integer", "minimum": 0 }, "targetValue": { "$ref": "#/$defs/automationTypedTargetValue" }, "needsAttention": { "type": "boolean" }, "deviceName": { "type": "string", "maxLength": 120 }, "areaName": { "type": "string", "maxLength": 120 } }, "additionalProperties": false
     },
     "tenantAutomationSummary": {
-      "type": "object", "required": ["id", "name", "status", "revision", "definitionChecksum", "timeZone", "trigger", "actions", "createdAt", "updatedAt"],
+      "type": "object", "required": ["id", "name", "status", "revision", "definitionChecksum", "timeZone", "trigger", "actions", "lastOutcome", "createdAt", "updatedAt"],
       "properties": {
         "id": { "$ref": "#/$defs/id" }, "name": { "type": "string", "minLength": 1, "maxLength": 60 },
         "status": { "enum": ["active", "waiting_for_activation", "waiting_for_hub", "disabled_waiting_for_hub", "disabled", "needs_attention", "removal_pending"] },
@@ -957,6 +973,7 @@
         "timeZone": { "type": "string", "minLength": 1, "maxLength": 64 },
         "trigger": { "anyOf": [{ "$ref": "#/$defs/tenantAutomationTriggerSummary" }, { "type": "null" }] },
         "actions": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/tenantAutomationActionSummary" } },
+        "lastOutcome": { "anyOf": [{ "type": "object", "required": ["status", "startedAt", "completedAt"], "properties": { "status": { "type": "string", "maxLength": 40 }, "startedAt": { "$ref": "#/$defs/timestamp" }, "completedAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }, "actionCount": { "type": "integer", "minimum": 0, "maximum": 32 }, "actionStatuses": { "type": "object", "required": ["applied", "failed", "uncertain", "skipped"], "properties": { "applied": { "type": "integer", "minimum": 0, "maximum": 32 }, "failed": { "type": "integer", "minimum": 0, "maximum": 32 }, "uncertain": { "type": "integer", "minimum": 0, "maximum": 32 }, "skipped": { "type": "integer", "minimum": 0, "maximum": 32 } }, "additionalProperties": false } }, "additionalProperties": false }, { "type": "null" }] },
         "createdAt": { "$ref": "#/$defs/timestamp" }, "updatedAt": { "$ref": "#/$defs/timestamp" }
       }, "additionalProperties": false
     },
@@ -993,7 +1010,7 @@
             "id": { "$ref": "#/$defs/id" }, "deviceId": { "$ref": "#/$defs/id" }, "areaId": { "$ref": "#/$defs/id" }, "controlId": { "type": "string", "minLength": 1, "maxLength": 160 },
             "sortOrder": { "type": "integer", "minimum": 0, "maximum": 31 }, "deviceName": { "type": "string", "maxLength": 120 }, "areaName": { "type": "string", "maxLength": 120 }, "needsAttention": { "type": "boolean" }
           }, "additionalProperties": false } },
-          "lastOutcome": { "anyOf": [{ "type": "object", "required": ["status", "startedAt", "completedAt"], "properties": { "status": { "type": "string", "maxLength": 40 }, "startedAt": { "$ref": "#/$defs/timestamp" }, "completedAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] } }, "additionalProperties": false }, { "type": "null" }] },
+        "lastOutcome": { "anyOf": [{ "type": "object", "required": ["status", "startedAt", "completedAt"], "properties": { "status": { "type": "string", "maxLength": 40 }, "startedAt": { "$ref": "#/$defs/timestamp" }, "completedAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }, "actionCount": { "type": "integer", "minimum": 0, "maximum": 32 }, "actionStatuses": { "type": "object", "required": ["applied", "failed", "uncertain", "skipped"], "properties": { "applied": { "type": "integer", "minimum": 0, "maximum": 32 }, "failed": { "type": "integer", "minimum": 0, "maximum": 32 }, "uncertain": { "type": "integer", "minimum": 0, "maximum": 32 }, "skipped": { "type": "integer", "minimum": 0, "maximum": 32 } }, "additionalProperties": false } }, "additionalProperties": false }, { "type": "null" }] },
           "canDisable": { "type": "boolean" }, "canDelete": { "type": "boolean" }, "createdAt": { "$ref": "#/$defs/timestamp" }, "updatedAt": { "$ref": "#/$defs/timestamp" }
         }, "additionalProperties": false } }
       }, "additionalProperties": false
