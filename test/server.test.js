@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const { createHub } = require("../src/server");
 
 function mockIntegration() {
@@ -36,6 +37,39 @@ async function request(base, route, options = {}) {
   return { response, body };
 }
 function dashboardRoute(route) { return `/_dinodia/admin${route}`; }
+
+test("default native MQTT composition does not depend on the retired Home Assistant remote handler", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-default-mqtt-composition-"));
+  const script = `
+    const path = require("node:path");
+    const { createHub } = require("./src/server");
+    const directory = process.env.DINODIA_TEST_DIR;
+    const integration = { start() {}, close() {}, status() { return { configured: false, connected: false }; } };
+    const hub = createHub({
+      config: {
+        nodeEnv: "development", adminToken: "test-token", mqttUrl: "", nativeApiPort: 0,
+        dataDir: directory, dataFile: path.join(directory, "dinodia.json"),
+        backupDir: path.join(directory, "backups"), staticDir: path.join(process.cwd(), "public"), otbrUrl: "",
+      },
+      matterBridge: integration,
+      cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false }; } },
+      platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
+    });
+    if (hub.mqtt.status().configured) throw new Error("the disposable MQTT bridge unexpectedly connected");
+    hub.stop().then(() => process.exit(0), (error) => { console.error(error.stack || error); process.exit(1); });
+  `;
+  try {
+    const result = spawnSync(process.execPath, ["-e", script], {
+      cwd: path.join(__dirname, ".."),
+      env: { PATH: process.env.PATH || "", DINODIA_TEST_DIR: directory },
+      encoding: "utf8",
+      timeout: 10000,
+    });
+    assert.equal(result.status, 0, `${result.stdout || ""}\n${result.stderr || ""}`);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("Native dashboard controls a virtual device without accepting retained legacy automation rules", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-http-"));

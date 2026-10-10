@@ -120,9 +120,9 @@ if [[ -f "$INSTALL_DIR/BUILD.json" ]] && [[ "$(node "$APP_SOURCE/scripts/native-
   OLD_RELEASE_ROLLBACK_SAFE=1
 fi
 if [[ "$OLD_RELEASE_ROLLBACK_SAFE" -eq 1 ]]; then
-  echo "Previous release recovery classification: certified native-only"
+  echo "Previous release recovery classification: certified healthy native-only"
 else
-  echo "Previous release recovery classification: not certified native-only; it will not be reactivated after a failed switch"
+  echo "Previous release recovery classification: not certified as a healthy native-only recovery target; it will not be reactivated after a failed switch"
 fi
 mkdir "$STAGE_DIR"
 
@@ -156,7 +156,7 @@ cleanup_failed_install() {
     else
       FAIL_CLOSED_CANDIDATE=1
       systemctl disable --now dinodia-os dinodia-identityd >/dev/null 2>&1 || true
-      echo "The candidate failed after the release switch. The previous release is preserved but is not certified native-only, so it remains inactive; native services are stopped for a reviewed forward-fix." >&2
+      echo "The candidate failed after the release switch. The previous release is preserved but is not certified as a healthy native-only recovery target, so it remains inactive; native services are stopped for a reviewed forward-fix." >&2
     fi
     systemctl daemon-reload >/dev/null 2>&1 || true
     if [[ "$FAIL_CLOSED_CANDIDATE" -eq 0 ]]; then
@@ -181,7 +181,7 @@ cleanup_failed_install() {
     if [[ "$FAIL_CLOSED_CANDIDATE" -eq 0 ]]; then
       systemctl enable --now dinodia-identityd >/dev/null 2>&1 || true
       systemctl enable --now dinodia-os >/dev/null 2>&1 || true
-      echo "The candidate failed after the release switch; the certified native-only previous release was restored." >&2
+      echo "The candidate failed after the release switch; the certified healthy native-only previous release was restored." >&2
     else
       echo "The failed candidate remains selected but native services are disabled; forward recovery is required." >&2
     fi

@@ -562,7 +562,6 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     eventDedupeMs: runtimeConfig.zigbeeEventDedupeMs,
     store: hubStore,
     onDeviceChanged: notifyDeviceChanged,
-    onRemoteEvent: handleRemoteEvent,
     logger,
   });
   const matter = matterBridge || new MatterBridge({

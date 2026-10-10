@@ -28,6 +28,11 @@ test("only a valid, explicitly native-only release manifest can be reactivated",
     mode: "native-v2",
     nativeOnly: true,
   }), true);
+  assert.equal(isCertifiedNativeOnly({
+    buildId: "native-v2-7e65d78e21538a79367309f6",
+    mode: "native-v2",
+    nativeOnly: true,
+  }), false, "a known startup-failing Native V2 release is not a safe rollback target");
 });
 
 test("installer policy classifies a real old manifest file fail-closed", (t) => {
@@ -57,6 +62,6 @@ test("a failed first native-only install cannot reactivate an uncertified legacy
   assert.match(installer, /nativeOnly":true/);
   assert.match(installer, /if \[\[ "\$OLD_RELEASE_ROLLBACK_SAFE" -eq 1 \]\]/);
   assert.match(installer, /systemctl disable --now dinodia-os dinodia-identityd/);
-  assert.match(installer, /previous release is preserved but is not certified native-only, so it remains inactive/);
+  assert.match(installer, /previous release is preserved but is not certified as a healthy native-only recovery target, so it remains inactive/);
   assert.match(installer, /if \[\[ "\$SWITCHED" -eq 1 \]\]; then\s+if \[\[ "\$FAIL_CLOSED_CANDIDATE" -eq 0 \]\]/);
 });
