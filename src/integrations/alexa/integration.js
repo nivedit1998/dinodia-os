@@ -26,12 +26,20 @@ class AlexaIntegration {
     return this.store?.getAlexa?.() || { enabled: true, linked: false, status: "disconnected", endpointCount: 0 };
   }
 
+  nativeEnabled() {
+    return this.config.alexaNativeEnabled === true;
+  }
+
+  connectIntentsEnabled() {
+    return this.nativeEnabled() && this.config.alexaConnectIntentsEnabled === true;
+  }
+
   status() {
     const local = this.state();
     const pairing = this.pairing?.status?.() || {};
     return {
-      available: this.config.alexaNativeEnabled !== false,
-      enabled: this.config.alexaNativeEnabled !== false,
+      available: this.nativeEnabled(),
+      enabled: this.nativeEnabled(),
       state: local.status || (local.linked ? "linked" : "disconnected"),
       linked: Boolean(local.linked),
       endpointCount: Number(local.endpointCount || this.catalogue?.endpoints?.length || 0),
@@ -59,16 +67,19 @@ class AlexaIntegration {
   }
 
   scheduleSync(reason = "device_changed") {
+    if (!this.nativeEnabled()) return;
     this.platformSync.queueCatalog(reason);
   }
 
   async syncCatalog(reason = "manual") {
+    if (!this.nativeEnabled()) return null;
     const result = await this.platformSync.pushCatalog(reason);
     if (result) await this.store.saveAlexa({ status: this.state().linked ? "linked" : "disconnected" });
     return result;
   }
 
   async connect() {
+    if (!this.connectIntentsEnabled()) throw Object.assign(new Error("Alexa connection is not enabled"), { code: "feature_disabled", statusCode: 503 });
     const secret = this.pairing.getSyncSecret?.();
     if (!secret) throw Object.assign(new Error("Dinodia OS is not paired with the platform"), { code: "platform_not_paired", statusCode: 409 });
     const result = await this.pairing.requestWithSecret("/api/hub-agent/alexa/connect-intents", {}, secret);
@@ -77,6 +88,7 @@ class AlexaIntegration {
   }
 
   async refresh() {
+    if (!this.nativeEnabled()) return this.status();
     await this.syncCatalog("manual");
     const secret = this.pairing.getSyncSecret?.();
     if (secret) {
@@ -96,6 +108,7 @@ class AlexaIntegration {
   }
 
   async handleDirective(directive) {
+    if (!this.nativeEnabled()) throw Object.assign(new Error("Native Alexa is not enabled"), { code: "feature_disabled", statusCode: 503 });
     if (!this.catalogue) this.buildCatalog();
     const messageId = String(directive?.header?.messageId || "").trim();
     if (messageId) {
@@ -128,6 +141,7 @@ class AlexaIntegration {
 
   start() {
     this.buildCatalog();
+    if (!this.nativeEnabled()) return;
     if (this.pairing?.status?.().paired) {
       this.scheduleSync("startup");
       this.statusTimer = setInterval(() => this.refresh().catch(() => {}), 30_000);

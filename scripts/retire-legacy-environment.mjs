@@ -19,6 +19,11 @@ export const RETIRED_ENVIRONMENT_NAMES = Object.freeze([
   "STAGE1_INTERNAL_OPERATOR_DAY_SESSION",
 ]);
 
+export const DISABLED_FEATURE_ENVIRONMENT_NAMES = Object.freeze([
+  "ALEXA_NATIVE_DINODIA_OS_ENABLED",
+  "ALEXA_CONNECT_INTENTS_ENABLED",
+]);
+
 function argumentsMap(argv) {
   const values = new Map();
   for (let index = 2; index < argv.length; index += 2) values.set(argv[index], argv[index + 1]);
@@ -30,14 +35,24 @@ export function retireLegacyEnvironmentFile({ envPath, backupDirectory, backupNa
   const original = fs.readFileSync(absoluteEnvPath);
   const text = original.toString("utf8");
   const retired = new Set(RETIRED_ENVIRONMENT_NAMES);
+  const disabledFeatures = new Set(DISABLED_FEATURE_ENVIRONMENT_NAMES);
   const removedNames = new Set();
+  const disabledNames = new Set();
   const retainedLines = text.split(/(?<=\n)/).filter((line) => {
     const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/);
     if (!match || !retired.has(match[1])) return true;
     removedNames.add(match[1]);
     return false;
+  }).map((line) => {
+    const match = line.match(/^(\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*\s*=))(.*?)(\r?\n)?$/);
+    if (!match || !disabledFeatures.has(match[2].replace(/\s*=\s*$/, ""))) return line;
+    const rawValue = match[3].trim();
+    if (["false", "\"false\"", "'false'"].includes(rawValue)) return line;
+    const name = match[2].replace(/\s*=\s*$/, "");
+    disabledNames.add(name);
+    return `${match[1]}false${match[4] || ""}`;
   });
-  if (removedNames.size === 0) return { backupPath: null, removedNames: [] };
+  if (removedNames.size === 0 && disabledNames.size === 0) return { backupPath: null, removedNames: [], disabledNames: [] };
 
   const stat = fs.statSync(absoluteEnvPath);
   const backupRoot = path.resolve(backupDirectory);
@@ -67,7 +82,7 @@ export function retireLegacyEnvironmentFile({ envPath, backupDirectory, backupNa
   const directoryFd = fs.openSync(path.dirname(absoluteEnvPath), "r");
   try { fs.fsyncSync(directoryFd); } finally { fs.closeSync(directoryFd); }
 
-  return { backupPath, removedNames: [...removedNames].sort() };
+  return { backupPath, removedNames: [...removedNames].sort(), disabledNames: [...disabledNames].sort() };
 }
 
 function run(argv) {
@@ -83,11 +98,12 @@ function run(argv) {
 
   const stamp = new Date().toISOString().replace(/[-:.]/g, "");
   const result = retireLegacyEnvironmentFile({ envPath, backupDirectory: `/var/backups/dinodia-os-env-before-native-v2-${stamp}-${process.pid}`, backupName: "original.env" });
-  if (result.removedNames.length === 0) {
+  if (result.removedNames.length === 0 && result.disabledNames.length === 0) {
     process.stdout.write("Retired environment keys already absent; no file changed.\n");
     return;
   }
-  process.stdout.write(`Retired environment keys: ${result.removedNames.join(",")}\n`);
+  if (result.removedNames.length) process.stdout.write(`Retired environment keys: ${result.removedNames.join(",")}\n`);
+  if (result.disabledNames.length) process.stdout.write(`Disabled held feature keys: ${result.disabledNames.join(",")}\n`);
   process.stdout.write(`Restricted original environment backup: ${result.backupPath}\n`);
 }
 

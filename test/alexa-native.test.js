@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const { nativeAlexaEndpointId, isNativeAlexaEndpointId } = require("../src/integrations/alexa/endpointId");
 const { mapSurface, publicEndpointParts } = require("../src/integrations/alexa/capabilityMapper");
 const { executeDirective } = require("../src/integrations/alexa/directiveService");
+const { AlexaIntegration } = require("../src/integrations/alexa/integration");
 
 test("native Alexa endpoint IDs are stable, opaque, and scoped to one hub instance", () => {
   const first = nativeAlexaEndpointId({ hubInstanceId: "hub/home/001", deviceId: "zigbee:0x001", channelId: "light-main" });
@@ -55,4 +56,38 @@ test("native directives resolve internal bindings without exposing execution rou
   });
   assert.equal(result.endpointId, endpointId);
   assert.deepEqual(calls, [{ deviceId: "device-001", surfaceId: "light.main", serviceId: "light.turn_on", data: {}, messageId: "message-1" }]);
+});
+
+test("disabled native Alexa emits no OS-to-Platform requests and rejects a connect intent", async (t) => {
+  const outbound = [];
+  const integration = new AlexaIntegration({
+    store: {
+      getAlexa: () => ({ status: "disconnected", linked: false }),
+      getIdentity: () => ({ instanceId: "disposable-instance" }),
+      saveAlexa: async () => {},
+    },
+    pairing: {
+      status: () => ({ paired: true }),
+      getSyncSecret: () => "disposable-only-secret",
+      requestWithSecret: async (route, body) => { outbound.push({ route, body }); return { ok: true }; },
+    },
+    serial: "disposable-hub",
+    config: { alexaNativeEnabled: false, alexaConnectIntentsEnabled: false },
+    getDevices: () => [],
+    getAreas: () => [],
+  });
+  t.after(() => integration.stop());
+  integration.platformSync.debounceMs = 1;
+  integration.start();
+  await integration.handleDeviceChanged();
+  await integration.refresh();
+  let connectError = null;
+  try { await integration.connect(); } catch (error) { connectError = error; }
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.deepEqual(outbound, [], "a disabled capability must not send catalog, status, reconcile, or connect-intent requests");
+  assert.equal(connectError?.code, "feature_disabled");
+  assert.equal(connectError?.statusCode, 503);
+  assert.equal(integration.status().available, false);
+  assert.equal(integration.status().enabled, false);
 });
