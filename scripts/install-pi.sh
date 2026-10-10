@@ -3,8 +3,9 @@ set -Eeuo pipefail
 
 # Native V2 installer. All validation and dependency installation happen in a
 # versioned release directory before the active /opt/dinodia-os path changes.
-# The active path is a symlink so a failed service start can be rolled back to
-# the exact previous release without restarting a partially copied tree.
+# A failed switch may reactivate only a predecessor explicitly marked as a
+# native-only recovery target. Legacy HA-compatible releases stay preserved
+# but inactive; failure remains unavailable for a reviewed forward-fix.
 APP_SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL_DIR="${DINODIA_INSTALL_DIR:-/opt/dinodia-os}"
 RELEASE_ROOT="${DINODIA_RELEASE_ROOT:-/opt/dinodia-os-releases}"
@@ -24,6 +25,8 @@ HIVE_WHEELHOUSE_SOURCE="${DINODIA_HIVE_WHEELHOUSE:-}"
 STAGE_DIR=""
 HIVE_WHEELHOUSE_STAGE=""
 OLD_RELEASE=""
+OLD_RELEASE_ROLLBACK_SAFE=0
+FAIL_CLOSED_CANDIDATE=0
 SWITCHED=0
 SERVICES_STOPPED=0
 COMPLETED=0
@@ -113,6 +116,14 @@ mkdir -p "$RELEASE_ROOT" "$DATA_DIR"
 STAGE_DIR="$RELEASE_ROOT/.staging-${BUILD_ID}-${BASHPID}"
 RELEASE_DIR="$RELEASE_ROOT/$BUILD_ID"
 [[ ! -e "$RELEASE_DIR" && ! -e "$STAGE_DIR" ]] || die "release identity already exists; review the existing candidate before retrying"
+if [[ -f "$INSTALL_DIR/BUILD.json" ]] && [[ "$(node "$APP_SOURCE/scripts/native-rollback-policy.js" --manifest "$INSTALL_DIR/BUILD.json")" == "native-only" ]]; then
+  OLD_RELEASE_ROLLBACK_SAFE=1
+fi
+if [[ "$OLD_RELEASE_ROLLBACK_SAFE" -eq 1 ]]; then
+  echo "Previous release recovery classification: certified native-only"
+else
+  echo "Previous release recovery classification: not certified native-only; it will not be reactivated after a failed switch"
+fi
 mkdir "$STAGE_DIR"
 
 cleanup_failed_install() {
@@ -124,31 +135,40 @@ cleanup_failed_install() {
     systemctl disable --now dinodia-setup-discovery-sync.timer >/dev/null 2>&1 || true
     systemctl stop dinodia-setup-discovery-sync.service >/dev/null 2>&1 || true
     systemctl stop dinodia-os dinodia-identityd >/dev/null 2>&1 || true
-    rm -f -- "$INSTALL_DIR"
-    if [[ -n "$OLD_RELEASE" && -e "$OLD_RELEASE" ]]; then mv -- "$OLD_RELEASE" "$INSTALL_DIR"; fi
-    if [[ "$OLD_OS_UNIT_PRESENT" -eq 1 && -f "$BACKUP_DIR/dinodia-os.service" ]]; then install -o root -g root -m 0644 "$BACKUP_DIR/dinodia-os.service" "$SERVICE_FILE"; else rm -f "$SERVICE_FILE"; fi
-    if [[ "$OLD_IDENTITY_UNIT_PRESENT" -eq 1 && -f "$BACKUP_DIR/dinodia-identityd.service" ]]; then install -o root -g root -m 0644 "$BACKUP_DIR/dinodia-identityd.service" "$IDENTITY_SERVICE_FILE"; else rm -f "$IDENTITY_SERVICE_FILE"; fi
-    if [[ "$OLD_DISCOVERY_SERVICE_PRESENT" -eq 1 && -f "$BACKUP_DIR/dinodia-setup-discovery-sync.service" ]]; then install -o root -g root -m 0644 "$BACKUP_DIR/dinodia-setup-discovery-sync.service" "$DISCOVERY_SERVICE_FILE"; else rm -f "$DISCOVERY_SERVICE_FILE"; fi
-    if [[ "$OLD_DISCOVERY_TIMER_PRESENT" -eq 1 && -f "$BACKUP_DIR/dinodia-setup-discovery-sync.timer" ]]; then install -o root -g root -m 0644 "$BACKUP_DIR/dinodia-setup-discovery-sync.timer" "$DISCOVERY_TIMER_FILE"; else rm -f "$DISCOVERY_TIMER_FILE"; fi
-    if [[ "$DISCOVERY_LINK_SWITCHED" -eq 1 ]]; then
-      if [[ "$OLD_DISCOVERY_LINK_PRESENT" -eq 1 && -d "$OLD_DISCOVERY_LINK_TARGET" ]]; then
-        discovery_link_tmp="${DISCOVERY_CURRENT_LINK}.rollback-${BASHPID}"
-        ln -s -- "$OLD_DISCOVERY_LINK_TARGET" "$discovery_link_tmp"
-        mv -Tf -- "$discovery_link_tmp" "$DISCOVERY_CURRENT_LINK"
-      else
-        rm -f -- "$DISCOVERY_CURRENT_LINK"
+    if [[ "$OLD_RELEASE_ROLLBACK_SAFE" -eq 1 ]]; then
+      rm -f -- "$INSTALL_DIR"
+      if [[ -n "$OLD_RELEASE" && -e "$OLD_RELEASE" ]]; then mv -- "$OLD_RELEASE" "$INSTALL_DIR"; fi
+      if [[ "$OLD_OS_UNIT_PRESENT" -eq 1 && -f "$BACKUP_DIR/dinodia-os.service" ]]; then install -o root -g root -m 0644 "$BACKUP_DIR/dinodia-os.service" "$SERVICE_FILE"; else rm -f "$SERVICE_FILE"; fi
+      if [[ "$OLD_IDENTITY_UNIT_PRESENT" -eq 1 && -f "$BACKUP_DIR/dinodia-identityd.service" ]]; then install -o root -g root -m 0644 "$BACKUP_DIR/dinodia-identityd.service" "$IDENTITY_SERVICE_FILE"; else rm -f "$IDENTITY_SERVICE_FILE"; fi
+      if [[ "$OLD_DISCOVERY_SERVICE_PRESENT" -eq 1 && -f "$BACKUP_DIR/dinodia-setup-discovery-sync.service" ]]; then install -o root -g root -m 0644 "$BACKUP_DIR/dinodia-setup-discovery-sync.service" "$DISCOVERY_SERVICE_FILE"; else rm -f "$DISCOVERY_SERVICE_FILE"; fi
+      if [[ "$OLD_DISCOVERY_TIMER_PRESENT" -eq 1 && -f "$BACKUP_DIR/dinodia-setup-discovery-sync.timer" ]]; then install -o root -g root -m 0644 "$BACKUP_DIR/dinodia-setup-discovery-sync.timer" "$DISCOVERY_TIMER_FILE"; else rm -f "$DISCOVERY_TIMER_FILE"; fi
+      if [[ "$DISCOVERY_LINK_SWITCHED" -eq 1 ]]; then
+        if [[ "$OLD_DISCOVERY_LINK_PRESENT" -eq 1 && -d "$OLD_DISCOVERY_LINK_TARGET" ]]; then
+          discovery_link_tmp="${DISCOVERY_CURRENT_LINK}.rollback-${BASHPID}"
+          ln -s -- "$OLD_DISCOVERY_LINK_TARGET" "$discovery_link_tmp"
+          mv -Tf -- "$discovery_link_tmp" "$DISCOVERY_CURRENT_LINK"
+        else
+          rm -f -- "$DISCOVERY_CURRENT_LINK"
+        fi
+        DISCOVERY_LINK_SWITCHED=0
       fi
-      DISCOVERY_LINK_SWITCHED=0
+      FAIL_CLOSED_CANDIDATE=0
+    else
+      FAIL_CLOSED_CANDIDATE=1
+      systemctl disable --now dinodia-os dinodia-identityd >/dev/null 2>&1 || true
+      echo "The candidate failed after the release switch. The previous release is preserved but is not certified native-only, so it remains inactive; native services are stopped for a reviewed forward-fix." >&2
     fi
     systemctl daemon-reload >/dev/null 2>&1 || true
-    if [[ "$OLD_DISCOVERY_TIMER_ENABLED" -eq 1 ]]; then systemctl enable dinodia-setup-discovery-sync.timer >/dev/null 2>&1 || true; else systemctl disable dinodia-setup-discovery-sync.timer >/dev/null 2>&1 || true; fi
-    if [[ "$OLD_DISCOVERY_TIMER_ACTIVE" -eq 1 ]]; then systemctl start dinodia-setup-discovery-sync.timer >/dev/null 2>&1 || true; else systemctl stop dinodia-setup-discovery-sync.timer >/dev/null 2>&1 || true; fi
+    if [[ "$FAIL_CLOSED_CANDIDATE" -eq 0 ]]; then
+      if [[ "$OLD_DISCOVERY_TIMER_ENABLED" -eq 1 ]]; then systemctl enable dinodia-setup-discovery-sync.timer >/dev/null 2>&1 || true; else systemctl disable dinodia-setup-discovery-sync.timer >/dev/null 2>&1 || true; fi
+      if [[ "$OLD_DISCOVERY_TIMER_ACTIVE" -eq 1 ]]; then systemctl start dinodia-setup-discovery-sync.timer >/dev/null 2>&1 || true; else systemctl stop dinodia-setup-discovery-sync.timer >/dev/null 2>&1 || true; fi
+    fi
   elif [[ -n "${RELEASE_DIR:-}" && -e "$RELEASE_DIR" ]]; then
     # A copy/install failure before the switch must not strand a partial
     # release identity that blocks a later guarded retry.
     rm -rf -- "$RELEASE_DIR" 2>/dev/null || true
   fi
-  if [[ "$AVAHI_CONFIG_CHANGED" -eq 1 ]]; then
+  if [[ "$AVAHI_CONFIG_CHANGED" -eq 1 && "$FAIL_CLOSED_CANDIDATE" -eq 0 ]]; then
     if [[ "$OLD_AVAHI_CONFIG_PRESENT" -eq 1 && -f "$BACKUP_DIR/avahi-daemon.conf" ]]; then
       install -o root -g root -m 0644 "$BACKUP_DIR/avahi-daemon.conf" "$AVAHI_CONFIG"
     else
@@ -158,9 +178,13 @@ cleanup_failed_install() {
     AVAHI_CONFIG_CHANGED=0
   fi
   if [[ "$SWITCHED" -eq 1 ]]; then
-    systemctl enable --now dinodia-identityd >/dev/null 2>&1 || true
-    systemctl enable --now dinodia-os >/dev/null 2>&1 || true
-    echo "The candidate failed after the release switch; the previous release was restored." >&2
+    if [[ "$FAIL_CLOSED_CANDIDATE" -eq 0 ]]; then
+      systemctl enable --now dinodia-identityd >/dev/null 2>&1 || true
+      systemctl enable --now dinodia-os >/dev/null 2>&1 || true
+      echo "The candidate failed after the release switch; the certified native-only previous release was restored." >&2
+    else
+      echo "The failed candidate remains selected but native services are disabled; forward recovery is required." >&2
+    fi
   elif [[ "$SERVICES_STOPPED" -eq 1 ]]; then
     systemctl enable --now dinodia-identityd >/dev/null 2>&1 || true
     systemctl enable --now dinodia-os >/dev/null 2>&1 || true
@@ -207,7 +231,7 @@ chown "$INSTALL_USER":"$INSTALL_USER" "$STAGE_DIR/.env"
 chmod 0600 "$STAGE_DIR/.env"
 store_schema_version="$(node -p 'require(process.argv[1]).NATIVE_AUTOMATION_STORE_VERSION' "$STAGE_DIR/src/automations/constants.js")"
 [[ "$store_schema_version" =~ ^[1-9][0-9]*$ ]] || die "candidate store schema version is invalid"
-printf '{"buildId":"%s","packageVersion":%s,"mode":"native-v2","storeSchemaVersion":%s}\n' "$BUILD_ID" "$(node -p 'JSON.stringify(require(process.argv[1]).version)' "$STAGE_DIR/package.json")" "$store_schema_version" > "$STAGE_DIR/BUILD.json"
+printf '{"buildId":"%s","packageVersion":%s,"mode":"native-v2","nativeOnly":true,"storeSchemaVersion":%s}\n' "$BUILD_ID" "$(node -p 'JSON.stringify(require(process.argv[1]).version)' "$STAGE_DIR/package.json")" "$store_schema_version" > "$STAGE_DIR/BUILD.json"
 chown "$INSTALL_USER":"$INSTALL_USER" "$STAGE_DIR/BUILD.json"
 chmod 0644 "$STAGE_DIR/BUILD.json"
 
@@ -327,7 +351,7 @@ NODE
   then health_ok=1; break; fi
   sleep 1
 done
-if [[ "$health_ok" -ne 1 ]]; then die "candidate health did not report the expected native-v2 build; rollback will restore the prior release"; fi
+if [[ "$health_ok" -ne 1 ]]; then die "candidate health did not report the expected native-v2 build; the installer recovery policy will be applied"; fi
 
 setup_hostname="$(node -e 'const x=require(process.argv[1]); process.stdout.write("dinodia-"+String(x.serialNumber||x.serial||"").toLowerCase()+".local")' "$IDENTITY_DIR/identity.json")"
 discovery_ok=0
@@ -336,7 +360,7 @@ for attempt in $(seq 1 15); do
   if [[ "$resolved_address" == "$AVAHI_SETUP_ADDRESS" ]]; then discovery_ok=1; break; fi
   sleep 1
 done
-if [[ "$discovery_ok" -ne 1 ]]; then die "locked-setup mDNS did not resolve the candidate alias to the selected private interface; rollback will restore the prior configuration"; fi
+if [[ "$discovery_ok" -ne 1 ]]; then die "locked-setup mDNS did not resolve the candidate alias to the selected private interface; the installer recovery policy will be applied"; fi
 rm -f -- "$AVAHI_CONFIG_CANDIDATE"
 AVAHI_CONFIG_CANDIDATE=""
 

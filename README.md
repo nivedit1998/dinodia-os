@@ -27,7 +27,7 @@ Hive credentials, tokens, and client-registration data are held only in the encr
 
 ## Updates and rollback
 
-Back up before updating with `npm run backup` or the dashboard backup action. The release image set is recorded in `docker/versions.env`; keep the previous application directory and image digests until the new version passes health, provisioning, Cloudflare, platform, and device checks. To roll back, stop the service, restore the previous application directory and data backup, then restart. Never delete the data directory as part of a normal update.
+Back up before updating with `npm run backup` or the dashboard backup action. Keep prior release directories and image digests until the new version passes health, provisioning, Cloudflare, platform, and device checks. The installer may reactivate a previous release only when its `BUILD.json` explicitly certifies `nativeOnly: true`. An uncertified legacy predecessor remains preserved but inactive; if the first Native-only candidate fails after switch, services stay stopped for a reviewed forward-fix. Never restore Home Assistant/old-app routes or delete the data directory as part of a normal update.
 
 Dinodia OS is the first simple, local-first Dinodia Hub appliance for Raspberry Pi 4. It runs one small Node service and can connect to protocol services only when the relevant hardware is installed.
 

@@ -92,7 +92,7 @@ export function validateCandidate({ sourceDir, envFile, identityDir }) {
   if (!String(identity.serial || "") || !Number.isInteger(Number(identity.generation)) || Number(identity.generation) < 1) fail("the enrolled identity is incomplete");
 
   const buildId = sourceFingerprint(sourceDir);
-  return { buildId, platformOrigin: CANONICAL_PLATFORM_ORIGIN, packageVersion: packageJson.version, storeSchemaVersion };
+  return { buildId, platformOrigin: CANONICAL_PLATFORM_ORIGIN, packageVersion: packageJson.version, storeSchemaVersion, nativeOnly: true };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

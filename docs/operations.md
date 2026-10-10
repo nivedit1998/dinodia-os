@@ -23,7 +23,7 @@ Review the pinned Hive adapter's upstream API/protocol behavior before changing 
 
 ## Backup and rollback
 
-Run `npm run backup` before an update. The encrypted backup contains the encrypted Hive vault record and the non-secret store snapshot; the plain data store never contains Hive passwords or tokens. Keep the matching machine key. If the update fails, stop the service, restore the previous application/data backup, and restart; do not delete `/var/lib/dinodia-os`.
+Run `npm run backup` before an update. The encrypted backup contains the encrypted Hive vault record and the non-secret store snapshot; the plain data store never contains Hive passwords or tokens. Keep the matching machine key. The installer only reactivates a previous release whose build manifest explicitly certifies `nativeOnly: true`. If the first Native-only candidate fails after switching from an uncertified legacy release, the old release remains preserved but inactive and native services remain stopped for a reviewed forward-fix. Do not restore Home Assistant/old-app code or delete `/var/lib/dinodia-os`.
 
 ## Pi checks
 
