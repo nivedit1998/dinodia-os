@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { classifyManifestFile, isCertifiedNativeOnly } = require("../scripts/native-rollback-policy");
+const { classifyManifest, classifyManifestFile, isCertifiedNativeOnly } = require("../scripts/native-rollback-policy");
 
 test("legacy Native V2 manifests without an explicit native-only marker are never rollback targets", () => {
   assert.equal(isCertifiedNativeOnly({
@@ -33,6 +33,11 @@ test("only a valid, explicitly native-only release manifest can be reactivated",
     mode: "native-v2",
     nativeOnly: true,
   }), false, "a known startup-failing Native V2 release is not a safe rollback target");
+  assert.equal(classifyManifest({
+    buildId: "native-v2-7e65d78e21538a79367309f6",
+    mode: "native-v2",
+    nativeOnly: true,
+  }), "known-unhealthy");
 });
 
 test("installer policy classifies a real old manifest file fail-closed", (t) => {
@@ -52,6 +57,13 @@ test("installer policy classifies a real old manifest file fail-closed", (t) => 
     storeSchemaVersion: 10,
   }));
   assert.equal(classifyManifestFile(manifest), "native-only");
+  fs.writeFileSync(manifest, JSON.stringify({
+    buildId: "native-v2-7e65d78e21538a79367309f6",
+    mode: "native-v2",
+    nativeOnly: true,
+    storeSchemaVersion: 10,
+  }));
+  assert.equal(classifyManifestFile(manifest), "known-unhealthy");
   fs.writeFileSync(manifest, "not-json");
   assert.equal(classifyManifestFile(manifest), "unsafe");
 });
@@ -64,4 +76,6 @@ test("a failed first native-only install cannot reactivate an uncertified legacy
   assert.match(installer, /systemctl disable --now dinodia-os dinodia-identityd/);
   assert.match(installer, /previous release is preserved but is not certified as a healthy native-only recovery target, so it remains inactive/);
   assert.match(installer, /if \[\[ "\$SWITCHED" -eq 1 \]\]; then\s+if \[\[ "\$FAIL_CLOSED_CANDIDATE" -eq 0 \]\]/);
+  assert.match(installer, /OLD_RELEASE_KNOWN_UNHEALTHY/);
+  assert.match(installer, /The previous release is known unhealthy and remains inactive after the pre-switch failure/);
 });

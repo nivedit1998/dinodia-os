@@ -26,6 +26,7 @@ STAGE_DIR=""
 HIVE_WHEELHOUSE_STAGE=""
 OLD_RELEASE=""
 OLD_RELEASE_ROLLBACK_SAFE=0
+OLD_RELEASE_KNOWN_UNHEALTHY=0
 FAIL_CLOSED_CANDIDATE=0
 SWITCHED=0
 SERVICES_STOPPED=0
@@ -116,11 +117,19 @@ mkdir -p "$RELEASE_ROOT" "$DATA_DIR"
 STAGE_DIR="$RELEASE_ROOT/.staging-${BUILD_ID}-${BASHPID}"
 RELEASE_DIR="$RELEASE_ROOT/$BUILD_ID"
 [[ ! -e "$RELEASE_DIR" && ! -e "$STAGE_DIR" ]] || die "release identity already exists; review the existing candidate before retrying"
-if [[ -f "$INSTALL_DIR/BUILD.json" ]] && [[ "$(node "$APP_SOURCE/scripts/native-rollback-policy.js" --manifest "$INSTALL_DIR/BUILD.json")" == "native-only" ]]; then
+PREVIOUS_RELEASE_CLASSIFICATION="unsafe"
+if [[ -f "$INSTALL_DIR/BUILD.json" ]]; then
+  PREVIOUS_RELEASE_CLASSIFICATION="$(node "$APP_SOURCE/scripts/native-rollback-policy.js" --manifest "$INSTALL_DIR/BUILD.json")"
+fi
+if [[ "$PREVIOUS_RELEASE_CLASSIFICATION" == "native-only" ]]; then
   OLD_RELEASE_ROLLBACK_SAFE=1
+elif [[ "$PREVIOUS_RELEASE_CLASSIFICATION" == "known-unhealthy" ]]; then
+  OLD_RELEASE_KNOWN_UNHEALTHY=1
 fi
 if [[ "$OLD_RELEASE_ROLLBACK_SAFE" -eq 1 ]]; then
   echo "Previous release recovery classification: certified healthy native-only"
+elif [[ "$OLD_RELEASE_KNOWN_UNHEALTHY" -eq 1 ]]; then
+  echo "Previous release recovery classification: known unhealthy; it will remain inactive if this install stops before switching"
 else
   echo "Previous release recovery classification: not certified as a healthy native-only recovery target; it will not be reactivated after a failed switch"
 fi
@@ -186,8 +195,13 @@ cleanup_failed_install() {
       echo "The failed candidate remains selected but native services are disabled; forward recovery is required." >&2
     fi
   elif [[ "$SERVICES_STOPPED" -eq 1 ]]; then
-    systemctl enable --now dinodia-identityd >/dev/null 2>&1 || true
-    systemctl enable --now dinodia-os >/dev/null 2>&1 || true
+    if [[ "$OLD_RELEASE_KNOWN_UNHEALTHY" -eq 1 ]]; then
+      systemctl disable --now dinodia-os dinodia-identityd >/dev/null 2>&1 || true
+      echo "The previous release is known unhealthy and remains inactive after the pre-switch failure; use a reviewed forward-fix." >&2
+    else
+      systemctl enable --now dinodia-identityd >/dev/null 2>&1 || true
+      systemctl enable --now dinodia-os >/dev/null 2>&1 || true
+    fi
   fi
   [[ -z "$AVAHI_CONFIG_CANDIDATE" ]] || rm -f -- "$AVAHI_CONFIG_CANDIDATE"
   [[ -z "$AVAHI_CONFIG_ATOMIC_TMP" ]] || rm -f -- "$AVAHI_CONFIG_ATOMIC_TMP"
