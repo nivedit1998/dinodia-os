@@ -54,7 +54,7 @@ test("commissioning event WebSocket sends scoped durable snapshots and closes wh
     config: {
       nodeEnv: "test", v2Environment: "test", appPublicKeys: appKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
       operatorPublicKey: operatorKeys.publicKey.export({ type: "spki", format: "pem" }).toString(), hubId,
-      port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"),
+      port: 0, nativeApiPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"),
       backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "",
       nativeCommissioningCapabilities: { nativeZigbeeCommissioningV1: false, nativeMatterCommissioningV1: false },
     },

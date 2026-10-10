@@ -29,28 +29,32 @@ test("operator sessions are signed, hub-bound, session-time-limited, with separa
   assert.equal(verifyOperatorSessionToken(token, { publicKey: keys.publicKey, hubId: "DIN-001", requireRecentAuth: true, now: now + 5 * 60_001 }), null);
 });
 
-test("temporary day policy is opt-in, admin-only, hub-bound, and expires at its exact absolute deadline", () => {
+test("operator grants always cap at 15 minutes and reject retired extended grants", () => {
   const keys = crypto.generateKeyPairSync("ed25519");
   const now = Date.UTC(2026, 8, 26, 12);
   const dayMs = 24 * 60 * 60 * 1000;
-  const dayToken = createOperatorSessionToken({ sub: "employee-1", hubId: "DIN-001", scope: ["os:admin"], recentAuthAt: now }, keys.privateKey, now, { internalOperatorDaySession: true });
-  assert.ok(verifyOperatorSessionToken(dayToken, { publicKey: keys.publicKey, hubId: "DIN-001", now, internalOperatorDaySession: true }));
-  assert.equal(verifyOperatorSessionToken(dayToken, { publicKey: keys.publicKey, hubId: "DIN-001", now }), null, "an OS with the temporary policy disabled rejects the extended grant");
-  assert.ok(verifyOperatorSessionToken(dayToken, { publicKey: keys.publicKey, hubId: "DIN-001", now: now + dayMs - 1, internalOperatorDaySession: true }));
-  assert.equal(verifyOperatorSessionToken(dayToken, { publicKey: keys.publicKey, hubId: "DIN-001", now: now + dayMs, internalOperatorDaySession: true }), null);
-  assert.equal(verifyOperatorSessionToken(dayToken, { publicKey: keys.publicKey, hubId: "DIN-001", now: now + dayMs + 1, internalOperatorDaySession: true }), null);
+  const shortToken = createOperatorSessionToken({ sub: "employee-1", hubId: "DIN-001", scope: ["os:admin"], recentAuthAt: now }, keys.privateKey, now, { internalOperatorDaySession: true });
+  const shortClaims = JSON.parse(Buffer.from(shortToken.split(".")[2], "base64url").toString("utf8"));
+  assert.equal(shortClaims.exp - shortClaims.iat, 15 * 60, "obsolete configuration cannot issue a longer grant");
+  assert.equal(shortClaims.sessionPolicy, undefined, "new grants carry no retired policy marker");
+  assert.ok(verifyOperatorSessionToken(shortToken, { publicKey: keys.publicKey, hubId: "DIN-001", now }));
+  assert.ok(verifyOperatorSessionToken(shortToken, { publicKey: keys.publicKey, hubId: "DIN-001", now: now + 15 * 60 * 1000 - 1 }));
+  assert.equal(verifyOperatorSessionToken(shortToken, { publicKey: keys.publicKey, hubId: "DIN-001", now: now + 15 * 60 * 1000 }), null);
 
-  const ordinaryToken = createOperatorSessionToken({ sub: "employee-1", hubId: "DIN-001", scope: ["os:admin"], recentAuthAt: now }, keys.privateKey, now);
-  assert.ok(verifyOperatorSessionToken(ordinaryToken, { publicKey: keys.publicKey, hubId: "DIN-001", now: now + 15 * 60 * 1000 - 1 }));
-  assert.equal(verifyOperatorSessionToken(ordinaryToken, { publicKey: keys.publicKey, hubId: "DIN-001", now: now + 15 * 60 * 1000 }), null);
-  assert.equal(verifyOperatorSessionToken(ordinaryToken, { publicKey: keys.publicKey, hubId: "DIN-001", now: now + 15 * 60 * 1000 - 1, internalOperatorDaySession: true }), null, "the Platform and OS temporary-mode mismatch fails closed");
+  const encode = (value) => Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+  const issuedAt = Math.floor(now / 1000);
+  const legacyHeader = encode({ alg: "EdDSA", typ: "DNO-OPS-1" });
+  const legacyPayload = encode({ iss: "dinodia-platform", aud: "dinodia-os:DIN-001", sub: "employee-1", sid: "legacy-session", jti: "legacy-jti", hubId: "DIN-001", scope: ["os:admin"], iat: issuedAt, exp: issuedAt + dayMs / 1000, recentAuthAt: now, sessionPolicy: "STAGE1_INTERNAL_OPERATOR_DAY_SESSION" });
+  const legacyInput = `${legacyHeader}.${legacyPayload}`;
+  const legacyToken = `dno1.${legacyInput}.${crypto.sign(null, Buffer.from(legacyInput), keys.privateKey).toString("base64url")}`;
+  assert.equal(verifyOperatorSessionToken(legacyToken, { publicKey: keys.publicKey, hubId: "DIN-001", now, internalOperatorDaySession: true }), null, "a pre-cutover extended token is rejected even if the retired setting is supplied");
 
-  const supportToken = createOperatorSessionToken({ sub: "employee-1", hubId: "DIN-001", scope: ["support:redeem"], recentAuthAt: now, exp: Math.floor((now + dayMs) / 1000) }, keys.privateKey, now, { internalOperatorDaySession: true });
-  const support = verifyOperatorSessionToken(supportToken, { publicKey: keys.publicKey, hubId: "DIN-001", requiredScope: "support:redeem", now, internalOperatorDaySession: true });
+  const supportToken = createOperatorSessionToken({ sub: "employee-1", hubId: "DIN-001", scope: ["support:redeem"], recentAuthAt: now, exp: Math.floor((now + dayMs) / 1000) }, keys.privateKey, now);
+  const support = verifyOperatorSessionToken(supportToken, { publicKey: keys.publicKey, hubId: "DIN-001", requiredScope: "support:redeem", now });
   assert.ok(support);
-  assert.equal(support.sessionPolicy, undefined, "support grants do not inherit the temporary operator policy");
-  assert.equal(support.exp - support.iat, 15 * 60, "support grants remain capped at their original 15-minute limit");
-  assert.equal(verifyOperatorSessionToken(supportToken, { publicKey: keys.publicKey, hubId: "DIN-001", requiredScope: "support:redeem", now: now + 15 * 60 * 1000, internalOperatorDaySession: true }), null);
+  assert.equal(support.sessionPolicy, undefined, "support grants keep their separate policy");
+  assert.equal(support.exp - support.iat, 15 * 60, "support grants remain capped at their existing 15-minute operator token limit");
+  assert.equal(verifyOperatorSessionToken(supportToken, { publicKey: keys.publicKey, hubId: "DIN-001", requiredScope: "support:redeem", now: now + 15 * 60 * 1000 }), null);
 });
 
 test("credential registry stores hashes, rejects expiry and revokes sockets by fingerprint", () => {

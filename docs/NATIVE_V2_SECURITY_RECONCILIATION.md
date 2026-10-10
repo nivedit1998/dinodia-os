@@ -1,5 +1,13 @@
 # Dinodia OS native V2 foundation reconciliation
 
+> Historical foundation snapshot: this document records the original
+> Native V2 transition state. Its deferred HA-compatibility entries below
+> were superseded by the Stage 14 retirement checkpoint dated 10 October 2026.
+> The active HA REST/legacy WebSocket executors and the old 8099 listener
+> have since been removed. The normalized device/capability domain model is
+> retained only where current Native V2 APIs, dashboard, automations, signed
+> sync, or Alexa consume it; retained legacy records are inert, not executable.
+
 This is the foundation-stage classification of the existing Dinodia OS worktree. It does not
 claim that the later native provisioning, support, offline authorization or customer journeys are
 complete. It records what is retained for the next stage and what is deliberately isolated.
@@ -10,8 +18,8 @@ complete. It records what is retained for the next stage and what is deliberatel
 - No old platform URL is a default or fallback.
 - Production configuration forces `legacyCompatibilityEnabled = false` and ignores legacy admin,
   HA and bootstrap environment credentials.
-- Home Assistant compatibility code remains only as a development/test compatibility surface until
-  its owning numbered Native V2 stage removes it. It is not a production authority path.
+- At this historical foundation checkpoint, Home Assistant compatibility was deferred for later
+  retirement; see the dated Stage 14 disposition above for its current status.
 - The foundation does not deploy to the Pi or introduce a customer database client.
 
 ## File classification

@@ -148,7 +148,7 @@ test("updater maintenance routes enforce tenant/operator scope and expose only t
       nodeEnv: "production", v2Environment: "test", updaterControlSocketPath: socketPath,
       appPublicKeys: appKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
       operatorPublicKey: operatorKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
-      hubId, port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory,
+      hubId, port: 0, nativeApiPort: 0, dataDir: directory,
       dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"),
       staticDir: path.join(__dirname, "..", "public"), otbrUrl: "",
     },
@@ -225,7 +225,7 @@ test("updater maintenance routes enforce tenant/operator scope and expose only t
 test("production rejects legacy admin, HA, bootstrap and dashboard credentials", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-stage1-production-boundary-"));
   const hub = createHub({
-    config: { nodeEnv: "production", adminToken: "legacy-admin-secret", haToken: "legacy-ha-secret", platformBootstrapSecret: "legacy-bootstrap-secret", port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    config: { nodeEnv: "production", adminToken: "legacy-admin-secret", haToken: "legacy-ha-secret", platformBootstrapSecret: "legacy-bootstrap-secret", port: 0, nativeApiPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
     mqttBridge: mockIntegration(),
     matterBridge: mockIntegration(),
     cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
@@ -236,7 +236,7 @@ test("production rejects legacy admin, HA, bootstrap and dashboard credentials",
   try {
     for (const token of ["legacy-admin-secret", "legacy-ha-secret", "legacy-bootstrap-secret"]) {
       assert.equal((await request(base, "/_dinodia/admin/api/status", { headers: { authorization: `Bearer ${token}` } })).response.status, 401);
-      assert.equal((await request(base, "/api/states", { headers: { authorization: `Bearer ${token}` } })).response.status, 401);
+      assert.equal((await request(base, "/api/states", { headers: { authorization: `Bearer ${token}` } })).response.status, 404);
       assert.equal((await request(base, "/_dinodia/admin/api/provisioning/pair", { method: "POST", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify({ bootstrapSecret: token }) })).response.status, 401);
     }
     assert.equal((await request(base, "/_dinodia/admin/api/status")).response.status, 401);
@@ -246,15 +246,89 @@ test("production rejects legacy admin, HA, bootstrap and dashboard credentials",
     assert.equal(health.body.buildId, undefined);
 
     const socket = new WebSocket(`${base.replace("http", "ws")}/api/websocket`);
-    const messages = [];
-    socket.on("message", (data) => messages.push(JSON.parse(data.toString())));
-    await new Promise((resolve) => socket.once("open", resolve));
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    socket.send(JSON.stringify({ type: "auth", access_token: "legacy-admin-secret" }));
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.equal(messages.some((message) => message.type === "auth_ok"), false);
-    assert.equal(messages.some((message) => message.type === "auth_invalid"), true);
-    socket.close();
+    const status = await new Promise((resolve, reject) => {
+      socket.once("unexpected-response", (_request, response) => { response.resume(); resolve(response.statusCode); });
+      socket.once("open", () => reject(new Error("retired HA WebSocket unexpectedly upgraded")));
+      socket.once("error", (error) => error.message.includes("Unexpected server response")
+        ? resolve(Number(error.message.match(/\d+/)?.[0]) || 0) : reject(error));
+    });
+    assert.equal(status, 404);
+
+    const unauthenticatedEvents = new WebSocket(`${base.replace("http", "ws")}/_dinodia/admin/events`, {
+      headers: { host: "127.0.0.1", origin: "http://127.0.0.1" },
+    });
+    const eventsStatus = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { unauthenticatedEvents.terminate(); reject(new Error("unauthenticated Native operator events did not deny")); }, 2000);
+      unauthenticatedEvents.once("unexpected-response", (_request, response) => { clearTimeout(timer); response.resume(); resolve(response.statusCode); });
+      unauthenticatedEvents.once("error", (error) => {
+        clearTimeout(timer);
+        if (error.message.includes("Unexpected server response")) resolve(Number(error.message.match(/\d+/)?.[0] || 0));
+        else reject(error);
+      });
+    });
+    assert.equal(eventsStatus, 401, "Native operator events require the existing scoped browser session");
+
+    const crossOriginEvents = new WebSocket(`${base.replace("http", "ws")}/_dinodia/admin/events`, {
+      headers: { host: "127.0.0.1", origin: "https://attacker.example" },
+    });
+    const crossOriginStatus = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { crossOriginEvents.terminate(); reject(new Error("cross-origin Native operator events did not deny")); }, 2000);
+      crossOriginEvents.once("unexpected-response", (_request, response) => { clearTimeout(timer); response.resume(); resolve(response.statusCode); });
+      crossOriginEvents.once("error", (error) => {
+        clearTimeout(timer);
+        if (error.message.includes("Unexpected server response")) resolve(Number(error.message.match(/\d+/)?.[0] || 0));
+        else reject(error);
+      });
+    });
+    assert.equal(crossOriginStatus, 404, "cross-origin upgrade has no event-stream existence oracle");
+  } finally {
+    await hub.stop();
+  }
+});
+
+test("production exposes no HA REST, service-command, or legacy WebSocket routes", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-stage14-native-only-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  let integrationCommands = 0;
+  const hub = createHub({
+    config: { nodeEnv: "production", adminToken: "retired-admin", haToken: "retired-ha", legacyCompatibilityEnabled: true, port: 0, nativeApiPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    mqttBridge: { ...mockIntegration(), async command() { integrationCommands += 1; } },
+    matterBridge: mockIntegration(),
+    cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
+    platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
+  });
+  await hub.start();
+  const base = `http://127.0.0.1:${hub.server.address().port}`;
+  try {
+    for (const [method, route, body] of [
+      ["GET", "/api/states"],
+      ["POST", "/api/services/light/turn_on", { entity_id: "light.not-a-real-device" }],
+      ["GET", "/api/config"],
+    ]) {
+      const response = await fetch(`${base}${route}`, {
+        method,
+        headers: { authorization: "Bearer retired-ha", ...(body ? { "content-type": "application/json" } : {}) },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      });
+      assert.equal(response.status, 404, `${method} ${route} must be retired rather than an inactive HA application route`);
+    }
+    assert.equal(integrationCommands, 0, "retired service commands never reach a native integration");
+
+    const legacySocket = new WebSocket(`${base.replace("http", "ws")}/api/websocket`);
+    const upgradeStatus = await new Promise((resolve, reject) => {
+      legacySocket.once("unexpected-response", (_request, response) => { response.resume(); resolve(response.statusCode); });
+      legacySocket.once("open", () => reject(new Error("legacy HA WebSocket unexpectedly upgraded")));
+      legacySocket.once("error", (error) => {
+        if (error.message.includes("Unexpected server response")) resolve(Number(error.message.match(/\d+/)?.[0]));
+        else reject(error);
+      });
+    });
+    assert.equal(upgradeStatus, 404, "the legacy HA WebSocket endpoint is absent");
+    assert.equal(integrationCommands, 0);
+
+    const nativeHealth = await request(base, "/api/health");
+    assert.equal(nativeHealth.response.status, 200);
+    assert.equal(nativeHealth.body.mode, "native-v2");
   } finally {
     await hub.stop();
   }
@@ -264,7 +338,7 @@ test("production app authorization is scoped and owners cannot command the hub",
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-stage1-app-scope-"));
   const keys = crypto.generateKeyPairSync("ed25519");
   const hub = createHub({
-    config: { nodeEnv: "production", appPublicKeys: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), hubId: "app-scope-hub", port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    config: { nodeEnv: "production", appPublicKeys: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), hubId: "app-scope-hub", port: 0, nativeApiPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
     mqttBridge: mockIntegration(),
     matterBridge: mockIntegration(),
     cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
@@ -291,7 +365,7 @@ test("Native v1 device route emits a home-bound contract envelope and never retu
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-native-v1-read-"));
   const keys = crypto.generateKeyPairSync("ed25519");
   const hub = createHub({
-    config: { nodeEnv: "production", appPublicKeys: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), hubId: "native-v1-hub", port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    config: { nodeEnv: "production", appPublicKeys: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), hubId: "native-v1-hub", port: 0, nativeApiPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
     mqttBridge: mockIntegration(), matterBridge: mockIntegration(),
     cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
     platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
@@ -414,7 +488,7 @@ test("tenant-owned Native V1 removal requires exact fresh proof and creates one 
   let adapterRemovals = 0;
   const matterBridge = { ...mockIntegration(), async remove(deviceId) { assert.equal(deviceId, "tenant-matter-lamp"); adapterRemovals += 1; return true; }, forgetDevice() {} };
   const hub = createHub({
-    config: { nodeEnv: "production", appPublicKeys: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), hubId, port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    config: { nodeEnv: "production", appPublicKeys: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), hubId, port: 0, nativeApiPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
     mqttBridge: mockIntegration(), matterBridge,
     cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
     platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
@@ -493,7 +567,7 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
   };
   let controlledClock = Date.now();
   const makeHub = () => createHub({
-    config: { nodeEnv: "production", v2Environment: "test", nativeCommandConfirmationTimeoutMs: 200, appPublicKeys: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), hubId: "native-command-hub", port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    config: { nodeEnv: "production", v2Environment: "test", nativeCommandConfirmationTimeoutMs: 200, appPublicKeys: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), hubId: "native-command-hub", port: 0, nativeApiPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
     identityBroker,
     mqttBridge: mockIntegration(), matterBridge: mockIntegration(),
     cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
@@ -529,12 +603,15 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     const token = appToken({ iss: "dinodia-platform-v2", aud: "dinodia-hub:native-command-hub", sub: "account-command-tenant", sid: "sid-command", jti: "jti-command", membershipId: "membership-command-tenant", trustedDeviceId: "trusted-command", hubInstallationId: "native-command-hub", iat: now, exp: now + 300, homeId: "home-command", householdRole: "TENANT", areaIds: ["area-uuid-command-kitchen"], policyRevision: 0, scope: ["tenant:device-command"] }, keys.privateKey);
     const headers = { authorization: `Bearer ${token}` };
     socket = new WebSocket(`${base.replace("http", "ws")}/api/websocket`);
-    assert.equal((await websocketMessage(socket)).type, "auth_required");
-    socket.send(JSON.stringify({ type: "auth", access_token: token }));
-    assert.equal((await websocketMessage(socket)).type, "auth_invalid", "Native V2 customer authority is never accepted by the HA-shaped compatibility socket");
-    await new Promise((resolve) => socket.once("close", resolve));
-    assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, 0, "rejected compatibility authentication causes no command event");
-    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "OFF", "rejected compatibility authentication has no virtual-device effect");
+    const retiredUpgradeStatus = await new Promise((resolve, reject) => {
+      socket.once("unexpected-response", (_request, response) => { response.resume(); resolve(response.statusCode); });
+      socket.once("open", () => reject(new Error("retired HA WebSocket unexpectedly upgraded")));
+      socket.once("error", (error) => error.message.includes("Unexpected server response")
+        ? resolve(Number(error.message.match(/\d+/)?.[0]) || 0) : reject(error));
+    });
+    assert.equal(retiredUpgradeStatus, 404);
+    assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, 0, "retired compatibility access causes no command event");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "OFF", "retired compatibility access has no virtual-device effect");
     const catalog = await request(base, "/api/dinodia/v1/devices", { headers });
     assert.equal(catalog.response.status, 200);
     const dto = catalog.body.data.find((item) => item.id === deviceId);
@@ -1149,7 +1226,7 @@ test("support operator sessions are read-only and cannot leak private tenant dev
   const keys = crypto.generateKeyPairSync("ed25519");
   const hubId = "support-scope-hub";
   const hub = createHub({
-    config: { nodeEnv: "production", hubId, operatorPublicKey: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    config: { nodeEnv: "production", hubId, operatorPublicKey: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), port: 0, nativeApiPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
     mqttBridge: mockIntegration(),
     matterBridge: mockIntegration(),
     cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
@@ -1187,7 +1264,7 @@ test("offline enrolled authority reaches only the actual loopback customer TLS l
     observation() { return { version: 1, state: "CURRENT", address: "127.0.0.1", baseUrl: `http://127.0.0.1:${lanPort}`, discoveryHost: `dinodia-${hubId}.local` }; },
   };
   const hub = createHub({
-    config: { nodeEnv: "production", v2Environment: "test", loopbackLanListenerForTest: true, customerLanPortForTest: lanPort, hubId, port: 0, haPort: cloudPort, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    config: { nodeEnv: "production", v2Environment: "test", loopbackLanListenerForTest: true, customerLanPortForTest: lanPort, hubId, port: 0, nativeApiPort: cloudPort, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
     lanTlsIdentityForTest: lanTlsIdentity,
     setupDiscoveryForTest: loopbackDiscovery,
     mqttBridge: mockIntegration(), matterBridge: mockIntegration(),
@@ -1292,7 +1369,7 @@ test("offline enrolled authority reaches only the actual loopback customer TLS l
     assert.equal(Object.hasOwn(wrongHomeRead.body, "data"), false);
     const oldPath = "/api/devices";
     const oldApi = await tlsRequest(oldPath, { headers: offlineHeaders("native.read", oldPath) });
-    assert.equal(oldApi.response.status, 401, "offline authority is rejected before any HA-shaped compatibility response");
+    assert.equal(oldApi.response.status, 404, "the legacy REST route is absent; offline authority has no alternate API path");
     assert.equal(JSON.stringify(oldApi.body).includes(deviceId), false);
     const cloudFallbackAttempt = await request(base, readPath, { headers: offlineHeaders("native.read", readPath) });
     assert.equal(cloudFallbackAttempt.response.status, 401, "offline authority cannot cross the loopback CloudURL/HTTP listener");

@@ -3,10 +3,6 @@ const { canonicalCloudChallenge } = require("./auth/identityBroker");
 const { privateInterface, isPrivateIPv4 } = require("./setupDiscovery");
 const { applyCloudConfiguration } = require("./sync/cloudConfiguration");
 
-function sign(secret, serial, ts, nonce) {
-  return crypto.createHmac("sha256", String(secret)).update(`${serial}.${ts}.${nonce}`).digest("hex");
-}
-
 function canonicalStepUpDescriptor(input) {
   return JSON.stringify({
     version: Number(input.version),
@@ -61,7 +57,7 @@ function validateLanEndpointObservation(value, serial, expectedPort = 80) {
 }
 
 class PlatformPairing {
-  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, haPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, runtime, getLanEndpoint = null, getLanTlsIdentity = null, acknowledgeLanTlsIdentity = null, getUpdaterStatus = null, reconcileTenantDeviceRemoval = null, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, legacyCompatibilityEnabled = false, clock = () => Date.now() } = {}) {
+  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, nativeApiPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, runtime, getLanEndpoint = null, getLanTlsIdentity = null, acknowledgeLanTlsIdentity = null, getUpdaterStatus = null, reconcileTenantDeviceRemoval = null, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, clock = () => Date.now() } = {}) {
     this.store = store;
     this.vault = vault;
     this.identityBroker = identityBroker;
@@ -71,7 +67,7 @@ class PlatformPairing {
     const storedApiUrl = String(storedPlatform.apiUrl || "").replace(/\/$/, "");
     this.apiUrl = String(requestedApiUrl || storedApiUrl).replace(/\/$/, "");
     this.serial = String(serial || store?.getIdentity()?.serial || "");
-    this.haPort = Number(haPort) || 8123;
+    this.nativeApiPort = Number(nativeApiPort) || 8123;
     this.intervalMs = Math.max(15000, Number(intervalMs) || 120000);
     this.heartbeatIntervalMs = Math.max(15000, Number(heartbeatIntervalMs) || 120000);
     this.clock = clock;
@@ -105,7 +101,6 @@ class PlatformPairing {
     this.acceptOfflineAuthorisations = acceptOfflineAuthorisations || (async () => {});
     this.logger = logger;
     this.fetchImpl = fetchImpl;
-    this.legacyCompatibilityEnabled = Boolean(legacyCompatibilityEnabled);
     this.timer = null;
     this.syncing = false;
     this.publishAttempts = 0;
@@ -144,10 +139,8 @@ class PlatformPairing {
     };
   }
 
-  async configure({ bootstrapSecret, apiUrl } = {}) {
+  async configure({ apiUrl } = {}) {
     if (apiUrl) this.apiUrl = String(apiUrl).replace(/\/$/, "");
-    if (bootstrapSecret && !this.legacyCompatibilityEnabled) throw new Error("Legacy bootstrap pairing is retired");
-    if (bootstrapSecret && this.vault) await this.vault.set("platform.bootstrapSecret", String(bootstrapSecret).trim());
     await this.store.savePlatform({ apiUrl: this.apiUrl });
     return this.status();
   }
@@ -263,54 +256,6 @@ class PlatformPairing {
     return result;
   }
 
-  async request(path, body, secret) {
-    if (!this.apiUrl) throw new Error("A native V2 platform URL is required");
-    const ts = Math.floor(Date.now() / 1000);
-    const nonce = crypto.randomBytes(18).toString("hex");
-    const payload = { serial: this.serial, ts, nonce, sig: sign(secret, this.serial, ts, nonce), ...body };
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
-    let response;
-    try {
-      response = await this.fetchImpl(`${this.apiUrl}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload), signal: controller.signal });
-    } finally {
-      clearTimeout(timeout);
-    }
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw Object.assign(new Error(result.error || result.message || `Platform returned HTTP ${response.status}`), { statusCode: response.status });
-    return result;
-  }
-
-  getSyncSecret() {
-    return this.vault && this.vault.get("platform.syncSecret");
-  }
-
-  async requestWithSecret(path, body, secret) {
-    return this.request(path, body, secret);
-  }
-
-  async pair(bootstrapSecret) {
-    if (!this.legacyCompatibilityEnabled) throw new Error("Legacy bootstrap pairing is retired; use the signed provisioning presentation");
-    const secret = String(bootstrapSecret || (this.vault && this.vault.get("platform.bootstrapSecret")) || "").trim();
-    if (!secret) throw new Error("Bootstrap secret is required");
-    const result = await this.request("/api/hub-agent/pair", {}, secret);
-    if (result.syncSecret && this.vault) await this.vault.set("platform.syncSecret", String(result.syncSecret));
-    await this.store.savePlatform({
-      apiUrl: this.apiUrl,
-      paired: true,
-      agentSeenVersion: Number(result.latestVersion || result.publishedVersion || 0),
-      publishedVersion: Number(result.publishedVersion || 0),
-      acceptedTokenHashes: Array.isArray(result.hubTokenHashes) ? result.hubTokenHashes : [],
-      syncIntervalMinutes: Number(result.platformSyncIntervalMinutes || 2),
-      lastPairAt: new Date().toISOString(),
-      lastError: null,
-    });
-    this.lastError = null;
-    this.retryAttempt = 0;
-    this.nextRetryAt = 0;
-    return result;
-  }
-
   async requestWithHubIdentity(path, body) {
     if (!this.apiUrl) throw new Error("A native V2 platform URL is required");
     const identity = await this.getPublicIdentity();
@@ -343,7 +288,7 @@ class PlatformPairing {
     const state = selected?.state === "CURRENT" && isPrivateIPv4(selected.address) ? "CURRENT" : "UNAVAILABLE";
     // The native HTTP contract has one fixed installer port. Do not derive it
     // from an ephemeral test listener or a configurable tenant transport.
-    const setupPort = this.production ? 80 : this.haPort;
+    const setupPort = this.production ? 80 : this.nativeApiPort;
     const discoveryHost = `dinodia-${this.serial.toLowerCase()}.local`;
     let baseUrl;
     if (state === "CURRENT") {
@@ -499,15 +444,10 @@ class PlatformPairing {
       // cannot report normal liveness while it is still using stale policy.
       const nativeIdentity = await this.getPublicIdentity();
       heartbeatIdentity = nativeIdentity;
-      const result = nativeIdentity
-        ? await this.requestWithHubIdentity("/api/hub-agent/token-state", payload)
-        : this.legacyCompatibilityEnabled && this.vault?.get("platform.syncSecret")
-          ? await this.request("/api/hub-agent/token-state", payload, this.vault.get("platform.syncSecret"))
-          : null;
-      if (!result) throw new Error("A factory-enrolled hub identity is required for Platform synchronisation");
+      if (!nativeIdentity) throw new Error("A factory-enrolled hub identity is required for Platform synchronisation");
+      const result = await this.requestWithHubIdentity("/api/hub-agent/token-state", payload);
       const reportedHubInstallId = result.hubInstallId == null ? "" : String(result.hubInstallId);
       const hubInstallId = reportedHubInstallId || String(platform.hubInstallId || "");
-      const developmentCompatibilityOnly = !nativeIdentity && this.legacyCompatibilityEnabled && !this.production;
       const installationSyncMode = result.installationSyncMode == null ? "ACTIVE" : String(result.installationSyncMode);
       if (!["ACTIVE", "INSTALLATION_BOOTSTRAP", "UNAVAILABLE"].includes(installationSyncMode)) {
         throw Object.assign(new Error("Platform returned an invalid installation sync mode"), { code: "installation_sync_mode_invalid" });
@@ -527,7 +467,7 @@ class PlatformPairing {
       if (platform.hubInstallId && reportedHubInstallId && String(platform.hubInstallId) !== reportedHubInstallId) {
         throw Object.assign(new Error("Platform hub installation identity changed; refusing to rebind this paired OS"), { code: "hub_installation_id_changed" });
       }
-      if (!hubInstallId && !developmentCompatibilityOnly) {
+      if (!hubInstallId) {
         throw Object.assign(new Error("Platform did not provide the enrolled hub installation ID required for native synchronisation"), { code: "hub_installation_id_missing" });
       }
       if (result.homeId !== undefined && (typeof result.homeId !== "string" || !result.homeId || result.homeId.length > 160)) throw new Error("Platform returned an invalid Native V1 home binding");
@@ -579,18 +519,6 @@ class PlatformPairing {
         syncIntervalMinutes: Number(result.platformSyncIntervalMinutes || platform.syncIntervalMinutes || 2),
         lastError: null,
       });
-      // The deliberately isolated development compatibility adapter only
-      // refreshes its legacy token allowlist. It has no Native V2 installation
-      // authority, so it must not enter the durable cloud sync route.
-      if (developmentCompatibilityOnly) {
-        await this.onSyncResult(result, undefined, undefined, undefined, undefined);
-        this.lastError = null;
-        this.retryAttempt = 0;
-        this.nextRetryAt = 0;
-        if (this.retryTimer) clearTimeout(this.retryTimer);
-        this.retryTimer = null;
-        return result;
-      }
       heartbeatAuthorityConfirmed = Boolean(nativeIdentity);
       await this.onOperatorCredentialStateChange({ previous: previousOperatorCredentialStates, current: operatorCredentialStates, now: Date.now(), hubId: this.serial });
       if (Array.isArray(result.offlineAuthorisations)) await this.acceptOfflineAuthorisations(result.offlineAuthorisations);
@@ -731,4 +659,4 @@ class PlatformPairing {
   }
 }
 
-module.exports = { PlatformPairing, sign, privateLanIp, validateLanEndpointObservation };
+module.exports = { PlatformPairing, privateLanIp, validateLanEndpointObservation };

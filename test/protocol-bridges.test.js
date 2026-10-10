@@ -8,6 +8,12 @@ const { Store } = require("../src/store");
 const { MqttBridge } = require("../src/mqttBridge");
 const { MatterBridge } = require("../src/matterBridge");
 
+function openDisposableZigbeePairingWindow(bridge) {
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  bridge.permitJoinUntil = expiresAt;
+  bridge.pairingSession.start(expiresAt, 60, []);
+}
+
 function waitFor(predicate, timeoutMs = 3000) {
   const started = Date.now();
   return new Promise((resolve, reject) => {
@@ -25,7 +31,7 @@ test("MQTT bridge ingests Zigbee2MQTT state messages", async () => {
   const store = new Store(path.join(directory, "dinodia.json"));
   const changed = [];
   const bridge = new MqttBridge({ url: "", store, onDeviceChanged: async (device) => changed.push(device) });
-  bridge.pairingSession.start(new Date(Date.now() + 60000).toISOString(), 60, []);
+  openDisposableZigbeePairingWindow(bridge);
   await bridge.handleMessage("zigbee2mqtt/kitchen-light", Buffer.from('{"state":"ON","brightness":80}'));
   assert.equal(store.getDevice("kitchen-light").state.brightness, 80);
   assert.equal(changed.length, 1);
@@ -35,7 +41,7 @@ test("MQTT bridge imports Zigbee exposes as child entities", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-mqtt-devices-"));
   const store = new Store(path.join(directory, "dinodia.json"));
   const bridge = new MqttBridge({ url: "", store });
-  bridge.pairingSession.start(new Date(Date.now() + 60000).toISOString(), 60, []);
+  openDisposableZigbeePairingWindow(bridge);
   await bridge.handleMessage("zigbee2mqtt/bridge/devices", Buffer.from(JSON.stringify([{
     friendly_name: "Coordinator",
     ieee_address: "0x9035eafffed2bcb9",
@@ -57,7 +63,7 @@ test("MQTT bridge gives code-only Zigbee devices a friendly manufacturer/model n
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-mqtt-name-"));
   const store = new Store(path.join(directory, "dinodia.json"));
   const bridge = new MqttBridge({ url: "", store });
-  bridge.pairingSession.start(new Date(Date.now() + 60000).toISOString(), 60, []);
+  openDisposableZigbeePairingWindow(bridge);
   await bridge.handleMessage("zigbee2mqtt/bridge/devices", Buffer.from(JSON.stringify([{ friendly_name: "0xf044d3fffe1242f6", ieee_address: "0xf044d3fffe1242f6", definition: { vendor: "SONOFF", model: "TRVZB", exposes: [] } }])));
   assert.equal(store.listDevices()[0].name, "SONOFF TRVZB");
 });
@@ -75,7 +81,7 @@ test("MQTT bridge migrates an early friendly-name state record to stable IEEE id
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-mqtt-migration-"));
   const store = new Store(path.join(directory, "dinodia.json"));
   const bridge = new MqttBridge({ url: "", store });
-  bridge.pairingSession.start(new Date(Date.now() + 60000).toISOString(), 60, []);
+  openDisposableZigbeePairingWindow(bridge);
   await bridge.handleMessage("zigbee2mqtt/kitchen-light", Buffer.from('{"state":"ON"}'));
   await bridge.handleMessage("zigbee2mqtt/bridge/devices", Buffer.from(JSON.stringify([{ friendly_name: "kitchen-light", ieee_address: "0x123", definition: { exposes: [{ type: "switch", name: "state", access: 7 }] } }] )));
   assert.equal(store.listDevices().length, 1);

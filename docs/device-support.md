@@ -14,4 +14,4 @@ The four user labels are fixed for now: `Light`, `Boiler`, `Radiator`, and `Tena
 
 After a Zigbee interview or Matter commissioning, the dashboard asks for one optional device name, one provisioned area, and exactly one of those labels. The presentation engine then creates bounded household control surfaces from the retained converter/cluster metadata. Raw battery, voltage, link quality, calibration, schedule, and other diagnostic entities remain available to authenticated Dinodia OS support views but are not sent as household tiles.
 
-Surface IDs are stable for the same physical device, protocol endpoint, and semantic domain. A device name change changes the display name only. A device-level area or label change rebuilds the surfaces atomically and the Home Assistant-compatible registry inherits the same area and device label.
+Surface IDs are stable for the same physical device, protocol endpoint, and semantic domain. A device name change changes the display name only. A device-level area or label change rebuilds the surfaces atomically and the Native V2 device projection inherits the same area and device label.

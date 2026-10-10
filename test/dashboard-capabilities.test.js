@@ -21,14 +21,14 @@ const healthcheck = fs.readFileSync(path.join(__dirname, "../scripts/healthcheck
 const installer = fs.readFileSync(path.join(__dirname, "../scripts/install-pi.sh"), "utf8");
 const readme = fs.readFileSync(path.join(__dirname, "../README.md"), "utf8");
 
-test("temporary internal day mode requires the exact opt-in in the OS runtime", () => {
+test("retired operator-day configuration cannot extend the OS session policy", () => {
   const root = path.resolve(__dirname, "..");
-  for (const [value, expected] of [[undefined, "false"], ["false", "false"], ["TRUE", "false"], [" true ", "false"], ["true", "true"]]) {
+  for (const value of [undefined, "false", "TRUE", " true ", "true"]) {
     const env = { PATH: process.env.PATH || "" };
     if (value !== undefined) env.STAGE1_INTERNAL_OPERATOR_DAY_SESSION = value;
-    const result = spawnSync(process.execPath, ["-e", "process.stdout.write(String(require('./src/config').stage1InternalOperatorDaySession))"], { cwd: root, env, encoding: "utf8" });
+    const result = spawnSync(process.execPath, ["-e", "const c=require('./src/config');process.stdout.write(JSON.stringify({ttl:c.operatorSessionTtlMs,legacyPolicy:Object.hasOwn(c,'stage1InternalOperatorDaySession')}))"], { cwd: root, env, encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, expected);
+    assert.equal(result.stdout, JSON.stringify({ ttl: 900_000, legacyPolicy: false }), `obsolete environment value ${String(value)} must not alter a 15-minute session`);
   }
 });
 
@@ -91,7 +91,7 @@ test("secure-access re-verification requires a connected tunnel and the operator
   assert.match(html, /id="cloudflare-reverify"/);
   assert.match(app, /cloudflare-reverify.*hidden.*verified && localConnected/);
   assert.match(app, /action: "reverify"/);
-  assert.match(setupScript, /fetch\("\/_dinodia\/admin\/api\/status", \{ cache: "no-store", credentials: "same-origin" \}\)/);
+  assert.match(setupScript, /fetch\(destination === "\/permanent-installation" \? "\/_dinodia\/installer\/commissioning" : "\/_dinodia\/admin\/api\/status", \{ cache: "no-store", credentials: "same-origin" \}\)/);
   assert.match(setupScript, /if \(!sessionCheck\.ok\) throw/);
   assert.match(setupScript, /dinodia-operator-session-established/);
   assert.match(setupScript, /if \(operatorHandoffStarted\) return/);
@@ -113,7 +113,7 @@ test("secure-access re-verification requires a connected tunnel and the operator
   assert.match(app, /event\.code === 4401/);
   assert.match(app, /\/_dinodia\/operator-session\/end/);
   assert.match(fs.readFileSync(path.join(__dirname, "../public/js/api.js"), "utf8"), /operator_session_expired/);
-  assert.match(fs.readFileSync(path.join(__dirname, "../src/config.js"), "utf8"), /process\.env\.STAGE1_INTERNAL_OPERATOR_DAY_SESSION === "true"/);
+  assert.match(fs.readFileSync(path.join(__dirname, "../src/config.js"), "utf8"), /operatorSessionTtlMs:\s*900_000/);
   assert.match(fs.readFileSync(path.join(__dirname, "../src/config.js"), "utf8"), /operatorPolicySyncIntervalMs: Math\.max\(15000, Math\.min\(numberEnv\("DINODIA_OPERATOR_POLICY_SYNC_INTERVAL_MS", 30000\), 60000\)\)/);
 });
 
@@ -153,10 +153,13 @@ test("dashboard API requests use the unified same-origin admin namespace", () =>
   assert.match(apiScript, /fetch\(dashboardRoute\(route\)/);
 });
 
-test("Devices & entities receives pushed updates and has a polling fallback", () => {
+test("Devices & entities receives Native refresh hints and has a polling fallback", () => {
   assert.match(app, /new WebSocket\(dashboardWebSocketUrl\(\)\)/);
-  assert.match(app, /state_changed/);
-  assert.match(app, /dinodia_dashboard_updated/);
+  assert.match(app, /value\.schemaVersion !== "dinodia\.v1" \|\| value\.type !== "refresh"/);
+  assert.match(app, /value\.resource === "devices"\) refreshDevices\(\)/);
+  assert.match(app, /value\.resource === "activity"\) loadActivity\(\{ reset: true \}\)/);
+  assert.match(app, /value\.resource === "dashboard"\) load\(\)/);
+  assert.doesNotMatch(app, /state_changed|new_state|entity_id|dinodia_dashboard_updated/);
   assert.match(app, /setInterval\(refreshDevices, 10000\)/);
   assert.match(app, /deviceEditorHasFocus/);
 });

@@ -17,18 +17,8 @@ function numberEnv(name, fallback) {
 const nodeEnv = stringEnv("NODE_ENV", "development");
 const developmentCompatibility = nodeEnv !== "production";
 const dataDir = path.resolve(stringEnv("DINODIA_DATA_DIR", path.join(process.cwd(), "data")));
-// Native production access is session based. The legacy dashboard/HA verifier
-// is intentionally available only when an operator explicitly opts into the
-// local development compatibility harness; it is never enabled by a default
-// token in production.
+// The legacy dashboard verifier is available only to development tests.
 const adminToken = developmentCompatibility ? stringEnv("DINODIA_ADMIN_TOKEN", "") : "";
-// Native production never accepts the old dashboard/HA credential family.
-// Development may opt into the compatibility fixture explicitly, but a
-// production process cannot enable it through an environment variable or a
-// supplied admin token.
-const legacyCompatibilityEnabled = nodeEnv === "production"
-  ? false
-  : stringEnv("DINODIA_LEGACY_COMPATIBILITY_ENABLED", "false") === "true";
 const nativeAutomationsMode = ["off", "read_only", "enabled"].includes(stringEnv("DINODIA_NATIVE_AUTOMATIONS_MODE", nodeEnv === "production" ? "read_only" : "enabled"))
   ? stringEnv("DINODIA_NATIVE_AUTOMATIONS_MODE", nodeEnv === "production" ? "read_only" : "enabled")
   : "read_only";
@@ -37,9 +27,6 @@ const configuredPlatformOrigin = stringEnv("DINODIA_PLATFORM_API_URL", "").repla
 const platformApiUrl = nodeEnv === "production"
   ? (configuredPlatformOrigin === canonicalPlatformOrigin ? configuredPlatformOrigin : "")
   : configuredPlatformOrigin;
-// Match Platform's exact opt-in semantics. Whitespace or any other malformed
-// value is OFF, avoiding a policy-mode disagreement between the two runtimes.
-const stage1InternalOperatorDaySession = process.env.STAGE1_INTERNAL_OPERATOR_DAY_SESSION === "true";
 const nativeCommissioningCatalogueVersion = stringEnv("DINODIA_NATIVE_COMMISSIONING_CATALOGUE_VERSION", "");
 const nativeCommissioningCatalogueApproved = nativeCommissioningCatalogueVersion === "DINODIA-NATIVE-COMMISSIONING-V1";
 const configuredSetupInterface = stringEnv("DINODIA_SETUP_INTERFACE", "");
@@ -53,9 +40,8 @@ const setupInterfaceName = /^(eth\d*|en[a-z0-9]*|wl[a-z0-9]*)$/i.test(configured
 
 module.exports = {
   nodeEnv,
-  haPort: numberEnv("DINODIA_HA_PORT", 8123),
-  hubAgentPort: numberEnv("DINODIA_HUB_AGENT_PORT", 8099),
-  haHost: stringEnv("DINODIA_HA_HOST", "0.0.0.0"),
+  nativeApiPort: numberEnv("DINODIA_NATIVE_API_PORT", 8123),
+  nativeApiHost: stringEnv("DINODIA_NATIVE_API_HOST", "0.0.0.0"),
   dataDir,
   identityDir: path.resolve(stringEnv("DINODIA_IDENTITY_DIR", "/etc/dinodia-os/identity")),
   identitySocketPath: stringEnv("DINODIA_IDENTITY_SOCKET", "/run/dinodia-identityd.sock"),
@@ -63,22 +49,18 @@ module.exports = {
   dataFile: path.join(dataDir, "dinodia.json"),
   backupDir: path.join(dataDir, "backups"),
   adminToken,
-  legacyCompatibilityEnabled,
+  legacyCompatibilityEnabled: false,
   operatorPublicKey: pemEnv("DINODIA_OPERATOR_PUBLIC_KEY", ""),
   appPublicKeys: stringEnv("DINODIA_APP_PUBLIC_KEYS", ""),
   setupInterfaceName,
   setupAllowedHosts: stringEnv("DINODIA_SETUP_ALLOWED_HOSTS", ""),
   pairingTtlMs: Math.max(60_000, Math.min(numberEnv("DINODIA_PAIRING_TTL_MS", 900_000), 900_000)),
-  // Temporary Stage 1 exception; Platform grants must carry the matching
-  // signed policy marker or the OS verifier rejects them. Stage 14 Section 7.2
-  // removes this branch and restores the 15-minute bound.
-  stage1InternalOperatorDaySession,
   nativeCommissioningCapabilities: Object.freeze({
     nativeZigbeeCommissioningV1: nativeCommissioningCatalogueApproved && stringEnv("DINODIA_NATIVE_ZIGBEE_COMMISSIONING_ENABLED", "false") === "true",
     nativeMatterCommissioningV1: nativeCommissioningCatalogueApproved && stringEnv("DINODIA_NATIVE_MATTER_COMMISSIONING_ENABLED", "false") === "true",
     nativeCommissioningCatalogueVersion: nativeCommissioningCatalogueApproved ? nativeCommissioningCatalogueVersion : "",
   }),
-  operatorSessionTtlMs: stage1InternalOperatorDaySession ? 86_400_000 : 900_000,
+  operatorSessionTtlMs: 900_000,
   manufacturingRootPublicKeys: stringEnv("DINODIA_MANUFACTURING_ROOT_PUBLIC_KEYS", ""),
   mqttUrl: stringEnv("MQTT_URL", ""),
   zigbeeBaseTopic: stringEnv("ZIGBEE2MQTT_BASE_TOPIC", "zigbee2mqtt"),
@@ -99,16 +81,10 @@ module.exports = {
   cloudflareTunnelToken: stringEnv("CLOUDFLARE_TUNNEL_TOKEN", ""),
   cloudflarePublicHostname: stringEnv("CLOUDFLARE_PUBLIC_HOSTNAME", ""),
   cloudflaredBinary: stringEnv("CLOUDFLARED_BIN", "cloudflared"),
-  // The old snapshot heartbeat is retained only for an explicit development
-  // compatibility run. Production uses the signed native heartbeat route and
-  // must not accept its legacy URL/token pair.
-  platformHeartbeatUrl: developmentCompatibility ? stringEnv("DINODIA_PLATFORM_HEARTBEAT_URL", "") : "",
-  platformToken: developmentCompatibility ? stringEnv("DINODIA_PLATFORM_TOKEN", "") : "",
   // Native V2 must be explicitly configured. An old platform URL is never a fallback.
   platformApiUrl,
   canonicalPlatformOrigin,
   buildId: stringEnv("DINODIA_BUILD_ID", ""),
-  platformBootstrapSecret: developmentCompatibility ? stringEnv("DINODIA_PLATFORM_BOOTSTRAP_SECRET", "") : "",
   platformSyncIntervalMs: numberEnv("DINODIA_PLATFORM_SYNC_INTERVAL_MS", 120000),
   // Operator revocation and policy changes must reach a connected hub well
   // inside the 60-second enforcement window. This is separate from heartbeat
@@ -117,10 +93,6 @@ module.exports = {
   alexaNativeEnabled: stringEnv("ALEXA_NATIVE_DINODIA_OS_ENABLED", "false") === "true",
   alexaConnectIntentsEnabled: stringEnv("ALEXA_CONNECT_INTENTS_ENABLED", "false") === "true",
   alexaNativeMaxStaleMs: Math.max(60000, Math.min(numberEnv("ALEXA_NATIVE_MAX_STALE_MS", 300000), 3600000)),
-  stateChangeUrl: stringEnv("DINODIA_STATE_CHANGE_URL", ""),
-  stateChangeSecret: stringEnv("DINODIA_STATE_CHANGE_SECRET", ""),
-  haToken: developmentCompatibility ? stringEnv("DINODIA_HA_TOKEN", "") : "",
-  haUsername: developmentCompatibility ? stringEnv("DINODIA_HA_USERNAME", "dinodia") : "",
   hubId: stringEnv("DINODIA_HUB_ID", ""),
   heartbeatIntervalMs: numberEnv("DINODIA_HEARTBEAT_INTERVAL_MS", 120000),
   hiveEnabled: stringEnv("DINODIA_HIVE_ENABLED", "true") === "true",

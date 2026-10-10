@@ -98,7 +98,7 @@ function packageSourceFingerprint(sourceDir) {
 function preflightCandidate(sourceDir, payload, { identityPath = IDENTITY_PATH } = {}) {
   const values = parseProductionEnv(path.join(sourceDir, ".env"));
   if (values.get("NODE_ENV") !== "production" || String(values.get("DINODIA_PLATFORM_API_URL") || "").replace(/\/$/, "") !== "https://dinodia-platform-v2.vercel.app") throw new Error("candidate production origin is incompatible");
-  for (const forbidden of ["DINODIA_ADMIN_TOKEN", "DINODIA_HA_TOKEN", "DINODIA_PLATFORM_TOKEN", "DINODIA_PLATFORM_BOOTSTRAP_SECRET"]) if (values.has(forbidden)) throw new Error("candidate has forbidden compatibility authority");
+  for (const forbidden of ["DINODIA_ADMIN_TOKEN", "DINODIA_HA_TOKEN", "DINODIA_PLATFORM_TOKEN", "DINODIA_PLATFORM_BOOTSTRAP_SECRET", "DINODIA_HA_PORT", "DINODIA_HUB_AGENT_PORT", "DINODIA_HA_HOST", "DINODIA_PLATFORM_HEARTBEAT_URL", "DINODIA_STATE_CHANGE_URL", "DINODIA_STATE_CHANGE_SECRET", "DINODIA_HA_USERNAME", "STAGE1_INTERNAL_OPERATOR_DAY_SESSION"]) if (values.has(forbidden)) throw new Error("candidate has forbidden compatibility authority");
   for (const required of ["DINODIA_APP_PUBLIC_KEYS", "DINODIA_OPERATOR_PUBLIC_KEY", "DINODIA_MANUFACTURING_ROOT_PUBLIC_KEYS"]) if (!String(values.get(required) || "").trim()) throw new Error("candidate authentication configuration is incomplete");
   const packageJson = JSON.parse(fs.readFileSync(path.join(sourceDir, "package.json"), "utf8"));
   if (!packageJson.version || packageJson.version === "0.5.0") throw new Error("candidate package version is invalid");

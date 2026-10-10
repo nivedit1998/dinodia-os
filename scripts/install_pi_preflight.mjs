@@ -75,7 +75,7 @@ export function validateCandidate({ sourceDir, envFile, identityDir }) {
   if (String(values.get("DINODIA_PLATFORM_API_URL") || "").replace(/\/$/, "") !== CANONICAL_PLATFORM_ORIGIN) {
     fail("DINODIA_PLATFORM_API_URL must be the canonical V2 origin");
   }
-  for (const name of ["DINODIA_ADMIN_TOKEN", "DINODIA_HA_TOKEN", "DINODIA_PLATFORM_TOKEN", "DINODIA_PLATFORM_BOOTSTRAP_SECRET"]) {
+  for (const name of ["DINODIA_ADMIN_TOKEN", "DINODIA_HA_TOKEN", "DINODIA_PLATFORM_TOKEN", "DINODIA_PLATFORM_BOOTSTRAP_SECRET", "DINODIA_HA_PORT", "DINODIA_HUB_AGENT_PORT", "DINODIA_HA_HOST", "DINODIA_PLATFORM_HEARTBEAT_URL", "DINODIA_STATE_CHANGE_URL", "DINODIA_STATE_CHANGE_SECRET", "DINODIA_HA_USERNAME", "STAGE1_INTERNAL_OPERATOR_DAY_SESSION"]) {
     if (values.has(name)) fail(`${name} is forbidden in a Native V2 production environment`);
   }
   for (const name of ["DINODIA_APP_PUBLIC_KEYS", "DINODIA_OPERATOR_PUBLIC_KEY", "DINODIA_MANUFACTURING_ROOT_PUBLIC_KEYS"]) required(values, name);

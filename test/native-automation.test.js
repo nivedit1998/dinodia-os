@@ -293,9 +293,23 @@ test("native admin API exposes catalogue, CRUD, revision conflicts, and executio
     const history = await fetch(`${base}/_dinodia/admin/api/automations/${encodeURIComponent(created.id)}/executions`, { headers }).then((response) => response.json());
     assert.deepEqual(history.executions, []);
     await hub.store.saveAutomation({ name: "Legacy test row", trigger: { type: "legacy_state" }, actions: [{ deviceId: "device-1" }] });
+    const legacyId = hub.store.listAutomations()[0].id;
     const list = await fetch(`${base}/_dinodia/admin/api/automations`, { headers }).then((response) => response.json());
     assert.equal(list.automations.some((item) => item.name === "Legacy test row"), false);
     assert.equal(Object.hasOwn(list, "legacyAutomations"), false);
+    const legacyCreate = await fetch(`${base}/_dinodia/admin/api/automations`, { method: "POST", headers, body: JSON.stringify({ name: "Legacy route write", trigger: { type: "legacy_state" }, actions: [] }) });
+    assert.equal(legacyCreate.status, 400);
+    const legacyUpdate = await fetch(`${base}/_dinodia/admin/api/automations/${encodeURIComponent(legacyId)}`, { method: "PUT", headers, body: JSON.stringify({ enabled: false }) });
+    assert.equal(legacyUpdate.status, 404);
+    const legacyDelete = await fetch(`${base}/_dinodia/admin/api/automations/${encodeURIComponent(legacyId)}`, { method: "DELETE", headers });
+    assert.equal(legacyDelete.status, 404);
+    assert.equal(hub.store.getAutomation(legacyId).name, "Legacy test row", "retiring execution/API access preserves the durable historical row");
+    await assert.rejects(
+      () => hub.model.callService("automation", "turn_off", { entity_id: `automation.${legacyId}` }),
+      /No target entities found/,
+      "the old Home Assistant-shaped automation service cannot mutate retained legacy rows",
+    );
+    assert.equal(hub.store.getAutomation(legacyId).enabled, true, "denied legacy service leaves stored historical automation untouched");
 
     const nativeCountBeforeDeniedLock = hub.store.listNativeAutomations().length;
     hub.nativeAutomationService.internalCatalogue = () => [{ deviceId: "device-1", configured: true, controls: [{

@@ -12,18 +12,14 @@ const QRCode = require("qrcode");
 
 const baseConfig = require("./config");
 const { Store } = require("./store");
-const { AutomationEngine } = require("./automation");
 const { MqttBridge } = require("./mqttBridge");
 const { MatterBridge } = require("./matterBridge");
-const { PlatformSync } = require("./platformSync");
 const { createBackup } = require("./backup");
 const { CloudflareTunnel, connectedLocalTunnelIdentity } = require("./cloudflareTunnel");
 const { listSerialAdapters, probeSerialAdapter } = require("./serialAdapters");
 const { HomeAssistantModel, normalizeHaState } = require("./haModel");
-const { createCompatInterface, createCompatServer } = require("./haCompat");
 const { SecretVault } = require("./secretVault");
 const { PlatformPairing } = require("./platformPairing");
-const { StateChangeNotifier } = require("./stateChangeNotifier");
 const { writeZigbee2MqttConfiguration } = require("./zigbeeConfig");
 const { HeatingUsageTracker } = require("./heatingUsage");
 const { ElectricUsageTracker } = require("./electricUsage");
@@ -275,24 +271,22 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   if ((lanTlsIdentityForTest || setupDiscoveryForTest || config.loopbackLanListenerForTest === true)
     && config.v2Environment !== "test") throw new Error("Loopback LAN listener injection is test-only");
   const loopbackLanListenerForTest = config.v2Environment === "test" && config.loopbackLanListenerForTest === true;
-  const lanListenerPort = loopbackLanListenerForTest ? Number(config.customerLanPortForTest) : Number(runtimeConfig.haPort);
+  // Legacy credentials are accepted only by explicitly injected development
+  // fixtures. Production always ignores these inputs and routes.
+  const legacyCompatibilityEnabled = runtimeConfig.nodeEnv === "production"
+    ? false
+    : config.legacyCompatibilityEnabled === undefined
+      ? (Object.prototype.hasOwnProperty.call(config, "adminToken")
+        ? Boolean(config.adminToken)
+        : runtimeConfig.legacyCompatibilityEnabled)
+      : Boolean(config.legacyCompatibilityEnabled);
+  const lanListenerPort = loopbackLanListenerForTest ? Number(config.customerLanPortForTest) : Number(runtimeConfig.nativeApiPort);
   if (loopbackLanListenerForTest && (!Number.isInteger(lanListenerPort) || lanListenerPort < 1024 || lanListenerPort > 65535
-    || lanListenerPort === Number(runtimeConfig.haPort))) throw new Error("The loopback LAN integration listener requires a distinct approved test port");
+    || lanListenerPort === Number(runtimeConfig.nativeApiPort))) throw new Error("The loopback LAN integration listener requires a distinct approved test port");
   const updaterSocketPath = config.v2Environment === "test" && typeof config.updaterControlSocketPath === "string"
     ? config.updaterControlSocketPath : "/run/dinodia-os-updater/control.sock";
   const operatorNow = () => Number(clock());
   let operatorSessionRevalidationTimer = null;
-  // Native production is permanently fail-closed. In particular, do not let
-  // a caller-supplied test/config object, an environment variable, or an old
-  // token field turn the legacy dashboard/HA verifier back on. The explicit
-  // compatibility harness is available only to non-production fixtures.
-  const legacyCompatibilityEnabled = runtimeConfig.nodeEnv === "production"
-    ? false
-    : config.legacyCompatibilityEnabled === undefined
-      ? (Object.prototype.hasOwnProperty.call(config, "adminToken") || Object.prototype.hasOwnProperty.call(config, "haToken") || Object.prototype.hasOwnProperty.call(config, "hubAgentToken")
-        ? Boolean(config.adminToken || config.haToken || config.hubAgentToken)
-        : runtimeConfig.legacyCompatibilityEnabled)
-      : Boolean(config.legacyCompatibilityEnabled);
   const hubStore = store || new Store(runtimeConfig.dataFile);
   const offlineLanAuthorisations = new OfflineLanAuthorisationStore({ store: hubStore, platformPublicKeys: parsePublicKeys(runtimeConfig.appPublicKeys) });
   const lanTlsIdentity = runtimeConfig.nodeEnv === "production"
@@ -300,7 +294,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       ? lanTlsIdentityForTest
       : new LanTlsIdentity({ dataDir: config.dataDir || runtimeConfig.dataDir || path.dirname(runtimeConfig.dataFile), now: () => Number(clock()) })
     : null;
-  const physicalLanListenersEnabled = runtimeConfig.nodeEnv === "production" && Number(runtimeConfig.haPort) > 0 && config.disablePhysicalLanListenersForTest !== true;
+  const physicalLanListenersEnabled = runtimeConfig.nodeEnv === "production" && Number(runtimeConfig.nativeApiPort) > 0 && config.disablePhysicalLanListenersForTest !== true;
   const eventBus = new EventEmitter();
   // Marks the one in-process descriptor projection used for Alexa state sync.
   // A JSON/WebSocket/client principal cannot manufacture this Symbol.
@@ -423,7 +417,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   function clearOperatorBrowserSessions() {
     for (const [handle, value] of operatorBrowserSessions) {
       try {
-        const principal = verifyOperatorSessionToken(value.token, { publicKey: operatorPublicKey, hubId: serial, requiredScope: null, requireRecentAuth: false, now: operatorNow(), internalOperatorDaySession: runtimeConfig.stage1InternalOperatorDaySession === true });
+        const principal = verifyOperatorSessionToken(value.token, { publicKey: operatorPublicKey, hubId: serial, requiredScope: null, requireRecentAuth: false, now: operatorNow() });
         if (!principal || revokedOperatorJtis.has(String(principal.jti))) operatorBrowserSessions.delete(handle);
       } catch { operatorBrowserSessions.delete(handle); }
     }
@@ -461,7 +455,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   }
   const operatorSessionAuth = (token) => {
     clearOperatorBrowserSessions();
-    const principal = verifyOperatorSessionToken(token, { publicKey: operatorPublicKey, hubId: serial, requiredScope: null, requireRecentAuth: false, now: operatorNow(), internalOperatorDaySession: runtimeConfig.stage1InternalOperatorDaySession === true });
+    const principal = verifyOperatorSessionToken(token, { publicKey: operatorPublicKey, hubId: serial, requiredScope: null, requireRecentAuth: false, now: operatorNow() });
     if (!principal || !principal.scope.some((scope) => ["os:admin", "os:support", "os:permanent-installation"].includes(String(scope))) || revokedOperatorJtis.has(String(principal.jti))) return null;
     const activeHandle = [...operatorBrowserSessions.values()].find((entry) => entry.token === String(token));
     if ((principal.scope.includes("os:admin") || principal.scope.includes("os:permanent-installation")) && runtimeConfig.nodeEnv === "production") {
@@ -510,7 +504,6 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     return acceptedLineages.has(String(principal.hubInstallId)) ? principal : null;
   };
 
-  let automation;
   let nativeAutomationService;
   let nativeAutomationExecutor;
   let nativeAutomationScheduler;
@@ -538,9 +531,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     logger,
   });
   const electric = new ElectricUsageTracker({ store: hubStore, logger });
-  const stateNotifier = new StateChangeNotifier({ url: runtimeConfig.stateChangeUrl, secret: runtimeConfig.stateChangeSecret, logger });
   async function notifyDeviceChanged(device, previous = null, causeType = null) {
-    if (automation) await automation.onDeviceChanged(device, previous);
     await heating.onDeviceChanged(device);
     await electric.onDeviceChanged(device);
     try {
@@ -558,7 +549,6 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         const oldState = previous && oldEntity ? { ...state, state: oldEntity.available === false || previous.available === false ? "unavailable" : normalizeHaState(oldEntity.state), attributes: { ...state.attributes, friendly_name: oldEntity.name || state.attributes.friendly_name } } : null;
         eventBus.emit("state_changed", { entity_id: state.entity_id, old_state: oldState, new_state: state,
           ...(nativeAlexaChangeCauses.has(String(causeType || "")) ? { causeType } : {}) });
-        stateNotifier.enqueue(state.entity_id);
       }
     }
     if (heatingDemandController) heatingDemandController.reconcileDeviceChange(device, previous).catch((error) => logger.error(`[heating-controller] ${error.message}`));
@@ -687,7 +677,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   const cloudflare = cloudflareTunnel || new CloudflareTunnel({
     store: hubStore,
     vault,
-    origin: `http://127.0.0.1:${runtimeConfig.haPort}`,
+    origin: `http://127.0.0.1:${runtimeConfig.nativeApiPort}`,
     binary: runtimeConfig.cloudflaredBinary,
     initialToken: runtimeConfig.cloudflareTunnelToken,
     initialHostname: runtimeConfig.cloudflarePublicHostname,
@@ -802,21 +792,6 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     }
     return commandDevice(device.id, device.protocol, fallbackCommand);
   }
-
-  automation = new AutomationEngine({
-    store: hubStore,
-    executeAction: async (action) => {
-      if (action && action.service && haModel) {
-        const [domain, service] = String(action.service).split(".");
-        await haModel.callService(domain, service, { ...(action.data || action.service_data || {}), ...(action.target || {}) });
-        return;
-      }
-      if (!action || !action.deviceId) throw new Error("Automation action requires deviceId or service");
-      const protocol = action.protocol || (hubStore.getDevice(action.deviceId) || {}).protocol;
-      await commandDevice(String(action.deviceId), protocol, action.command || action.payload || {});
-    },
-    logger,
-  });
 
   haModel = new HomeAssistantModel({
     store: hubStore,
@@ -939,45 +914,13 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     logger,
   });
 
-  async function handleRemoteEvent(event) {
-    eventBus.emit("dinodia_remote_manager_event", event);
-    const bindings = hubStore.listRemoteBindings ? hubStore.listRemoteBindings() : [];
-    for (const binding of bindings) {
-      const source = String(binding.sourceDeviceId || binding.device_id || binding.remote_device_id || "");
-      const sourceDevice = hubStore.getDevice(event.deviceId) || haModel.findDevice(event.deviceId);
-      const sourceRawId = sourceDevice?.id || event.deviceId;
-      const sourceHaId = sourceDevice?.haDeviceId || "";
-      if (binding.enabled === false || ![String(event.deviceId), String(sourceRawId), String(sourceHaId)].includes(source)) continue;
-      if (binding.action && String(binding.action) !== String(event.action)) continue;
-      const target = binding.target || { entity_id: binding.targetEntityId || binding.target_entity_id };
-      const service = binding.service || binding.targetService || "toggle";
-      const domain = binding.domain || (String(target.entity_id || "").split(".")[0]) || "homeassistant";
-      try { await haModel.callService(domain, service, { ...(binding.data || {}), ...target }); }
-      catch (error) { logger.error(`[remote-manager] ${error.message}`); }
-    }
-  }
-
-  const heartbeat = platformSync || new PlatformSync({
-    url: runtimeConfig.platformHeartbeatUrl,
-    token: runtimeConfig.platformToken,
-    hubId: serial,
-    intervalMs: runtimeConfig.heartbeatIntervalMs,
-    getSnapshot: () => ({
-      version: VERSION,
-      deviceCount: hubStore.listDevices().length,
-      automationCount: hubStore.listAutomations().length,
-      integrations: { mqtt: mqtt.status(), matter: matter.status(), hive: hive.status(), googleNest: googleNest.status() },
-    }),
-    logger,
-  });
-
   pairing = new PlatformPairing({
     store: hubStore,
     vault,
     identityBroker,
     apiUrl: runtimeConfig.platformApiUrl,
     serial,
-    haPort: runtimeConfig.haPort,
+    nativeApiPort: runtimeConfig.nativeApiPort,
     intervalMs: runtimeConfig.operatorPolicySyncIntervalMs,
     heartbeatIntervalMs: runtimeConfig.heartbeatIntervalMs,
     getLanEndpoint: () => physicalLanListenersEnabled
@@ -1028,7 +971,6 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       // distinguishes emergency revocation from ordinary grace retirement.
       await syncOperatorBrowserSessions();
     },
-    legacyCompatibilityEnabled,
     onSyncResult: async (result, payload, resetAckAt, electricPayload, electricResetAckAt) => {
       heating.applyPlatformResponse(result);
       if (payload?.devices) heating.acknowledgeUploaded(payload.devices.map((entry) => entry.entityId));
@@ -1046,252 +988,6 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     commissioningCapabilities: runtimeConfig.nativeCommissioningCapabilities, clock, logger });
   eventBus.on("registry_updated", (event) => {
     if (event?.registry === "area") pairing.syncNow().catch(() => {});
-  });
-
-  const configuredHaToken = legacyCompatibilityEnabled ? String(runtimeConfig.haToken || "") : "";
-  const existingAuth = hubStore.getAuth ? hubStore.getAuth() : {};
-  let pendingHaToken = "";
-  let pendingHaPassword = "";
-  if (configuredHaToken && !existingAuth.haTokenHash) {
-    hubStore.saveAuth({ haTokenHash: hashTokenValue(configuredHaToken), issuedAt: new Date().toISOString() }).catch((error) => logger.error(`[auth] ${error.message}`));
-  }
-  if (legacyCompatibilityEnabled && !configuredHaToken && !existingAuth.haTokenHash) {
-    pendingHaToken = `dinodia_${crypto.randomBytes(30).toString("base64url")}`;
-    hubStore.saveAuth({ haTokenHash: hashTokenValue(pendingHaToken), issuedAt: new Date().toISOString() }).catch((error) => logger.error(`[auth] ${error.message}`));
-  }
-  if (legacyCompatibilityEnabled && !existingAuth.passwordHash) {
-    pendingHaPassword = `Dino-${crypto.randomBytes(12).toString("base64url")}`;
-    const salt = crypto.randomBytes(16).toString("hex");
-    const digest = crypto.scryptSync(pendingHaPassword, salt, 32).toString("hex");
-    hubStore.saveAuth({ passwordHash: `scrypt$${salt}$${digest}`, issuedAt: existingAuth.issuedAt || new Date().toISOString() }).catch((error) => logger.error(`[auth] ${error.message}`));
-  }
-  const hubAgentFallbackToken = legacyCompatibilityEnabled ? String(runtimeConfig.hubAgentToken || (runtimeConfig.nodeEnv === "development" ? "dev-hub-token" : "")) : "";
-  const tokenMatchesHash = (token, expectedHash) => {
-    const actual = Buffer.from(hashTokenValue(token));
-    const expected = Buffer.from(String(expectedHash || ""));
-    return actual.length === expected.length && actual.length > 0 && crypto.timingSafeEqual(actual, expected);
-  };
-  const hubAgentAuth = (token) => {
-    if (runtimeConfig.nodeEnv === "production") return false;
-    if (!token || String(token).length > 256) return false;
-    if (hubAgentFallbackToken && safeEqual(token, hubAgentFallbackToken)) return true;
-    return hubStore.getPlatform().acceptedTokenHashes.some((hash) => tokenMatchesHash(token, hash));
-  };
-  const haAuth = (token) => {
-    if (!legacyCompatibilityEnabled) return false;
-    if (!token || String(token).length > 256) return false;
-    const storedHash = hubStore.getAuth?.().haTokenHash || "";
-    // Keep the explicitly configured token usable alongside a persisted token
-    // hash. Existing iOS/platform clients may still hold either credential
-    // during provisioning and migration.
-    const configuredFallback = configuredHaToken && safeEqual(token, configuredHaToken);
-    const developmentDashboardFallback = runtimeConfig.nodeEnv === "development" && !configuredHaToken && runtimeConfig.adminToken && safeEqual(token, runtimeConfig.adminToken);
-    return Boolean(configuredFallback || developmentDashboardFallback || (pendingHaToken && safeEqual(token, pendingHaToken)) || tokenMatchesHash(token, storedHash));
-  };
-  const compatibilityFlows = {
-    matter: { configure: async (data) => {
-      if (!data.code) return { type: "abort", reason: "missing_code" };
-      const result = await matter.commission(data.code, data.networkOnly);
-      return { type: "create_entry", title: "Matter", result: result || {} };
-    } },
-    dinodia_remote_manager: { configure: async () => {
-      const entry = await hubStore.saveConfigEntry({ entry_id: "ce_remote_manager", domain: "dinodia_remote_manager", title: "Dinodia Remote Manager" });
-      return { type: "create_entry", title: entry.title, result: entry };
-    } },
-  };
-  const haCompat = createCompatInterface({
-    port: runtimeConfig.haPort,
-    host: runtimeConfig.haHost,
-    model: haModel,
-    store: hubStore,
-    auth: haAuth,
-    // The dashboard websocket is multiplexed through the compatibility
-    // listener, so its explicitly supplied compatibility admin token remains
-    // accepted for dashboard sessions. It is intentionally not accepted by
-    // the HTTP HA compatibility API above.
-    // The compatibility WebSocket broadcasts the complete hub entity model.
-    // It is therefore an operator-only surface in production; app tokens must
-    // use the scoped native HTTP contract so a tenant can never receive a
-    // cross-area or private-device broadcast through this legacy transport.
-    wsAuth: (token, request) => {
-      // Same-origin WebSockets carry the opaque HttpOnly browser handle in the
-      // upgrade Cookie header; the browser never receives the signed bearer.
-      const browserToken = request ? browserOperatorToken(request) : "";
-      const operatorToken = browserToken || token;
-      const principal = operatorSessionAuth(operatorToken);
-      if (principal && principal.scope.includes("os:admin")) return principal;
-      // Native customer credentials are accepted only by the canonical
-      // /api/dinodia/v1 HTTP and event boundaries below. The HA-shaped
-      // compatibility socket has broader request shapes and must never
-      // become an alternate customer command or state channel.
-      if (appSessionAuth(token)) return null;
-      if (!legacyCompatibilityEnabled) return null;
-      const haPrincipal = haAuth(token);
-      if (haPrincipal) return { principalType: "legacy_ha", credentialFingerprint: hashTokenValue(token).slice(0, 32) };
-      if (runtimeConfig.nodeEnv === "development" && runtimeConfig.adminToken && safeEqual(token, runtimeConfig.adminToken)) return { principalType: "legacy_admin", credentialFingerprint: hashTokenValue(token).slice(0, 32) };
-      return null;
-    },
-    authorizeWsMessage: async (message, principal, context) => {
-      if (!principal || principal.principalType !== "app") {
-        // The HA compatibility surface is test/development-only. It never
-        // authenticates a native route and is disabled by the production
-        // boundary above; keep its legacy message authorization isolated so
-        // existing compatibility fixtures remain truthful without creating a
-        // production bypass.
-        if (principal?.principalType === "operator") {
-          const current = operatorSessionAuth(principal.authToken);
-          if (!current || !current.scope.includes("os:admin")) {
-            context.socket?.close?.(4401, "Operator session expired or revoked");
-            return false;
-          }
-          return true;
-        }
-        return runtimeConfig.nodeEnv !== "production" && legacyCompatibilityEnabled && ["legacy_ha", "legacy_admin"].includes(principal?.principalType);
-      }
-      // A native app token is short-lived, but a WebSocket can outlive its
-      // original HTTP request. Revalidate the exact signed token against the
-      // current hub policy before every message so a policy/session/trusted
-      // device change cannot leave an already-connected socket authorized.
-      // The raw token exists only in this in-memory socket principal and is
-      // never serialized or returned to the client.
-      if (!principal.authToken || !appSessionAuth(principal.authToken)) {
-        context.socket?.close?.(4401, "Policy changed");
-        return false;
-      }
-      if (["get_states", "subscribe_events", "unsubscribe_events", "get_services_for_target"].includes(String(message.type))) return true;
-      if (message.type !== "call_service" || principal.householdRole !== "TENANT" || !principal.scope.includes("tenant:device-command")) return false;
-      const target = { ...(message.service_data || {}), ...(message.target || {}) };
-      // Native tenant WS commands are single-control operations. Reject
-      // device/area/label selectors and multi-entity values instead of
-      // authorizing one entity and letting the HA compatibility model expand
-      // the request to other devices during dispatch.
-      const forbiddenSelectors = ["device_id", "deviceId", "area_id", "areaId", "label_id", "labelId", "target"];
-      if (forbiddenSelectors.some((key) => Object.prototype.hasOwnProperty.call(target, key))) return false;
-      if (Object.prototype.hasOwnProperty.call(target, "entity_id") && Object.prototype.hasOwnProperty.call(target, "entityId")) return false;
-      const rawEntityId = target.entity_id ?? target.entityId;
-      if (typeof rawEntityId !== "string" || !rawEntityId.trim() || /[,\s]/.test(rawEntityId.trim())) return false;
-      const entityId = rawEntityId.trim();
-      const entity = context.model.entities().find((item) => item.haId === entityId || item.entityId === entityId || item.rawId === entityId);
-      if (!entity) return false;
-      const targets = context.model.resolveTargets({ entity_id: entityId });
-      if (targets.length !== 1 || targets[0].haId !== entity.haId) return false;
-      const requestedService = message.domain && message.service
-        ? `${String(message.domain).toLowerCase()}.${String(message.service).toLowerCase()}`
-        : message.service;
-      if (!appCanCommandDevice(principal, entity.device, target, entity, requestedService)) return false;
-
-      const requestedDomain = String(message.domain || entity.domain || "").toLowerCase();
-      const sensitive = Boolean(entity.entity?.capability?.sensitive) || /^(lock|alarm|security)$/i.test(requestedDomain.split(".")[0]);
-      if (sensitive) {
-        const descriptorDigests = message.descriptorDigests && typeof message.descriptorDigests === "object" && !Array.isArray(message.descriptorDigests)
-          ? message.descriptorDigests
-          : {};
-        const currentDescriptor = stepUpDescriptorDigest(entity.device);
-        const suppliedDescriptor = descriptorDigests[entity.device.id] == null ? null : String(descriptorDigests[entity.device.id]);
-        const controlId = String(target.controlId || target.control_id || entity.entity?.controlId || entity.entity?.capability?.controlId || entity.entity?.id || "");
-        if (!controlId || !currentDescriptor || !Object.prototype.hasOwnProperty.call(descriptorDigests, entity.device.id) || suppliedDescriptor !== currentDescriptor) return false;
-        const serviceData = { ...target };
-        for (const key of ["entity_id", "entityId", "controlId", "control_id", "stepUpProof", "step_up_proof", "descriptorDigests", "descriptor_digests"]) delete serviceData[key];
-        const requestedValue = { ...serviceData, controlId };
-        const proof = String(message.stepUpProof || message.step_up_proof || target.stepUpProof || target.step_up_proof || "");
-        const approved = await stepUpVerifier.verify(proof, {
-          actorId: principal.sub,
-          trustedDeviceId: principal.trustedDeviceId,
-          trustedSessionId: principal.sid,
-          homeId: principal.homeId,
-          membershipId: principal.membershipId,
-          hubInstallId: principal.hubInstallId,
-          operation: "device_sensitive_command",
-          targetIds: [entity.device.id],
-          value: descriptorBoundValue(requestedValue, { [entity.device.id]: suppliedDescriptor }),
-        });
-        if (!approved) return false;
-      }
-      return true;
-    },
-    filterWsStates: (states, principal) => {
-      if (principal?.principalType !== "app") return states;
-      const entities = new Map((haModel?.entities?.() || []).map((item) => [item.haId, item]));
-      return states.filter((state) => {
-        const entity = entities.get(state.entity_id);
-        // An app principal may only receive entities that are present in the
-        // current dynamic descriptor. Unknown legacy/raw states fail closed;
-        // they must never become an accidental tenant-device side channel.
-        return entity ? appCanReadDevice(principal, entity.device) : false;
-      });
-    },
-    filterWsEvent: (eventType, data, principal) => {
-      if (principal?.principalType !== "app") return data;
-      if (eventType !== "state_changed") return null;
-      const entityId = String(data?.entity_id || data?.entityId || "");
-      const entity = (haModel?.entities?.() || []).find((item) => item.haId === entityId || item.entityId === entityId || item.rawId === entityId);
-      return entity && appCanReadDevice(principal, entity.device) ? data : null;
-    },
-    onAuthenticated: (socket, principal) => {
-      if (principal?.principalType === "operator" || principal?.principalType === "app") {
-        const untrack = revocationCoordinator.track(socket, {
-          fingerprint: principal.credentialFingerprint,
-          jti: principal.jti,
-          homeId: principal.homeId || null,
-          credentialVersion: principal.credentialVersion || null,
-        });
-        socket.once?.("close", untrack);
-      }
-      if (principal?.principalType === "operator") {
-        let stopped = false;
-        let freshnessTimer;
-        let expiryTimer;
-        const checkFreshness = () => {
-          if (stopped) return;
-          const session = [...operatorBrowserSessions.values()].find((entry) => entry.jti === String(principal.jti));
-          if (!session || operatorNow() >= session.expiresAt) { socket.close?.(4401, "Operator session expired"); return; }
-          const remaining = session.lastAuthorizationCheckAt + 60_000 - operatorNow();
-          if (remaining <= 0) { socket.close?.(4401, "Operator authorization could not be revalidated"); return; }
-          freshnessTimer = setTimeout(checkFreshness, remaining);
-          freshnessTimer.unref?.();
-        };
-        const expiryDelay = Math.max(1, Number(principal.exp) * 1000 - operatorNow());
-        expiryTimer = setTimeout(() => socket.close?.(4401, "Operator session expired"), expiryDelay);
-        expiryTimer.unref?.();
-        checkFreshness();
-        socket.once?.("close", () => { stopped = true; clearTimeout(freshnessTimer); clearTimeout(expiryTimer); });
-      }
-    },
-    eventBus,
-    onRegistryChange: async (change) => {
-      if (change?.source !== "ha_compat" || change.registry !== "area") return;
-      const current = change.current || change.previous;
-      await activity.record({
-        type: change.action === "created" ? "area_created" : change.action === "removed" ? "area_removed" : "area_renamed",
-        area: current ? { id: current.id, name: current.name } : null,
-        detail: change.action === "removed" ? `Area ${current?.name || current?.id || "unknown"} was removed.` : `Area ${current?.name || "unknown"} was ${change.action}.`,
-        change: change.previous && change.current && change.previous.name !== change.current.name ? { field: "name", before: change.previous.name, after: change.current.name } : null,
-      });
-    },
-    mqtt,
-    syncStatus: () => pairing.status(),
-    logger,
-    hubAgent: false,
-    healthMode: runtimeConfig.nodeEnv === "production" ? "native-v2" : undefined,
-    buildId: runtimeConfig.buildId,
-    flowHandlers: compatibilityFlows,
-    onRemoteEvent: handleRemoteEvent,
-  });
-  const hubAgentCompat = createCompatServer({
-    port: runtimeConfig.hubAgentPort,
-    host: runtimeConfig.haHost,
-    model: haModel,
-    store: hubStore,
-    auth: hubAgentAuth,
-    eventBus,
-    mqtt,
-    syncStatus: () => pairing.status(),
-    logger,
-    hubAgent: true,
-    healthMode: "hub-agent",
-    buildId: runtimeConfig.buildId,
-    flowHandlers: compatibilityFlows,
-    onRemoteEvent: handleRemoteEvent,
   });
 
   async function integrationStatus() {
@@ -1315,8 +1011,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       matter: matter.status(),
       matterPairing: matterPairing.status(),
       otbr: { ...otbr, service: await threadRuntime.status(), rcpDevice: configuredRcpDevice, rcpName: threadSettings.rcpName || "", baudRate: threadSettings.baudRate || runtimeConfig.threadRcpBaudRate, infraIf: threadSettings.infraIf || runtimeConfig.otInfraIf, threadIf: threadSettings.threadIf || runtimeConfig.otThreadIf },
-      platform: { ...heartbeat.status(), pairing: pairingStatus },
-      stateChange: stateNotifier.status(),
+      platform: { pairing: pairingStatus },
       heatingUsage: heating.status(),
       electricUsage: electric.status(),
       nativeAutomations: nativeAutomationSummary(),
@@ -1344,9 +1039,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     const checks = {
       storage: Boolean(hubStore.filePath),
       dashboard: server.listening,
-      homeAssistant: server.listening,
       unifiedWeb: server.listening,
-      hubAgent: hubAgentCompat.server.listening,
       mqtt: !integrations.mqtt.configured || Boolean(integrations.mqtt.connected),
       zigbee: !integrations.zigbee.configured || Boolean(integrations.zigbee.connected),
       matter: !integrations.matter.configured || Boolean(integrations.matter.connected),
@@ -1357,7 +1050,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       thread: !integrations.otbr.configured || (Boolean(integrations.otbr.service?.running) && Boolean(integrations.otbr.reachable) && ["leader", "router", "child", "detached"].includes(integrations.otbr.state)),
       nativeAutomations: runtimeConfig.nativeAutomationsMode !== "enabled" || Boolean(integrations.nativeAutomations?.scheduler?.schedulerRunning),
     };
-    const ok = checks.storage && checks.dashboard && checks.homeAssistant && checks.unifiedWeb && checks.hubAgent;
+    const ok = checks.storage && checks.dashboard && checks.unifiedWeb;
     const degraded = !Object.values(checks).every(Boolean);
     return { ok, status: ok && !degraded ? "ready" : ok ? "degraded" : "not_ready", checks, integrations };
   }
@@ -1375,29 +1068,6 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   function googleNestDashboardStatus() {
     const status = googleNest.status();
     return { ...status, callbackUri: status.callbackUri || googleNestCallbackUri() };
-  }
-
-  async function handleNativeAlexaPlatformRequest(req, res, url) {
-    if (!hubAgentAuth(bearerToken(req))) return json(res, 401, { error: "Hub token required", errorCode: "invalid_hub_token" });
-    const suffix = url.pathname.slice("/_dinodia/platform/v1/alexa".length) || "/health";
-    if (suffix === "/health" && req.method === "GET") return json(res, 200, { ok: true, ...alexaIntegration.status() });
-    if (suffix === "/catalog" && req.method === "GET") return json(res, 200, alexaIntegration.publicCatalog());
-    if (suffix === "/state" && req.method === "GET") {
-      const endpointId = String(url.searchParams.get("endpointId") || "");
-      const catalog = alexaIntegration.catalogue || alexaIntegration.buildCatalog();
-      const endpoint = require("./integrations/alexa/catalogService").internalEndpoint(catalog, endpointId);
-      if (!endpoint) return json(res, 404, { error: "Endpoint is no longer available", errorCode: "no_such_endpoint" });
-      return json(res, 200, { endpointId: endpoint.endpointId, state: endpoint.state, available: endpoint.available, sourceUpdatedAt: endpoint.sourceUpdatedAt });
-    }
-    if (suffix === "/directives" && req.method === "POST") {
-      try {
-        const result = await alexaIntegration.handleDirective(await readBody(req));
-        return json(res, 200, result);
-      } catch (error) {
-        return json(res, Number(error.statusCode) || 500, { error: error.message || "Directive failed", errorCode: error.code || "internal_error" });
-      }
-    }
-    return json(res, 404, { error: "Unknown Alexa platform route" });
   }
 
   function appCanReadDevice(principal, device) {
@@ -2740,7 +2410,6 @@ function nativeDeviceView(principal, device) {
         hubId: serial,
         devices: hubStore.listDevices().length,
         automations: integrations.nativeAutomations,
-        legacyAutomations: hubStore.listAutomations().length,
         integrations,
         heatingDemandController: heatingDemandController.status(),
       });
@@ -2899,41 +2568,16 @@ function nativeDeviceView(principal, device) {
     if (resource === "readiness" && req.method === "GET") return json(res, 200, await readiness());
     if (resource === "provisioning" && req.method === "GET") {
       const identity = hubStore.getIdentity ? hubStore.getIdentity() : { serial };
-      const credentials = legacyCompatibilityEnabled ? {
-        username: runtimeConfig.haUsername,
-        oneTimeLongLivedToken: pendingHaToken || undefined,
-        oneTimePassword: pendingHaPassword || undefined,
-        displayed: Boolean(hubStore.getAuth?.().displayedAt),
-      } : undefined;
       return json(res, 200, {
         ok: true,
         identity: { serial: identity.serial || serial, instanceId: identity.instanceId || "" },
         setup: hubStore.getSetup ? hubStore.getSetup() : { state: "UNKNOWN" },
         platform: pairing.status(),
-        pairing: provisioningPairing.status(),
+        nativePairing: provisioningPairing.status(),
         heatingUsage: heating.status(),
         electricUsage: electric.status(),
-        ...(credentials ? { credentials } : {}),
-        urls: { baseUrl: `http://${privateAddress(req)}:${runtimeConfig.haPort}`, hubAgentUrl: `http://${privateAddress(req)}:${runtimeConfig.hubAgentPort}`, cloudUrl: cloudflare.status().secureAccessVerified ? cloudflare.status().publicUrl || "" : "" },
+        cloudUrl: cloudflare.status().secureAccessVerified ? cloudflare.status().publicUrl || "" : "",
       });
-    }
-    if (resource === "provisioning" && parts[2] === "credentials" && parts[3] === "ack" && req.method === "POST") {
-      if (!legacyCompatibilityEnabled) return json(res, 410, { error: "Legacy credential acknowledgement is retired", errorCode: "legacy_credential_flow_retired" });
-      pendingHaToken = "";
-      pendingHaPassword = "";
-      if (hubStore.saveAuth) await hubStore.saveAuth({ displayedAt: new Date().toISOString() });
-      return json(res, 200, { ok: true });
-    }
-    if (resource === "provisioning" && parts[2] === "credentials" && parts[3] === "regenerate" && req.method === "POST") {
-      if (!legacyCompatibilityEnabled) return json(res, 410, { error: "Legacy credential regeneration is retired", errorCode: "legacy_credential_flow_retired" });
-      const token = `dinodia_${crypto.randomBytes(30).toString("base64url")}`;
-      const password = `Dino-${crypto.randomBytes(12).toString("base64url")}`;
-      const salt = crypto.randomBytes(16).toString("hex");
-      const digest = crypto.scryptSync(password, salt, 32).toString("hex");
-      await hubStore.saveAuth({ haTokenHash: hashTokenValue(token), passwordHash: `scrypt$${salt}$${digest}`, issuedAt: new Date().toISOString(), displayedAt: null });
-      pendingHaToken = token;
-      pendingHaPassword = password;
-      return json(res, 200, { ok: true, oneTimeLongLivedToken: token, oneTimePassword: password, restartRequired: false });
     }
     if (pathname === "/api/factory-reset" && req.method === "POST") {
       if (!operatorPrincipal) return json(res, 403, { error: "An authenticated Dinodia operator is required", errorCode: "insufficient_scope" });
@@ -2954,30 +2598,6 @@ function nativeDeviceView(principal, device) {
       if (vault.clearAll) await vault.clearAll();
       await hubStore.factoryReset();
       return json(res, 202, { ok: true, restartRequired: true, message: "Hub data and pairing state were removed. Restart Dinodia OS to initialize a new identity." });
-    }
-    if (resource === "provisioning" && parts[2] === "pair" && req.method === "POST") {
-      const body = await readBody(req);
-      if (!legacyCompatibilityEnabled) {
-        // A local browser or caller must not self-redeem the presentation. In
-        // production the hub proves the redeemed attempt through its outbound
-        // Platform channel; this retired endpoint exists only to provide an
-        // explicit, non-secret migration error to old clients.
-        return json(res, 410, { error: "Local provisioning redemption is retired; use the outbound hub pairing channel", errorCode: "native_pairing_requires_outbound_channel" });
-      }
-      await pairing.configure({ bootstrapSecret: body.bootstrapSecret || body.bootstrap_secret, apiUrl: body.apiUrl });
-      const result = await pairing.pair(body.bootstrapSecret || body.bootstrap_secret);
-      await pairing.syncNow();
-      if (hubStore.saveSetup) await hubStore.saveSetup({ state: "PLATFORM_PAIRED", completed: ["identity", "platform-paired"] });
-      return json(res, 200, { ok: true, paired: true, result: { publishedVersion: result.publishedVersion || 0 }, status: pairing.status() });
-    }
-    if (resource === "provisioning" && parts[2] === "ha-token" && req.method === "POST") {
-      if (!legacyCompatibilityEnabled) return json(res, 410, { error: "Legacy HA token provisioning is retired", errorCode: "legacy_credential_flow_retired" });
-      const body = await readBody(req);
-      const token = String(body.token || `dinodia_${crypto.randomBytes(30).toString("base64url")}`).trim();
-      if (token.length < 24 || token.length > 256) return json(res, 400, { error: "HA token must be between 24 and 256 characters" });
-      await hubStore.saveAuth({ haTokenHash: hashTokenValue(token), issuedAt: new Date().toISOString(), displayedAt: null });
-      pendingHaToken = token;
-      return json(res, 200, { ok: true, oneTimeLongLivedToken: token, restartRequired: Boolean(configuredHaToken) });
     }
     if (resource === "activity" && id === "devices" && req.method === "GET") return json(res, 200, { devices: hubStore.listActivityDevices() });
     if (resource === "activity" && req.method === "GET") {
@@ -3315,30 +2935,19 @@ function nativeDeviceView(principal, device) {
     if (resource === "automations" && req.method === "POST" && !id) {
       const body = await readBody(req);
       const isNative = Number(body.schemaVersion) === 1 || body.trigger?.type === "schedule" || (Array.isArray(body.actions) && body.actions.some((action) => action && (action.controlId || action.control_id)));
-      if (isNative) {
-        if (runtimeConfig.nativeAutomationsMode !== "enabled") return json(res, 403, { error: { code: "native_automations_read_only", message: "Native automations are read-only on this hub" } });
-        return json(res, 201, await nativeAutomationService.create(body, { homeId: serial, owner: { type: "local_admin", subjectId: "local-admin" } }, { idempotencyKey: req.headers["idempotency-key"] }));
-      }
-      return json(res, 201, await hubStore.saveAutomation(body));
+      if (!isNative) return json(res, 400, { error: { code: "native_schema_required", message: "Only validated Native V2 automation definitions are accepted" } });
+      if (runtimeConfig.nativeAutomationsMode !== "enabled") return json(res, 403, { error: { code: "native_automations_read_only", message: "Native automations are read-only on this hub" } });
+      return json(res, 201, await nativeAutomationService.create(body, { homeId: serial, owner: { type: "local_admin", subjectId: "local-admin" } }, { idempotencyKey: req.headers["idempotency-key"] }));
     }
     if (resource === "automations" && id && !parts[3] && req.method === "PUT" && hubStore.getNativeAutomation(id)) {
       if (runtimeConfig.nativeAutomationsMode !== "enabled") return json(res, 403, { error: { code: "native_automations_read_only", message: "Native automations are read-only on this hub" } });
       const body = await readBody(req);
       return json(res, 200, await nativeAutomationService.update(id, body, { homeId: serial, owner: { type: "local_admin", subjectId: "local-admin" } }, { expectedRevision: body.expectedRevision ?? req.headers["if-match"]?.replace(/^\"|\"$/g, "") }));
     }
-    if (resource === "automations" && id && !parts[3] && req.method === "PUT") {
-      const existing = hubStore.getAutomation(id);
-      if (!existing) return json(res, 404, { error: "Automation not found" });
-      return json(res, 200, await hubStore.saveAutomation({ ...existing, ...(await readBody(req)) }, id));
-    }
     if (resource === "automations" && id && !parts[3] && req.method === "DELETE" && hubStore.getNativeAutomation(id)) {
       if (runtimeConfig.nativeAutomationsMode !== "enabled") return json(res, 403, { error: { code: "native_automations_read_only", message: "Native automations are read-only on this hub" } });
       const body = await readBody(req);
       const deleted = await nativeAutomationService.remove(id, { homeId: serial, owner: { type: "local_admin", subjectId: "local-admin" } }, { expectedRevision: body.expectedRevision ?? req.headers["if-match"]?.replace(/^\"|\"$/g, "") });
-      return json(res, deleted ? 204 : 404, {});
-    }
-    if (resource === "automations" && id && !parts[3] && req.method === "DELETE") {
-      const deleted = await hubStore.deleteAutomation(id);
       return json(res, deleted ? 204 : 404, {});
     }
     if (resource === "events" && req.method === "GET") return json(res, 200, { events: hubStore.listEvents(url.searchParams.get("limit")) });
@@ -3600,9 +3209,6 @@ function nativeDeviceView(principal, device) {
       || (req.method === "DELETE" && /^\/api\/dinodia\/v1\/devices\/[^/]+$/.test(url.pathname))
       || (req.method === "POST" && (url.pathname === "/api/dinodia/v1/commands" || url.pathname === "/api/dinodia/v1/alexa/commands" || url.pathname === "/api/dinodia/v1/alexa/state" || url.pathname === "/api/dinodia/v1/offline/challenges" || url.pathname === "/api/dinodia/v1/maintenance/update" || url.pathname === "/api/step-up/descriptor-challenge" || /^\/api\/dinodia\/v1\/commissioning\/sessions(?:\/[^/]+(?:\/(?:matter-payload|select|complete|cancel|resume))?)?$/.test(url.pathname)))
       || (req.method === "GET" && /^\/api\/dinodia\/v1\/commissioning\/sessions\/[^/]+$/.test(url.pathname));
-  }
-  function isHaCompatibilityPath(pathname) {
-    return pathname === "/api" || pathname.startsWith("/api/") || pathname.startsWith("/_dinodia/zha/") || pathname === "/_dinodia/sync-status";
   }
   function applyDashboardHeaders(res) {
     res.setHeader("x-content-type-options", "nosniff");
@@ -4076,7 +3682,7 @@ function nativeDeviceView(principal, device) {
       job.statusCode = 401;
       return respondOperatorHandoffJob(res, job);
     }
-    const sessionMaxAge = Math.max(1, Math.min(Math.ceil((job.expiresAt - operatorNow()) / 1000), runtimeConfig.stage1InternalOperatorDaySession === true ? 86_400 : 900));
+    const sessionMaxAge = Math.max(1, Math.min(Math.ceil((job.expiresAt - operatorNow()) / 1000), 900));
     setupHeaders(res, [
       `dinodia_os_operator_session=${encodeURIComponent(job.sessionHandle)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${sessionMaxAge}${job.remote ? "; Secure" : ""}`,
       "dinodia_os_operator=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
@@ -4147,7 +3753,6 @@ function nativeDeviceView(principal, device) {
         requiredScope: null,
         requireRecentAuth: false,
         now: operatorNow(),
-        internalOperatorDaySession: runtimeConfig.stage1InternalOperatorDaySession === true,
       });
       const scopeList = Array.isArray(grantedPrincipal?.scope) ? grantedPrincipal.scope.map(String) : [];
       const operatorScope = scopeList.length === 1 && ["os:admin", "os:permanent-installation"].includes(scopeList[0]) ? scopeList[0] : "";
@@ -4358,6 +3963,24 @@ function nativeDeviceView(principal, device) {
   }
   async function handleUnifiedRequest(req, res) {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+    if (url.pathname === "/api/health" && req.method === "GET") {
+      const memory = process.memoryUsage();
+      return json(res, 200, {
+        ok: true,
+        mode: "native-v2",
+        buildId: runtimeConfig.buildId || undefined,
+        version: VERSION,
+        uptimeSeconds: Math.round(process.uptime()),
+        memory: { rssMb: Math.round(memory.rss / 1024 / 1024), heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024) },
+        storeSchemaVersion: hubStore.state?.version || 0,
+        integrations: {
+          mqtt: { configured: Boolean(mqtt.status().configured), connected: Boolean(mqtt.status().connected) },
+          matter: { configured: Boolean(matter.status().configured), connected: Boolean(matter.status().connected) },
+          hive: { configured: Boolean(hive.status().configured), status: String(hive.status().status || "disabled") },
+          googleNest: { configured: Boolean(googleNest.status().configured), status: String(googleNest.status().status || "disabled") },
+        },
+      });
+    }
     if (url.pathname === "/api/dinodia/v1/claim-resolver/challenge") {
       if (req.method !== "POST") return nativeContractError(res, 405, "METHOD_NOT_ALLOWED", "The claim resolver method is not allowed");
       const report = lanTlsIdentity?.publicReport();
@@ -4430,19 +4053,31 @@ function nativeDeviceView(principal, device) {
     if (url.pathname === "/_dinodia/operator-session/end") return handleOperatorSessionEnd(req, res);
     if (url.pathname === "/setup.js") return handleSetupScriptRequest(req, res);
     if (url.pathname === "/setup" || url.pathname.startsWith("/_dinodia/setup/")) return handleLocalSetupRequest(req, res, url);
-    if (url.pathname.startsWith("/_dinodia/platform/v1/alexa")) return handleNativeAlexaPlatformRequest(req, res, url);
-    // Only the canonical Native V1 app routes and its descriptor-bound
-    // sensitive-command challenge bypass HA compatibility.
-    // Their app token is still verified by handleDashboardRequest/handleApi;
-    // every other /api/* path remains on the existing compatibility router.
     if (isNativeAppRoute(req, url)) return handleDashboardRequest(req, res, url);
     if (isDashboardAdminPath(url.pathname)) return handleDashboardRequest(req, res, url);
-    if (isHaCompatibilityPath(url.pathname)) return haCompat.handleHttp(req, res);
+    if (url.pathname === "/api" || url.pathname.startsWith("/api/")
+      || url.pathname.startsWith("/_dinodia/platform/v1/alexa")
+      || url.pathname.startsWith("/_dinodia/zha/") || url.pathname === "/_dinodia/sync-status") {
+      return json(res, 404, { error: "Not found" });
+    }
     return handleDashboardRequest(req, res, url);
   }
+  const operatorEventServer = new WebSocket.Server({ noServer: true, maxPayload: 1024 });
+  const operatorEventClients = new Set();
   const nativeEventServer = new WebSocket.Server({ noServer: true, maxPayload: 16 * 1024 });
   const commissioningEventServer = new WebSocket.Server({ noServer: true, maxPayload: 16 * 1024 });
   const server = http.createServer(handleUnifiedRequest);
+  function sendOperatorRefresh(resource) {
+    if (!new Set(["dashboard", "devices", "activity"]).has(resource)) return;
+    const message = JSON.stringify({ schemaVersion: "dinodia.v1", type: "refresh", resource });
+    for (const client of operatorEventClients) {
+      if (client.socket.readyState !== WebSocket.OPEN) continue;
+      try { client.socket.send(message); } catch { client.socket.close(1011, "Refresh unavailable"); }
+    }
+  }
+  eventBus.on("state_changed", () => sendOperatorRefresh("devices"));
+  eventBus.on("dinodia_dashboard_updated", (event = {}) => sendOperatorRefresh(["device", "device_removed"].includes(String(event.kind || "")) ? "devices" : "dashboard"));
+  eventBus.on("dinodia_activity_created", () => sendOperatorRefresh("activity"));
   function queueCommissioningSnapshot(client) {
     client.sendQueue = client.sendQueue.then(async () => {
       if (client.socket.readyState !== WebSocket.OPEN) return;
@@ -4513,6 +4148,53 @@ function nativeDeviceView(principal, device) {
     let url;
     try { url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`); }
     catch { socket.destroy(); return; }
+    if (url.pathname === "/_dinodia/admin/events") {
+      const transport = operatorRequestTransportAllowed(req);
+      const expectedOrigin = transport ? `${transport.expectedProtocol}://${req.headers.host}` : "";
+      let handle = "";
+      try { handle = setupCookie(req, "dinodia_os_operator_session"); } catch {}
+      const browserSession = operatorBrowserSessions.get(handle);
+      const token = browserSessionToken(handle);
+      const principal = token ? operatorSessionAuth(token) : null;
+      if (!transport || url.search || !expectedOrigin || String(req.headers.origin || "") !== expectedOrigin) {
+        socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+        return;
+      }
+      if (!browserSession || !principal || !principal.scope.includes("os:admin")
+        || principal.jti !== browserSession.jti || principal.credentialVersion !== browserSession.credentialVersion) {
+        socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+        return;
+      }
+      operatorEventServer.handleUpgrade(req, socket, head, (clientSocket) => {
+        const client = { socket: clientSocket, handle, token, jti: principal.jti, homeId: principal.homeId, credentialVersion: principal.credentialVersion };
+        operatorEventClients.add(client);
+        client.untrack = revocationCoordinator.track(clientSocket, {
+          fingerprint: principal.credentialFingerprint, jti: principal.jti,
+          homeId: principal.homeId, credentialVersion: principal.credentialVersion,
+        });
+        clientSocket.once("close", () => {
+          operatorEventClients.delete(client);
+          clearInterval(client.authTimer);
+          client.untrack?.();
+        });
+        clientSocket.on("message", () => {
+          const currentToken = browserSessionToken(handle);
+          const current = currentToken ? operatorSessionAuth(currentToken) : null;
+          if (!current || current.jti !== client.jti || current.credentialVersion !== client.credentialVersion) clientSocket.close(4401, "Session expired or revoked");
+          else clientSocket.close(1008, "The Native operator event stream is server-push only");
+        });
+        client.authTimer = setInterval(() => {
+          const currentToken = browserSessionToken(handle);
+          const current = currentToken ? operatorSessionAuth(currentToken) : null;
+          if (!current || current.jti !== client.jti || current.homeId !== client.homeId || current.credentialVersion !== client.credentialVersion) {
+            clientSocket.close(4401, "Session expired or revoked");
+          }
+        }, 2000);
+        client.authTimer.unref?.();
+        clientSocket.send(JSON.stringify({ schemaVersion: "dinodia.v1", type: "ready" }));
+      });
+      return;
+    }
     const commissioningEvents = url.pathname.match(/^\/api\/dinodia\/v1\/commissioning\/sessions\/([0-9a-f-]{36})\/events$/i);
     if (commissioningEvents) {
       const token = bearerToken(req);
@@ -4590,8 +4272,7 @@ function nativeDeviceView(principal, device) {
       });
       return;
     }
-    if (url.pathname.startsWith("/api/dinodia/v1/")) { socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n"); return; }
-    haCompat.handleUpgrade(req, socket, head);
+    socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
   });
   async function closeListeningServer(listener) {
     if (!listener?.listening) return;
@@ -4670,7 +4351,6 @@ function nativeDeviceView(principal, device) {
         })
         .catch((error) => logger.error(`[thread] automatic startup failed: ${error.message}`));
     }
-    automation.start?.();
     await hubStore.pruneActivity();
     activity.start();
     if (runtimeConfig.nodeEnv === "production" && !operatorSessionRevalidationTimer) {
@@ -4688,13 +4368,13 @@ function nativeDeviceView(principal, device) {
       try { await lanTlsIdentity.initialize(); }
       catch { logger.warn("[lan-tls] customer HTTPS identity unavailable; direct LAN control remains fail-closed"); }
     }
-    const cloudOriginHost = runtimeConfig.nodeEnv === "production" ? "127.0.0.1" : runtimeConfig.haHost;
+    const cloudOriginHost = runtimeConfig.nodeEnv === "production" ? "127.0.0.1" : runtimeConfig.nativeApiHost;
     await new Promise((resolve, reject) => {
       server.once("error", reject);
-      server.listen(runtimeConfig.haPort, cloudOriginHost, resolve);
+      server.listen(runtimeConfig.nativeApiPort, cloudOriginHost, resolve);
     });
     if (physicalLanListenersEnabled) {
-      if (!loopbackLanListenerForTest) setupDiscovery.start(80, 80, lanTlsIdentity?.publicReport()?.host || "", runtimeConfig.haPort);
+      if (!loopbackLanListenerForTest) setupDiscovery.start(80, 80, lanTlsIdentity?.publicReport()?.host || "", runtimeConfig.nativeApiPort);
       await refreshPhysicalLanListeners(setupDiscovery.observation()).catch(() => {});
     }
     if (lanTlsIdentity && !certificateRefreshTimer) {
@@ -4710,33 +4390,25 @@ function nativeDeviceView(principal, device) {
     await electric.tick(hubStore.listDevices());
     electricTimer = setInterval(() => electric.tick(hubStore.listDevices()).catch((error) => logger.error(`[electric] ${error.message}`)), 5 * 60 * 1000);
     electricTimer.unref?.();
-    await hubAgentCompat.start();
     cloudflare.start();
     const cloudflareSettings = hubStore.getCloudflare?.() || {};
     if (runtimeConfig.nodeEnv === "production" && cloudflareSettings.mode === "local" && cloudflareSettings.platformVerification?.state !== "PLATFORM_VERIFIED") {
       const retry = setTimeout(() => reportCloudflareVerification().catch((error) => logger.warn(`[cloudflare] automatic verification retry unavailable: ${error.message}`)), 3000);
       retry.unref?.();
     }
-    heartbeat.start();
     pairing.start();
     alexaIntegration.start();
     hive.start().catch((error) => logger.error(`[hive] automatic startup failed: ${error.message}`));
     googleNest.start().catch((error) => logger.error(`[google-nest] automatic startup failed: ${error.message}`));
     await heatingDemandController.evaluate({ reason: "startup", execute: false });
     await heatingDemandController.start();
-    if (legacyCompatibilityEnabled && runtimeConfig.platformBootstrapSecret && !hubStore.getPlatform().paired) {
-      pairing.configure({ bootstrapSecret: runtimeConfig.platformBootstrapSecret })
-        .then(() => pairing.pair(runtimeConfig.platformBootstrapSecret))
-        .then(() => pairing.syncNow())
-        .catch((error) => logger.error(`[platform] automatic pairing failed: ${error.message}`));
-    }
-    logger.log(`[dinodia] CloudURL loopback HTTP and selected-interface Native V2 HTTPS listener active on port ${runtimeConfig.haPort}`);
-    logger.log(`[dinodia] Hub Agent compatibility on http://${runtimeConfig.haHost}:${runtimeConfig.hubAgentPort}`);
-    if (legacyCompatibilityEnabled && runtimeConfig.nodeEnv !== "production") logger.log("[dinodia] legacy compatibility harness enabled; native production credentials remain disabled");
+    logger.log(`[dinodia] CloudURL loopback HTTP and selected-interface Native V2 HTTPS listener active on port ${runtimeConfig.nativeApiPort}`);
     return server;
   }
 
   async function stop() {
+    for (const client of operatorEventClients) client.socket.close(1001, "Hub stopping");
+    operatorEventClients.clear();
     for (const client of commissioningEventClients) client.socket.close(1001, "Hub stopping");
     commissioningEventClients.clear();
     for (const timer of nativeCommandOutcomeTimers.values()) clearTimeout(timer);
@@ -4749,10 +4421,8 @@ function nativeDeviceView(principal, device) {
     heatingDemandController.stop();
     await hive.close();
     await googleNest.close();
-    automation.stop?.();
     if (nativeAutomationScheduler) await nativeAutomationScheduler.stop();
     await cloudflare.stop();
-    heartbeat.stop();
     pairing.stop();
     setupDiscovery.stop();
     if (certificateRefreshTimer) clearInterval(certificateRefreshTimer);
@@ -4764,14 +4434,12 @@ function nativeDeviceView(principal, device) {
     if (electricTimer) clearInterval(electricTimer);
     electricTimer = null;
     await hubStore.setActivityRuntime({ lastShutdownClean: true, lastStoppedAt: new Date().toISOString() });
-    await haCompat.stop();
-    await hubAgentCompat.stop();
     await closeListeningServer(httpsServer);
     await closeListeningServer(setupServer);
     await closeListeningServer(server);
   }
 
-  return { server, start, stop, haServer: server, setupServer, getLanHttpsServer: () => httpsServer, hubAgentServer: hubAgentCompat.server, store: hubStore, mqtt, matter, hive, googleNest, alexa: alexaIntegration, heatingDemandController, cloudflare, sync: heartbeat, pairing, activity, electric, model: haModel, vault, eventBus, config: runtimeConfig, syncOperatorBrowserSessions, nativeAutomationService, nativeAutomationScheduler, nativeCommissioningService };
+  return { server, start, stop, setupServer, getLanHttpsServer: () => httpsServer, store: hubStore, mqtt, matter, hive, googleNest, alexa: alexaIntegration, heatingDemandController, cloudflare, pairing, activity, electric, model: haModel, vault, eventBus, config: runtimeConfig, syncOperatorBrowserSessions, nativeAutomationService, nativeAutomationScheduler, nativeCommissioningService };
 }
 
 if (require.main === module) {

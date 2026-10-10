@@ -1,6 +1,6 @@
 # Dinodia OS
 
-Dinodia OS is the local-first Raspberry Pi hub that presents a Home Assistant-compatible API to the existing Dinodia platform and iOS app. It is designed for Raspberry Pi 4 Model B (2 GB, 64-bit Raspberry Pi OS) and keeps the existing Cloudflare, provisioning, heartbeat, area, label, and HA-compatible contracts intact.
+Dinodia OS is the local-first Native V2 Raspberry Pi hub for Dinodia Smart Living. It is designed for Raspberry Pi 4 Model B (2 GB, 64-bit Raspberry Pi OS) and uses the existing paired identity, Cloudflare tunnel, signed Platform sync, provisioning, Area, and capability contracts. It does not provide Home Assistant or old-app compatibility routes.
 
 ## Quick start
 
@@ -11,7 +11,7 @@ Dinodia OS is the local-first Raspberry Pi hub that presents a Home Assistant-co
 5. In **Radios & networks**, choose the connected supported coordinator from the dropdown. Dinodia writes a stable `/dev/serial/by-id` Zigbee2MQTT configuration. Select the separate OpenThread RCP for Thread.
 6. Start Zigbee pairing or Matter commissioning from **Add devices**. Both protocols end in one device setup card: optional name, required provisioned area, and one fixed label. Dinodia then derives safe household controls from the device capability.
 
-The unified Dinodia dashboard and Home Assistant-compatible API are on port `8123`; the local Hub Agent compatibility API is on `8099`. The existing Cloudflare hostname serves both the dashboard and API through the `8123` origin. There is no separate legacy dashboard listener.
+The unified Native V2 setup/dashboard and local health endpoint use port `8123`. The existing Cloudflare hostname continues to reach the approved Native V2 origin. There is no Hub Agent port, HA listener, or second legacy dashboard listener.
 
 ## Zigbee and Matter
 
@@ -23,7 +23,7 @@ The production UI has no raw command editor or test device. Protocol diagnostics
 
 Open **Pair a device → Hive** and connect the homeowner's Hive owner account. No receiver or thermostat model number is needed: Dinodia discovers heating zones through the pinned `pyhive-integration` adapter. Hive SMS verification and any new-client registration are completed in the dashboard. Each discovered zone remains **Needs setup** until an area and the `Boiler` label are confirmed. The resulting standard `climate` surface is compatible with the existing Dinodia platform and iOS client.
 
-Hive credentials, tokens, and client-registration data are held only in the encrypted local vault. Credential and MFA submissions require the secure Cloudflare dashboard in production; the development override is disabled by default. Hive uses an unofficial cloud API, so a cloud outage degrades Hive only and does not affect Zigbee, Matter, Thread, Cloudflare, or the HA-compatible API. Disconnecting Hive removes the local account, devices, projections, and secrets but does not reset physical Hive hardware or delete Hive schedules.
+Hive credentials, tokens, and client-registration data are held only in the encrypted local vault. Credential and MFA submissions require the secure Cloudflare dashboard in production; the development override is disabled by default. Hive uses an unofficial cloud API, so a cloud outage degrades Hive only and does not affect Zigbee, Matter, Thread, Cloudflare, or Native V2 health. Disconnecting Hive removes the local account, devices, projections, and secrets but does not reset physical Hive hardware or delete Hive schedules.
 
 ## Updates and rollback
 
@@ -33,9 +33,8 @@ Dinodia OS is the first simple, local-first Dinodia Hub appliance for Raspberry 
 
 ## What is included
 
-- Unified local dashboard and Home Assistant-compatible REST/WebSocket API at `http://<pi-ip>:8123`
-- Dinodia Hub Agent-compatible local API at `http://<pi-ip>:8099`
-- Token-protected device, registry, service and automation APIs
+- Unified Native V2 setup/dashboard and health endpoint at `http://<pi-ip>:8123`
+- Native V2 authenticated admin, customer, device and automation APIs on their scoped routes
 - Native V2 schedule automations with a capability-driven editor, durable occurrences, and restart-safe local execution
 - JSON persistence with atomic writes and rotating backups
 - Zigbee2MQTT MQTT adapter for Zigbee devices
@@ -50,9 +49,9 @@ Dinodia OS is the first simple, local-first Dinodia Hub appliance for Raspberry 
 - Raspberry Pi installer and systemd service
 - Automated unit and HTTP API tests
 
-### Important compatibility decision
+### Native-only boundary
 
-ZHA is a Home Assistant integration. Because Dinodia OS replaces Home Assistant, it uses Zigbee2MQTT as the standalone Zigbee runtime while exposing the ZHA-compatible calls required by the unchanged Dinodia app. The app does not need to know that the radio is backed by Zigbee2MQTT.
+Zigbee uses Zigbee2MQTT as the radio runtime. Dinodia OS exposes its own Native V2 contracts; it does not emulate Home Assistant endpoints or preserve old-app API compatibility. Shared capability and normalized device-domain models remain where Native V2 features consume them.
 
 ## Fast local development
 
@@ -64,7 +63,7 @@ npm run check
 npm start
 ```
 
-Open `http://127.0.0.1:8123` for the explicitly configured development compatibility harness. Production has no reusable dashboard password.
+Open the local setup/dashboard only through its configured Native V2 authentication flow. Production has no reusable dashboard password, legacy bearer token, or HA credential path.
 
 The dashboard can create a virtual test switch. This makes the core UI, device commands, persistence and automations testable without any radio hardware.
 
@@ -99,7 +98,7 @@ cd "Dinodia OS"
 sudo bash scripts/install-pi.sh
 ```
 
-The installer copies the service to `/opt/dinodia-os`, stores data in `/var/lib/dinodia-os`, and starts `dinodia-os.service` only after the two-phase manufacturing identity ceremony completes. Phase 1 generates and encrypts the signing/encryption keys locally on the hub; the offline manufacturing authority signs the printed public certificate; phase 2 verifies that signature on the hub before activation. No manufacturing-root private key is copied to the hub. The unified dashboard and HA compatibility surface is on `8123`; the Hub Agent compatibility surface is on `8099`. For the bundled Mosquitto/Zigbee2MQTT/Matter protocol topology, use the Docker Compose deployment below; the native service remains useful as the lightweight compatibility core when those protocol runtimes are managed separately.
+The installer copies the service to `/opt/dinodia-os`, stores data in `/var/lib/dinodia-os`, and starts `dinodia-os.service` only after the two-phase manufacturing identity ceremony completes. Phase 1 generates and encrypts the signing/encryption keys locally on the hub; the offline manufacturing authority signs the printed public certificate; phase 2 verifies that signature on the hub before activation. No manufacturing-root private key is copied to the hub. Native V2 setup/dashboard and health use `8123`; no `8099` Hub Agent compatibility listener is installed. For the bundled Mosquitto/Zigbee2MQTT/Matter protocol topology, use the Docker Compose deployment below.
 
 Useful commands:
 
@@ -119,7 +118,7 @@ sudo apt-get update && sudo apt-get install -y cloudflared
 cloudflared --version
 ```
 
-Open the installer-only local setup address `http://dinodia-<serial>.local/setup` and complete the paired Company Portal session. Production does not use a pasted dashboard password. Cloudflare setup is available only inside that paired setup session, uses the Platform-reserved Dinodia company hostname, and must complete remote verification before installation can be marked complete. The local Hub Agent port is never the tunnel origin. The public dashboard URL is `https://<hostname>/` without `:8123`.
+Open the installer-only local setup address `http://dinodia-<serial>.local/setup` and complete the paired Company Portal session. Production does not use a pasted dashboard password. Cloudflare setup is available only inside that paired setup session, uses the Platform-reserved Dinodia company hostname, and must complete remote verification before installation can be marked complete. Installer-only and private radio/protocol interfaces are never the tunnel origin. The dashboard URL is `https://<hostname>/` without `:8123`.
 
 ## Docker Compose deployment
 
@@ -181,51 +180,11 @@ The dashboard quick-link and named-tunnel controls run inside the Dinodia contai
 
 Do not expose MQTT, Matter Server, or OTBR directly to the internet. Cloudflare should be the only remote entry point, and production access remains session-based through Company Portal.
 
-## API
+## API and authentication
 
-Dashboard endpoints use `/_dinodia/admin/api/...` on the unified `8123` origin and require a short-lived, workflow-bound Company Portal operator session in production. Native app routes use short-lived scoped app tokens or persisted offline-LAN authorizations. The HA-compatible `/api/...` surface and Hub Agent listener are isolated compatibility surfaces; production does not accept dashboard passwords, HA passwords, bootstrap secrets or development tokens.
+Production dashboard requests use the same-origin `/_dinodia/admin/...` routes and the short-lived, workflow-bound Company Portal operator session. Customer app requests use the current scoped Native V2 session and signed OS boundaries. Health is available at `http://127.0.0.1:8123/api/health` and does not grant access to protected data or commands.
 
-The initial setup API is:
-
-- `GET/POST /api/areas`, `PUT/DELETE /api/areas/:id`
-- `GET/POST /api/labels`, `PUT/DELETE /api/labels/:id`
-- `GET/PUT /_dinodia/admin/api/devices/:id/setup` for the single device-level name, area and label setup/preview
-- `GET /_dinodia/admin/api/devices/:id/capabilities` for separated household controls and diagnostics
-- `DELETE /_dinodia/admin/api/devices/:id` to remove a paired household device
-- `POST /api/integrations/zigbee/permit-join` to open Zigbee pairing
-- `GET /_dinodia/admin/api/integrations/hive` for sanitized Hive account status
-- `GET /_dinodia/admin/api/integrations/google-nest` for sanitized Google Nest Sandbox status. The Google Nest tab opens Google's official browser consent flow and never asks Dinodia OS for a Google password.
-- `POST /_dinodia/admin/api/integrations/hive/connect` and `POST /_dinodia/admin/api/integrations/hive/sessions/:id/mfa` for the owner/MFA setup flow
-- `POST /_dinodia/admin/api/integrations/hive/refresh`, `POST /_dinodia/admin/api/integrations/hive/reauthenticate`, and `DELETE /_dinodia/admin/api/integrations/hive/account` for lifecycle management
-- `GET/POST /api/integrations/cloudflare` for status, a temporary link, a named tunnel, or disconnect
-- `GET /api/provisioning` for the serial, compatibility URLs, pairing status, and first-boot copy-ready values
-- `POST /api/provisioning/pair` is retired in production; provisioning is completed through the paired Company Portal handoff and outbound hub challenge
-- `GET /_dinodia/admin/api/activity` for the authenticated six-column activity ledger; use `deviceId`, `category`, `severity`, and cursor pagination to filter it
-
-The unchanged Home Assistant-compatible surface is available on ports `8123` and `8099`, including `/api/states`, `/api/services/<domain>/<service>`, `/api/template`, `/api/websocket`, registries, ZHA compatibility routes, and config flows.
-
-```bash
-curl http://127.0.0.1:8123/api/health
-Use the authenticated Company Portal operator session for dashboard requests; production does not accept `DINODIA_ADMIN_TOKEN`.
-```
-
-Create a virtual device:
-
-```bash
-curl -X POST http://127.0.0.1:8123/_dinodia/admin/api/devices \
-  -H "Authorization: Bearer <short-lived-operator-session>" \
-  -H 'content-type: application/json' \
-  -d '{"id":"hall-switch","name":"Hall switch","protocol":"virtual","state":{"power":"OFF"}}'
-```
-
-Send a device command:
-
-```bash
-curl -X POST http://127.0.0.1:8123/_dinodia/admin/api/devices/hall-switch/command \
-  -H "Authorization: Bearer <short-lived-operator-session>" \
-  -H 'content-type: application/json' \
-  -d '{"state":{"power":"ON"}}'
-```
+The former `/api/states`, `/api/services/*`, `/api/template`, `/api/websocket`, registry/config-flow compatibility routes, old-app bearer credentials, and port `8099` are retired. Do not call them from new clients or use them as fallback. Use the current product clients and contract tests to discover supported Native V2 routes; do not issue raw commands with copied tokens.
 
 ## Backups and recovery
 

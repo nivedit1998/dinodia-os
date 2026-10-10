@@ -49,7 +49,7 @@ async function request(base, route, options = {}) {
 test("heating controller API persists mappings and verifies read-only without writing climate state", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-heating-api-"));
   const hub = createHub({
-    config: { nodeEnv: "development", haPort: 0, hubAgentPort: 0, adminToken: "test-token", dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    config: { nodeEnv: "development", nativeApiPort: 0, adminToken: "test-token", dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
     mqttBridge: mockIntegration(),
     matterBridge: mockIntegration(),
     cloudflareTunnel: mockCloudflare(),

@@ -13,16 +13,16 @@ if (!/const configuredPlatformOrigin = stringEnv\("DINODIA_PLATFORM_API_URL", ""
 if (!/apiUrl = ""/.test(pairing)) failures.push('pairing constructor has a legacy URL fallback');
 if (!/A native V2 platform URL is required/.test(pairing)) failures.push('pairing does not fail closed without a V2 platform URL');
 
-const probe = spawnSync(process.execPath, ['-e', 'const c=require("./src/config"); process.stdout.write(JSON.stringify({legacy:c.legacyCompatibilityEnabled,admin:c.adminToken,ha:c.haToken,bootstrap:c.platformBootstrapSecret,platform:c.platformApiUrl}));'], {
+const probe = spawnSync(process.execPath, ['-e', 'const c=require("./src/config"); process.stdout.write(JSON.stringify({legacy:c.legacyCompatibilityEnabled,admin:c.adminToken,platform:c.platformApiUrl,nativePort:c.nativeApiPort,oldPort:Object.hasOwn(c,"haPort"),oldToken:Object.hasOwn(c,"haToken"),oldBootstrap:Object.hasOwn(c,"platformBootstrapSecret")}));'], {
   cwd: root,
   encoding: 'utf8',
-  env: { NODE_ENV: 'production', DINODIA_ADMIN_TOKEN: 'legacy', DINODIA_HA_TOKEN: 'legacy', DINODIA_PLATFORM_BOOTSTRAP_SECRET: 'legacy' },
+  env: { NODE_ENV: 'production', DINODIA_ADMIN_TOKEN: 'legacy', DINODIA_HA_TOKEN: 'legacy', DINODIA_PLATFORM_BOOTSTRAP_SECRET: 'legacy', DINODIA_HA_PORT: '8123', DINODIA_HUB_AGENT_PORT: '8099' },
 });
 if (probe.status !== 0) failures.push('production configuration probe failed');
 else {
   try {
     const value = JSON.parse(probe.stdout);
-    if (value.legacy !== false || value.admin !== '' || value.ha !== '' || value.bootstrap !== '' || value.platform !== '') failures.push('production configuration accepts legacy credentials or an implicit platform URL');
+    if (value.legacy !== false || value.admin !== '' || value.platform !== '' || value.nativePort !== 8123 || value.oldPort || value.oldToken || value.oldBootstrap) failures.push('production configuration accepts legacy credentials, ports, or an implicit platform URL');
   } catch { failures.push('production configuration probe returned invalid output'); }
 }
 

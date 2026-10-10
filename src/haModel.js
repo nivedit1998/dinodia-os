@@ -356,7 +356,6 @@ class HomeAssistantModel {
     const nestedTarget = data && data.target && typeof data.target === "object" ? data.target : {};
     const normalizedData = { ...(data || {}), ...nestedTarget };
     delete normalizedData.target;
-    if (actualDomain === "automation") return this.callAutomationService(actualService, normalizedData);
     const isGlobalBlindController = actualDomain === "script" && actualService === "global_blind_controller";
     const dispatchDomain = isGlobalBlindController ? "cover" : actualDomain;
     const dispatchService = isGlobalBlindController ? "set_cover_position" : actualService;
@@ -438,17 +437,6 @@ class HomeAssistantModel {
       script: ["turn_on"],
     };
     return Boolean(controllable[domain]?.includes(String(service).toLowerCase()));
-  }
-
-  async callAutomationService(service, data) {
-    const ids = parseTargetIds(data.entity_id || data.entityId);
-    const automations = this.store.listAutomations().filter((automation) => !ids.length || ids.includes(automation.id) || ids.includes(`automation.${slug(automation.id)}`) || ids.includes(`automation.${slug(automation.name)}`));
-    if (service === "delete") {
-      for (const automation of automations) await this.store.deleteAutomation(automation.id);
-    } else {
-      for (const automation of automations) await this.store.saveAutomation({ ...automation, enabled: service !== "turn_off" }, automation.id);
-    }
-    return { changed_states: [], service_response: {} };
   }
 
   servicesForTarget(target) {

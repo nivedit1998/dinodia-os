@@ -6,7 +6,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { Store } = require("../src/store");
 const { SecretVault } = require("../src/secretVault");
-const { PlatformPairing, sign, validateLanEndpointObservation } = require("../src/platformPairing");
+const { PlatformPairing, validateLanEndpointObservation } = require("../src/platformPairing");
 const { applyCloudConfiguration } = require("../src/sync/cloudConfiguration");
 const { AutomationService } = require("../src/automations/service");
 const { AutomationExecutor } = require("../src/automations/executor");
@@ -67,29 +67,19 @@ function nativeSyncAck(request) {
   };
 }
 
-test("platform pairing signs requests, stores only token hashes, and acknowledges publication", async () => {
+test("retired bootstrap credentials cannot pair or synchronize a Native V2 installation", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-pairing-"));
   const store = new Store(path.join(directory, "dinodia.json"));
   await store.saveIdentity({ serial: "hub-test" });
   const vault = new SecretVault({ dataDir: directory });
   const calls = [];
-  const fetchImpl = async (url, options) => {
-    const body = JSON.parse(options.body);
-    calls.push({ url, body });
-    assert.equal(body.serial, "hub-test");
-    const secret = url.includes("/pair") ? "bootstrap" : "sync";
-    assert.equal(body.sig, sign(secret, body.serial, body.ts, body.nonce));
-    if (url.endsWith("/pair")) return { ok: true, async json() { return { syncSecret: "sync", latestVersion: 2, publishedVersion: 0, hubTokenHashes: [crypto.createHash("sha256").update("hub-token").digest("hex")] }; } };
-    return { ok: true, async json() { return { latestVersion: 2, publishedVersion: 2, hubTokenHashes: [crypto.createHash("sha256").update("hub-token").digest("hex")] }; } };
-  };
-  const pairing = new PlatformPairing({ store, vault, apiUrl: "https://platform.test", serial: "hub-test", legacyCompatibilityEnabled: true, intervalMs: 60000, fetchImpl });
+  const pairing = new PlatformPairing({ store, vault, apiUrl: "https://platform.test", serial: "hub-test", intervalMs: 60000, fetchImpl: async (...args) => { calls.push(args); throw new Error("unexpected legacy network call"); } });
   await pairing.configure({ bootstrapSecret: "bootstrap" });
-  const paired = await pairing.pair();
-  assert.equal(paired.latestVersion, 2);
-  assert.equal(vault.get("platform.syncSecret"), "sync");
-  assert.equal(store.getPlatform().acceptedTokenHashes.length, 1);
-  assert.equal(store.getPlatform().publishedVersion, 0);
-  assert.equal(calls.every((call) => !Object.keys(call.body).some((key) => /token/i.test(key) && key !== "agentSeenVersion")), true);
+  assert.equal(pairing.pair, undefined);
+  assert.equal(vault.get("platform.bootstrapSecret"), null);
+  assert.equal(await pairing.syncNow(), null, "unpaired installations do not enter the legacy bearer-sync route");
+  assert.equal(store.getPlatform().paired, false);
+  assert.deepEqual(calls, []);
 });
 
 test("incident transitions use the durable native sync stream and retire only after its receipt", async () => {
@@ -604,7 +594,7 @@ test("production installer heartbeat accepts the URL-normalized default HTTP por
     vault: {},
     apiUrl: "https://platform.test",
     serial,
-    haPort: 8123,
+    nativeApiPort: 8123,
     runtime: { nodeEnv: "production" },
     getLanEndpoint: () => ({ state: "CURRENT", address: "192.168.1.76", interfaceName: "eth0" }),
   });

@@ -1,12 +1,9 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
-const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
-const crypto = require("node:crypto");
 const { createHub } = require("../src/server");
-const { sign } = require("../src/platformPairing");
 
 function mockIntegration() {
   return { start() {}, close() {}, status() { return { configured: false, connected: false, lastError: null }; }, async command() {}, async refresh() {}, async permitJoin() {} };
@@ -21,7 +18,7 @@ function dashboardRoute(route) { return `/_dinodia/admin${route}`; }
 test("locked setup page serves its JavaScript without dashboard authentication", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-setup-assets-"));
   const hub = createHub({
-    config: { nodeEnv: "development", adminToken: "setup-assets-admin", haToken: "setup-assets-ha", port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    config: { nodeEnv: "development", adminToken: "setup-assets-admin", haToken: "setup-assets-ha", port: 0, nativeApiPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
     mqttBridge: mockIntegration(),
     matterBridge: mockIntegration(),
     cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
@@ -36,7 +33,7 @@ test("locked setup page serves its JavaScript without dashboard authentication",
     assert.equal(script.status, 200);
     assert.match(script.headers.get("content-type") || "", /javascript/);
     assert.match(await script.text(), /_dinodia\/setup\/pairing/);
-    assert.match(await (await fetch(`${base}/setup.js`)).text(), /window\.location\.assign\("\/"\)/);
+    assert.match(await (await fetch(`${base}/setup.js`)).text(), /window\.location\.assign\(destination\)/);
   } finally {
     await hub.stop();
   }
@@ -45,7 +42,7 @@ test("locked setup page serves its JavaScript without dashboard authentication",
 test("locked setup sends CSRF on its status read and reports a valid hub identity", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-setup-status-"));
   const hub = createHub({
-    config: { nodeEnv: "development", adminToken: "setup-status-admin", haToken: "setup-status-ha", hubId: "setup-status-hub", port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    config: { nodeEnv: "development", adminToken: "setup-status-admin", haToken: "setup-status-ha", hubId: "setup-status-hub", port: 0, nativeApiPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
     mqttBridge: mockIntegration(),
     matterBridge: mockIntegration(),
     cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
@@ -75,7 +72,7 @@ test("locked setup sends CSRF on its status read and reports a valid hub identit
 test("paired operator bootstrap can start over the private LAN before Cloudflare verification", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-local-operator-"));
   const hub = createHub({
-    config: { nodeEnv: "development", adminToken: "local-operator-admin", haToken: "local-operator-ha", port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    config: { nodeEnv: "development", adminToken: "local-operator-admin", haToken: "local-operator-ha", port: 0, nativeApiPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
     mqttBridge: mockIntegration(),
     matterBridge: mockIntegration(),
     cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
@@ -95,7 +92,7 @@ test("paired operator bootstrap can start over the private LAN before Cloudflare
 test("secure Cloudflare setup page serves the non-secret handoff script", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-remote-setup-assets-"));
   const hub = createHub({
-    config: { nodeEnv: "production", adminToken: "remote-assets-admin", port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "", cloudflarePublicHostname: "secure.example.test" },
+    config: { nodeEnv: "production", adminToken: "remote-assets-admin", port: 0, nativeApiPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "", cloudflarePublicHostname: "secure.example.test" },
     mqttBridge: mockIntegration(),
     matterBridge: mockIntegration(),
     cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: true, connected: true, running: true, mode: "local", hostname: "secure.example.test", publicUrl: "https://secure.example.test" }; } },
@@ -116,56 +113,24 @@ test("secure Cloudflare setup page serves the non-secret handoff script", async 
   }
 });
 
-test("development compatibility pairing remains isolated from production native access", async () => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-provisioning-"));
-  const serial = "hub-provisioning-test";
-  const bootstrapSecret = "bootstrap-secret";
-  const syncSecret = "sync-secret";
-  const tokenOne = "token-one-for-provisioning-test";
-  const tokenTwo = "token-two-for-provisioning-test";
-  let syncCalls = 0;
-  const platformRoutes = [];
-  const platform = http.createServer(async (req, res) => {
-    platformRoutes.push(req.url);
-    const body = await new Promise((resolve) => { let value = ""; req.on("data", (chunk) => { value += chunk; }); req.on("end", () => resolve(JSON.parse(value || "{}"))); });
-    const expectedSecret = req.url.endsWith("/pair") ? bootstrapSecret : syncSecret;
-    assert.equal(body.sig, sign(expectedSecret, body.serial, body.ts, body.nonce));
-    const hash = (value) => crypto.createHash("sha256").update(value).digest("hex");
-    const response = req.url.endsWith("/pair")
-      ? { ok: true, syncSecret, latestVersion: 1, publishedVersion: 0, hubTokenHashes: [hash(tokenOne)] }
-      : (++syncCalls === 1 ? { ok: true, latestVersion: 1, publishedVersion: 1, hubTokenHashes: [hash(tokenOne)] } : { ok: true, latestVersion: 2, publishedVersion: 2, hubTokenHashes: [hash(tokenTwo)] });
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify(response));
-  });
-  await new Promise((resolve) => platform.listen(0, "127.0.0.1", resolve));
-  const platformUrl = `http://127.0.0.1:${platform.address().port}`;
+test("retired HA, hub-agent and bootstrap routes stay absent while Native V2 setup remains available", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-native-only-routes-"));
   const hub = createHub({
-    config: { nodeEnv: "development", adminToken: "provisioning-admin", haToken: "configured-ha-token-that-must-not-be-redisplayed", hubId: serial, platformApiUrl: platformUrl, port: 0, haPort: 0, hubAgentPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    config: { nodeEnv: "production", hubId: "native-only-routes", port: 0, nativeApiPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
     mqttBridge: mockIntegration(),
     matterBridge: mockIntegration(),
     cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
-    platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
   });
   await hub.start();
-  const dashboardBase = `http://127.0.0.1:${hub.server.address().port}`;
-  const provisioning = await request(dashboardBase, dashboardRoute("/api/provisioning"), { headers: { authorization: "Bearer provisioning-admin" } });
-  assert.equal(provisioning.response.status, 200);
-  assert.equal(provisioning.body.credentials.oneTimeLongLivedToken, undefined);
-  const pair = await request(dashboardBase, dashboardRoute("/api/provisioning/pair"), { method: "POST", headers: { authorization: "Bearer provisioning-admin" }, body: JSON.stringify({ bootstrapSecret }) });
-  assert.equal(pair.response.status, 200);
-  assert.equal(pair.body.paired, true);
-  assert.equal(hub.store.getPlatform().acceptedTokenHashes.length, 1);
-  const agentBase = `http://127.0.0.1:${hub.hubAgentServer.address().port}`;
-  const accepted = await request(agentBase, "/api/", { headers: { authorization: `Bearer ${tokenOne}` } });
-  assert.equal(accepted.response.status, 200);
-  const invalid = await request(agentBase, "/api/", { headers: { authorization: "Bearer not-a-token" } });
-  assert.equal(invalid.response.status, 401);
-  await hub.pairing.syncNow();
-  const newToken = await request(agentBase, "/api/", { headers: { authorization: `Bearer ${tokenTwo}` } });
-  assert.equal(newToken.response.status, 200);
-  const expired = await request(agentBase, "/api/", { headers: { authorization: `Bearer ${tokenOne}` } });
-  assert.equal(expired.response.status, 401);
-  assert.equal(platformRoutes.some((route) => route.includes("/v2/")), false, "the development-only compatibility adapter never enters Native V2 sync without enrolled installation authority");
-  await hub.stop();
-  await new Promise((resolve) => platform.close(resolve));
+  const base = `http://127.0.0.1:${hub.server.address().port}`;
+  try {
+    assert.equal(Object.hasOwn(hub, "hubAgentServer"), false);
+    for (const path of ["/api/states", "/api/services/light/turn_on", "/api/config", "/_dinodia/platform/v1/alexa/catalog"]) {
+      assert.equal((await fetch(`${base}${path}`)).status, 404, `${path} is not an application compatibility route`);
+    }
+    assert.equal((await fetch(`${base}/_dinodia/admin/api/provisioning/pair`, { method: "POST" })).status, 401);
+    assert.match(await (await fetch(`${base}/setup.js`)).text(), /_dinodia\/setup\/pairing/);
+  } finally {
+    await hub.stop();
+  }
 });

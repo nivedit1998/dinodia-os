@@ -7,13 +7,11 @@ services:
     cpus: 1.5
     ports:
       - "8123:8123"
-      - "8099:8099"
     env_file:
       - .env
     environment:
       DINODIA_DATA_DIR: /data
-      DINODIA_HA_PORT: 8123
-      DINODIA_HUB_AGENT_PORT: 8099
+      DINODIA_NATIVE_API_PORT: 8123
       MQTT_URL: mqtt://mosquitto:1883
       MATTER_SERVER_URL: ${MATTER_SERVER_URL:-ws://host.docker.internal:5580/ws}
       OTBR_URL: ${OTBR_URL:-http://host.docker.internal:8081}

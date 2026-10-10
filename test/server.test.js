@@ -37,7 +37,7 @@ async function request(base, route, options = {}) {
 }
 function dashboardRoute(route) { return `/_dinodia/admin${route}`; }
 
-test("HTTP API protects writes and controls a virtual device", async () => {
+test("Native dashboard controls a virtual device without accepting retained legacy automation rules", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-http-"));
   const hub = createHub({
     config: { nodeEnv: "development", adminToken: "test-token", dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
@@ -46,43 +46,52 @@ test("HTTP API protects writes and controls a virtual device", async () => {
     cloudflareTunnel: mockCloudflare(),
     platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
   });
-  await new Promise((resolve) => hub.server.listen(0, "127.0.0.1", resolve));
-  const address = hub.server.address();
-  const base = `http://127.0.0.1:${address.port}`;
-  const unauthorized = await request(base, dashboardRoute("/api/status"));
-  assert.equal(unauthorized.response.status, 401);
-  const health = await request(base, "/api/health");
-  assert.equal(health.response.status, 200);
-  const headers = { authorization: "Bearer test-token" };
-  const adapters = await request(base, dashboardRoute("/api/integrations/zigbee/adapters"), { headers });
-  assert.equal(Array.isArray(adapters.body.adapters), true);
-  const invalidAdapter = await request(base, dashboardRoute("/api/integrations/zigbee/adapter"), { method: "POST", headers, body: JSON.stringify({ path: "/dev/not-connected" }) });
-  assert.equal(invalidAdapter.response.status, 400);
-  const quickLink = await request(base, dashboardRoute("/api/integrations/cloudflare"), { method: "POST", headers, body: JSON.stringify({ action: "quick" }) });
-  assert.equal(quickLink.body.publicUrl, "https://test.trycloudflare.com");
-  const area = await request(base, dashboardRoute("/api/areas"), { method: "POST", headers, body: JSON.stringify({ id: "11111111-1111-4111-8111-111111111111", name: "Kitchen", icon: "room" }) });
-  const label = await request(base, dashboardRoute("/api/labels"), { method: "POST", headers, body: JSON.stringify({ name: "Lights" }) });
-  const created = await request(base, dashboardRoute("/api/devices"), { method: "POST", headers, body: JSON.stringify({ id: "lamp", name: "Lamp", protocol: "virtual", state: { power: "OFF" } }) });
-  assert.equal(created.response.status, 201);
-  const updated = await request(base, dashboardRoute("/api/devices/lamp"), { method: "PUT", headers, body: JSON.stringify({ name: "Kitchen lamp", areaId: area.body.id }) });
-  assert.equal(updated.body.areaId, area.body.id);
-  const entityId = encodeURIComponent("lamp:power");
-  const entity = await request(base, dashboardRoute(`/api/devices/lamp/entities/${entityId}`), { method: "PUT", headers, body: JSON.stringify({ name: "Lamp power", labelIds: [label.body.id] }) });
-  assert.equal(entity.body.name, "Lamp power");
-  assert.deepEqual(entity.body.labelIds, [label.body.id]);
-  await request(base, dashboardRoute("/api/devices"), { method: "POST", headers, body: JSON.stringify({ id: "fan", name: "Fan", protocol: "virtual", state: { power: "OFF" } }) });
-  const automation = await request(base, dashboardRoute("/api/automations"), { method: "POST", headers, body: JSON.stringify({ name: "Lamp to fan", trigger: { deviceId: "lamp", field: "power", equals: "ON" }, actions: [{ deviceId: "fan", command: { state: { power: "ON" } } }] }) });
-  assert.equal(automation.response.status, 201);
-  const changed = await request(base, dashboardRoute("/api/devices/lamp/command"), { method: "POST", headers, body: JSON.stringify({ state: { power: "ON" } }) });
-  assert.equal(changed.response.status, 200);
-  assert.equal(changed.body.state.power, "ON");
-  const fan = await request(base, dashboardRoute("/api/devices/fan"), { headers });
-  assert.equal(fan.body.state.power, "ON");
-  const deleted = await request(base, dashboardRoute(`/api/automations/${automation.body.id}`), { method: "DELETE", headers });
-  assert.equal(deleted.response.status, 204);
-  const status = await request(base, dashboardRoute("/api/status"), { headers });
-  assert.equal(status.body.devices, 2);
-  await hub.stop();
+  try {
+    await new Promise((resolve) => hub.server.listen(0, "127.0.0.1", resolve));
+    const address = hub.server.address();
+    const base = `http://127.0.0.1:${address.port}`;
+    const unauthorized = await request(base, dashboardRoute("/api/status"));
+    assert.equal(unauthorized.response.status, 401);
+    const health = await request(base, "/api/health");
+    assert.equal(health.response.status, 200);
+    const headers = { authorization: "Bearer test-token" };
+    const adapters = await request(base, dashboardRoute("/api/integrations/zigbee/adapters"), { headers });
+    assert.equal(Array.isArray(adapters.body.adapters), true);
+    const invalidAdapter = await request(base, dashboardRoute("/api/integrations/zigbee/adapter"), { method: "POST", headers, body: JSON.stringify({ path: "/dev/not-connected" }) });
+    assert.equal(invalidAdapter.response.status, 400);
+    const quickLink = await request(base, dashboardRoute("/api/integrations/cloudflare"), { method: "POST", headers, body: JSON.stringify({ action: "quick" }) });
+    assert.equal(quickLink.body.publicUrl, "https://test.trycloudflare.com");
+    const area = await request(base, dashboardRoute("/api/areas"), { method: "POST", headers, body: JSON.stringify({ id: "11111111-1111-4111-8111-111111111111", name: "Kitchen", icon: "room" }) });
+    const label = await request(base, dashboardRoute("/api/labels"), { method: "POST", headers, body: JSON.stringify({ name: "Lights" }) });
+    const created = await request(base, dashboardRoute("/api/devices"), { method: "POST", headers, body: JSON.stringify({ id: "lamp", name: "Lamp", protocol: "virtual", state: { power: "OFF" } }) });
+    assert.equal(created.response.status, 201);
+    const updated = await request(base, dashboardRoute("/api/devices/lamp"), { method: "PUT", headers, body: JSON.stringify({ name: "Kitchen lamp", areaId: area.body.id }) });
+    assert.equal(updated.body.areaId, area.body.id);
+    const entityId = encodeURIComponent("lamp:power");
+    const entity = await request(base, dashboardRoute(`/api/devices/lamp/entities/${entityId}`), { method: "PUT", headers, body: JSON.stringify({ name: "Lamp power", labelIds: [label.body.id] }) });
+    assert.equal(entity.body.name, "Lamp power");
+    assert.deepEqual(entity.body.labelIds, [label.body.id]);
+    await request(base, dashboardRoute("/api/devices"), { method: "POST", headers, body: JSON.stringify({ id: "fan", name: "Fan", protocol: "virtual", state: { power: "OFF" } }) });
+
+    const legacyBefore = hub.store.listAutomations();
+    const legacyWrite = await request(base, dashboardRoute("/api/automations"), { method: "POST", headers, body: JSON.stringify({ name: "Legacy lamp to fan", trigger: { deviceId: "lamp", field: "power", equals: "ON" }, actions: [{ deviceId: "fan", command: { state: { power: "ON" } } }] }) });
+    assert.equal(legacyWrite.response.status, 400);
+    assert.equal(legacyWrite.body.error.code, "native_schema_required");
+    assert.deepEqual(hub.store.listAutomations(), legacyBefore, "the rejected legacy request does not alter retained automation records");
+
+    const changed = await request(base, dashboardRoute("/api/devices/lamp/command"), { method: "POST", headers, body: JSON.stringify({ state: { power: "ON" } }) });
+    assert.equal(changed.response.status, 200);
+    assert.equal(changed.body.state.power, "ON");
+    assert.equal(hub.store.getDevice("fan").state.power, "OFF", "manual Native dashboard control does not execute a retained legacy rule");
+    const listed = await request(base, dashboardRoute("/api/automations"), { headers });
+    assert.equal(listed.response.status, 200);
+    assert.deepEqual(listed.body.automations, [], "the active automation projection contains no legacy rules");
+    const status = await request(base, dashboardRoute("/api/status"), { headers });
+    assert.equal(status.body.devices, 2);
+  } finally {
+    await hub.stop();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("removing the configured Zigbee dongle stops the runtime, clears its selection, and preserves devices", async () => {

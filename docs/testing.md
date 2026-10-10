@@ -34,21 +34,22 @@ npm test -- test/native-automation.test.js
 ```
 
 The suite covers the version-10 migration, normalized child rows, typed target
-validation, safe public catalogue projection, timezone/ISO weekday matching,
-idempotent creation, optimistic revision checks, ordered execution, durable
-duplicate suppression, and conservative restart recovery. The complete
-`npm test` command remains mandatory because the legacy Home Assistant-shaped
-automation path must continue to pass.
+validation, safe Native V2 catalogue projection, timezone/ISO weekday
+matching, idempotent creation, optimistic revision checks, ordered execution,
+durable duplicate suppression, and conservative restart recovery. Existing
+legacy-shaped records are retained inertly; there is no legacy executor or
+compatibility API. The complete `npm test` suite remains mandatory for the
+Native V2 release candidate.
 
-For a Pi smoke check, first copy the build and restart the service in a
-controlled window. Confirm the authenticated responses from
-`GET /api/health`, `GET /api/status`, and `GET /api/automations/catalog`, then
-create a test schedule for a real safe device. Close the phone/dashboard,
-capture the single occurrence and ordered action outcomes from
-`GET /api/automations/<id>/executions`, restart before a second tick, and
-confirm no duplicate occurrence is created. Do not use real momentary or
-destructive controls for this test. A production Pi must remain in
-`read_only` until the operator has reviewed catalogue and migration evidence.
+For a Pi smoke check, first use the separately prepared, checksummed
+installation packet and authorized maintenance window. Verify health and the
+current build, then use the authenticated Native V2 Company Portal dashboard
+for operator status and automation outcomes. Never invoke retired HA routes
+or copy bearer material into command history. Keep Production automation in
+`read_only` unless the exact Stage 14 activation checkpoint has been approved;
+when approved, use only a safe authorized control and verify one durable
+occurrence, its ordered outcomes, and restart/exact-retry behavior. Do not use
+momentary or destructive controls for this test.
 
 ## Google Nest beta testing
 

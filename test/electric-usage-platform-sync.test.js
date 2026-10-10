@@ -1,18 +1,20 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { Store } = require('../src/store');
 const { SecretVault } = require('../src/secretVault');
-const { PlatformPairing, sign } = require('../src/platformPairing');
+const { PlatformPairing } = require('../src/platformPairing');
 
-test('legacy development compatibility never enters Native V2 sync or acknowledges its usage rows', async () => {
+test('retired bootstrap and bearer secrets cannot enter Native V2 sync or acknowledge usage rows', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'dinodia-electric-pairing-'));
   const store = new Store(path.join(directory, 'dinodia.json'));
   await store.saveIdentity({ serial: 'electric-hub' });
   const vault = new SecretVault({ dataDir: directory });
+  await vault.set('platform.bootstrapSecret', 'retired-bootstrap');
+  await vault.set('platform.syncSecret', 'retired-sync');
+  await store.savePlatform({ apiUrl: 'https://platform.test', paired: true });
   let sent;
   const requestedPaths = [];
   const tracker = {
@@ -24,17 +26,11 @@ test('legacy development compatibility never enters Native V2 sync or acknowledg
   };
   const fetchImpl = async (url, options) => {
     requestedPaths.push(new URL(url).pathname);
-    const body = JSON.parse(options.body);
-    const isPair = url.endsWith('/api/hub-agent/pair');
-    const secret = isPair ? 'bootstrap' : 'sync';
-    assert.equal(body.sig, sign(secret, body.serial, body.ts, body.nonce));
-    if (isPair) return { ok: true, async json() { return { syncSecret: 'sync', latestVersion: 1, publishedVersion: 1, hubTokenHashes: [] }; } };
-    return { ok: true, async json() { return { latestVersion: 1, publishedVersion: 1, hubTokenHashes: [crypto.createHash('sha256').update('token').digest('hex')] }; } };
+    throw new Error(`retired transport unexpectedly called: ${new URL(url).pathname}`);
   };
-  const pairing = new PlatformPairing({ store, vault, apiUrl: 'https://platform.test', serial: 'electric-hub', legacyCompatibilityEnabled: true, fetchImpl, getElectricUsage: () => tracker.payload(), getElectricUsageResetAck: tracker.resetAcknowledgement, onSyncResult: async (result, heating, heatingReset, electric) => { tracker.applyPlatformResponse(result); if (electric?.devices) tracker.acknowledgeUploaded(electric.devices); } });
-  await pairing.configure({ bootstrapSecret: 'bootstrap' });
-  await pairing.pair();
+  const pairing = new PlatformPairing({ store, vault, apiUrl: 'https://platform.test', serial: 'electric-hub', fetchImpl, getElectricUsage: () => tracker.payload(), getElectricUsageResetAck: tracker.resetAcknowledgement, onSyncResult: async (result, heating, heatingReset, electric) => { tracker.applyPlatformResponse(result); if (electric?.devices) tracker.acknowledgeUploaded(electric.devices); } });
   await pairing.syncNow();
-  assert.deepEqual(requestedPaths, ['/api/hub-agent/pair', '/api/hub-agent/token-state']);
+  assert.deepEqual(requestedPaths, []);
   assert.equal(sent, undefined);
+  assert.equal(pairing.lastError, 'A factory-enrolled hub identity is required for Platform synchronisation');
 });
