@@ -542,6 +542,34 @@
       }],
       "additionalProperties": false
     },
+    "customerHomeClaimLanEndpoint": {
+      "type": "object",
+      "required": ["state", "origin", "publicHubId", "certificateGeneration", "currentSpkiPin", "currentNotBefore", "currentNotAfter", "reportedAt", "validUntil", "lanAddress", "lanAddressReportedAt", "lanAddressValidUntil"],
+      "properties": {
+        "state": { "const": "verified_lan" },
+        "origin": { "type": "string", "pattern": "^https://dinodia-[a-f0-9]{20}\\.local:8123$" },
+        "publicHubId": { "type": "string", "pattern": "^[a-f0-9]{20}$" },
+        "certificateGeneration": { "type": "integer", "minimum": 1 },
+        "currentSpkiPin": { "type": "string", "pattern": "^sha256/[A-Za-z0-9+/]{43}=$" },
+        "currentNotBefore": { "$ref": "#/$defs/timestamp" },
+        "currentNotAfter": { "$ref": "#/$defs/timestamp" },
+        "nextCertificateGeneration": { "type": "integer", "minimum": 2 },
+        "nextSpkiPin": { "type": "string", "pattern": "^sha256/[A-Za-z0-9+/]{43}=$" },
+        "nextNotBefore": { "$ref": "#/$defs/timestamp" },
+        "nextNotAfter": { "$ref": "#/$defs/timestamp" },
+        "reportedAt": { "$ref": "#/$defs/timestamp" },
+        "validUntil": { "$ref": "#/$defs/timestamp" },
+        "lanAddress": { "type": "string", "pattern": "^(10|172|192)\\.(?:[0-9]{1,3}\\.){2}[0-9]{1,3}$" },
+        "lanAddressReportedAt": { "$ref": "#/$defs/timestamp" },
+        "lanAddressValidUntil": { "$ref": "#/$defs/timestamp" }
+      },
+      "allOf": [{
+        "if": { "required": ["nextCertificateGeneration", "nextSpkiPin", "nextNotBefore", "nextNotAfter"] },
+        "then": { "properties": { "nextCertificateGeneration": { "type": "integer", "minimum": 2 } } },
+        "else": { "not": { "anyOf": [{ "required": ["nextCertificateGeneration"] }, { "required": ["nextSpkiPin"] }, { "required": ["nextNotBefore"] }, { "required": ["nextNotAfter"] }] } }
+      }],
+      "additionalProperties": false
+    },
     "customerHubSession": {
       "type": "object",
       "required": ["ok", "token", "expiresAt", "homeId", "membershipId", "hubEndpoint"],
@@ -2359,7 +2387,7 @@
       "properties": {
         "schemaVersion": { "const": "dinodia.v1" },
         "ok": { "const": true },
-        "lanEndpoint": { "$ref": "#/$defs/customerLanEndpoint" }
+        "lanEndpoint": { "$ref": "#/$defs/customerHomeClaimLanEndpoint" }
       },
       "additionalProperties": false
     },

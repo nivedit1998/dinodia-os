@@ -1635,7 +1635,7 @@ paths:
             schema: { $ref: "./contract.json#/$defs/customerHomeClaimLanEndpointRequest" }
       responses:
         "200":
-          description: "Current signed-in customer’s exact verified hub identity; contains no Home or membership data."
+          description: "Current signed-in claimant’s exact verified hub identity and private LAN address from the identity-bound signed OS observation, with a separate maximum 420-second address validity; contains no Home or membership data."
           content:
             application/json:
               schema: { $ref: "./contract.json#/$defs/customerHomeClaimLanEndpointReceipt" }
