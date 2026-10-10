@@ -63,7 +63,17 @@ function addInterval(state, source, startMs, endMs, activity) {
   while (cursor < endMs) {
     const start = hourStartMs(cursor);
     const stop = Math.min(endMs, start + 3_600_000);
-    const seconds = Math.floor((stop - cursor) / 1000);
+    // Quantize both endpoints against the same epoch-second grid. Rounding
+    // each fragment's duration independently loses a second whenever a
+    // contiguous fragment ends with a smaller millisecond fraction than it
+    // started with. That made coverageStartAt/coverageEndAt span more seconds
+    // than the activity counters and caused the strict cloud sync contract to
+    // reject otherwise valid usage events. Ceil boundaries avoid attributing
+    // a whole second before the observation while keeping adjacent fragments
+    // contiguous and their integer-second totals exactly reconcilable.
+    const coveredStart = Math.ceil(cursor / 1000) * 1000;
+    const coveredEnd = Math.ceil(stop / 1000) * 1000;
+    const seconds = Math.max(0, (coveredEnd - coveredStart) / 1000);
     if (seconds > 0) {
       const key = bucketKey(source, start);
       const bucket = state.buckets[key] || (state.buckets[key] = {
@@ -84,8 +94,6 @@ function addInterval(state, source, startMs, endMs, activity) {
       });
       const field = activity === "on" ? "onSeconds" : activity === "off" ? "offSeconds" : "unknownSeconds";
       bucket[field] += seconds;
-      const coveredStart = Math.ceil(cursor / 1000) * 1000;
-      const coveredEnd = coveredStart + seconds * 1000;
       const previousStart = validInstant(bucket.coverageStartAt);
       const previousEnd = validInstant(bucket.coverageEndAt);
       bucket.coverageStartAt = new Date(previousStart === null ? coveredStart : Math.min(previousStart, coveredStart)).toISOString();

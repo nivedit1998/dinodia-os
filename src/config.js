@@ -27,8 +27,6 @@ const configuredPlatformOrigin = stringEnv("DINODIA_PLATFORM_API_URL", "").repla
 const platformApiUrl = nodeEnv === "production"
   ? (configuredPlatformOrigin === canonicalPlatformOrigin ? configuredPlatformOrigin : "")
   : configuredPlatformOrigin;
-const nativeCommissioningCatalogueVersion = stringEnv("DINODIA_NATIVE_COMMISSIONING_CATALOGUE_VERSION", "");
-const nativeCommissioningCatalogueApproved = nativeCommissioningCatalogueVersion === "DINODIA-NATIVE-COMMISSIONING-V1";
 const configuredSetupInterface = stringEnv("DINODIA_SETUP_INTERFACE", "");
 // Keep a stable interface selector, never a DHCP address from the previous
 // router. Legacy IPv4 values are ignored and physical-interface discovery
@@ -56,9 +54,10 @@ module.exports = {
   setupAllowedHosts: stringEnv("DINODIA_SETUP_ALLOWED_HOSTS", ""),
   pairingTtlMs: Math.max(60_000, Math.min(numberEnv("DINODIA_PAIRING_TTL_MS", 900_000), 900_000)),
   nativeCommissioningCapabilities: Object.freeze({
-    nativeZigbeeCommissioningV1: nativeCommissioningCatalogueApproved && stringEnv("DINODIA_NATIVE_ZIGBEE_COMMISSIONING_ENABLED", "false") === "true",
-    nativeMatterCommissioningV1: nativeCommissioningCatalogueApproved && stringEnv("DINODIA_NATIVE_MATTER_COMMISSIONING_ENABLED", "false") === "true",
-    nativeCommissioningCatalogueVersion: nativeCommissioningCatalogueApproved ? nativeCommissioningCatalogueVersion : "",
+    // These remain explicit operational holds. A model-catalogue marker is
+    // not protocol authority and must not be required to discover a device.
+    nativeZigbeeCommissioningV1: stringEnv("DINODIA_NATIVE_ZIGBEE_COMMISSIONING_ENABLED", "false") === "true",
+    nativeMatterCommissioningV1: stringEnv("DINODIA_NATIVE_MATTER_COMMISSIONING_ENABLED", "false") === "true",
   }),
   operatorSessionTtlMs: 900_000,
   manufacturingRootPublicKeys: stringEnv("DINODIA_MANUFACTURING_ROOT_PUBLIC_KEYS", ""),

@@ -14,7 +14,7 @@
   const get = async (path) => {
     const response = await fetch(path, { credentials: "same-origin", cache: "no-store" });
     const value = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(value?.error?.message || value?.error || "The assigned installation session is no longer available");
+    if (!response.ok) { const error = new Error(value?.error?.message || value?.error || "The assigned installation session is no longer available"); error.statusCode = response.status; throw error; }
     return value;
   };
   function cookie(name) {
@@ -22,8 +22,9 @@
   }
   function showError(error) { $("error").textContent = error instanceof Error ? error.message : "The action could not be completed"; $("error").hidden = false; }
   function clearError() { $("error").hidden = true; $("error").textContent = ""; }
-  function setBusy(value) { state.busy = value; for (const id of ["start-zigbee", "start-matter", "refresh", "cancel", "submit-matter", "select", "install", "view-only", "remove"]) $(id).disabled = value; }
-  function canStart(protocol) { const entry = state.context?.protocols?.[protocol]; return entry?.enabled === true && entry?.adapterReady === true && !state.session; }
+  const terminal = new Set(["completed", "cancelled", "expired", "failed"]);
+  function setBusy(value) { state.busy = value; for (const id of ["start-zigbee", "start-matter", "refresh", "cancel", "submit-matter", "select", "install", "view-only", "retain-unsupported", "remove", "add-next"]) $(id).disabled = value; }
+  function canStart(protocol) { const entry = state.context?.protocols?.[protocol]; return entry?.enabled === true && entry?.adapterReady === true && (!state.session || terminal.has(state.session.status)); }
   function updateButtons() {
     $("start-zigbee").disabled = state.busy || !canStart("zigbee");
     $("start-matter").disabled = state.busy || !canStart("matter");
@@ -33,7 +34,9 @@
     $("select").hidden = !state.selected || selected;
     $("install").hidden = !selected || state.session?.catalogueStatus !== "ready";
     $("view-only").hidden = !selected || state.session?.catalogueStatus !== "no_safe_controls" || state.session?.catalogueUsefulReadings !== true;
+    $("retain-unsupported").hidden = !selected || state.session?.catalogueStatus !== "unsupported";
     $("remove").hidden = !selected || !["unsupported", "no_safe_controls"].includes(state.session?.catalogueStatus);
+    $("add-next").hidden = !state.session || !terminal.has(state.session.status) || (state.session.cleanup?.pendingCount || 0) > 0;
   }
   function render(session) {
     state.session = session;
@@ -82,14 +85,45 @@
   async function refresh() {
     if (state.busy) return;
     clearError();
-    if (!state.session) { $("status").textContent = "No active commissioning session. Only enabled, ready protocols can be started."; return; }
     setBusy(true);
     try {
+      await refreshContext();
+      if (!state.session) return;
       const session = await get(`/_dinodia/installer/commissioning/sessions/${encodeURIComponent(state.session.sessionId)}`);
       render(session); renderCandidates();
-      if (["completed", "cancelled", "expired", "failed"].includes(session.status)) { clearInterval(state.poll); state.poll = null; }
+      if (terminal.has(session.status) || session.status.endsWith("_cleanup_pending")) { clearInterval(state.poll); state.poll = null; }
     } catch (error) { showError(error); }
     finally { setBusy(false); updateButtons(); }
+  }
+  async function refreshContext() {
+    try { state.context = await get("/_dinodia/installer/commissioning"); }
+    catch (error) {
+      if ([401, 403].includes(error?.statusCode)) {
+        sessionStorage.removeItem(key("session"));
+        if (state.poll) clearInterval(state.poll);
+        state.poll = null; state.context = null; state.session = null; state.selected = null;
+        $("summary").textContent = "This assigned installation authority is no longer current. Close this window and reopen the work from Company Portal.";
+        $("area").replaceChildren(new Option("No current Area access", ""));
+        $("device-result").hidden = true; $("candidates").hidden = true;
+        $("status").textContent = "No protected installation scope is retained in this window.";
+      }
+      throw error;
+    }
+    $("summary").textContent = `Assigned installation work · ${state.context.areas.length} permitted original Area${state.context.areas.length === 1 ? "" : "s"}`;
+    const select = $("area"); const previous = select.value; select.replaceChildren(new Option("Choose an Area", ""));
+    for (const area of state.context.areas) select.add(new Option(area.name, area.id));
+    if (state.context.areas.some((area) => area.id === previous)) select.value = previous;
+    for (const protocol of ["zigbee", "matter"]) {
+      const entry = state.context.protocols?.[protocol];
+      const title = protocol === "zigbee" ? "Zigbee coordinator" : "Matter controller";
+      const reason = !entry?.enabled ? `${title} commissioning is held by this hub's operational configuration.`
+        : !entry?.adapterReady ? entry?.readinessMessage || `The ${title.toLowerCase()} is not ready; no commissioning action can start.`
+          : protocol === "matter" ? (entry.readinessMessage || `${title} is connected.`)
+            : `${title} is ready for a user-started device search/setup.`;
+      $(`${protocol}-readiness`).textContent = reason;
+      $(`start-${protocol}`).disabled = state.busy || !entry?.enabled || !entry?.adapterReady || Boolean(state.session && !terminal.has(state.session.status));
+    }
+    if (!state.session) $("status").textContent = "No active commissioning session. Start a search only when the relevant radio is ready.";
   }
   async function chooseCandidate() {
     if (!state.session || !state.selected) return;
@@ -127,7 +161,14 @@
   $("select").addEventListener("click", () => chooseCandidate());
   $("install").addEventListener("click", () => complete("install"));
   $("view-only").addEventListener("click", () => complete("view_only"));
+  $("retain-unsupported").addEventListener("click", () => complete("retain_unsupported"));
   $("remove").addEventListener("click", () => complete("remove"));
+  $("add-next").addEventListener("click", async () => {
+    if (!state.session || !terminal.has(state.session.status) || (state.session.cleanup?.pendingCount || 0) > 0) return;
+    sessionStorage.removeItem(key("session")); state.session = null; state.selected = null;
+    $("device-result").hidden = true; $("candidates").hidden = true;
+    await refresh().catch(showError); updateButtons();
+  });
   $("submit-matter").addEventListener("click", async () => {
     if (location.protocol !== "https:") { showError(new Error("Matter setup codes are accepted only through the verified secure Dinodia OS address. Reopen this assigned work using secure access.")); return; }
     if (!state.session) return;
@@ -145,14 +186,7 @@
   });
   async function init() {
     try {
-      state.context = await get("/_dinodia/installer/commissioning");
-      $("summary").textContent = `Assigned installation work · ${state.context.areas.length} permitted original Area${state.context.areas.length === 1 ? "" : "s"}`;
-      for (const area of state.context.areas) { const option = document.createElement("option"); option.value = area.id; option.textContent = area.name; $("area").append(option); }
-      $("start-zigbee").disabled = !(state.context.protocols?.zigbee?.enabled && state.context.protocols?.zigbee?.adapterReady);
-      $("start-matter").disabled = !(state.context.protocols?.matter?.enabled && state.context.protocols?.matter?.adapterReady);
-      const zigbee = state.context.protocols?.zigbee; const matter = state.context.protocols?.matter;
-      if (!zigbee?.enabled && !matter?.enabled) $("status").textContent = "No protocol is enabled for this hub’s approved device catalogue yet. This screen will not open an unapproved radio join.";
-      else if (!zigbee?.adapterReady && !matter?.adapterReady) $("status").textContent = "The approved radio adapter is not ready. No pairing window has been opened.";
+      await refreshContext();
       const saved = sessionStorage.getItem(key("session"));
       if (saved && /^[0-9a-f-]{36}$/i.test(saved)) { state.session = { sessionId: saved }; await refresh(); }
       updateButtons();

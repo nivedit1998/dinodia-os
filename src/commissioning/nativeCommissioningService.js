@@ -144,15 +144,14 @@ class NativeCommissioningService {
         return this.publicStatus(this.sessions()[prior.sessionId] || prior);
       }
       const capability = input.protocol === "zigbee" ? "nativeZigbeeCommissioningV1" : "nativeMatterCommissioningV1";
-      if (this.commissioningCapabilities[capability] !== true
-        || this.commissioningCapabilities.nativeCommissioningCatalogueVersion !== "DINODIA-NATIVE-COMMISSIONING-V1") {
-        fail(SAFE_ERROR.unavailable, 503, "This protocol is not enabled for the enrolled hub because its supported-device catalogue is not approved");
+      if (this.commissioningCapabilities[capability] !== true) {
+        fail(SAFE_ERROR.unavailable, 503, "This protocol is disabled for this hub by its current operational configuration");
       }
       if (Object.values(this.sessions()).some((row) => (!TERMINAL.has(row.status) && Date.parse(row.expiresAt) > this.clock()) || row.radioOperationInFlight || row.radioOperationUncertain || row.cleanup?.pendingIds?.length)) fail(SAFE_ERROR.busy, 409, "Another radio commissioning operation or cleanup is still active on this hub");
       if (input.protocol === "zigbee") {
         if (!this.mqtt?.status?.().connected || !this.store.getZigbee?.().adapterPath) fail(SAFE_ERROR.unavailable, 503, "The enrolled Zigbee coordinator is not ready; no join was opened");
         if (this.mqtt.pairingStatus?.().active) fail(SAFE_ERROR.busy, 409, "Another Zigbee pairing session is already active on this hub");
-      } else if (!this.matter?.status?.().connected || !this.store.getThread?.().configured) fail(SAFE_ERROR.unavailable, 503, "The enrolled Matter-over-Thread controller is not ready; no setup payload was accepted");
+      } else if (!this.matter?.status?.().connected) fail(SAFE_ERROR.unavailable, 503, "The enrolled Matter commissioning controller is unavailable; no setup payload was accepted");
       const now = this.clock(); const sessionId = crypto.randomUUID();
       const session = {
         sessionId, protocol: input.protocol, actorType: actor.actorType, requesterAccountId: actor.accountId, requesterSessionId: actor.customerSessionId,
@@ -401,8 +400,11 @@ class NativeCommissioningService {
       if (!this.isCompleteRadioDevice(session, device)) fail(SAFE_ERROR.unavailable, 409, "The selected device is not fully discovered and usable yet");
       const catalogue = session.selectedCatalogue;
       if (catalogue.capabilityStatus === "ready" ? disposition !== "install"
-        : !["no_safe_controls", "unsupported"].includes(catalogue.capabilityStatus)
-          || disposition !== "remove" && (disposition !== "view_only" || catalogue.usefulReadings !== true)) {
+        : catalogue.capabilityStatus === "no_safe_controls"
+          ? disposition !== "remove" && (disposition !== "view_only" || catalogue.usefulReadings !== true)
+          : catalogue.capabilityStatus === "unsupported"
+            ? !["remove", "retain_unsupported"].includes(disposition)
+            : true) {
         fail(SAFE_ERROR.conflict, 409, "Review the discovered device result and choose a permitted keep or remove action");
       }
       if (disposition === "remove") {
@@ -423,19 +425,20 @@ class NativeCommissioningService {
         descriptorRevision: catalogue.descriptorRevision, descriptorDigest: catalogue.descriptorDigest, capabilitySummary: { controls },
         catalogueStatus: catalogue.capabilityStatus, usefulReadings: catalogue.usefulReadings,
         areaId: session.selectedAreaId, name: session.selectedName || null, customerLabel: session.selectedCustomerLabel };
-      const cloud = await this.platform("finalize", session, { candidateRef: session.selectedCandidateRef, disposition, device: deviceProjection });
-      const expectedLifecycle = disposition === "view_only" ? "VIEW_ONLY" : "INSTALLED";
+      const platformDisposition = disposition === "retain_unsupported" ? "view_only" : disposition;
+      const cloud = await this.platform("finalize", session, { candidateRef: session.selectedCandidateRef, disposition: platformDisposition, device: deviceProjection });
+      const expectedLifecycle = platformDisposition === "view_only" ? "VIEW_ONLY" : "INSTALLED";
       const expectedClass = actor.actorType === "STAFF_INSTALLER" ? "PROPERTY_DEVICE" : "TENANT_DEVICE";
       if (!cloud?.ok || !cloud.device?.id || cloud.device.managementClass !== expectedClass || (cloud.device.ownerMembershipId ?? null) !== actor.membershipId || cloud.device.lifecycle !== expectedLifecycle) fail(SAFE_ERROR.unavailable, 503, "Platform did not confirm the correctly scoped canonical device record and catalogue result");
       await this.mqtt.stopPairing?.().catch(() => {});
       const propertyDevice = actor.actorType === "STAFF_INSTALLER";
       const updated = await this.store.upsertDevice({ ...device, name: session.selectedName || device.originalName || device.name, areaId: session.selectedHubAreaId,
         managementClass: propertyDevice ? "property_device" : "tenant_device", tenantOwnerMembershipId: propertyDevice ? undefined : actor.membershipId,
-        setup: { ...(device.setup || {}), status: "ready", viewOnly: disposition === "view_only", commissionedAt: new Date(this.clock()).toISOString() },
+        setup: { ...(device.setup || {}), status: "ready", viewOnly: platformDisposition === "view_only", unsupported: catalogue.capabilityStatus === "unsupported", commissionedAt: new Date(this.clock()).toISOString() },
         metadata: { ...(device.metadata || {}), managementClass: propertyDevice ? "property_device" : "tenant_device", ...(propertyDevice ? { tenantOwnerMembershipId: undefined, installationRequestId: actor.requestId } : { tenantOwnerMembershipId: actor.membershipId }), cloudDeviceId: cloud.device.id } });
       const platform = this.store.getPlatform?.() || {};
       await this.store.savePlatform({ devicePolicies: { ...(platform.devicePolicies || {}), [updated.id]: {
-        managementClass: expectedClass, ownerMembershipId: actor.membershipId, lifecycle: expectedLifecycle, customerLabel: session.selectedCustomerLabel,
+        managementClass: expectedClass, ownerMembershipId: actor.membershipId, lifecycle: expectedLifecycle, catalogueStatus: catalogue.capabilityStatus, usefulReadings: catalogue.usefulReadings, customerLabel: session.selectedCustomerLabel,
         canonicalAreaIds: [session.selectedAreaId], platformDeviceId: cloud.device.id, overrideName: session.selectedName || null,
         ...(propertyDevice ? { installationRequestId: actor.requestId } : {}),
       } } });

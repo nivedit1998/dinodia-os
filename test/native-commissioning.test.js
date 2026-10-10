@@ -1,12 +1,30 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { execFileSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const { QrPairingCodeCodec } = require("@matter/types");
 const { NativeCommissioningService, fixedSession, MAX_CANDIDATES } = require("../src/commissioning/nativeCommissioningService");
 
 const uuid = () => crypto.randomUUID();
+
+test("protocol operational flags are independent of any removed catalogue marker and remain explicit holds", () => {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("DINODIA_NATIVE_")));
+  const readFlags = (overrides = {}) => JSON.parse(execFileSync(process.execPath, ["-e", "process.stdout.write(JSON.stringify(require('./src/config').nativeCommissioningCapabilities))"], {
+    cwd: process.cwd(), env: { ...env, ...overrides }, encoding: "utf8",
+  }));
+  assert.deepEqual(readFlags(), { nativeZigbeeCommissioningV1: false, nativeMatterCommissioningV1: false });
+  assert.deepEqual(readFlags({ DINODIA_NATIVE_ZIGBEE_COMMISSIONING_ENABLED: "false", DINODIA_NATIVE_MATTER_COMMISSIONING_ENABLED: "false" }), {
+    nativeZigbeeCommissioningV1: false, nativeMatterCommissioningV1: false,
+  });
+  assert.deepEqual(readFlags({ DINODIA_NATIVE_ZIGBEE_COMMISSIONING_ENABLED: "true", DINODIA_NATIVE_MATTER_COMMISSIONING_ENABLED: "true" }), {
+    nativeZigbeeCommissioningV1: true, nativeMatterCommissioningV1: true,
+  });
+  assert.deepEqual(readFlags({ DINODIA_NATIVE_ZIGBEE_COMMISSIONING_ENABLED: "yes", DINODIA_NATIVE_MATTER_COMMISSIONING_ENABLED: "1" }), {
+    nativeZigbeeCommissioningV1: false, nativeMatterCommissioningV1: false,
+  });
+});
 function fixture({ dropFirstCreateResponse = false, matterCommission = async () => ({}), matterRefresh = async () => [], commissioningCapabilities = {
-  nativeZigbeeCommissioningV1: true, nativeMatterCommissioningV1: true, nativeCommissioningCatalogueVersion: "DINODIA-NATIVE-COMMISSIONING-V1",
+  nativeZigbeeCommissioningV1: true, nativeMatterCommissioningV1: true,
 } } = {}) {
   const areaId = uuid(); const homeId = uuid(); const hubInstallId = uuid(); const accountId = uuid();
   const membershipId = uuid(); const sid = uuid(); const trustedDeviceId = uuid();
@@ -142,7 +160,7 @@ test("tenant candidate assignment requires a nonempty custom label and stores th
   assert.equal(finalize.device.name, null);
 });
 
-test("unsupported newly joined radios cannot be installed or retained without useful current readings", async (t) => {
+test("unsupported newly joined radios remain visible and can be retained without invented readings or controls", async (t) => {
   const f = fixture(); t.after(f.close);
   const session = await f.service.start(f.principal, { protocol: "zigbee" }, "commission-unsupported-0001");
   const device = { id: "zigbee:unsupported-device", protocol: "zigbee", available: true, interviewStatus: "successful",
@@ -157,13 +175,26 @@ test("unsupported newly joined radios cannot be installed or retained without us
     candidateRef: candidate.candidateRef, areaId: f.areaId, name: "Unknown accessory", customerLabel: "Accessory" });
   assert.equal(selected.catalogueStatus, "unsupported");
   await assert.rejects(f.service.complete(session.sessionId, f.principal, "install"), { code: "commissioning_revision_conflict" });
-  await assert.rejects(f.service.complete(session.sessionId, f.principal, "view_only"), { code: "commissioning_revision_conflict" });
-  const removed = await f.service.complete(session.sessionId, f.principal, "remove");
-  assert.equal(removed.status, "completed");
-  assert.equal(removed.finalDisposition, "remove");
-  assert.equal(f.store.getDevice(device.id), null);
-  assert.equal(f.platformRequests.filter((row) => row.action === "finalize").length, 0);
-  assert.equal(f.platformRequests.filter((row) => row.action === "transition" && row.result === "REMOVED").length, 1);
+  const retained = await f.service.complete(session.sessionId, f.principal, "retain_unsupported");
+  assert.equal(retained.status, "completed");
+  assert.equal(retained.finalDisposition, "retain_unsupported");
+  assert.equal(f.store.getDevice(device.id).setup.unsupported, true);
+  assert.equal(f.store.getPlatform().devicePolicies[device.id].lifecycle, "VIEW_ONLY");
+  const finalize = f.platformRequests.find((row) => row.action === "finalize");
+  assert.equal(finalize.device.catalogueStatus, "unsupported");
+  assert.equal(finalize.device.usefulReadings, false);
+  assert.equal(finalize.device.capabilitySummary.controls.length, 0);
+});
+
+test("a model approval marker is not required when the protocol is enabled and the enrolled controller is ready", async (t) => {
+  const f = fixture({ commissioningCapabilities: {
+    nativeZigbeeCommissioningV1: true,
+    nativeMatterCommissioningV1: true,
+  } }); t.after(f.close);
+  const started = await f.service.start(f.principal, { protocol: "zigbee" }, "commission-no-model-gate-0001");
+  assert.equal(started.status, "searching");
+  assert.equal(f.platformRequests.filter((row) => row.action === "create").length, 1);
+  assert.equal(f.platformRequests.filter((row) => row.action === "transition").length, 1);
 });
 
 test("fresh readable but safely nonwritable devices can be retained view-only without widening controls", async (t) => {
@@ -293,7 +324,7 @@ test("the hub permits only one active radio commissioning session across tenant 
 });
 
 test("protocol capability must be explicitly enabled for this hub before any session or radio effect", async (t) => {
-  const f = fixture({ commissioningCapabilities: { nativeZigbeeCommissioningV1: false, nativeMatterCommissioningV1: false, nativeCommissioningCatalogueVersion: "" } }); t.after(f.close);
+  const f = fixture({ commissioningCapabilities: { nativeZigbeeCommissioningV1: false, nativeMatterCommissioningV1: false } }); t.after(f.close);
   await assert.rejects(f.service.start(f.principal, { protocol: "zigbee" }, "commission-capability-off-01"), { code: "commissioning_radio_unavailable" });
   assert.equal(f.platformRequests.length, 0);
   assert.equal(Object.keys(f.service.sessions()).length, 0);

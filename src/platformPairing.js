@@ -279,7 +279,12 @@ class PlatformPairing {
       response = await this.fetchImpl(`${this.apiUrl}${path}`, { method: "POST", headers, body: JSON.stringify(signedBody), signal: controller.signal });
     } finally { clearTimeout(timeout); }
     const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw Object.assign(new Error(result.error || result.message || `Platform returned HTTP ${response.status}`), { statusCode: response.status });
+    if (!response.ok) {
+      const responseCode = typeof result.errorCode === "string" && /^[a-z0-9_.:-]{1,80}$/i.test(result.errorCode)
+        ? result.errorCode
+        : `platform_http_${response.status}`;
+      throw Object.assign(new Error(result.error || result.message || `Platform returned HTTP ${response.status}`), { statusCode: response.status, code: responseCode });
+    }
     return result;
   }
 

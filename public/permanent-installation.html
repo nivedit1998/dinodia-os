@@ -24,14 +24,16 @@
     <h1>Permanent device installation</h1>
     <p id="summary" class="muted">Checking this assigned installation and the paired hub…</p>
     <section class="install-card" aria-labelledby="protocol-heading">
-      <h2 id="protocol-heading">Add a supported device</h2>
-      <p class="muted">Only protocols enabled for this enrolled hub and its approved device catalogue can start. A device is registered only after the hub completes its interview and the current Area and descriptor are confirmed.</p>
+      <h2 id="protocol-heading">Add a Zigbee or Matter device</h2>
+      <p class="muted">Dinodia discovers devices from the enrolled radio controller; there is no brand/model allowlist. A device is registered only after its interview and the current Area and descriptor are confirmed. Unsupported devices remain visible with no invented controls or readings.</p>
       <div class="row">
         <button id="start-zigbee" class="primary" type="button" disabled>Start Zigbee search</button>
         <button id="start-matter" class="primary" type="button" disabled>Start Matter setup</button>
         <button id="refresh" type="button">Refresh status</button>
         <button id="cancel" type="button" disabled>Cancel session</button>
       </div>
+      <p id="zigbee-readiness" role="status" class="muted"></p>
+      <p id="matter-readiness" role="status" class="muted"></p>
       <label id="matter-entry" hidden for="matter-payload">Matter QR setup code (only sent over verified secure Dinodia OS)</label>
       <div id="matter-entry-row" class="row" hidden>
         <input id="matter-payload" type="password" autocomplete="off" spellcheck="false" maxlength="512" placeholder="Matter setup code">
@@ -49,11 +51,13 @@
         <button id="select" class="primary" type="button">Review this device</button>
         <button id="install" class="primary" type="button" hidden>Install and sync</button>
         <button id="view-only" type="button" hidden>Keep as view-only</button>
+        <button id="retain-unsupported" type="button" hidden>Keep visible without controls</button>
         <button id="remove" type="button" hidden>Remove unsupported candidate</button>
       </div>
     </section>
     <section id="candidates" class="install-card" hidden aria-label="Discovered devices"><h2>Discovery results</h2><div id="candidate-list"></div></section>
     <footer class="muted"><p>This workspace is limited to the current assigned request, paired hub, and active original Areas. It does not grant homeowner or tenant ownership.</p>
+      <button id="add-next" type="button" hidden>Add next device</button>
       <button id="end-session" type="button">End installation session</button></footer>
   </main>
   <script src="/permanent-installation.js" defer></script>

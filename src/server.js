@@ -3541,11 +3541,30 @@ function nativeDeviceView(principal, device) {
     if (!principal) return nativeContractError(res, 401, "AUTH_REQUIRED", "The assigned work or Company Portal session expired. Close this window and reopen the work from Company Portal.");
     try {
       if (req.method === "GET" && !sessionId && !action) {
+        const zigbeeSettings = hubStore.getZigbee?.() || {};
+        const zigbeeRuntimeState = await zigbeeRuntime.status();
+        const zigbeeBroker = mqtt.status();
+        const zigbeeAdapterReady = zigbeeBroker.connected === true
+          && Boolean(zigbeeSettings.adapterPath || runtimeConfig.zigbeeAdapterPath)
+          && (zigbeeRuntimeState.configured !== true || zigbeeRuntimeState.running === true);
+        const matterStatus = matter.status();
+        const threadSettings = hubStore.getThread?.() || {};
+        const threadRuntimeState = await threadRuntime.status();
+        const threadUrl = runtimeConfig.otbrUrl || (threadSettings.rcpDevice || runtimeConfig.threadRcpDevice ? "http://127.0.0.1:8081" : "");
+        const threadNetwork = await fetchOtbr(threadUrl ? `${threadUrl.replace(/\/$/, "")}/node` : "");
+        const threadReady = Boolean(threadSettings.configured && threadRuntimeState.running === true
+          && threadNetwork.reachable === true && ["leader", "router", "child", "detached"].includes(String(threadNetwork.state)));
         return json(res, 200, { schemaVersion: "dinodia.v1", requestId: principal.requestId, workflowId: principal.workflow,
           areas: (Array.isArray(principal.areaOptions) ? principal.areaOptions : []).map((area) => ({ id: area.id, name: area.name })),
           protocols: {
-            zigbee: { enabled: runtimeConfig.nativeCommissioningCapabilities.nativeZigbeeCommissioningV1 === true, adapterReady: mqtt.status().connected === true && Boolean(hubStore.getZigbee?.().adapterPath) },
-            matter: { enabled: runtimeConfig.nativeCommissioningCapabilities.nativeMatterCommissioningV1 === true, adapterReady: matter.status().connected === true && hubStore.getThread?.().configured === true },
+            zigbee: { enabled: runtimeConfig.nativeCommissioningCapabilities.nativeZigbeeCommissioningV1 === true, adapterReady: zigbeeAdapterReady,
+              readinessMessage: !zigbeeBroker.connected ? "The MQTT coordinator connection is offline. No Zigbee join will start."
+                : !Boolean(zigbeeSettings.adapterPath || runtimeConfig.zigbeeAdapterPath) ? "No Zigbee coordinator adapter is selected. Configure the installed coordinator in the full Home dashboard first."
+                  : zigbeeRuntimeState.configured === true && zigbeeRuntimeState.running !== true ? "The Zigbee2MQTT service is not running. Check the coordinator and service in the full Home dashboard."
+                    : "The Zigbee coordinator connection and configured service are ready." },
+            matter: { enabled: runtimeConfig.nativeCommissioningCapabilities.nativeMatterCommissioningV1 === true, adapterReady: matterStatus.connected === true,
+              threadReady, threadConfigured: threadSettings.configured === true, threadServiceRunning: threadRuntimeState.running === true,
+              readinessMessage: matterStatus.connected === true ? `Matter Server is connected.${threadReady ? " The Thread network is ready for compatible Matter-over-Thread devices." : " Matter-over-Thread devices additionally need a current Thread border-router network; the Matter controller connection is reported separately."}` : "Matter Server is not connected. No Matter setup payload will be accepted." },
           } }, { "Cache-Control": "no-store" });
       }
       if (!nativeCommissioningService) return nativeContractError(res, 503, "HUB_UNAVAILABLE", "The hub commissioning service is unavailable", true);

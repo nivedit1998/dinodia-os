@@ -9,7 +9,7 @@ const { NATIVE_AUTOMATION_STORE_VERSION, LIMITS } = require("./automations/const
 const { migrateLegacyAutomations } = require("./automations/legacyAdapter");
 const { getSurfaces } = require("./capabilities/devicePresentation");
 const { serializeDevice } = require("./contracts/dinodiaV1");
-const { enqueueSyncEventInState, initialSyncOutbox, nextSyncBatch, normalizeSyncOutbox } = require("./sync/syncOutbox");
+const { compactUnregisteredPropertyDeviceEvents, enqueueSyncEventInState, initialSyncOutbox, nextSyncBatch, normalizeSyncOutbox } = require("./sync/syncOutbox");
 const { validateCloudConfiguration } = require("./sync/cloudConfiguration");
 const { activityFor, advanceUsage, endUsageAssignment, initialUsageState, observeUsage } = require("./sync/usageBuckets");
 
@@ -985,6 +985,12 @@ class Store {
         }
       }
       state.platform = { ...(state.platform || {}), ...clone(platformPatch) };
+      const currentPropertyDeviceIds = new Set(Object.entries(incomingPolicies)
+        .filter(([, policy]) => policy?.managementClass === "PROPERTY_DEVICE"
+          && !["REMOVAL_PENDING", "REMOVED", "RETIRED", "RECOMMISSION_REQUIRED"].includes(String(policy.lifecycle)))
+        .map(([osDeviceId]) => String(osDeviceId)));
+      const syncOutbox = state.syncOutbox = normalizeSyncOutbox(state.syncOutbox);
+      compactUnregisteredPropertyDeviceEvents(syncOutbox, currentPropertyDeviceIds);
       state.platform.pendingTenantDeviceRemovals = [...pendingRemovals.values()].slice(-500);
       state.automations = state.automations || {};
       state.automationTriggers = state.automationTriggers || {};
@@ -2014,6 +2020,11 @@ class Store {
       }
       outbox.events = outbox.events.filter((event) => event.sequence > outbox.acknowledgedSequence);
       outbox.inFlight = null;
+      const propertyDeviceIds = new Set(Object.entries(this.state.platform?.devicePolicies || {})
+        .filter(([, policy]) => policy?.managementClass === "PROPERTY_DEVICE"
+          && !["REMOVAL_PENDING", "REMOVED", "RETIRED", "RECOMMISSION_REQUIRED"].includes(String(policy.lifecycle)))
+        .map(([osDeviceId]) => String(osDeviceId)));
+      compactUnregisteredPropertyDeviceEvents(outbox, propertyDeviceIds);
       outbox.cloudRevision = Math.max(outbox.cloudRevision, Number(receipt.cloudRevision) || 0);
       // The caller has already validated and durably applied the returned
       // configuration before acknowledging this batch.

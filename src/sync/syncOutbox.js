@@ -7,6 +7,7 @@ const SYNC_BATCH_MAX_EVENTS = 200;
 const SYNC_BATCH_MAX_BYTES = 512 * 1024;
 const CRITICAL_TYPES = new Set(["area.tombstone", "device.tombstone", "control.catalog.upsert", "control.catalog.tombstone", "incident.transition", "automation.outcome", "update.status"]);
 const COALESCIBLE_TYPES = new Set(["area.upsert", "device.upsert", "control.catalog.upsert", "usage.bucket", "device.state"]);
+const PROPERTY_DEVICE_BOUND_TYPES = new Set(["device.upsert", "control.catalog.upsert", "control.catalog.tombstone", "device.state", "usage.bucket", "temperature.sample"]);
 
 function initialSyncOutbox() {
   return {
@@ -75,6 +76,27 @@ function compactSuperseded(outbox, type, aggregateId) {
   previous.payload = { supersededBy: outbox.nextSequence };
   previous.critical = false;
   return true;
+}
+
+function compactUnregisteredPropertyDeviceEvents(outbox, currentPropertyDeviceIds) {
+  const current = currentPropertyDeviceIds instanceof Set ? currentPropertyDeviceIds : new Set();
+  const inFlightSequences = new Set((outbox.inFlight?.events || []).map((event) => Number(event.sequence)));
+  let compacted = 0;
+  for (const event of outbox.events) {
+    if (Number(event.sequence) <= Number(outbox.acknowledgedSequence || 0) || inFlightSequences.has(Number(event.sequence))
+      || !PROPERTY_DEVICE_BOUND_TYPES.has(String(event.type)) || !event.payload?.osDeviceId
+      || current.has(String(event.payload.osDeviceId))) continue;
+    // A policy snapshot is the current authority for property projections. If
+    // that authority is gone, stale unsent device data must not block the
+    // contiguous stream or be replayed into another management class. Keep the
+    // sequence with the same redacted marker used for safe metadata compaction.
+    event.type = "sync.compacted";
+    event.aggregateId = "";
+    event.payload = { supersededBy: outbox.nextSequence };
+    event.critical = false;
+    compacted += 1;
+  }
+  return compacted;
 }
 
 function enqueueSyncEventInState(state, type, aggregateId, payload, options = {}) {
@@ -168,6 +190,7 @@ module.exports = {
   SYNC_OUTBOX_MAX_BYTES,
   SYNC_OUTBOX_MAX_EVENTS,
   enqueueSyncEventInState,
+  compactUnregisteredPropertyDeviceEvents,
   initialSyncOutbox,
   nextSyncBatch,
   normalizeSyncOutbox,

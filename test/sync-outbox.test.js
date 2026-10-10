@@ -73,6 +73,73 @@ test("inventory mutations enqueue bounded safe events atomically and resume the 
   }
 });
 
+test("a current cloud policy compacts only unsent property events for devices no longer authorized", async () => {
+  const { directory, store } = temporaryStore();
+  try {
+    const hubId = "00000000-0000-4000-8000-000000000001";
+    const observedAt = "2026-10-10T10:00:00.000Z";
+    const configuration = (revision, devicePolicies) => {
+      const unsigned = {
+        revision, policyRevision: revision,
+        areas: [{ id: "area-a", osAreaId: "os-area-a", originalName: "Kitchen", overrideName: null, revision: 1 }],
+        memberships: [], devicePolicies, automations: [], releasePolicy: { mode: "MANUAL", automaticInstallEnabled: false, desiredRelease: null },
+      };
+      return { ...unsigned, checksum: configChecksum(unsigned) };
+    };
+    await store.saveArea({ name: "Kitchen" }, "os-area-a");
+    await applyCloudConfiguration(store, configuration(1, [{
+      osDeviceId: "os-device-revoked", managementClass: "PROPERTY_DEVICE", ownerMembershipId: null,
+      analyticsCategory: "RADIATOR", lifecycle: "INSTALLED", customerLabel: null, overrideName: null,
+      descriptorRevision: 1, descriptorDigest: "a".repeat(64), osAreaIds: ["os-area-a"],
+    }]));
+    await store.upsertDevice({
+      id: "os-device-revoked", name: "Disposable radiator", protocol: "zigbee", areaId: "os-area-a",
+      setup: { status: "ready", assignmentMode: "device_inherited_v1", completedAt: observedAt },
+      entities: {
+        demand: { id: "demand", name: "Heat demand", state: true, sourceObservedAt: observedAt, domain: "climate", capability: {
+          controlId: "control-demand", kind: "binary", readable: true, writable: false, observable: true,
+          semanticRole: "active_heat_demand", maxStateValiditySeconds: 1800, bindings: [],
+        } },
+        temperature: { id: "temperature", name: "Temperature", state: 20, sourceObservedAt: observedAt, domain: "sensor", capability: {
+          controlId: "control-temperature", kind: "number", readable: true, writable: false, observable: true,
+          semanticRole: "ambient_temperature", maxStateValiditySeconds: 1800, bindings: [],
+        } },
+      },
+    }, { nowMs: Date.parse("2026-10-10T10:00:20.000Z") });
+    for (const [index, type] of ["control.catalog.upsert", "control.catalog.tombstone", "device.state", "usage.bucket", "temperature.sample"].entries()) {
+      await store.queueSyncEvent(type, `synthetic-aggregate-${index}`, { osDeviceId: "os-device-revoked", value: "disposable" }, { now: Date.parse("2026-10-10T10:00:21.000Z") + index });
+    }
+    const queuedBefore = store.getSyncOutbox();
+    const deviceBoundTypes = new Set(["device.upsert", "control.catalog.upsert", "control.catalog.tombstone", "device.state", "usage.bucket", "temperature.sample"]);
+    const originalDeviceEvents = queuedBefore.events.filter((event) => deviceBoundTypes.has(event.type));
+    assert.deepEqual(new Set(originalDeviceEvents.map((event) => event.type)), deviceBoundTypes);
+    assert.equal(originalDeviceEvents.some((event) => event.payload.osDeviceId !== "os-device-revoked"), false);
+
+    const runtime = { kind: "dinodia_os", version: "test", capabilities: {} };
+    const inFlight = await store.prepareSyncBatch(hubId, runtime, Date.parse("2026-10-10T10:00:30.000Z"), { allowedTypesPrefix: ["area.upsert"] });
+    assert.deepEqual(inFlight.events.map((event) => event.type), ["area.upsert"]);
+    await applyCloudConfiguration(store, configuration(2, []));
+
+    let afterPolicy = store.getSyncOutbox();
+    assert.deepEqual(afterPolicy.inFlight, inFlight, "a policy refresh must never rewrite exact bytes already in flight");
+    const replaced = afterPolicy.events.filter((event) => event.sequence > inFlight.toSequence);
+    assert.equal(replaced.length, originalDeviceEvents.length);
+    assert.ok(replaced.every((event) => event.type === "sync.compacted" && event.critical === false
+      && Object.keys(event.payload).join(",") === "supersededBy" && event.payload.supersededBy > event.sequence));
+    assert.equal(JSON.stringify(replaced).includes("os-device-revoked"), false, "a revoked projection must not remain in the durable retry queue");
+
+    await store.acknowledgeSyncBatch({ streamId: inFlight.streamId, acceptedThroughSequence: inFlight.toSequence,
+      cloudRevision: 2, configurationAppliedRevision: 1 }, Date.parse("2026-10-10T10:00:40.000Z"));
+    afterPolicy = store.getSyncOutbox();
+    assert.equal(afterPolicy.events.length, originalDeviceEvents.length);
+    assert.ok(afterPolicy.events.every((event) => event.type === "sync.compacted"));
+    const retry = await store.prepareSyncBatch(hubId, runtime, Date.parse("2026-10-10T10:00:50.000Z"));
+    assert.ok(retry.events.every((event) => event.type === "sync.compacted"), "the contiguous retry carries only redacted sequence markers");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("installation bootstrap reframes only a server-unaccepted in-flight prefix to Areas and leaves other durable events queued", async () => {
   const { directory, store } = temporaryStore();
   try {
