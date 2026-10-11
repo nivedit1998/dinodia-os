@@ -43,18 +43,29 @@ test("assigned commissioning route serves a current grant and denies stale ident
   };
   const hub = createHub({
     config: { nodeEnv: "production", v2Environment: "test", platformApiUrl: canonicalOrigin, hubId,
+      nativeCommissioningCapabilities: { nativeZigbeeCommissioningV1: false, nativeMatterCommissioningV1: false,
+        nativeStaffZigbeeCommissioningV1: true, nativeStaffMatterCommissioningV1: true, nativeStaffDeviceRegistrationV1: true },
       operatorPublicKey: keys.publicKey.export({ format: "pem", type: "spki" }).toString(), port: 0, nativeApiPort: 0,
       dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"),
       staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
     identityBroker: { async getPublicIdentity() { return { serial: hubId, generation: 9 }; } },
-    mqttBridge: { status: () => ({ connected: true }), start() {}, close() {}, pairingStatus: () => ({ active: false, found: [] }) },
-    matterBridge: { status: () => ({ connected: false }), start() {}, close() {} },
+    mqttBridge: { status: () => ({ connected: true }), start() {}, close() {}, pairingStatus: () => ({ active: false, found: [] }),
+      startPairing: async () => ({ active: true }), stopPairing: async () => ({ active: false }) },
+    matterBridge: { status: () => ({ connected: true }), start() {}, close() {}, commission: async () => ({}) },
     cloudflareTunnel: { start() {}, async stop() {}, status: () => ({ configured: false, connected: false, running: false, mode: "disabled", hostname: "", publicUrl: "" }) },
     platformSync: { start() {}, stop() {}, status: () => ({ configured: false }) },
     logger: { log() {}, warn() {}, error() {} },
   });
   t.after(async () => { await hub.stop().catch(() => {}); global.fetch = originalFetch; await fs.rm(directory, { recursive: true, force: true }); });
-  await hub.store.savePlatform({ homeId, hubInstallId, paired: true });
+  await hub.store.savePlatform({ homeId, hubInstallId, paired: true, areaBindings: [{ areaId, hubAreaId: "os-area-1" }] });
+  await hub.store.saveZigbee({ adapterPath: "/dev/ttyUSB-test-zigbee" });
+  const existingDeviceId = "zigbee:assigned-route-radiator";
+  await hub.store.upsertDevice({ id: existingDeviceId, protocol: "zigbee", available: true, interviewStatus: "successful",
+    originalName: "Assigned-route radiator", name: "Assigned-route radiator", areaId: "os-area-1",
+    protocolIdentity: { ieeeAddress: "0x00124b0000000abc" }, setup: { status: "ready" },
+    entities: { climate: { name: "Heating", capability: { category: "control", semanticRole: "target_temperature", readable: true, writable: true } } },
+    metadata: { manufacturer: "SONOFF", model: "TRVZB" } });
+  await hub.store.addEvent({ type: "device_setup_completed", deviceId: existingDeviceId, areaId: "os-area-1", timestamp: new Date().toISOString() });
   let liveIdentityGeneration = 8;
   hub.pairing.getPublicIdentity = async () => ({ serial: hubId, generation: liveIdentityGeneration });
   hub.pairing.start = () => {};
@@ -65,6 +76,9 @@ test("assigned commissioning route serves a current grant and denies stale ident
   hub.pairing.requestWithHubIdentity = async (route, body) => {
     if (route.endsWith("/operator-session/attempt")) return { setupAttemptId: body.setupAttemptId, expiresAt: new Date(Date.now() + 60_000).toISOString() };
     if (route.endsWith("/operator-session/revalidate")) return { active: true, homeId: revalidatedHomeId, hubInstallationId: revalidatedHubInstallId };
+    if (route.endsWith("/commissioning-sessions")) return body.action === "create"
+      ? { sessionId: body.sessionId, expiresAt: body.expiresAt, revision: 1 }
+      : { sessionId: body.sessionId, revision: Number(body.expectedRevision) + 1, state: body.status };
     return { ok: true };
   };
 
@@ -95,7 +109,31 @@ test("assigned commissioning route serves a current grant and denies stale ident
   assert.equal(liveContext.status, 200);
   assert.deepEqual(liveBody.areas.map((area) => area.name), [privateAreaName]);
   const liveDevices = await fetch(`${setupOrigin}/_dinodia/installer/commissioning/devices`, { headers: { cookie: authorityCookie } });
+  const liveDevicesBody = await liveDevices.json();
   assert.equal(liveDevices.status, 200);
+  assert.equal(liveDevicesBody.devices.length, 1, "the actual assigned route lists an eligible previously-interviewed local device");
+  assert.equal(liveDevicesBody.devices[0].name, "Assigned-route radiator");
+  assert.equal(JSON.stringify(liveDevicesBody).includes(existingDeviceId), false, "local device IDs remain opaque to the browser");
+
+  const startHeaders = { ...commonHeaders, cookie: authorityCookie, "idempotency-key": "assigned-route-zigbee-0001" };
+  const startZigbee = await fetch(`${setupOrigin}/_dinodia/installer/commissioning/sessions`, {
+    method: "POST", headers: startHeaders, body: JSON.stringify({ schemaVersion: "dinodia.v1", operationKind: "PAIR_NEW", protocol: "zigbee" }),
+  });
+  const zigbeeSession = await startZigbee.json();
+  assert.equal(startZigbee.status, 201, JSON.stringify(zigbeeSession));
+  assert.equal(zigbeeSession.status, "searching");
+
+  const cancel = await fetch(`${setupOrigin}/_dinodia/installer/commissioning/sessions/${encodeURIComponent(zigbeeSession.sessionId)}/cancel`, {
+    method: "POST", headers: { ...commonHeaders, cookie: authorityCookie }, body: JSON.stringify({ schemaVersion: "dinodia.v1" }),
+  });
+  assert.equal(cancel.status, 200, await cancel.clone().text());
+  const startMatter = await fetch(`${setupOrigin}/_dinodia/installer/commissioning/sessions`, {
+    method: "POST", headers: { ...startHeaders, "idempotency-key": "assigned-route-matter-0001" },
+    body: JSON.stringify({ schemaVersion: "dinodia.v1", operationKind: "PAIR_NEW", protocol: "matter" }),
+  });
+  const matterSession = await startMatter.json();
+  assert.equal(startMatter.status, 201, JSON.stringify(matterSession));
+  assert.equal(matterSession.status, "awaiting_payload");
 
   liveIdentityGeneration = 9;
   const context = await fetch(`${setupOrigin}/_dinodia/installer/commissioning`, { headers: { cookie: authorityCookie } });

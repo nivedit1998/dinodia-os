@@ -20,7 +20,7 @@ class Element {
   add(child) { this.children.push(child); }
 }
 
-function harness({ context, devicesStatus = 200, holdDeviceList = false, seededStorage = {} } = {}) {
+function harness({ context, devicesStatus = 200, devices = [], holdDeviceList = false, seededStorage = {} } = {}) {
   const elements = new Map([...markup.matchAll(/\bid="([^"]+)"/g)].map(([, id]) => [id, new Element(id)]));
   const storage = new Map();
   for (const [key, value] of Object.entries(seededStorage)) storage.set(key, String(value));
@@ -45,7 +45,7 @@ function harness({ context, devicesStatus = 200, holdDeviceList = false, seededS
     if (url === "/_dinodia/installer/commissioning") return response(200, context);
     if (url === "/_dinodia/installer/commissioning/devices") {
       if (deviceListGate) await deviceListGate;
-      return response(devicesStatus, devicesStatus === 200 ? { devices: [], completedDevices: [] }
+      return response(devicesStatus, devicesStatus === 200 ? { devices, completedDevices: [] }
         : { error: { code: "COMMISSIONING_AUTHORITY_DENIED", message: "A current assigned permanent-installation authority is required" } });
     }
     return response(404, { error: "not_found" });
@@ -106,4 +106,22 @@ test("assigned installation page keeps radio actions disabled until all required
   await page.flush();
   assert.equal(page.elements.get("start-zigbee").disabled, false,
     "radio actions become available only after the required protected checks confirm current authority and readiness");
+});
+
+test("assigned installation page renders eligible already-paired devices with an explicit registration action", async () => {
+  const device = { candidateRef: "44444444-4444-4444-8444-444444444444", protocol: "zigbee", name: "Living room radiator",
+    manufacturer: "SONOFF", model: "TRVZB", originalAreaName: "Living Room", originalAreaId: areaId,
+    availableAreas: [{ id: areaId, name: "Private Test Area" }] };
+  const page = harness({ context: validContext(), devices: [device] });
+  await page.flush();
+  const list = page.elements.get("existing-device-list");
+  assert.equal(list.children.length, 1);
+  const rendered = list.children[0];
+  assert.equal(rendered.children[0].textContent, "Living room radiator");
+  assert.match(rendered.children[1].textContent, /ZIGBEE.*SONOFF.*TRVZB.*Living Room/);
+  assert.match(rendered.children[2].textContent, /Not registered to this property yet/);
+  assert.equal(rendered.children[3].textContent, "Review and register");
+  assert.equal(rendered.children[3].disabled, false);
+  assert.equal(list.children.some((child) => JSON.stringify(child).includes(device.candidateRef)), false,
+    "the opaque review reference is used only by the registration action and is not rendered into page text");
 });

@@ -3633,6 +3633,7 @@ function nativeDeviceView(principal, device) {
     const listPath = `${rootPath}/devices`;
     const isRootPath = url.pathname === rootPath;
     const isDeviceListPath = url.pathname === listPath;
+    const isSessionCollection = url.pathname === `${rootPath}/sessions`;
     const pathMatch = url.pathname.match(/^\/_dinodia\/installer\/commissioning\/sessions(?:\/([^/]+)(?:\/(matter-payload|select|complete|cancel|resume))?)?$/);
     if (!isRootPath && !isDeviceListPath && !pathMatch) return nativeContractError(res, 404, "RESOURCE_NOT_FOUND", "The commissioning route is unavailable");
     const sessionId = pathMatch?.[1] ? decodeURIComponent(pathMatch[1]) : "";
@@ -3683,7 +3684,7 @@ function nativeDeviceView(principal, device) {
               readinessMessage: matterStatus.connected === true ? `Matter Server is connected.${threadReady ? " The Thread network is ready for compatible Matter-over-Thread devices." : " Matter-over-Thread devices additionally need a current Thread border-router network; the Matter controller connection is reported separately."}` : "Matter Server is not connected. No Matter setup payload will be accepted." },
           } }, { "Cache-Control": "no-store" });
       }
-      if (req.method === "POST" && isRootPath) {
+      if (req.method === "POST" && isSessionCollection) {
         const body = await readBody(req, 4096);
         const operationKind = body.operationKind || "PAIR_NEW";
         const expected = operationKind === "REGISTER_EXISTING" ? "candidateRef\noperationKind\nprotocol\nschemaVersion"
