@@ -292,6 +292,198 @@ test("incident transitions use the durable native sync stream and retire only af
   pairing.stop();
 });
 
+function pairingFixture({ serial, hubInstallId, syncStreamId = null, syncAcceptedSequence = 0, configurationRevision = 5, acknowledgedCloudRevision = 5, divergent = false } = {}) {
+  const directoryPromise = fs.mkdtemp(path.join(os.tmpdir(), "dinodia-sync-config-recovery-"));
+  return directoryPromise.then(async (directory) => {
+    const store = new Store(path.join(directory, "dinodia.json"));
+    await store.saveIdentity({ serial });
+    const vault = new SecretVault({ dataDir: directory });
+    const identity = generateManufacturingIdentity({ serial });
+    const record = vaultIdentityRecord(identity);
+    for (const [key, value] of Object.entries({
+      "platform.identityPrivateKey": record.signingPrivateKey,
+      "platform.identityPublicKey": record.signingPublicKey,
+      "platform.encryptionPrivateKey": record.encryptionPrivateKey,
+      "platform.encryptionPublicKey": record.encryptionPublicKey,
+      "platform.identityGeneration": "1",
+      "platform.machineCredential": "test-machine-credential",
+    })) await vault.set(key, value);
+    await store.savePlatform({ paired: true, provisioningCredentialVersion: 1, hubInstallId, homeId: "home-a" });
+    return { directory, store, vault, syncStreamId, syncAcceptedSequence, configurationRevision, acknowledgedCloudRevision, divergent };
+  });
+}
+
+function refreshConfiguration(revision) {
+  return signedConfiguration({ revision, policyRevision: 1, areas: [], memberships: [], devicePolicies: [], automations: [],
+    releasePolicy: { mode: "MANUAL", automaticInstallEnabled: false, desiredRelease: null } });
+}
+
+test("stale configuration refresh applies policy without consuming the durable event batch", async () => {
+  const serial = "DINODIA-CONFIG-REFRESH-HUB";
+  const hubInstallId = "11111111-1111-4111-8111-111111111111";
+  const fixture = await pairingFixture({ serial, hubInstallId });
+  try {
+    const { directory, store, vault } = fixture;
+    await store.queueSyncEvent("update.status", "updater", { revision: 1, trustState: "unprovisioned" }, { critical: true });
+    const originalBatch = await store.prepareSyncBatch(hubInstallId, { kind: "dinodia_os", version: "test", capabilities: {} });
+    assert.ok(originalBatch);
+    const seen = [];
+    let outboxDuringConfigurationRefresh = null;
+    const pairing = new PlatformPairing({
+      store, vault, apiUrl: "https://platform.test", serial, intervalMs: 60000, logger: { error() {}, warn() {} },
+      fetchImpl: async (url, options) => {
+        const body = JSON.parse(options.body);
+        if (url.endsWith("/token-state")) return { ok: true, async json() { return {
+          hubInstallId, homeId: "home-a", latestVersion: 0, publishedVersion: 0, operatorCredentialStates: [], offlineAuthorisations: [],
+          areaBindings: [], policyRevision: 1, installationSyncMode: "ACTIVE", syncStreamId: null, syncAcceptedSequence: 0,
+          cloudConfigurationRevision: 5, acknowledgedCloudRevision: 5,
+        }; } };
+        if (url.endsWith("/v2/sync")) {
+          seen.push(structuredClone(body));
+          const configuration = refreshConfiguration(5);
+          if (body.configurationRefreshOnly === true) {
+            outboxDuringConfigurationRefresh = store.getSyncOutbox();
+            return { ok: true, async json() { return {
+              configurationRefreshOnly: true, streamId: body.streamId, syncStreamId: null, syncAcceptedSequence: 0,
+              cloudRevision: 5, configurationAppliedRevision: body.acknowledgedCloudRevision,
+              configuration, resnapshotRequired: false,
+            }; } };
+          }
+          return { ok: true, async json() { return {
+            streamId: body.streamId, cloudRevision: 5, configurationAppliedRevision: body.acknowledgedCloudRevision,
+            acceptedThroughSequence: body.toSequence, resnapshotRequired: false, configuration,
+          }; } };
+        }
+        if (url.endsWith("/heartbeat")) return { ok: true, async json() { return { ok: true, online: true }; } };
+        throw new Error(`Unexpected test route: ${url}`);
+      },
+    });
+    await pairing.syncNow();
+    assert.equal(seen[0]?.configurationRefreshOnly, true, "the authenticated configuration-only request precedes event submission");
+    assert.equal(seen[0]?.events.length, 0);
+    assert.equal(seen[0]?.acknowledgedCloudRevision, 0);
+    assert.equal(seen[1]?.configurationRefreshOnly, undefined);
+    assert.equal(outboxDuringConfigurationRefresh.acknowledgedSequence, 0);
+    assert.deepEqual(outboxDuringConfigurationRefresh.inFlight, originalBatch, "refresh preserves the exact durable in-flight body");
+    assert.ok(outboxDuringConfigurationRefresh.events.some((event) => event.sequence === originalBatch.fromSequence));
+    assert.equal(store.getSyncOutbox().acknowledgedSequence, originalBatch.toSequence, "the cursor advances only after the subsequent ordinary event acknowledgement");
+    pairing.stop();
+  } finally { await fs.rm(fixture.directory, { recursive: true, force: true }); }
+});
+
+test("configuration refresh leaves a divergent remote stream queued and fail-closed", async () => {
+  const serial = "DINODIA-CONFIG-REFRESH-DIVERGED-HUB";
+  const hubInstallId = "22222222-2222-4222-8222-222222222222";
+  const serverStreamId = "remote-stream-accepted-18";
+  const fixture = await pairingFixture({ serial, hubInstallId, syncStreamId: serverStreamId, syncAcceptedSequence: 18, divergent: true });
+  try {
+    const { directory, store, vault } = fixture;
+    await store.queueSyncEvent("update.status", "updater", { revision: 1, trustState: "unprovisioned" }, { critical: true });
+    const before = store.getSyncOutbox();
+    const seen = [];
+    const pairing = new PlatformPairing({
+      store, vault, apiUrl: "https://platform.test", serial, intervalMs: 60000, logger: { error() {}, warn() {} },
+      fetchImpl: async (url, options) => {
+        const body = JSON.parse(options.body);
+        if (url.endsWith("/token-state")) return { ok: true, async json() { return {
+          hubInstallId, homeId: "home-a", latestVersion: 0, publishedVersion: 0, operatorCredentialStates: [], offlineAuthorisations: [],
+          areaBindings: [], policyRevision: 1, installationSyncMode: "ACTIVE", syncStreamId: serverStreamId, syncAcceptedSequence: 18,
+          cloudConfigurationRevision: 5, acknowledgedCloudRevision: 5,
+        }; } };
+        if (url.endsWith("/v2/sync")) {
+          seen.push(structuredClone(body));
+          const configuration = refreshConfiguration(5);
+          return { ok: true, async json() { return {
+            configurationRefreshOnly: true, streamId: body.streamId, syncStreamId: serverStreamId, syncAcceptedSequence: 18,
+            cloudRevision: 5, configurationAppliedRevision: body.acknowledgedCloudRevision,
+            configuration, resnapshotRequired: false,
+          }; } };
+        }
+        throw new Error(`Unexpected test route: ${url}`);
+      },
+    });
+    await pairing.syncNow();
+    const after = store.getSyncOutbox();
+    assert.equal(seen.length, 1, "no ordinary event request is sent across a divergent server cursor");
+    assert.equal(seen[0].configurationRefreshOnly, true);
+    assert.equal(after.acknowledgedSequence, before.acknowledgedSequence);
+    assert.deepEqual(after.events, before.events);
+    assert.deepEqual(after.inFlight, before.inFlight);
+    assert.equal(after.lastErrorCode, "hub_sync_stream_reconciliation_required");
+    pairing.stop();
+  } finally { await fs.rm(fixture.directory, { recursive: true, force: true }); }
+});
+
+test("restricted installation bootstrap never requests a full Home configuration refresh", async () => {
+  const serial = "DINODIA-CONFIG-REFRESH-BOOTSTRAP-HUB";
+  const hubInstallId = "33333333-3333-4333-8333-333333333333";
+  const fixture = await pairingFixture({ serial, hubInstallId });
+  try {
+    const { store, vault } = fixture;
+    await store.queueSyncEvent("update.status", "updater", { revision: 1, trustState: "unprovisioned" }, { critical: true });
+    const before = store.getSyncOutbox();
+    const syncRequests = [];
+    const pairing = new PlatformPairing({
+      store, vault, apiUrl: "https://platform.test", serial, intervalMs: 60000, logger: { error() {}, warn() {} },
+      fetchImpl: async (url, options) => {
+        const body = JSON.parse(options.body);
+        if (url.endsWith("/token-state")) return { ok: true, async json() { return {
+          hubInstallId, homeId: "home-a", latestVersion: 0, publishedVersion: 0, operatorCredentialStates: [], offlineAuthorisations: [],
+          areaBindings: [], policyRevision: 1, installationSyncMode: "INSTALLATION_BOOTSTRAP", syncStreamId: null, syncAcceptedSequence: 0,
+          cloudConfigurationRevision: 5, acknowledgedCloudRevision: 5,
+        }; } };
+        if (url.endsWith("/v2/sync")) { syncRequests.push(structuredClone(body)); throw new Error("restricted installation attempted a configuration refresh"); }
+        if (url.endsWith("/heartbeat")) return { ok: true, async json() { return { ok: true, online: true }; } };
+        throw new Error(`Unexpected test route: ${url}`);
+      },
+    });
+    await pairing.syncNow();
+    const after = store.getSyncOutbox();
+    assert.deepEqual(syncRequests, [], "restricted bootstrap does not request the full Home policy snapshot");
+    assert.equal(after.cloudRevision, before.cloudRevision);
+    assert.deepEqual(after.events, before.events);
+    assert.deepEqual(after.inFlight, before.inFlight);
+    assert.equal(after.acknowledgedSequence, before.acknowledgedSequence);
+    assert.equal(after.lastErrorCode, "hub_sync_configuration_refresh_unavailable");
+    pairing.stop();
+  } finally { await fs.rm(fixture.directory, { recursive: true, force: true }); }
+});
+
+test("a missing remote stream identity cannot silently reset a locally acknowledged cursor", async () => {
+  const serial = "DINODIA-CONFIG-REFRESH-MISSING-CURSOR-HUB";
+  const hubInstallId = "44444444-4444-4444-8444-444444444444";
+  const fixture = await pairingFixture({ serial, hubInstallId });
+  try {
+    const { store, vault } = fixture;
+    await store.queueSyncEvent("update.status", "updater", { revision: 1, trustState: "unprovisioned" }, { critical: true });
+    const localBatch = await store.prepareSyncBatch(hubInstallId, { kind: "dinodia_os", version: "test", capabilities: {} });
+    await store.acknowledgeSyncBatch({ streamId: localBatch.streamId, acceptedThroughSequence: localBatch.toSequence, cloudRevision: 1, configurationAppliedRevision: 1 });
+    const before = store.getSyncOutbox();
+    const syncRequests = [];
+    const pairing = new PlatformPairing({
+      store, vault, apiUrl: "https://platform.test", serial, intervalMs: 60000, logger: { error() {}, warn() {} },
+      fetchImpl: async (url, options) => {
+        const body = JSON.parse(options.body);
+        if (url.endsWith("/token-state")) return { ok: true, async json() { return {
+          hubInstallId, homeId: "home-a", latestVersion: 0, publishedVersion: 0, operatorCredentialStates: [], offlineAuthorisations: [],
+          areaBindings: [], policyRevision: 1, installationSyncMode: "ACTIVE", syncStreamId: null, syncAcceptedSequence: 0,
+          cloudConfigurationRevision: 1, acknowledgedCloudRevision: 1,
+        }; } };
+        if (url.endsWith("/v2/sync")) { syncRequests.push(structuredClone(body)); throw new Error("missing remote cursor must not receive a new stream"); }
+        if (url.endsWith("/heartbeat")) return { ok: true, async json() { return { ok: true, online: true }; } };
+        throw new Error(`Unexpected test route: ${url}`);
+      },
+    });
+    await pairing.syncNow();
+    const after = store.getSyncOutbox();
+    assert.deepEqual(syncRequests, []);
+    assert.equal(after.acknowledgedSequence, before.acknowledgedSequence);
+    assert.deepEqual(after.events, before.events);
+    assert.equal(after.lastErrorCode, "hub_sync_stream_reconciliation_required");
+    pairing.stop();
+  } finally { await fs.rm(fixture.directory, { recursive: true, force: true }); }
+});
+
 test("an atomically applied Platform automation survives OS restart, executes once on a virtual descriptor, and creates one durable outcome event", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-platform-automation-sync-"));
   const dataFile = path.join(directory, "dinodia.json");
@@ -409,6 +601,8 @@ test("tenant removal policy is not acknowledged until the paired hub completes l
   await store.upsertDevice({ id: "tenant-sync-lamp", name: "Private lamp", protocol: "zigbee", areaId: "os-room", managementClass: "tenant_device", tenantOwnerMembershipId: "tenant-membership", metadata: { managementClass: "tenant_device", tenantOwnerMembershipId: "tenant-membership" } });
   const removalConfiguration = makeConfiguration(2, "REMOVAL_PENDING", []);
   let enforce = false;
+  let acceptedSequence = 0;
+  let acceptedStreamId = null;
   const seenRemovals = [];
   const pairing = new PlatformPairing({
     store, vault, apiUrl: "https://platform.test", serial, intervalMs: 60000,
@@ -421,8 +615,20 @@ test("tenant removal policy is not acknowledged until the paired hub completes l
     },
     fetchImpl: async (url, options) => {
       const body = JSON.parse(options.body);
-      if (url.endsWith("/token-state")) return { ok: true, async json() { return { hubInstallId, homeId: "tenant-sync-home", areaBindings: [{ areaId: "public-room", hubAreaId: "os-room" }], latestVersion: 0, publishedVersion: 0, hubTokenHashes: [], operatorCredentialStates: [], offlineAuthorisations: [], syncAcceptedSequence: 0, syncStreamId: null, installationSyncMode: "ACTIVE", policyRevision: 2 }; } };
-      if (url.endsWith("/v2/sync")) return { ok: true, async json() { return { streamId: body.streamId, cloudRevision: 2, configurationAppliedRevision: 2, acceptedThroughSequence: body.toSequence, resnapshotRequired: false, configuration: removalConfiguration }; } };
+      if (url.endsWith("/token-state")) return { ok: true, async json() { return { hubInstallId, homeId: "tenant-sync-home", areaBindings: [{ areaId: "public-room", hubAreaId: "os-room" }], latestVersion: 0, publishedVersion: 0, hubTokenHashes: [], operatorCredentialStates: [], offlineAuthorisations: [], syncAcceptedSequence: acceptedSequence, syncStreamId: acceptedStreamId, cloudConfigurationRevision: 2, acknowledgedCloudRevision: 2, installationSyncMode: "ACTIVE", policyRevision: 2 }; } };
+      if (url.endsWith("/v2/sync")) return { ok: true, async json() {
+        if (body.configurationRefreshOnly === true) return {
+          configurationRefreshOnly: true, streamId: body.streamId, syncStreamId: acceptedStreamId,
+          syncAcceptedSequence: acceptedSequence, cloudRevision: 2,
+          configurationAppliedRevision: body.acknowledgedCloudRevision,
+          resnapshotRequired: false, configuration: removalConfiguration,
+        };
+        if (acceptedStreamId === null) acceptedStreamId = body.streamId;
+        assert.equal(body.streamId, acceptedStreamId, "the durable stream identity remains stable across retry");
+        assert.ok(body.fromSequence <= acceptedSequence + 1, "server never receives a sequence gap");
+        acceptedSequence = Math.max(acceptedSequence, body.toSequence);
+        return { streamId: body.streamId, cloudRevision: 2, configurationAppliedRevision: 2, acceptedThroughSequence: acceptedSequence, resnapshotRequired: false, configuration: removalConfiguration };
+      } };
       if (url.endsWith("/heartbeat")) return { ok: true, async json() { return { ok: true, online: true, lanEndpoint: { revision: body.lanEndpoint.revision, state: body.lanEndpoint.state } }; } };
       throw new Error(`Unexpected tenant-removal sync route: ${url}`);
     },

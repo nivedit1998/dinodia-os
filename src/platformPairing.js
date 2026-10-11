@@ -661,7 +661,66 @@ class PlatformPairing {
       if (Array.isArray(result.offlineAuthorisations)) await this.acceptOfflineAuthorisations(result.offlineAuthorisations);
       const updaterStatus = await this.getUpdaterStatus().catch(() => null);
       if (updaterStatus) await this.store.ensureUpdaterStatusEvent?.(updaterStatus, this.clock());
-      const syncState = this.store.getSyncOutbox();
+      let syncState = this.store.getSyncOutbox();
+      const serverCloudConfigurationRevision = Number(result.cloudConfigurationRevision ?? syncState.cloudRevision ?? 0);
+      const serverAcknowledgedCloudRevision = Number(result.acknowledgedCloudRevision ?? syncState.cloudRevision ?? 0);
+      if (!Number.isSafeInteger(serverCloudConfigurationRevision) || serverCloudConfigurationRevision < 0
+        || !Number.isSafeInteger(serverAcknowledgedCloudRevision) || serverAcknowledgedCloudRevision < 0
+        || serverAcknowledgedCloudRevision > serverCloudConfigurationRevision) {
+        throw Object.assign(new Error("Platform returned an invalid cloud-configuration revision checkpoint"), { code: "hub_sync_configuration_status_invalid" });
+      }
+      if (Number(syncState.cloudRevision || 0) > serverCloudConfigurationRevision) {
+        throw Object.assign(new Error("Local cloud configuration is newer than the authoritative Platform revision"), { code: "hub_sync_configuration_revision_conflict" });
+      }
+      if (Number(syncState.cloudRevision || 0) < serverAcknowledgedCloudRevision) {
+        if (installationSyncMode !== "ACTIVE") {
+          throw Object.assign(new Error("A stale configuration cannot be refreshed through a restricted installation bootstrap session"), { code: "hub_sync_configuration_refresh_unavailable" });
+        }
+        const refreshEnvelope = {
+          schemaVersion: 1,
+          hubInstallationId: hubInstallId,
+          streamId: String(syncState.streamId),
+          fromSequence: Number(syncState.acknowledgedSequence || 0) + 1,
+          toSequence: Number(syncState.acknowledgedSequence || 0),
+          events: [],
+          queueDepth: (syncState.events || []).filter((event) => Number(event.sequence) > Number(syncState.acknowledgedSequence || 0)).length,
+          acknowledgedCloudRevision: Number(syncState.cloudRevision || 0),
+          runtime: this.store.getSyncRuntime?.(this.runtime) || this.runtime,
+          sentAt: new Date(this.clock()).toISOString(),
+          configurationRefreshOnly: true,
+        };
+        const refreshed = await this.requestWithHubIdentity("/api/hub-agent/v2/sync", refreshEnvelope);
+        if (refreshed?.configurationRefreshOnly !== true || refreshed.streamId !== refreshEnvelope.streamId
+          || Number(refreshed.configurationAppliedRevision) !== Number(syncState.cloudRevision || 0)
+          || !Number.isSafeInteger(Number(refreshed.cloudRevision)) || Number(refreshed.cloudRevision) < serverAcknowledgedCloudRevision
+          || Number(refreshed.configuration?.revision) !== Number(refreshed.cloudRevision)
+          || refreshed.syncStreamId !== serverStreamId || Number(refreshed.syncAcceptedSequence) !== serverAcceptedSequence
+          || Object.hasOwn(refreshed, "acceptedThroughSequence")) {
+          throw Object.assign(new Error("Platform returned an invalid or cursor-changing configuration-only refresh"), { code: "hub_sync_configuration_refresh_invalid" });
+        }
+        await applyCloudConfiguration(this.store, refreshed.configuration);
+        await this.store.applySyncConfigurationSnapshot(Number(refreshed.cloudRevision));
+        syncState = this.store.getSyncOutbox();
+      }
+      if (serverStreamId !== null && serverStreamId !== String(syncState.streamId)) {
+        throw Object.assign(new Error("Platform sync stream differs from the durable local stream; preserving the queue for explicit reconciliation"), { code: "hub_sync_stream_reconciliation_required" });
+      }
+      if (serverStreamId === null && serverAcceptedSequence !== 0) {
+        throw Object.assign(new Error("Platform reports an accepted cursor without its stream identity"), { code: "hub_sync_stream_reconciliation_required" });
+      }
+      const localAcknowledgedSequence = Number(syncState.acknowledgedSequence || 0);
+      if (serverStreamId === null && localAcknowledgedSequence > 0) {
+        throw Object.assign(new Error("Platform has no stream identity for the locally acknowledged event cursor; preserving the queue for explicit reconciliation"), { code: "hub_sync_stream_reconciliation_required" });
+      }
+      if (serverAcceptedSequence < localAcknowledgedSequence) {
+        throw Object.assign(new Error("Platform sync cursor is behind the durable local acknowledgement; preserving the queue for explicit reconciliation"), { code: "hub_sync_stream_reconciliation_required" });
+      }
+      if (serverAcceptedSequence > localAcknowledgedSequence) {
+        const inFlightEnd = Number(syncState.inFlight?.toSequence || 0);
+        if (!syncState.inFlight || serverAcceptedSequence !== inFlightEnd) {
+          throw Object.assign(new Error("Platform sync cursor does not match the exact durable in-flight batch; preserving the queue for explicit reconciliation"), { code: "hub_sync_stream_reconciliation_required" });
+        }
+      }
       const bootstrapBatchOptions = installationSyncMode === "INSTALLATION_BOOTSTRAP"
         ? {
           allowedTypesPrefix: ["sync.compacted", "update.status", "area.upsert", "incident.transition"],

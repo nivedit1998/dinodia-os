@@ -2114,6 +2114,23 @@ class Store {
     }
   }
 
+  async applySyncConfigurationSnapshot(revision) {
+    const before = this.snapshot();
+    try {
+      const outbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
+      const next = Number(revision);
+      if (!Number.isSafeInteger(next) || next < outbox.cloudRevision) throw new Error("Cloud configuration snapshot revision is invalid or moved backwards");
+      // This records only that the signed configuration snapshot was durably
+      // applied. It deliberately preserves the event cursor, in-flight batch,
+      // last successful event-sync timestamp, and error until a separate
+      // ordinary sync receives its own valid acknowledgement.
+      outbox.cloudRevision = next;
+      outbox.configurationAppliedRevision = Math.max(outbox.configurationAppliedRevision, next);
+      await this.persist();
+      return this.getSyncOutbox();
+    } catch (error) { this.state = before; throw error; }
+  }
+
   async markSyncFailure(code) {
     const before = this.snapshot();
     try {
