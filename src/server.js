@@ -894,6 +894,11 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
 
   let pairing;
   let nativeCommissioningService;
+  let cloudflareVerificationInFlight = false;
+  let cloudflareVerificationRetryAt = 0;
+  let cloudflareVerificationAttempts = 0;
+  let cloudflareHeartbeatRecoveryState = null;
+  let cloudflareHeartbeatRequestedAt = 0;
   alexaIntegration = new AlexaIntegration({
     store: hubStore,
     pairing,
@@ -927,6 +932,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       : { version: 1, revision: 1, state: "UNAVAILABLE", discoveryHost: `dinodia-${serial.toLowerCase()}.local` },
     getLanTlsIdentity: () => lanTlsIdentity?.publicReport() || null,
     acknowledgeLanTlsIdentity: (generation) => lanTlsIdentity?.acknowledge(Number(generation)) || false,
+    getCloudflareStatus: () => cloudflare.status(),
     getUpdaterStatus: async () => {
       try {
         const result = await requestUpdaterControl({ operation: "status" }, updaterSocketPath);
@@ -980,6 +986,30 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       if (Array.isArray(result.acceptedActivityIncidentIds)) await activity.store.acknowledgeIncidentEnvelopes(result.acceptedActivityIncidentIds);
     },
     logger,
+  });
+  cloudflare.setReservationProvider?.(() => pairing.getCloudflareReservation());
+  cloudflare.setStatusObserver?.((status) => {
+    eventBus.emit("dinodia_dashboard_updated", { kind: "integration", integration: "cloudflare", status: {
+      configured: status.configured === true, recoveryState: status.recoveryState, connected: status.connected === true,
+      secureAccessVerified: status.secureAccessVerified === true, transport: status.transport,
+    }, at: new Date().toISOString() });
+    const now = Date.now();
+    if (cloudflareHeartbeatRecoveryState !== status.recoveryState || now - cloudflareHeartbeatRequestedAt >= 120_000) {
+      cloudflareHeartbeatRecoveryState = status.recoveryState;
+      cloudflareHeartbeatRequestedAt = now;
+      pairing.requestImmediateHeartbeat?.();
+    }
+    const transportHealthy = status.mode === "local" && status.connected === true && status.transport?.originState === "HEALTHY";
+    if (!transportHealthy || status.platformVerification?.fresh || status.platformVerification?.state === "PLATFORM_REPORT_PENDING" || cloudflareVerificationInFlight || Date.now() < cloudflareVerificationRetryAt) return;
+    cloudflareVerificationInFlight = true;
+    reportCloudflareVerification(status, { reverifyChallenge: true }).then(() => {
+      cloudflareVerificationAttempts = 0;
+      cloudflareVerificationRetryAt = 0;
+    }).catch((error) => {
+      cloudflareVerificationAttempts = Math.min(cloudflareVerificationAttempts + 1, 8);
+      cloudflareVerificationRetryAt = Date.now() + Math.min(5 * 60_000, 15_000 * (2 ** (cloudflareVerificationAttempts - 1)));
+      logger.warn(`[cloudflare] signed verification retry deferred (${String(error?.code || "verification_unavailable").slice(0, 64)})`);
+    }).finally(() => { cloudflareVerificationInFlight = false; });
   });
   alexaIntegration.pairing = pairing;
   if (alexaIntegration.platformSync) alexaIntegration.platformSync.pairing = pairing;
@@ -3121,12 +3151,24 @@ function nativeDeviceView(principal, device) {
       if (body.action === "quick") return json(res, 200, await cloudflare.startQuick());
       if (body.action === "disconnect") return json(res, 200, await cloudflare.disconnect());
       if (body.action === "setup") {
-        if (runtimeConfig.nodeEnv === "production") {
-          let reservation;
-          try { reservation = await pairing.getCloudflareReservation(); } catch (error) { return json(res, Number(error.statusCode) || 503, { error: "The installation-specific Cloudflare reservation could not be loaded", errorCode: "cloudflare_reservation_unavailable" }); }
-          return json(res, 200, await cloudflare.beginSetup({ tunnelName: reservation.reservedTunnelName, hostname: reservation.reservedHostname, reservationToken: reservation.reservationToken }));
-        }
+        if (runtimeConfig.nodeEnv === "production") return json(res, 410, { error: "Production does not create or route replacement tunnels. Use Reconnect existing tunnel to check this hub's exact signed reservation.", errorCode: "cloudflare_setup_retired" });
         return json(res, 200, await cloudflare.beginSetup({ tunnelName: body.tunnelName, hostname: body.hostname }));
+      }
+      if (body.action === "reconnect-existing") {
+        if (runtimeConfig.nodeEnv !== "production") return json(res, 409, { error: "Existing installation recovery is available only for the paired production tunnel", errorCode: "cloudflare_recovery_unavailable" });
+        let reservation;
+        try { reservation = await pairing.getCloudflareReservation(); }
+        catch (error) { return json(res, Number(error.statusCode) || 503, { error: "The current signed installation reservation could not be loaded", errorCode: "cloudflare_reservation_unavailable" }); }
+        try { return json(res, 200, await cloudflare.reconnectExisting({ reservation })); }
+        catch (error) { return json(res, Number(error.statusCode) || (error.code === "cloudflare_recovery_held" ? 409 : 409), { error: error.message || "The existing tunnel did not match the current installation reservation", errorCode: String(error.code || "cloudflare_recovery_denied").slice(0, 80) }); }
+      }
+      if (body.action === "retry-recovery") {
+        if (runtimeConfig.nodeEnv !== "production") return json(res, 409, { error: "Existing installation recovery is available only for the paired production tunnel", errorCode: "cloudflare_recovery_unavailable" });
+        let reservation;
+        try { reservation = await pairing.getCloudflareReservation(); }
+        catch (error) { return json(res, Number(error.statusCode) || 503, { error: "The current signed installation reservation could not be loaded", errorCode: "cloudflare_reservation_unavailable" }); }
+        try { return json(res, 200, await cloudflare.retryRecovery({ reservation })); }
+        catch (error) { return json(res, Number(error.statusCode) || 409, { error: error.message || "Tunnel recovery could not be confirmed", errorCode: String(error.code || "cloudflare_recovery_denied").slice(0, 80) }); }
       }
       if (body.action === "reverify") {
         if (runtimeConfig.nodeEnv !== "production") return json(res, 409, { error: "A live reserved Cloudflare tunnel is required for independent verification", errorCode: "cloudflare_reverification_unavailable" });
@@ -3139,6 +3181,7 @@ function nativeDeviceView(principal, device) {
         }
       }
       if (body.action === "finish") {
+        if (runtimeConfig.nodeEnv === "production") return json(res, 410, { error: "Production setup cannot create or route tunnels. Use Reconnect existing tunnel for this installation.", errorCode: "cloudflare_setup_retired" });
         const result = await cloudflare.finishSetup();
         try {
           return json(res, 200, await reportCloudflareVerification(result));
@@ -3149,7 +3192,7 @@ function nativeDeviceView(principal, device) {
       }
       if (body.action === "connect" && runtimeConfig.nodeEnv === "production") return json(res, 410, { error: "Arbitrary Cloudflare tunnel tokens are retired", errorCode: "cloudflare_token_flow_retired" });
       if (body.action === "connect") return json(res, 200, await cloudflare.configure({ token: body.token, hostname: body.hostname }));
-      return json(res, 400, { error: "action must be quick, setup, finish, reverify, connect, or disconnect" });
+      return json(res, 400, { error: "action must be quick, setup, reconnect-existing, retry-recovery, finish, reverify, connect, or disconnect" });
     }
     if (resource === "integrations" && parts[2] === "matter" && parts[3] === "commission" && req.method === "POST") {
       const body = await readBody(req);
@@ -3223,11 +3266,13 @@ function nativeDeviceView(principal, device) {
 
   async function reportCloudflareVerification(result = cloudflare.status(), { reverifyChallenge = false } = {}) {
     if (!result?.publicUrl || !pairing?.reportCloudUrl) throw new Error("The local Cloudflare tunnel is not ready to report to Platform");
+    if (result.mode !== "local" || result.connected !== true || result.transport?.originState !== "HEALTHY" || !result.connectorIdentityVerified) throw Object.assign(new Error("The existing local tunnel and origin are not currently verified"), { code: "cloudflare_transport_unhealthy" });
     await cloudflare.markPlatformVerification({ state: "PLATFORM_REPORT_PENDING", cloudUrl: result.publicUrl, verificationId: cloudflare.status()?.platformVerification?.verificationId || null });
     let reservationToken = cloudflare.reservationToken();
-    if (!reservationToken && runtimeConfig.nodeEnv === "production" && pairing.getCloudflareReservation) {
+    if (runtimeConfig.nodeEnv === "production" && pairing.getCloudflareReservation) {
       const reservation = await pairing.getCloudflareReservation();
-      if (String(reservation.reservedHostname || "") !== String(result.hostname || "") || String(reservation.reservedTunnelName || "") !== String(result.tunnelName || "")) throw new Error("The installation Cloudflare reservation does not match the paired tunnel");
+      if (String(reservation.reservedHostname || "") !== String(result.hostname || "") || String(reservation.reservedTunnelName || "") !== String(result.tunnelName || "")
+        || String(reservation.tunnelId || "") !== String(result.tunnelId || "")) throw Object.assign(new Error("The installation Cloudflare reservation does not match the paired tunnel"), { code: "cloudflare_reservation_identity_mismatch" });
       reservationToken = await cloudflare.setReservationToken(reservation.reservationToken);
     }
     const report = await pairing.reportCloudUrl(result.publicUrl, { tunnelId: result.tunnelId, tunnelName: result.tunnelName, hostname: result.hostname, reservationToken, reverifyChallenge });
@@ -4408,7 +4453,7 @@ function nativeDeviceView(principal, device) {
     await electric.tick(hubStore.listDevices());
     electricTimer = setInterval(() => electric.tick(hubStore.listDevices()).catch((error) => logger.error(`[electric] ${error.message}`)), 5 * 60 * 1000);
     electricTimer.unref?.();
-    cloudflare.start();
+    await cloudflare.start();
     const cloudflareSettings = hubStore.getCloudflare?.() || {};
     if (runtimeConfig.nodeEnv === "production" && cloudflareSettings.mode === "local" && cloudflareSettings.platformVerification?.state !== "PLATFORM_VERIFIED") {
       const retry = setTimeout(() => reportCloudflareVerification().catch((error) => logger.warn(`[cloudflare] automatic verification retry unavailable: ${error.message}`)), 3000);

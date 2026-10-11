@@ -57,7 +57,7 @@ function validateLanEndpointObservation(value, serial, expectedPort = 80) {
 }
 
 class PlatformPairing {
-  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, nativeApiPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, runtime, getLanEndpoint = null, getLanTlsIdentity = null, acknowledgeLanTlsIdentity = null, getUpdaterStatus = null, reconcileTenantDeviceRemoval = null, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, clock = () => Date.now() } = {}) {
+  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, nativeApiPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, runtime, getLanEndpoint = null, getLanTlsIdentity = null, acknowledgeLanTlsIdentity = null, getUpdaterStatus = null, getCloudflareStatus = null, reconcileTenantDeviceRemoval = null, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, clock = () => Date.now() } = {}) {
     this.store = store;
     this.vault = vault;
     this.identityBroker = identityBroker;
@@ -81,6 +81,7 @@ class PlatformPairing {
     this.getLanTlsIdentity = getLanTlsIdentity || (() => null);
     this.acknowledgeLanTlsIdentity = acknowledgeLanTlsIdentity || (() => false);
     this.getUpdaterStatus = getUpdaterStatus || (async () => null);
+    this.getCloudflareStatus = getCloudflareStatus || (() => null);
     this.reconcileTenantDeviceRemoval = reconcileTenantDeviceRemoval;
     this.pendingEndpointHeartbeat = false;
     this.queuedImmediateSync = false;
@@ -403,7 +404,7 @@ class PlatformPairing {
     const lanTlsIdentity = this.getLanTlsIdentity();
     const heartbeat = await this.requestWithHubIdentity("/api/hub-agent/v2/heartbeat", {
       serial: this.serial,
-      hubRuntime: this.store.getSyncRuntime?.(this.runtime) || this.runtime,
+      hubRuntime: this.runtimeWithCloudflareStatus(this.store.getSyncRuntime?.(this.runtime) || this.runtime, nativeIdentity?.generation),
       lanEndpoint,
       ...(lanTlsIdentity ? { lanTlsIdentity } : {}),
     });
@@ -417,6 +418,30 @@ class PlatformPairing {
     this.lastHeartbeatAt = this.clock();
     this.pendingEndpointHeartbeat = this.queuedImmediateSync;
     return heartbeat;
+  }
+
+  runtimeWithCloudflareStatus(runtime, identityGeneration = null) {
+    const base = runtime && typeof runtime === "object" ? runtime : this.runtime;
+    const capabilities = base.capabilities && typeof base.capabilities === "object" && !Array.isArray(base.capabilities) ? { ...base.capabilities } : {};
+    const status = this.getCloudflareStatus?.();
+    const states = new Set(["READY", "RECONNECTING", "RECONNECT_REQUIRED", "HELD", "UNCONFIGURED", "UNAVAILABLE"]);
+    const originStates = new Set(["HEALTHY", "UNHEALTHY", "UNKNOWN"]);
+    const edgeStates = new Set(["CONNECTED", "DISCONNECTED", "UNKNOWN"]);
+    if (status && states.has(String(status.recoveryState)) && originStates.has(String(status.transport?.originState)) && edgeStates.has(String(status.transport?.edgeState))) {
+      const sampledAt = Date.parse(String(status.transport.sampledAt || ""));
+      capabilities.cloudflareTunnel = {
+        schemaVersion: 1,
+        recoveryState: String(status.recoveryState),
+        childRunning: status.transport.childRunning === true,
+        originState: String(status.transport.originState),
+        edgeState: String(status.transport.edgeState),
+        activeConnections: Number.isSafeInteger(Number(status.transport.activeConnections)) && Number(status.transport.activeConnections) >= 0 ? Number(status.transport.activeConnections) : null,
+        sampledAt: Number.isFinite(sampledAt) ? new Date(sampledAt).toISOString() : null,
+        validUntil: Number.isFinite(sampledAt) ? new Date(sampledAt + 420000).toISOString() : null,
+        identityGeneration: Number.isSafeInteger(Number(identityGeneration)) && Number(identityGeneration) > 0 ? Number(identityGeneration) : null,
+      };
+    }
+    return { ...base, capabilities };
   }
 
   async syncNow() {
@@ -450,6 +475,7 @@ class PlatformPairing {
       const nativeIdentity = await this.getPublicIdentity();
       heartbeatIdentity = nativeIdentity;
       if (!nativeIdentity) throw new Error("A factory-enrolled hub identity is required for Platform synchronisation");
+      payload.hubRuntime = this.runtimeWithCloudflareStatus(payload.hubRuntime, nativeIdentity.generation);
       const result = await this.requestWithHubIdentity("/api/hub-agent/token-state", payload);
       const reportedHubInstallId = result.hubInstallId == null ? "" : String(result.hubInstallId);
       const hubInstallId = reportedHubInstallId || String(platform.hubInstallId || "");

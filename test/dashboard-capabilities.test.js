@@ -79,7 +79,9 @@ test("Hive pairing exposes a sanitized summary and suggests Boiler at device set
 test("completed secure access and provisioning replace setup inputs with confirmation rows", () => {
   assert.match(html, /id="cloudflare-connected-row" class="setup-complete-row hidden"/);
   assert.match(html, /id="provisioning-complete-row" class="setup-complete-row hidden"/);
-  assert.match(app, /\$\("#cloudflare-setup-form"\)\.classList\.toggle\("hidden", localConnected\)/);
+  assert.match(app, /setupAllowed = cloudflare\.setupAllowed !== false/);
+  assert.match(app, /\$\("#cloudflare-setup-form"\)\.classList\.toggle\("hidden", localConnected \|\| !setupAllowed \|\| \["RECONNECT_REQUIRED", "RECONNECTING", "HELD"\]\.includes\(recoveryState\)\)/);
+  assert.match(app, /action = state === "RECONNECT_REQUIRED" \? "reconnect-existing" : "retry-recovery"/);
   assert.match(app, /platformVerification\?\.state === "PLATFORM_VERIFIED"/);
   assert.match(app, /\$\("#pair-form"\)\.classList\.toggle\("hidden", paired\)/);
   assert.doesNotMatch(html, /advanced-cloudflare|regenerate-credentials/);
@@ -99,6 +101,10 @@ test("secure-access re-verification requires a connected tunnel and the operator
   assert.match(setupScript, /window\.opener\.postMessage\(\{ type: "dinodia-operator-attempt", setupAttemptId: data\.setupAttemptId \}, portalOrigin\)/);
   assert.doesNotMatch(setupScript, /postMessage\(\{ type: "dinodia-operator-attempt"[^\n]*, "\*"\)/);
   const server = fs.readFileSync(path.join(__dirname, "../src/server.js"), "utf8");
+  assert.match(server, /Production does not create or route replacement tunnels/);
+  assert.match(server, /Production setup cannot create or route tunnels/);
+  assert.match(server, /body\.action === "reconnect-existing"/);
+  assert.match(server, /body\.action === "retry-recovery"/);
   assert.match(server, /operatorHandoffJobs = new Map\(\)/);
   assert.match(server, /void runOperatorHandoffJob\(job\)/);
   assert.match(server, /handoffPhase: job\.phase/);

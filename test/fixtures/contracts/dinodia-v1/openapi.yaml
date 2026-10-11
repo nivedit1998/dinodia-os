@@ -2475,7 +2475,7 @@ paths:
       tags: [Home]
       security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
       parameters: [{ $ref: "#/components/parameters/HomeId" }]
-      responses: { "200": { description: Selected Home, Areas and permanent-device projection; tenant-owned devices are excluded. }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/Forbidden" } }
+      responses: { "200": { description: Selected Home, Areas and permanent-device projection; tenant-owned devices are excluded. The hub may include a bounded current-generation remoteAccessState (READY, RECONNECTING, RECONNECT_REQUIRED, HELD, UNCONFIGURED, UNAVAILABLE, or UNKNOWN); no tunnel identifier, hostname or credential is exposed. }, "401": { $ref: "#/components/responses/Unauthorized" }, "404": { $ref: "#/components/responses/Forbidden" } }
   /api/v2/homes/{homeId}/hub-status:
     get:
       summary: Read heartbeat-derived Hub status
