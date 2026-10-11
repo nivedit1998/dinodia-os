@@ -21,6 +21,7 @@ class Element {
 }
 
 function harness({ context, devicesStatus = 200, devices = [], holdDeviceList = false, seededStorage = {} } = {}) {
+  let currentDevicesStatus = devicesStatus;
   const elements = new Map([...markup.matchAll(/\bid="([^"]+)"/g)].map(([, id]) => [id, new Element(id)]));
   const storage = new Map();
   for (const [key, value] of Object.entries(seededStorage)) storage.set(key, String(value));
@@ -34,10 +35,13 @@ function harness({ context, devicesStatus = 200, devices = [], holdDeviceList = 
   const calls = [];
   let releaseDeviceList;
   const deviceListGate = holdDeviceList ? new Promise((resolve) => { releaseDeviceList = resolve; }) : null;
+  const documentListeners = new Map();
   const document = {
     cookie: "dinodia_setup_csrf=test-csrf",
     getElementById: (id) => elements.get(id) || null,
     createElement: () => new Element(),
+    addEventListener: (name, listener) => documentListeners.set(name, listener),
+    visibilityState: "visible",
   };
   class Option extends Element { constructor(text, value) { super(); this.textContent = text; this.value = value; } }
   const fetch = async (url) => {
@@ -45,22 +49,27 @@ function harness({ context, devicesStatus = 200, devices = [], holdDeviceList = 
     if (url === "/_dinodia/installer/commissioning") return response(200, context);
     if (url === "/_dinodia/installer/commissioning/devices") {
       if (deviceListGate) await deviceListGate;
-      return response(devicesStatus, devicesStatus === 200 ? { devices, completedDevices: [] }
-        : { error: { code: "COMMISSIONING_AUTHORITY_DENIED", message: "A current assigned permanent-installation authority is required" } });
+      return response(currentDevicesStatus, currentDevicesStatus === 200 ? { devices, completedDevices: [] }
+        : { error: { code: currentDevicesStatus === 503 ? "AUTHORITY_UNAVAILABLE" : "COMMISSIONING_AUTHORITY_DENIED", message: currentDevicesStatus === 503 ? "Authority is temporarily unavailable" : "A current assigned permanent-installation authority is required" } });
     }
     return response(404, { error: "not_found" });
   };
   const timers = new Set();
+  let monotonicNow = 100;
+  const performance = { now: () => monotonicNow };
   const sandbox = {
     document, sessionStorage, fetch, Option, crypto: crypto.webcrypto,
-    setInterval: (fn) => { const timer = { fn }; timers.add(timer); return timer; },
+    performance,
+    setInterval: (fn, delay) => { const timer = { fn, delay }; timers.add(timer); return timer; },
     clearInterval: (timer) => timers.delete(timer),
-    window: { opener: null, confirm: () => false },
-    location: { protocol: "https:", replace() {} },
+    setTimeout: (fn, delay) => { const timer = { fn, delay }; timers.add(timer); return timer; },
+    clearTimeout: (timer) => timers.delete(timer),
+    window: { opener: null, confirm: () => false, performance },
+    location: { protocol: "https:", pathname: "/_dinodia/operator/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/installation", replace() {} },
     URL, Date, Set, Map, Error, console,
   };
   vm.runInNewContext(script, sandbox, { filename: "permanent-installation.js" });
-  return { elements, calls, storage, timers, releaseDeviceList, flush: async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve)); } };
+  return { elements, calls, storage, timers, documentListeners, setMonotonicNow: (value) => { monotonicNow = value; }, setDevicesStatus: (value) => { currentDevicesStatus = value; }, releaseDeviceList, flush: async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve)); } };
 }
 
 function response(status, value) {
@@ -70,12 +79,59 @@ function response(status, value) {
 const areaId = "11111111-1111-4111-8111-111111111111";
 const validContext = (registrationEnabled = true) => ({
   schemaVersion: "dinodia.v1", requestId: "22222222-2222-4222-8222-222222222222",
+  sessionExpiresAt: new Date(Date.now() + 1_800_000).toISOString(), serverNow: new Date().toISOString(), authorityVerifiedAt: new Date().toISOString(),
   areas: [{ id: areaId, name: "Private Test Area" }],
   protocols: {
     registrationEnabled,
     zigbee: { enabled: true, adapterReady: true, readinessMessage: "Zigbee is ready" },
     matter: { enabled: false, adapterReady: false, readinessMessage: "Matter is offline" },
   },
+});
+
+test("temporary verifier outage keeps the same assigned window, shows the last verification time, and disables mutations", async () => {
+  const page = harness({ context: validContext(), devicesStatus: 503,
+    seededStorage: { "dinodia.operatorSessionSelector": "A".repeat(32), "dinodia-installation:22222222-2222-4222-8222-222222222222:session": "33333333-3333-4333-8333-333333333333" } });
+  await page.flush();
+  assert.equal(page.storage.get("dinodia.operatorSessionSelector"), "A".repeat(32));
+  assert.equal(page.elements.get("area").children.some((option) => option.textContent === "Private Test Area"), true,
+    "a transient failure does not misrepresent an unexpired, correctly scoped snapshot as revoked");
+  assert.match(page.elements.get("summary").textContent, /temporarily unavailable.*not been declared expired/i);
+  assert.match(page.elements.get("summary").textContent, /Last verified/i);
+  assert.equal(page.elements.get("start-zigbee").disabled, true);
+  await page.elements.get("start-zigbee").listeners.get("click")();
+  assert.equal(page.calls.some((url) => url === "/_dinodia/installer/commissioning/sessions"), false);
+});
+
+test("temporary assigned-authority outage retries the same window at a bounded interval without launching another handoff", async () => {
+  const page = harness({ context: validContext(), devicesStatus: 503,
+    seededStorage: { "dinodia.operatorSessionSelector": "B".repeat(32) } });
+  await page.flush();
+  assert.equal(page.storage.get("dinodia.operatorSessionSelector"), "B".repeat(32));
+  const retry = [...page.timers].find((timer) => timer.delay === 15000);
+  assert.ok(retry, "a transient verifier outage schedules a bounded retry rather than a rapid poll or immediate relaunch");
+  const priorDeviceReads = page.calls.filter((url) => url === "/_dinodia/installer/commissioning/devices").length;
+  page.setDevicesStatus(200);
+  page.timers.delete(retry);
+  retry.fn();
+  await page.flush();
+  assert.equal(page.calls.filter((url) => url === "/_dinodia/installer/commissioning/devices").length, priorDeviceReads + 1);
+  assert.equal(page.storage.get("dinodia.operatorSessionSelector"), "B".repeat(32));
+  assert.equal(page.calls.some((url) => url === "/_dinodia/setup/operator-session"), false);
+  assert.equal(page.elements.get("start-zigbee").disabled, false, "actions become available only after the same scope revalidates successfully");
+});
+
+test("assigned workspace uses the server-anchored 30-minute deadline and refreshes once on return to the foreground", async () => {
+  const page = harness({ context: validContext(), devicesStatus: 200 });
+  await page.flush();
+  assert.match(page.elements.get("operator-session-status").textContent, /30m 00s remaining/);
+  const contextReads = page.calls.filter((url) => url === "/_dinodia/installer/commissioning").length;
+  page.documentListeners.get("visibilitychange")();
+  await page.flush();
+  assert.equal(page.calls.filter((url) => url === "/_dinodia/installer/commissioning").length, contextReads + 1);
+  page.setMonotonicNow(1_800_101);
+  [...page.timers].find((timer) => timer.delay === 1000)?.fn();
+  assert.match(page.elements.get("operator-session-status").textContent, /reached its absolute deadline/i);
+  assert.equal(page.elements.get("start-zigbee").disabled, true);
 });
 
 test("assigned installation page erases protected scope and disables actions after a dependent authorization denial", async () => {

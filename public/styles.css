@@ -104,6 +104,15 @@ button:disabled { cursor: not-allowed; transform: none; opacity: .55; box-shadow
   .entity-controls .entity-control { max-width: 100%; }
 }
 
+.operator-session-status { margin: 0 0 20px; padding: 13px 16px; border: 1px solid #d5e5ef; border-radius: 12px; background: #f2f8fc; color: #344e60; font-size: .8rem; line-height: 1.5; }
+.operator-session-status[data-state="active"] { border-color: #d4e7dd; background: #f3faf6; color: #35644d; }
+.operator-session-status[data-state="unavailable"] { border-color: #eadbb8; background: #fff9ea; color: #795c22; }
+.operator-session-status[data-state="ended"] { border-color: #efd2d2; background: #fff5f5; color: #834646; }
+body.operator-authority-unavailable .main-content > :not(.topbar):not(#operator-session-status),
+body.operator-authority-ended .main-content > :not(.topbar):not(#operator-session-status) { display: none !important; }
+body.operator-authority-unavailable .sidebar .nav,
+body.operator-authority-ended .sidebar .nav { pointer-events: none; opacity: .45; }
+
 /* Native V2 automations: a compact, capability-driven editor. */
 .native-automation-toolbar, .native-automation-form-head, .automation-actions-head, .automation-form-footer, .native-automation-card, .native-automation-card-copy, .native-automation-card-actions { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .native-automation-toolbar { align-items: flex-start; margin-bottom: 18px; }

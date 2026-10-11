@@ -1,6 +1,6 @@
 const crypto = require("node:crypto");
 
-const MAX_SESSION_MS = 15 * 60 * 1000;
+const MAX_SESSION_MS = 30 * 60 * 1000;
 const MAX_RECENT_AUTH_MS = 5 * 60 * 1000;
 
 function encode(value) {
@@ -68,7 +68,7 @@ function verifyOperatorSessionToken(token, { publicKey, hubId, requiredScope = "
   const recentAuthAt = Number(claims.recentAuthAt);
   const scope = Array.isArray(claims.scope) ? claims.scope.map(String) : [];
   if (claims.iss !== "dinodia-platform" || claims.aud !== `dinodia-os:${String(hubId || "")}` || claims.hubId !== String(hubId || "")) return null;
-  if (!claims.sub || !claims.sid || !claims.jti || !Number.isFinite(exp) || !Number.isFinite(iat) || exp <= nowSeconds || exp - iat > MAX_SESSION_MS / 1000 || claims.sessionPolicy !== undefined) return null;
+  if (!claims.sub || !claims.sid || !claims.jti || !Number.isFinite(exp) || !Number.isFinite(iat) || iat > nowSeconds + 5 || exp <= nowSeconds || exp <= iat || exp - iat > MAX_SESSION_MS / 1000 || claims.sessionPolicy !== undefined) return null;
   if (!Number.isFinite(recentAuthAt)) return null;
   if (requireRecentAuth && Number(now) - recentAuthAt > MAX_RECENT_AUTH_MS) return null;
   if (!Array.isArray(claims.scope) || (requiredScope && !claims.scope.includes(requiredScope))) return null;

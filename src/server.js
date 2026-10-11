@@ -57,6 +57,7 @@ const { createSupportProofOfPossession } = require("./auth/supportProofOfPossess
 const { validateMembership: validateNativeMembership, validateArea: validateNativeArea, validateControlState: validateNativeControlState, serializeDevice: serializeNativeDevice, validateCommand: validateNativeCommand, makeEnvelope: makeNativeEnvelope } = require("./contracts/dinodiaV1");
 
 const VERSION = require("../package.json").version;
+const OPERATOR_REVALIDATION_RETRY_MS = 15_000;
 
 function safeEqual(left, right) {
   const a = Buffer.from(String(left || ""));
@@ -346,8 +347,23 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   const supportBrowserSessions = new Map();
   function issueBrowserOperatorSession(token, expiresAt, authority = {}) {
     const handle = `osb_${crypto.randomBytes(32).toString("base64url")}`;
-    operatorBrowserSessions.set(handle, { token: String(token), expiresAt: Number(new Date(expiresAt).getTime()), jti: String(authority.jti || ""), handoffId: String(authority.handoffId || ""), credentialVersion: Number(authority.credentialVersion || 0), lastAuthorizationCheckAt: operatorNow() });
-    return handle;
+    const selector = crypto.randomBytes(24).toString("base64url");
+    operatorBrowserSessions.set(handle, { token: String(token), selector, expiresAt: Number(new Date(expiresAt).getTime()), jti: String(authority.jti || ""), handoffId: String(authority.handoffId || ""), credentialVersion: Number(authority.credentialVersion || 0), lastAuthorizationCheckAt: operatorNow(), revalidationPromise: null });
+    return { handle, selector };
+  }
+  function operatorSessionFromRequest(req, selectorOverride = "") {
+    const selectorHeader = req.headers["x-dinodia-operator-session"];
+    const selector = String(selectorOverride || (Array.isArray(selectorHeader) ? selectorHeader[0] : selectorHeader) || "");
+    if (!/^[A-Za-z0-9_-]{24,64}$/.test(selector)) return { handle: "", selector: "", session: null, missingReason: selector ? "selector_invalid" : "selector_missing" };
+    const name = `dinodia_os_operator_session_${selector}`;
+    const cookie = String(req.headers.cookie || "").split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`));
+    if (!cookie) return { handle: "", selector, session: null, missingReason: "cookie_missing" };
+    let handle = "";
+    try { handle = decodeURIComponent(cookie.slice(name.length + 1)); } catch { return { handle: "", selector, session: null, missingReason: "cookie_invalid" }; }
+    const session = operatorBrowserSessions.get(handle);
+    if (!session) return { handle: "", selector, session: null, missingReason: "hub_process_restart" };
+    if (session.selector !== selector) return { handle: "", selector, session: null, missingReason: "selector_mismatch" };
+    return { handle, selector, session };
   }
   function browserSessionToken(handle) {
     const value = operatorBrowserSessions.get(String(handle || ""));
@@ -439,17 +455,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     return revocationCoordinator.revoke({ jti: session.jti, reason });
   }
   async function syncOperatorBrowserSessions() {
-    for (const session of operatorBrowserSessions.values()) {
-      if (!session.handoffId || !session.jti || operatorNow() >= session.expiresAt || revokedOperatorJtis.has(session.jti)) continue;
-      try {
-        const result = await pairing.requestWithHubIdentity("/api/hub-agent/operator-session/revalidate", { handoffId: session.handoffId, jti: session.jti, credentialVersion: session.credentialVersion });
-        if (result?.active !== true) await revokeLocalOperatorSession(session, "operator_authority_changed");
-        else session.lastAuthorizationCheckAt = operatorNow();
-      } catch {
-        // Never extend the last successful decision. operatorSessionAuth and
-        // the socket deadline fail closed once its 60-second freshness ends.
-      }
-    }
+    await Promise.allSettled([...operatorBrowserSessions.values()].map((session) => revalidateOperatorBrowserSession(session)));
   }
   function armOperatorSessionFreshnessDeadline(socket, session) {
     const checkAt = Number(session?.lastAuthorizationCheckAt || 0) + 60_000;
@@ -464,12 +470,76 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     clearOperatorBrowserSessions();
     const principal = verifyOperatorSessionToken(token, { publicKey: operatorPublicKey, hubId: serial, requiredScope: null, requireRecentAuth: false, now: operatorNow() });
     if (!principal || !principal.scope.some((scope) => ["os:admin", "os:support", "os:permanent-installation"].includes(String(scope))) || revokedOperatorJtis.has(String(principal.jti))) return null;
-    const activeHandle = [...operatorBrowserSessions.values()].find((entry) => entry.token === String(token));
-    if ((principal.scope.includes("os:admin") || principal.scope.includes("os:permanent-installation")) && runtimeConfig.nodeEnv === "production") {
-      if (activeHandle && operatorNow() - Number(activeHandle.lastAuthorizationCheckAt || 0) >= 60_000) return null;
-    }
     return { ...principal, principalType: "operator", authToken: String(token), credentialFingerprint: hashTokenValue(token).slice(0, 32) };
   };
+  async function revalidateOperatorBrowserSession(session) {
+    if (!session?.handoffId || !session?.jti || operatorNow() >= Number(session.expiresAt || 0) || revokedOperatorJtis.has(String(session.jti))) return { state: "denied" };
+    if (session.revalidationPromise) return session.revalidationPromise;
+    if (operatorNow() - Number(session.lastRevalidationAttemptAt || 0) < OPERATOR_REVALIDATION_RETRY_MS) return { state: "unavailable" };
+    session.lastRevalidationAttemptAt = operatorNow();
+    session.revalidationPromise = (async () => {
+      try {
+        const principal = operatorSessionAuth(session.token);
+        if (!principal || principal.jti !== session.jti || principal.handoffId !== session.handoffId
+          || Number(principal.credentialVersion || 0) !== session.credentialVersion) {
+          await revokeLocalOperatorSession(session, "operator_grant_invalid");
+          return { state: "denied" };
+        }
+        const result = await pairing.requestWithHubIdentity("/api/hub-agent/operator-session/revalidate", { handoffId: session.handoffId, jti: session.jti, credentialVersion: session.credentialVersion });
+        if (result?.active !== true || String(result.homeId || "") !== String(principal.homeId || "")) {
+          await revokeLocalOperatorSession(session, "operator_authority_changed");
+          return { state: "denied" };
+        }
+        const platform = hubStore.getPlatform?.() || {};
+        if (!platform.hubInstallId || String(result.hubInstallationId || "") !== String(platform.hubInstallId)) {
+          await revokeLocalOperatorSession(session, "operator_hub_binding_changed");
+          return { state: "denied" };
+        }
+        const identity = await pairing.getPublicIdentity();
+        if (!identity?.serial || String(identity.serial) !== String(serial) || Number(identity.generation) !== Number(principal.identityGeneration)) {
+          await revokeLocalOperatorSession(session, "operator_hub_identity_changed");
+          return { state: "denied" };
+        }
+        if (Array.isArray(result.areaOptions)) session.currentAreaOptions = result.areaOptions
+          .filter((area) => area && /^[0-9a-f-]{36}$/i.test(String(area.id || "")) && typeof area.name === "string")
+          .map((area) => ({ id: String(area.id), name: String(area.name).slice(0, 120) }));
+        session.lastAuthorizationCheckAt = operatorNow();
+        return { state: "active" };
+      } catch (error) {
+        const statusCode = Number(error?.statusCode || error?.status || 0);
+        if (statusCode === 401 || statusCode === 403) {
+          await revokeLocalOperatorSession(session, "operator_authority_denied");
+          return { state: "denied" };
+        }
+        return { state: "unavailable" };
+      } finally {
+        session.revalidationPromise = null;
+      }
+    })();
+    return session.revalidationPromise;
+  }
+  async function resolveBrowserOperatorSession(req, selectorOverride = "") {
+    const scoped = operatorSessionFromRequest(req, selectorOverride);
+    if (!scoped) return { state: "missing", selector: String(selectorOverride || req.headers["x-dinodia-operator-session"] || ""), reason: "selector_missing" };
+    if (scoped.missingReason) return { state: scoped.missingReason === "hub_process_restart" ? "restart_required" : "missing", selector: scoped.selector, reason: scoped.missingReason };
+    const { session, selector } = scoped;
+    if (!Number.isFinite(session.expiresAt) || operatorNow() >= session.expiresAt || revokedOperatorJtis.has(String(session.jti))) {
+      operatorBrowserSessions.delete(scoped.handle);
+      return { state: "denied", selector };
+    }
+    let principal = operatorSessionAuth(session.token);
+    if (!principal || principal.jti !== session.jti || principal.credentialVersion !== session.credentialVersion) return { state: "denied", selector };
+    if (operatorNow() - Number(session.lastAuthorizationCheckAt || 0) >= 60_000) {
+      const result = await revalidateOperatorBrowserSession(session);
+      if (result.state !== "active") return { state: result.state, selector };
+      principal = operatorSessionAuth(session.token);
+      if (!principal) return { state: "denied", selector };
+    }
+    return { state: "active", selector, handle: scoped.handle, session, principal: Object.freeze({ ...principal,
+      operatorExpiresAt: session.expiresAt,
+      authorizationCheckedAt: Number(session.lastAuthorizationCheckAt || 0),
+      ...(Array.isArray(session.currentAreaOptions) ? { areaOptions: session.currentAreaOptions, areaIds: session.currentAreaOptions.map((area) => area.id) } : {}) }) };
+  }
   const appSessionAuth = (token) => {
     const platform = hubStore.getPlatform?.() || {};
     const principal = verifyAppAccessToken(token, {
@@ -3543,62 +3613,31 @@ function nativeDeviceView(principal, device) {
   }
 
   async function currentPermanentInstallationPrincipal(req) {
-    const cookie = String(req.headers.cookie || "").split(";").map((part) => part.trim()).find((part) => part.startsWith("dinodia_os_operator_session="));
-    const handle = cookie ? decodeURIComponent(cookie.slice("dinodia_os_operator_session=".length)) : "";
-    const session = operatorBrowserSessions.get(handle);
-    if (!session || !session.handoffId || !session.jti || revokedOperatorJtis.has(String(session.jti)) || operatorNow() >= Number(session.expiresAt || 0)) return null;
-    const principal = operatorSessionAuth(session.token);
-    if (!principal || principal.scope.length !== 1 || principal.scope[0] !== "os:permanent-installation") return null;
-    try {
-      const result = await pairing.requestWithHubIdentity("/api/hub-agent/operator-session/revalidate", { handoffId: session.handoffId, jti: session.jti, credentialVersion: session.credentialVersion });
-      const platform = hubStore.getPlatform?.() || {};
-      if (result?.active !== true || String(result.homeId || "") !== String(principal.homeId || "")
-        || !platform.hubInstallId || String(result.hubInstallationId || "") !== String(platform.hubInstallId)) {
-        await revokeLocalOperatorSession(session, "operator_installation_authority_changed");
-        return null;
-      }
-      session.lastAuthorizationCheckAt = operatorNow();
-      const current = operatorSessionAuth(session.token);
-      return current ? Object.freeze({ ...current, verifiedHubInstallationId: String(result.hubInstallationId) }) : null;
-    } catch {
-      // An installer mutation must have a fresh Platform authorization result;
-      // unlike a dashboard session, an old successful check is not sufficient.
-      return null;
-    }
+    const authority = await resolveBrowserOperatorSession(req);
+    if (authority.state === "unavailable") throw Object.assign(new Error("Current assigned-work authority is temporarily unavailable"), { statusCode: 503, code: "operator_authority_unavailable" });
+    const principal = authority.principal;
+    if (authority.state !== "active" || !principal || principal.scope.length !== 1 || principal.scope[0] !== "os:permanent-installation") return null;
+    return Object.freeze({ ...principal, verifiedHubInstallationId: String(hubStore.getPlatform?.()?.hubInstallId || "") });
   }
 
   async function currentAssignedDashboardPrincipal(req) {
-    const cookie = String(req.headers.cookie || "").split(";").map((part) => part.trim()).find((part) => part.startsWith("dinodia_os_operator_session="));
-    const handle = cookie ? decodeURIComponent(cookie.slice("dinodia_os_operator_session=".length)) : "";
-    const session = operatorBrowserSessions.get(handle);
-    if (!session || !session.handoffId || !session.jti || revokedOperatorJtis.has(String(session.jti)) || operatorNow() >= Number(session.expiresAt || 0)) return null;
-    const principal = operatorSessionAuth(session.token);
+    const authority = await resolveBrowserOperatorSession(req);
+    if (authority.state === "unavailable") throw Object.assign(new Error("Current Home authority is temporarily unavailable"), { statusCode: 503, code: "operator_authority_unavailable" });
+    const principal = authority.principal;
     let currentIdentity = null;
-    try { currentIdentity = await pairing.getPublicIdentity(); } catch { return null; }
-    if (!principal || principal.scope.length !== 1 || principal.scope[0] !== "os:admin"
-      || principal.jti !== session.jti || principal.handoffId !== session.handoffId
+    try { currentIdentity = await pairing.getPublicIdentity(); }
+    catch { throw Object.assign(new Error("The paired hub identity is temporarily unavailable"), { statusCode: 503, code: "operator_authority_unavailable" }); }
+    if (!currentIdentity) throw Object.assign(new Error("The paired hub identity is temporarily unavailable"), { statusCode: 503, code: "operator_authority_unavailable" });
+    if (authority.state !== "active" || !principal || principal.scope.length !== 1 || principal.scope[0] !== "os:admin"
+      || principal.jti !== authority.session.jti || principal.handoffId !== authority.session.handoffId
       || !principal.workflow || !principal.employeeSessionId || !Number.isSafeInteger(Number(principal.workRevision))
       || !principal.homeId || String(principal.hubId || "") !== String(serial)
       || !currentIdentity || String(currentIdentity.serial || "") !== String(serial)
-      || Number(currentIdentity.generation) < 1 || Number(principal.identityGeneration) !== Number(currentIdentity.generation)) return null;
-    try {
-      const result = await pairing.requestWithHubIdentity("/api/hub-agent/operator-session/revalidate", {
-        handoffId: session.handoffId, jti: session.jti, credentialVersion: session.credentialVersion,
-      });
-      const platform = hubStore.getPlatform?.() || {};
-      if (result?.active !== true || String(result.homeId || "") !== String(principal.homeId || "")
-        || !platform.hubInstallId || String(result.hubInstallationId || "") !== String(platform.hubInstallId)) {
-        await revokeLocalOperatorSession(session, "operator_dashboard_authority_changed");
-        return null;
-      }
-      session.lastAuthorizationCheckAt = operatorNow();
-      const current = operatorSessionAuth(session.token);
-      return current ? Object.freeze({ ...current, verifiedHubInstallationId: String(result.hubInstallationId) }) : null;
-    } catch {
-      // This is private local Home inventory; fail closed when current Portal
-      // authority cannot be independently revalidated.
+      || Number(currentIdentity.generation) < 1 || Number(principal.identityGeneration) !== Number(currentIdentity.generation)) {
+      if (authority.session) await revokeLocalOperatorSession(authority.session, "operator_hub_identity_changed");
       return null;
     }
+    return Object.freeze({ ...principal, verifiedHubInstallationId: String(hubStore.getPlatform?.()?.hubInstallId || "") });
   }
 
   function operatorRequestTransportAllowed(req) {
@@ -3645,7 +3684,9 @@ function nativeDeviceView(principal, device) {
     if (req.method === "POST" && action === "matter-payload" && !transport.remote && !transport.directLanTls) {
       return nativeContractError(res, 403, "SECURE_TRANSPORT_REQUIRED", "Matter setup codes require the verified secure hub connection");
     }
-    const principal = await currentPermanentInstallationPrincipal(req);
+    let principal;
+    try { principal = await currentPermanentInstallationPrincipal(req); }
+    catch (error) { return nativeContractError(res, 503, "AUTHORITY_UNAVAILABLE", "Current assigned-work authority cannot be verified right now. Keep this window open and retry when the connection recovers.", true); }
     if (!principal) return nativeContractError(res, 401, "AUTH_REQUIRED", "The assigned work or Company Portal session expired. Close this window and reopen the work from Company Portal.");
     try {
       if (!nativeCommissioningService) return nativeContractError(res, 503, "HUB_UNAVAILABLE", "The hub commissioning service is unavailable", true);
@@ -3671,6 +3712,9 @@ function nativeDeviceView(principal, device) {
         const threadReady = Boolean(threadSettings.configured && threadRuntimeState.running === true
           && threadNetwork.reachable === true && ["leader", "router", "child", "detached"].includes(String(threadNetwork.state)));
         return json(res, 200, { schemaVersion: "dinodia.v1", requestId: actor.requestId, workflowId: actor.workItemId,
+          sessionExpiresAt: new Date(principal.operatorExpiresAt).toISOString(),
+          serverNow: new Date(operatorNow()).toISOString(),
+          authorityVerifiedAt: new Date(principal.authorizationCheckedAt || operatorNow()).toISOString(),
           areas: actor.areaOptions.map((area) => ({ id: area.id, name: area.name })),
           protocols: {
             registrationEnabled: runtimeConfig.nativeCommissioningCapabilities.nativeStaffDeviceRegistrationV1 === true,
@@ -3725,9 +3769,19 @@ function nativeDeviceView(principal, device) {
     const transport = operatorRequestTransportAllowed(req);
     if (!transport) return text(res, 404, "Not found");
     if (req.method !== "GET") return text(res, 405, "Method not allowed");
-    const principal = await currentPermanentInstallationPrincipal(req);
-    if (!principal) return handleRemoteSupportPage(req, res);
     const asset = req.url?.split("?")[0] === "/permanent-installation.js";
+    if (asset) {
+      const filePath = path.resolve(runtimeConfig.staticDir, "permanent-installation.js");
+      const content = await fs.promises.readFile(filePath, "utf8").catch(() => null);
+      if (content === null) return text(res, 404, "Not found");
+      setupHeaders(res);
+      res.writeHead(200, { "content-type": "application/javascript; charset=utf-8", "cache-control": "no-store, private", "content-security-policy": "default-src 'self'; connect-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'" });
+      return res.end(content);
+    }
+    let principal;
+    try { principal = await currentPermanentInstallationPrincipal(req); }
+    catch { return text(res, 503, "Assigned-work authority is temporarily unavailable. Keep this window open and try again shortly."); }
+    if (!principal) return text(res, 401, "This assigned installation session expired or was revoked. Reopen the assigned work from Company Portal.");
     const filePath = path.resolve(runtimeConfig.staticDir, asset ? "permanent-installation.js" : "permanent-installation.html");
     const content = await fs.promises.readFile(filePath, "utf8").catch(() => null);
     if (content === null) return text(res, 404, "Not found");
@@ -3812,22 +3866,23 @@ function nativeDeviceView(principal, device) {
         correlationId: job.correlationId,
       });
     }
-    if (!job.sessionHandle || !Number.isFinite(job.expiresAt) || operatorNow() >= job.expiresAt) {
+    if (!job.sessionHandle || !job.sessionSelector || !Number.isFinite(job.expiresAt) || operatorNow() >= job.expiresAt) {
       job.state = "failed";
       job.phase = "hub";
       job.errorCode = "operator_session_expired";
       job.statusCode = 401;
       return respondOperatorHandoffJob(res, job);
     }
-    const sessionMaxAge = Math.max(1, Math.min(Math.ceil((job.expiresAt - operatorNow()) / 1000), 900));
+    const sessionMaxAge = Math.max(1, Math.min(Math.ceil((job.expiresAt - operatorNow()) / 1000), 1800));
+    const sessionCookie = `dinodia_os_operator_session_${job.sessionSelector}`;
     setupHeaders(res, [
-      `dinodia_os_operator_session=${encodeURIComponent(job.sessionHandle)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${sessionMaxAge}${job.remote ? "; Secure" : ""}`,
+      `${sessionCookie}=${encodeURIComponent(job.sessionHandle)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${sessionMaxAge}${job.remote ? "; Secure" : ""}`,
       "dinodia_os_operator=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
       "dinodia_operator_binding=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
       "dinodia_operator_attempt=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
     ]);
-    return json(res, 200, { ok: true, state: "established", expiresAt: new Date(job.expiresAt).toISOString(), serial, correlationId: job.correlationId,
-      destination: job.operatorScope === "os:permanent-installation" ? "/permanent-installation" : "/" });
+    return json(res, 200, { ok: true, state: "established", expiresAt: new Date(job.expiresAt).toISOString(), sessionSelector: job.sessionSelector, serial, correlationId: job.correlationId,
+      destination: `/_dinodia/operator/${job.sessionSelector}${job.operatorScope === "os:permanent-installation" ? "/installation" : ""}` });
   }
 
   async function runOperatorHandoffJob(job) {
@@ -3911,7 +3966,9 @@ function nativeDeviceView(principal, device) {
       }
       const expiresAt = Math.min(Number(new Date(consumed.expiresAt).getTime()), Number(grantedPrincipal.exp) * 1000);
       if (!Number.isFinite(expiresAt) || expiresAt <= operatorNow()) throw Object.assign(new Error("grant expired"), { safeCode: "operator_session_expired", phase: "consume", statusCode: 401 });
-      job.sessionHandle = issueBrowserOperatorSession(operatorToken, expiresAt, { jti: grantedPrincipal.jti, handoffId: grantedPrincipal.handoffId, credentialVersion: grantedPrincipal.credentialVersion });
+      const browserSession = issueBrowserOperatorSession(operatorToken, expiresAt, { jti: grantedPrincipal.jti, handoffId: grantedPrincipal.handoffId, credentialVersion: grantedPrincipal.credentialVersion });
+      job.sessionHandle = browserSession.handle;
+      job.sessionSelector = browserSession.selector;
       job.expiresAt = expiresAt;
       job.operatorScope = operatorScope;
       job.state = "established";
@@ -3991,15 +4048,15 @@ function nativeDeviceView(principal, device) {
     if (req.method !== "POST") return json(res, 405, { error: "Method not allowed" });
     const expectedProtocol = remote ? "https" : "http";
     if (String(req.headers.origin || "") !== `${expectedProtocol}://${req.headers.host}`) return json(res, 403, { error: "Operator session origin is not allowed" });
-    const cookie = String(req.headers.cookie || "").split(";").map((part) => part.trim()).find((part) => part.startsWith("dinodia_os_operator_session="));
-    const handle = cookie ? decodeURIComponent(cookie.slice("dinodia_os_operator_session=".length)) : "";
-    const session = operatorBrowserSessions.get(handle);
+    const scoped = operatorSessionFromRequest(req);
+    const session = scoped?.session;
     if (session) {
       const principal = operatorSessionAuth(session.token);
       if (!principal || !(principal.scope.includes("os:admin") || principal.scope.includes("os:permanent-installation"))) return json(res, 401, { error: "This Dinodia OS session has expired or is no longer active", errorCode: "operator_session_expired" });
       await revokeLocalOperatorSession(session, "operator_session_ended");
     }
-    setupHeaders(res, ["dinodia_os_operator_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"]);
+    if (!scoped?.selector) return json(res, 401, { error: "The current browser window has no selected Dinodia OS session", errorCode: "operator_session_selector_required" });
+    setupHeaders(res, [`dinodia_os_operator_session_${scoped.selector}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${remote ? "; Secure" : ""}`]);
     return json(res, 200, { ok: true, message: "Dinodia OS session ended" });
   }
   function googleNestCallbackPage(kind = "success") {
@@ -4036,21 +4093,38 @@ function nativeDeviceView(principal, device) {
     res.end(googleNestCallbackPage(kind));
   }
   function browserOperatorToken(req) {
-    const cookie = String(req.headers.cookie || "")
-      .split(";")
-      .map((item) => item.trim())
-      .find((item) => item.startsWith("dinodia_os_operator_session="));
-    const handle = cookie ? decodeURIComponent(cookie.slice("dinodia_os_operator_session=".length)) : "";
-    return browserSessionToken(handle) || bearerToken(req);
+    const scoped = operatorSessionFromRequest(req);
+    return browserSessionToken(scoped?.handle) || bearerToken(req);
   }
 
   async function handleDashboardRequest(req, res, url) {
     applyDashboardHeaders(res);
     if (req.method === "OPTIONS") return text(res, 204, "");
+    if (req.method === "GET" && (["/app.js", "/styles.css"].includes(url.pathname) || /^\/js\/[A-Za-z0-9._/-]+$/.test(url.pathname) && !url.pathname.split("/").includes(".."))) return serveStatic(res, url);
     const dashboardUrl = isDashboardAdminPath(url.pathname) ? dashboardApiUrl(url) : url;
     const directNativeAppApi = !isDashboardAdminPath(url.pathname) && isNativeAppRoute(req, url);
     const browserToken = browserOperatorToken(req);
-    const operator = await refreshedSupportBrowserPrincipal(req) || operatorSessionAuth(browserToken);
+    const browserAuthority = await resolveBrowserOperatorSession(req);
+    if (browserAuthority.state === "unavailable") return json(res, 503, { error: "Current Dinodia OS authority cannot be verified right now. Keep this window open; protected actions are paused until verification recovers.", errorCode: "operator_authority_unavailable", retryable: true });
+    const operator = await refreshedSupportBrowserPrincipal(req) || browserAuthority.principal || operatorSessionAuth(browserToken);
+    if (dashboardUrl.pathname === "/api/operator-session" && req.method === "GET") {
+      if (browserAuthority.state !== "active" || !browserAuthority.principal || !browserAuthority.session) {
+        const restartRequired = browserAuthority.state === "restart_required";
+        return json(res, browserAuthority.state === "unavailable" ? 503 : 401, {
+          error: browserAuthority.state === "unavailable" ? "The current Dinodia OS authority cannot be verified right now." : restartRequired ? "The hub restarted, so its in-memory operator session ended. Return to Company Portal and deliberately open a new session." : "This browser window has no active Dinodia OS session.",
+          errorCode: browserAuthority.state === "unavailable" ? "operator_authority_unavailable" : restartRequired ? "operator_session_hub_restart" : "operator_session_expired",
+          ...(browserAuthority.reason ? { reason: browserAuthority.reason } : {}),
+          ...(browserAuthority.state === "unavailable" ? { retryable: true } : {}),
+        }, { "Cache-Control": "no-store, private", ...(browserAuthority.state === "unavailable" ? { "Retry-After": "5" } : {}) });
+      }
+      return json(res, 200, {
+        ok: true,
+        expiresAt: new Date(browserAuthority.session.expiresAt).toISOString(),
+        serverNow: new Date(operatorNow()).toISOString(),
+        authorityVerifiedAt: new Date(browserAuthority.session.lastAuthorizationCheckAt).toISOString(),
+        scope: browserAuthority.principal.scope,
+      }, { "Cache-Control": "no-store, private" });
+    }
     if (operator?.scope?.includes("os:permanent-installation") && !operator.scope.includes("os:admin")) {
       return nativeContractError(res, 403, "SCOPE_DENIED", "This assigned-work session can open only its permanent-installation workspace");
     }
@@ -4087,10 +4161,15 @@ function nativeDeviceView(principal, device) {
         || (req.method === "POST" && url.pathname === "/api/dinodia/v1/commands"));
     if (runtimeConfig.nodeEnv === "production" && !operator && !app && !offlineNativeRoute && !alexaNativeRoute) {
       if (directNativeAppApi) return nativeContractError(res, 401, "AUTH_REQUIRED", "A valid selected-home app session is required");
-      const hasOperatorCookie = String(req.headers.cookie || "").split(";").some((item) => item.trim().startsWith("dinodia_os_operator_session="));
+      const hasOperatorCookie = String(req.headers.cookie || "").split(";").some((item) => item.trim().startsWith("dinodia_os_operator_session_"));
       if (hasOperatorCookie) {
-        setupHeaders(res, ["dinodia_os_operator_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"]);
-        return json(res, 401, { error: "Your Dinodia OS session expired or was revoked. Return to Company Portal and launch secure access again.", errorCode: "operator_session_expired" });
+        if (browserAuthority.selector && browserAuthority.state === "denied") setupHeaders(res, [`dinodia_os_operator_session_${browserAuthority.selector}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${req.socket?.encrypted ? "; Secure" : ""}`]);
+        const missingSelector = browserAuthority.state === "missing";
+        const restartRequired = browserAuthority.state === "restart_required";
+        const errorCode = missingSelector ? "operator_session_selector_required" : restartRequired ? "operator_session_hub_restart" : "operator_session_expired";
+        const error = missingSelector ? "This browser window has no selected Dinodia OS session." : restartRequired ? "The hub restarted, so its in-memory operator session ended. Return to Company Portal and deliberately open a new session." : "This Dinodia OS session expired or was revoked. Return to Company Portal and launch secure access again.";
+        if (browserAuthority.selector && (browserAuthority.state === "denied" || restartRequired)) setupHeaders(res, [`dinodia_os_operator_session_${browserAuthority.selector}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${req.socket?.encrypted ? "; Secure" : ""}`]);
+        return json(res, 401, { error, errorCode, ...(browserAuthority.reason ? { reason: browserAuthority.reason } : {}) });
       }
       return json(res, 401, { error: "A temporary Dinodia OS operator session is required", errorCode: "operator_session_required" });
     }
@@ -4190,6 +4269,13 @@ function nativeDeviceView(principal, device) {
       }
       return json(res, 200, { ok: true, ...responseBody, hubSignature });
     }
+    const operatorWorkspace = url.pathname.match(/^\/_dinodia\/operator\/([A-Za-z0-9_-]{24,64})(?:\/(installation))?$/);
+    if (operatorWorkspace) {
+      if (req.method !== "GET") return text(res, 405, "Method not allowed");
+      req.headers["x-dinodia-operator-session"] = operatorWorkspace[1];
+      if (operatorWorkspace[2]) return handlePermanentInstallationPage(req, res);
+      return handleDashboardRequest(req, res, new URL("/", `http://${req.headers.host || "localhost"}`));
+    }
     if (url.pathname === runtimeConfig.googleNestCallbackPath) return handleGoogleNestCallback(req, res, url);
     if (url.pathname === "/permanent-installation" || url.pathname === "/permanent-installation.js") return handlePermanentInstallationPage(req, res);
     if (url.pathname === "/_dinodia/installer/commissioning" || url.pathname.startsWith("/_dinodia/installer/commissioning/")) return handlePermanentInstallationCommissioning(req, res, url);
@@ -4219,6 +4305,10 @@ function nativeDeviceView(principal, device) {
     const message = JSON.stringify({ schemaVersion: "dinodia.v1", type: "refresh", resource });
     for (const client of operatorEventClients) {
       if (client.socket.readyState !== WebSocket.OPEN) continue;
+      if (operatorNow() - Number(client.session?.lastAuthorizationCheckAt || 0) >= 60_000) {
+        client.socket.close(1013, "Authorization temporarily unavailable");
+        continue;
+      }
       try { client.socket.send(message); } catch { client.socket.close(1011, "Refresh unavailable"); }
     }
   }
@@ -4278,7 +4368,7 @@ function nativeDeviceView(principal, device) {
       "/api/heating-demand-controller", "/api/activity", "/api/commissioning/unregistered-devices",
     ]);
     const adminApiPath = pathname.startsWith("/_dinodia/admin/") ? pathname.slice("/_dinodia/admin".length) : "";
-    const operatorReadRoute = req.method === "GET" && installerReadRoutes.has(adminApiPath);
+    const operatorReadRoute = req.method === "GET" && (installerReadRoutes.has(adminApiPath) || adminApiPath === "/api/operator-session");
     const operatorAreaCreateRoute = req.method === "POST" && adminApiPath === "/api/areas";
     // The local assigned full-Home dashboard must be able to read the
     // existing tunnel's recovery state and invoke its already-authorized
@@ -4307,17 +4397,23 @@ function nativeDeviceView(principal, device) {
     let url;
     try { url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`); }
     catch { socket.destroy(); return; }
-    if (url.pathname === "/_dinodia/admin/events") {
+    const operatorEventRoute = url.pathname.match(/^\/_dinodia\/admin\/events\/([A-Za-z0-9_-]{24,64})$/);
+    if (operatorEventRoute) {
       const transport = operatorRequestTransportAllowed(req);
       const expectedOrigin = transport ? `${transport.expectedProtocol}://${req.headers.host}` : "";
-      let handle = "";
-      try { handle = setupCookie(req, "dinodia_os_operator_session"); } catch {}
-      const browserSession = operatorBrowserSessions.get(handle);
+      const selected = operatorSessionFromRequest(req, operatorEventRoute[1]);
+      const handle = selected?.handle || "";
+      const browserSession = selected?.session;
       const token = browserSessionToken(handle);
-      const principal = token ? operatorSessionAuth(token) : null;
+      let principal = token ? operatorSessionAuth(token) : null;
       if (!transport || url.search || !expectedOrigin || String(req.headers.origin || "") !== expectedOrigin) {
         socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
         return;
+      }
+      if (browserSession && principal && operatorNow() - Number(browserSession.lastAuthorizationCheckAt || 0) >= 60_000) {
+        const authority = await resolveBrowserOperatorSession(req, operatorEventRoute[1]);
+        if (authority.state === "unavailable") { socket.end("HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\nConnection: close\r\n\r\n"); return; }
+        principal = authority.principal || null;
       }
       if (!browserSession || !principal || !principal.scope.includes("os:admin")
         || principal.jti !== browserSession.jti || principal.credentialVersion !== browserSession.credentialVersion) {
@@ -4325,7 +4421,7 @@ function nativeDeviceView(principal, device) {
         return;
       }
       operatorEventServer.handleUpgrade(req, socket, head, (clientSocket) => {
-        const client = { socket: clientSocket, handle, token, jti: principal.jti, homeId: principal.homeId, credentialVersion: principal.credentialVersion };
+        const client = { socket: clientSocket, handle, session: browserSession, token, jti: principal.jti, homeId: principal.homeId, credentialVersion: principal.credentialVersion };
         operatorEventClients.add(client);
         client.untrack = revocationCoordinator.track(clientSocket, {
           fingerprint: principal.credentialFingerprint, jti: principal.jti,
@@ -4347,6 +4443,8 @@ function nativeDeviceView(principal, device) {
           const current = currentToken ? operatorSessionAuth(currentToken) : null;
           if (!current || current.jti !== client.jti || current.homeId !== client.homeId || current.credentialVersion !== client.credentialVersion) {
             clientSocket.close(4401, "Session expired or revoked");
+          } else if (operatorNow() - Number(browserSession.lastAuthorizationCheckAt || 0) >= 60_000) {
+            clientSocket.close(1013, "Authorization temporarily unavailable");
           }
         }, 2000);
         client.authTimer.unref?.();

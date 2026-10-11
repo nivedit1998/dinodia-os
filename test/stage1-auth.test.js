@@ -29,17 +29,17 @@ test("operator sessions are signed, hub-bound, session-time-limited, with separa
   assert.equal(verifyOperatorSessionToken(token, { publicKey: keys.publicKey, hubId: "DIN-001", requireRecentAuth: true, now: now + 5 * 60_001 }), null);
 });
 
-test("operator grants always cap at 15 minutes and reject retired extended grants", () => {
+test("operator grants are capped at 30 minutes and reject retired marked grants", () => {
   const keys = crypto.generateKeyPairSync("ed25519");
   const now = Date.UTC(2026, 8, 26, 12);
   const dayMs = 24 * 60 * 60 * 1000;
   const shortToken = createOperatorSessionToken({ sub: "employee-1", hubId: "DIN-001", scope: ["os:admin"], recentAuthAt: now }, keys.privateKey, now, { internalOperatorDaySession: true });
   const shortClaims = JSON.parse(Buffer.from(shortToken.split(".")[2], "base64url").toString("utf8"));
-  assert.equal(shortClaims.exp - shortClaims.iat, 15 * 60, "obsolete configuration cannot issue a longer grant");
+  assert.equal(shortClaims.exp - shortClaims.iat, 30 * 60, "every assigned OS scope shares the approved absolute lifetime");
   assert.equal(shortClaims.sessionPolicy, undefined, "new grants carry no retired policy marker");
   assert.ok(verifyOperatorSessionToken(shortToken, { publicKey: keys.publicKey, hubId: "DIN-001", now }));
-  assert.ok(verifyOperatorSessionToken(shortToken, { publicKey: keys.publicKey, hubId: "DIN-001", now: now + 15 * 60 * 1000 - 1 }));
-  assert.equal(verifyOperatorSessionToken(shortToken, { publicKey: keys.publicKey, hubId: "DIN-001", now: now + 15 * 60 * 1000 }), null);
+  assert.ok(verifyOperatorSessionToken(shortToken, { publicKey: keys.publicKey, hubId: "DIN-001", now: now + 30 * 60 * 1000 - 1 }));
+  assert.equal(verifyOperatorSessionToken(shortToken, { publicKey: keys.publicKey, hubId: "DIN-001", now: now + 30 * 60 * 1000 }), null);
 
   const encode = (value) => Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
   const issuedAt = Math.floor(now / 1000);
@@ -53,8 +53,8 @@ test("operator grants always cap at 15 minutes and reject retired extended grant
   const support = verifyOperatorSessionToken(supportToken, { publicKey: keys.publicKey, hubId: "DIN-001", requiredScope: "support:redeem", now });
   assert.ok(support);
   assert.equal(support.sessionPolicy, undefined, "support grants keep their separate policy");
-  assert.equal(support.exp - support.iat, 15 * 60, "support grants remain capped at their existing 15-minute operator token limit");
-  assert.equal(verifyOperatorSessionToken(supportToken, { publicKey: keys.publicKey, hubId: "DIN-001", requiredScope: "support:redeem", now: now + 15 * 60 * 1000 }), null);
+  assert.equal(support.exp - support.iat, 30 * 60, "shared token parser uses the assigned-session ceiling; support lease owner remains separately shorter");
+  assert.equal(verifyOperatorSessionToken(supportToken, { publicKey: keys.publicKey, hubId: "DIN-001", requiredScope: "support:redeem", requireRecentAuth: true, now: now + 5 * 60 * 1000 + 1 }), null);
 });
 
 test("credential registry stores hashes, rejects expiry and revokes sockets by fingerprint", () => {

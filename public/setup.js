@@ -185,10 +185,12 @@ window.addEventListener("message", (event) => {
         result = await readHandoffResponse(pollResponse);
       }
       if (result.state !== "established") throw handoffFailure({ handoffPhase: "hub", errorCode: "operator_handoff_invalid_state", correlationId: result.correlationId });
+      if (typeof result.sessionSelector !== "string" || !/^[A-Za-z0-9_-]{24,64}$/.test(result.sessionSelector)) throw handoffFailure({ handoffPhase: "hub", errorCode: "operator_session_binding_invalid", correlationId: result.correlationId });
+      sessionStorage.setItem("dinodia.operatorSessionSelector", result.sessionSelector);
       // Verify the newly set HttpOnly cookie with an authenticated, read-only
       // OS endpoint before telling Company Portal the session works.
-      const destination = result.destination === "/permanent-installation" ? "/permanent-installation" : "/";
-      const sessionCheck = await fetch(destination === "/permanent-installation" ? "/_dinodia/installer/commissioning" : "/_dinodia/admin/api/status", { cache: "no-store", credentials: "same-origin" });
+      const destination = `/_dinodia/operator/${result.sessionSelector}${result.destination.endsWith("/installation") ? "/installation" : ""}`;
+      const sessionCheck = await fetch(destination.endsWith("/installation") ? "/_dinodia/installer/commissioning" : "/_dinodia/admin/api/status", { cache: "no-store", credentials: "same-origin", headers: { "x-dinodia-operator-session": result.sessionSelector } });
       if (!sessionCheck.ok) throw handoffFailure({ handoffPhase: "hub", errorCode: "operator_session_protected_read_failed", correlationId: result.correlationId });
       if (window.opener) window.opener.postMessage({ type: "dinodia-operator-session-established" }, "https://dinodia-platform-v2.vercel.app");
       window.location.assign(destination);

@@ -21,14 +21,14 @@ const healthcheck = fs.readFileSync(path.join(__dirname, "../scripts/healthcheck
 const installer = fs.readFileSync(path.join(__dirname, "../scripts/install-pi.sh"), "utf8");
 const readme = fs.readFileSync(path.join(__dirname, "../README.md"), "utf8");
 
-test("retired operator-day configuration cannot extend the OS session policy", () => {
+test("retired configuration cannot change the owner-approved 30-minute OS session policy", () => {
   const root = path.resolve(__dirname, "..");
   for (const value of [undefined, "false", "TRUE", " true ", "true"]) {
     const env = { PATH: process.env.PATH || "" };
     if (value !== undefined) env.STAGE1_INTERNAL_OPERATOR_DAY_SESSION = value;
     const result = spawnSync(process.execPath, ["-e", "const c=require('./src/config');process.stdout.write(JSON.stringify({ttl:c.operatorSessionTtlMs,legacyPolicy:Object.hasOwn(c,'stage1InternalOperatorDaySession')}))"], { cwd: root, env, encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, JSON.stringify({ ttl: 900_000, legacyPolicy: false }), `obsolete environment value ${String(value)} must not alter a 15-minute session`);
+    assert.equal(result.stdout, JSON.stringify({ ttl: 1_800_000, legacyPolicy: false }), `obsolete environment value ${String(value)} must not alter the 30-minute session`);
   }
 });
 
@@ -106,7 +106,7 @@ test("secure-access re-verification requires a connected tunnel and the operator
   assert.match(html, /id="cloudflare-reverify"/);
   assert.match(app, /cloudflare-reverify.*hidden.*verified && localConnected/);
   assert.match(app, /action: "reverify"/);
-  assert.match(setupScript, /fetch\(destination === "\/permanent-installation" \? "\/_dinodia\/installer\/commissioning" : "\/_dinodia\/admin\/api\/status", \{ cache: "no-store", credentials: "same-origin" \}\)/);
+  assert.match(setupScript, /fetch\(destination\.endsWith\("\/installation"\) \? "\/_dinodia\/installer\/commissioning" : "\/_dinodia\/admin\/api\/status", \{ cache: "no-store", credentials: "same-origin", headers: \{ "x-dinodia-operator-session": result\.sessionSelector \} \}\)/);
   assert.match(setupScript, /if \(!sessionCheck\.ok\) throw/);
   assert.match(setupScript, /dinodia-operator-session-established/);
   assert.match(setupScript, /if \(operatorHandoffStarted\) return/);
@@ -125,14 +125,33 @@ test("secure-access re-verification requires a connected tunnel and the operator
   assert.match(setupScript, /action: "start"/);
   assert.match(setupScript, /action: "status"/);
   assert.match(setupScript, /operator_handoff_non_json_response/);
-  assert.doesNotMatch(setupScript, /localStorage|sessionStorage/);
+  assert.doesNotMatch(setupScript, /localStorage/);
+  assert.match(setupScript, /sessionStorage\.setItem\("dinodia\.operatorSessionSelector"/);
+  assert.doesNotMatch(setupScript, /sessionStorage\.setItem\([^)]*(?:operatorToken|handoffSecret|sessionHandle)/i);
   assert.doesNotMatch(setupScript, /JSON\.stringify\(\{[^}]*operatorToken|JSON\.stringify\(\{[^}]*handoffSecret/);
   assert.match(setupScript, /"https:\/\/dinodia-platform-v2\.vercel\.app"/);
   assert.match(app, /Your Dinodia OS session expired or was revoked\. Return to Company Portal and select Open secure Dinodia OS again\./);
   assert.match(app, /event\.code === 4401/);
   assert.match(app, /\/_dinodia\/operator-session\/end/);
   assert.match(fs.readFileSync(path.join(__dirname, "../public/js/api.js"), "utf8"), /operator_session_expired/);
-  assert.match(fs.readFileSync(path.join(__dirname, "../src/config.js"), "utf8"), /operatorSessionTtlMs:\s*900_000/);
+  assert.match(fs.readFileSync(path.join(__dirname, "../public/js/api.js"), "utf8"), /operator_authority_unavailable/);
+  assert.match(fs.readFileSync(path.join(__dirname, "../public/js/api.js"), "utf8"), /operator_session_hub_restart/);
+  assert.match(html, /id="operator-session-status"/);
+  assert.match(app, /startOperatorSessionStatusRefresh\(\)/);
+  assert.match(app, /addEventListener\("visibilitychange"/);
+  assert.match(app, /operatorSessionDeadlineMono/);
+  assert.match(apiScript, /const requestStartedAt = performance\.now\(\)/);
+  assert.match(apiScript, /expiresAt - serverNow - \(performance\.now\(\) - requestStartedAt\)/,
+    "the displayed OS countdown must conservatively subtract response transit time from the server-issued absolute deadline");
+  assert.match(app, /operatorSessionDeadlineMono = performance\.now\(\) \+ remainingMs/);
+  assert.match(server, /const name = `dinodia_os_operator_session_\$\{selector\}`/,
+    "each operator window must use its own selector-named HttpOnly cookie rather than replacing a shared session cookie");
+  assert.match(server, /Math\.min\(Math\.ceil\(\(job\.expiresAt - operatorNow\(\)\) \/ 1000\), 1800\)/);
+  assert.match(server, /OPERATOR_REVALIDATION_RETRY_MS = 15_000/);
+  assert.match(fs.readFileSync(path.join(__dirname, "../public/permanent-installation.js"), "utf8"), /scheduleSessionRefresh\(15000\)/,
+    "assigned commissioning transient failures must back off and retry the same selected window");
+  assert.match(css, /operator-authority-unavailable \.main-content/);
+  assert.match(fs.readFileSync(path.join(__dirname, "../src/config.js"), "utf8"), /operatorSessionTtlMs:\s*1_800_000/);
   assert.match(fs.readFileSync(path.join(__dirname, "../src/config.js"), "utf8"), /operatorPolicySyncIntervalMs: Math\.max\(15000, Math\.min\(numberEnv\("DINODIA_OPERATOR_POLICY_SYNC_INTERVAL_MS", 30000\), 60000\)\)/);
 });
 

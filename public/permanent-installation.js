@@ -1,10 +1,14 @@
 (() => {
   "use strict";
   const $ = (id) => document.getElementById(id);
-  const state = { context: null, session: null, selected: null, existingDevices: [], completedDevices: [], authorityVerified: false, busy: false, poll: null };
+  const state = { context: null, session: null, selected: null, existingDevices: [], completedDevices: [], authorityVerified: false, busy: false, poll: null, sessionDeadlineMono: null, sessionClockTimer: null, lastAuthorityVerifiedAt: null };
   const key = (suffix) => `dinodia-installation:${state.context?.requestId || "unknown"}:${suffix}`;
+  const operatorSessionHeaders = () => {
+    const selector = sessionStorage.getItem("dinodia.operatorSessionSelector") || String(location.pathname || "").match(/^\/_dinodia\/operator\/([A-Za-z0-9_-]{24,64})/)?.[1] || "";
+    return selector ? { "x-dinodia-operator-session": selector } : {};
+  };
   const post = async (path, body, idempotencyKey = null) => {
-    const headers = { "content-type": "application/json", "x-dinodia-setup-csrf": cookie("dinodia_setup_csrf") };
+    const headers = { "content-type": "application/json", "x-dinodia-setup-csrf": cookie("dinodia_setup_csrf"), ...operatorSessionHeaders() };
     if (idempotencyKey) headers["idempotency-key"] = idempotencyKey;
     const response = await fetch(path, { method: "POST", credentials: "same-origin", cache: "no-store", headers, body: JSON.stringify(body) });
     const value = await response.json().catch(() => ({}));
@@ -12,9 +16,22 @@
     return value;
   };
   const get = async (path) => {
-    const response = await fetch(path, { credentials: "same-origin", cache: "no-store" });
+    const requestStartedAt = performance.now();
+    const response = await fetch(path, { credentials: "same-origin", cache: "no-store", headers: operatorSessionHeaders() });
     const value = await response.json().catch(() => ({}));
-    if (!response.ok) { const error = new Error(value?.error?.message || value?.error || "The assigned installation session is no longer available"); error.statusCode = response.status; if ([401, 403].includes(response.status)) clearProtectedScope(error); throw error; }
+    if (!response.ok) {
+      const error = new Error(value?.error?.message || value?.error || "The assigned installation session is no longer available"); error.statusCode = response.status;
+      if ([401, 403].includes(response.status)) clearProtectedScope(error);
+      else if (response.status === 503) {
+        state.authorityVerified = false;
+        updateButtons();
+        const last = state.lastAuthorityVerifiedAt ? ` Last verified ${new Date(state.lastAuthorityVerifiedAt).toLocaleTimeString()}.` : "";
+        $("summary").textContent = `Authority is temporarily unavailable. This OS session has not been declared expired; protected actions are paused.${last}`;
+        $("status").textContent = "Waiting to recheck the same assigned session. Do not sign in or launch a replacement because of a temporary connection failure.";
+      }
+      throw error;
+    }
+    if (value && typeof value === "object") Object.defineProperty(value, "__responseRttMs", { value: Math.max(0, performance.now() - requestStartedAt), enumerable: false });
     return value;
   };
   function cookie(name) {
@@ -70,6 +87,25 @@
     $("select").textContent = state.session?.operationKind === "REGISTER_EXISTING" ? "Review device and Area" : "Review this device";
     $("install").textContent = state.session?.operationKind === "REGISTER_EXISTING" ? "Register as permanent device" : "Install and sync";
   }
+  function renderSessionDeadline(context) {
+    if (!context?.sessionExpiresAt || !context?.serverNow || !window.performance?.now) return;
+    const deadline = Date.parse(context.sessionExpiresAt); const serverNow = Date.parse(context.serverNow);
+    if (!Number.isFinite(deadline) || !Number.isFinite(serverNow)) return;
+    state.sessionDeadlineMono = performance.now() + Math.max(0, deadline - serverNow - Number(context.__responseRttMs || 0));
+    state.lastAuthorityVerifiedAt = context.authorityVerifiedAt || context.serverNow;
+    const render = () => {
+      const remainingMs = Math.max(0, state.sessionDeadlineMono - performance.now());
+      const remaining = Math.ceil(remainingMs / 1000);
+      const minutes = Math.floor(remaining / 60); const seconds = remaining % 60;
+      $("operator-session-status").textContent = remaining > 0
+        ? `This assigned OS session ends at ${new Date(deadline).toLocaleTimeString()} (${minutes}m ${String(seconds).padStart(2, "0")}s remaining). Refreshing or opening another window does not extend it.`
+        : "This assigned OS session has reached its absolute deadline. Return to Company Portal to deliberately open a new session.";
+      if (remaining === 0) { state.authorityVerified = false; updateButtons(); }
+    };
+    render();
+    if (state.sessionClockTimer) clearInterval(state.sessionClockTimer);
+    state.sessionClockTimer = setInterval(render, 1000);
+  }
   function render(session) {
     state.session = session;
     if (session.operationKind === "REGISTER_EXISTING" && !state.selected) state.selected = (session.candidates || [])[0] || null;
@@ -121,6 +157,10 @@
       list.append(item);
     }
   }
+  function scheduleSessionRefresh(delayMs) {
+    if (state.poll) clearTimeout(state.poll);
+    state.poll = setTimeout(() => { state.poll = null; void refresh(); }, delayMs);
+  }
   async function refreshExistingDevices() {
     if (!state.context?.protocols?.registrationEnabled) { state.existingDevices = []; state.completedDevices = []; state.authorityVerified = true; renderExistingDevices(); renderCompleted(); updateButtons(); return; }
     const result = await get("/_dinodia/installer/commissioning/devices");
@@ -155,7 +195,7 @@
       const session = await post("/_dinodia/installer/commissioning/sessions", { schemaVersion: "dinodia.v1", operationKind: "PAIR_NEW", protocol }, `install-start-${crypto.randomUUID()}`);
       render(session); renderCandidates();
       if (state.poll) clearInterval(state.poll);
-      state.poll = setInterval(() => refresh().catch(showError), 3000);
+      scheduleSessionRefresh(3000);
     } catch (error) { showError(error); }
     finally { setBusy(false); updateButtons(); }
   }
@@ -171,27 +211,33 @@
       $("label").value = device.name || "Device"; $("name").value = device.name || "Device";
       const area = $("area"); if (device.availableAreas?.some((row) => row.id === device.originalAreaId)) area.value = device.originalAreaId;
       if (state.poll) clearInterval(state.poll);
-      state.poll = setInterval(() => refresh().catch(showError), 3000);
+      scheduleSessionRefresh(3000);
     } catch (error) { state.selected = null; showError(error); await refreshExistingDevices().catch(() => {}); }
     finally { setBusy(false); updateButtons(); }
   }
   async function refresh() {
-    if (state.busy) return;
+    if (state.busy) { if (state.session) scheduleSessionRefresh(1000); return; }
     clearError();
     setBusy(true);
+    let nextPollDelay = null;
     try {
       await refreshContext();
       await refreshExistingDevices();
       if (!state.session) return;
       const session = await get(`/_dinodia/installer/commissioning/sessions/${encodeURIComponent(state.session.sessionId)}`);
       render(session); renderCandidates();
-      if (terminal.has(session.status) || session.status.endsWith("_cleanup_pending")) { clearInterval(state.poll); state.poll = null; }
-    } catch (error) { showError(error); }
-    finally { setBusy(false); updateButtons(); }
+      if (terminal.has(session.status) || session.status.endsWith("_cleanup_pending")) { if (state.poll) clearTimeout(state.poll); state.poll = null; }
+      else nextPollDelay = 3000;
+    } catch (error) {
+      showError(error);
+      if (state.context && ![401, 403].includes(Number(error?.statusCode))) nextPollDelay = 15000;
+    }
+    finally { setBusy(false); updateButtons(); if (nextPollDelay !== null) scheduleSessionRefresh(nextPollDelay); }
   }
   async function refreshContext() {
     state.authorityVerified = false; updateButtons();
     state.context = await get("/_dinodia/installer/commissioning");
+    renderSessionDeadline(state.context);
     $("summary").textContent = `Assigned installation work · ${state.context.areas.length} permitted original Area${state.context.areas.length === 1 ? "" : "s"}`;
     const select = $("area"); const previous = select.value; select.replaceChildren(new Option("Choose an Area", ""));
     for (const area of state.context.areas) select.add(new Option(area.name, area.id));
@@ -260,7 +306,7 @@
   });
   $("finish-installation").addEventListener("click", async () => {
     if (state.session && !terminal.has(state.session.status)) return;
-    await fetch("/_dinodia/operator-session/end", { method: "POST", credentials: "same-origin", headers: { "x-dinodia-setup-csrf": cookie("dinodia_setup_csrf") } }).catch(() => {});
+    await fetch("/_dinodia/operator-session/end", { method: "POST", credentials: "same-origin", headers: { "x-dinodia-setup-csrf": cookie("dinodia_setup_csrf"), ...operatorSessionHeaders() } }).catch(() => {});
     if (window.opener && !window.opener.closed) { window.close(); return; }
     location.replace("/support-access");
   });
@@ -276,7 +322,7 @@
   });
   $("end-session").addEventListener("click", async () => {
     if (state.session && !["completed", "cancelled", "expired", "failed"].includes(state.session.status)) await cancel();
-    await fetch("/_dinodia/operator-session/end", { method: "POST", credentials: "same-origin", headers: { "x-dinodia-setup-csrf": cookie("dinodia_setup_csrf") } }).catch(() => {});
+    await fetch("/_dinodia/operator-session/end", { method: "POST", credentials: "same-origin", headers: { "x-dinodia-setup-csrf": cookie("dinodia_setup_csrf"), ...operatorSessionHeaders() } }).catch(() => {});
     location.replace("/support-access");
   });
   async function init() {
@@ -287,7 +333,14 @@
       if (saved && /^[0-9a-f-]{36}$/i.test(saved)) { state.session = { sessionId: saved }; await refresh(); }
       updateButtons();
     renderCompleted();
-    } catch (error) { if (![401, 403].includes(error?.statusCode)) $("summary").textContent = state.context ? "Authority or hub status could not be refreshed; actions remain disabled until it is revalidated." : "This assigned work is unavailable."; showError(error); updateButtons(); }
+    } catch (error) {
+      if (![401, 403].includes(error?.statusCode) && !(error?.statusCode === 503 && /temporarily unavailable/i.test($("summary").textContent))) {
+        $("summary").textContent = state.context ? "Authority or hub status could not be refreshed; actions remain disabled until it is revalidated." : "This assigned work is unavailable.";
+      }
+      showError(error); updateButtons();
+      if (![401, 403].includes(Number(error?.statusCode))) scheduleSessionRefresh(15000);
+    }
   }
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") void refresh().catch(showError); });
   void init();
 })();

@@ -65,7 +65,7 @@ module.exports = {
     nativeStaffMatterCommissioningV1: stringEnv("DINODIA_NATIVE_STAFF_MATTER_COMMISSIONING_ENABLED", "true") === "true",
     nativeStaffDeviceRegistrationV1: stringEnv("DINODIA_NATIVE_STAFF_DEVICE_REGISTRATION_ENABLED", "true") === "true",
   }),
-  operatorSessionTtlMs: 900_000,
+  operatorSessionTtlMs: 1_800_000,
   manufacturingRootPublicKeys: stringEnv("DINODIA_MANUFACTURING_ROOT_PUBLIC_KEYS", ""),
   mqttUrl: stringEnv("MQTT_URL", ""),
   zigbeeBaseTopic: stringEnv("ZIGBEE2MQTT_BASE_TOPIC", "zigbee2mqtt"),

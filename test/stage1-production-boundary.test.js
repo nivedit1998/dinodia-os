@@ -254,7 +254,8 @@ test("production rejects legacy admin, HA, bootstrap and dashboard credentials",
     });
     assert.equal(status, 404);
 
-    const unauthenticatedEvents = new WebSocket(`${base.replace("http", "ws")}/_dinodia/admin/events`, {
+    const eventSelector = crypto.randomBytes(24).toString("base64url");
+    const unauthenticatedEvents = new WebSocket(`${base.replace("http", "ws")}/_dinodia/admin/events/${encodeURIComponent(eventSelector)}`, {
       headers: { host: "127.0.0.1", origin: "http://127.0.0.1" },
     });
     const eventsStatus = await new Promise((resolve, reject) => {
@@ -268,7 +269,7 @@ test("production rejects legacy admin, HA, bootstrap and dashboard credentials",
     });
     assert.equal(eventsStatus, 401, "Native operator events require the existing scoped browser session");
 
-    const crossOriginEvents = new WebSocket(`${base.replace("http", "ws")}/_dinodia/admin/events`, {
+    const crossOriginEvents = new WebSocket(`${base.replace("http", "ws")}/_dinodia/admin/events/${encodeURIComponent(eventSelector)}`, {
       headers: { host: "127.0.0.1", origin: "https://attacker.example" },
     });
     const crossOriginStatus = await new Promise((resolve, reject) => {

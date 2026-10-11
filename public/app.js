@@ -4,6 +4,7 @@ const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
 
 function showNotice(message, kind = "info") { const notice = $("#notice"); notice.textContent = message || ""; notice.dataset.kind = kind; notice.classList.toggle("hidden", !message); }
+function operatorAuthorityPaused() { return document.body.classList.contains("operator-authority-unavailable") || document.body.classList.contains("operator-authority-ended"); }
 function api(route, options = {}) { return window.DinodiaApi.request(route, options, state.token); }
 window.DinodiaAutomations?.configure({ api, notice: showNotice, escapeHtml });
 function areaName(id) { return state.areas.find((area) => area.id === id)?.name || "Unassigned"; }
@@ -696,6 +697,7 @@ async function loadMatterPairingStatus() { try { const pairing = await api("/api
 let loadInFlight = null;
 let loadQueued = false;
 function load() {
+  if (operatorAuthorityPaused()) return Promise.resolve();
   if (loadInFlight) { loadQueued = true; return loadInFlight; }
   loadInFlight = loadDashboard().finally(() => {
     const rerun = loadQueued;
@@ -705,9 +707,82 @@ function load() {
   });
   return loadInFlight;
 }
+let operatorSessionDeadlineMono = null;
+let operatorSessionDeadlineWall = null;
+let operatorSessionClockTimer = null;
+let operatorSessionPollTimer = null;
+let operatorSessionPollInFlight = false;
+function renderOperatorSessionDeadline() {
+  const banner = $("#operator-session-status");
+  if (!banner || operatorSessionDeadlineMono === null) return;
+  const remainingSeconds = Math.max(0, Math.ceil((operatorSessionDeadlineMono - performance.now()) / 1000));
+  if (remainingSeconds === 0) {
+    document.body.classList.remove("operator-authority-unavailable");
+    document.body.classList.add("operator-authority-ended");
+    banner.dataset.state = "ended";
+    banner.textContent = "This Dinodia OS session reached its original 30-minute deadline. Your Company Portal sign-in is separate; deliberately open a new OS session there when you are ready.";
+    return;
+  }
+  const minutes = Math.floor(remainingSeconds / 60);
+  const seconds = remainingSeconds % 60;
+  banner.dataset.state = "active";
+  banner.textContent = `This OS session ends at ${new Date(operatorSessionDeadlineWall).toLocaleTimeString()} (${minutes}m ${String(seconds).padStart(2, "0")}s remaining). Rechecking authority does not extend it.`;
+}
+document.addEventListener("dinodia-operator-authority", (event) => {
+  const detail = event.detail || {};
+  const banner = $("#operator-session-status");
+  if (!banner) return;
+  banner.classList.remove("hidden");
+  if (detail.state === "unavailable") {
+    document.body.classList.remove("operator-authority-ended");
+    document.body.classList.add("operator-authority-unavailable");
+    banner.dataset.state = "unavailable";
+    banner.textContent = "Remote authority verification is temporarily unavailable. Protected Home data and actions are hidden/paused; this is not a sign-out or proof that the 30-minute session expired. Keep this window open; Dinodia will retry the same session.";
+    return;
+  }
+  if (detail.state === "ended") {
+    document.body.classList.remove("operator-authority-unavailable");
+    document.body.classList.add("operator-authority-ended");
+    banner.dataset.state = "ended";
+    banner.textContent = detail.code === "operator_session_hub_restart"
+      ? "The hub restarted and cleared its in-memory operator session. No access is retained; return to Company Portal and deliberately open a new session."
+      : detail.code === "operator_session_revoked"
+      ? "This OS session was explicitly revoked or its assigned authority changed. Return to Company Portal and review the current assigned work."
+      : "This Dinodia OS session ended or was revoked. Your Company Portal sign-in is separate; return there to deliberately open a new OS session if the work is still assigned.";
+    if (operatorSessionPollTimer) clearInterval(operatorSessionPollTimer);
+    operatorSessionPollTimer = null;
+    return;
+  }
+  if (detail.state !== "active") return;
+  const expiresAt = Date.parse(detail.expiresAt);
+  const serverNow = Date.parse(detail.serverNow);
+  if (!Number.isFinite(expiresAt) || !Number.isFinite(serverNow)) return;
+  const wasAuthorityPaused = operatorAuthorityPaused();
+  document.body.classList.remove("operator-authority-unavailable", "operator-authority-ended");
+  operatorSessionDeadlineWall = expiresAt;
+  const remainingMs = Number.isFinite(detail.remainingMs) ? Math.max(0, detail.remainingMs) : Math.max(0, expiresAt - serverNow);
+  operatorSessionDeadlineMono = performance.now() + remainingMs;
+  banner.classList.remove("hidden");
+  renderOperatorSessionDeadline();
+  if (operatorSessionClockTimer) clearInterval(operatorSessionClockTimer);
+  operatorSessionClockTimer = setInterval(renderOperatorSessionDeadline, 1000);
+  if (wasAuthorityPaused) void load();
+});
+async function refreshOperatorSessionStatus() {
+  if (operatorSessionPollInFlight || document.body.classList.contains("operator-authority-ended")) return;
+  operatorSessionPollInFlight = true;
+  try { await api("/api/operator-session"); } catch { /* The shared API wrapper preserves outage vs terminal state. */ }
+  finally { operatorSessionPollInFlight = false; }
+}
+function startOperatorSessionStatusRefresh() {
+  void refreshOperatorSessionStatus();
+  if (!operatorSessionPollTimer) operatorSessionPollTimer = setInterval(refreshOperatorSessionStatus, 15000);
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") void refreshOperatorSessionStatus(); });
 let deviceRefreshInFlight = null;
 function deviceEditorHasFocus() { return Boolean(document.activeElement?.closest("#devices .device-editor")); }
 function refreshDevices() {
+  if (operatorAuthorityPaused()) return Promise.resolve();
   if (deviceEditorHasFocus()) return Promise.resolve();
   if (deviceRefreshInFlight) return deviceRefreshInFlight;
   deviceRefreshInFlight = api("/api/devices").then((devices) => {
@@ -720,7 +795,10 @@ function refreshDevices() {
 let dashboardSocket = null;
 let dashboardSocketReconnectTimer = null;
 let dashboardSocketAttempt = 0;
-function dashboardWebSocketUrl() { return `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/_dinodia/admin/events`; }
+function dashboardWebSocketUrl() {
+  const selector = sessionStorage.getItem("dinodia.operatorSessionSelector") || location.pathname.match(/^\/_dinodia\/operator\/([A-Za-z0-9_-]{24,64})/)?.[1] || "";
+  return `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/_dinodia/admin/events/${encodeURIComponent(selector)}`;
+}
 function scheduleDashboardSocketReconnect() {
   if (dashboardSocketReconnectTimer) return;
   const delay = Math.min(30000, 1000 * (2 ** Math.min(dashboardSocketAttempt, 5)));
@@ -753,6 +831,7 @@ function connectDashboardSocket(force = false) {
       showNotice("Your Dinodia OS session expired or was revoked. Return to Company Portal and select Open secure Dinodia OS again.", "error");
       return;
     }
+    if (event.code === 1013) showNotice("Live updates are paused while Dinodia OS rechecks this window. The session remains open; updates will reconnect automatically.", "warning");
     scheduleDashboardSocketReconnect();
   });
   socket.addEventListener("error", () => { setActivityLiveStatus(false); if (dashboardSocket === socket) socket.close(); });
@@ -763,7 +842,8 @@ $("#end-session")?.addEventListener("click", async () => {
   const button = $("#end-session");
   if (button) button.disabled = true;
   try {
-    const response = await fetch("/_dinodia/operator-session/end", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" } });
+    const selector = sessionStorage.getItem("dinodia.operatorSessionSelector") || location.pathname.match(/^\/_dinodia\/operator\/([A-Za-z0-9_-]{24,64})/)?.[1] || "";
+    const response = await fetch("/_dinodia/operator-session/end", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json", ...(selector ? { "x-dinodia-operator-session": selector } : {}) } });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || "The Dinodia OS session could not be ended");
     state.token = "";
@@ -893,4 +973,5 @@ $("#cloudflare-finish").addEventListener("click", async () => { try { await api(
 $("#cloudflare-reverify").addEventListener("click", async () => { const button = $("#cloudflare-reverify"); button.disabled = true; button.textContent = "Verifying…"; try { await api("/api/integrations/cloudflare", { method: "POST", body: JSON.stringify({ action: "reverify" }) }); await load(); } catch (error) { showNotice(error.message, "error"); await load().catch(() => {}); } finally { button.disabled = false; button.textContent = "Verify secure access again"; } });
 $("#disconnect-cloudflare").addEventListener("click", async () => { try { await api("/api/integrations/cloudflare", { method: "POST", body: JSON.stringify({ action: "disconnect" }) }); await load(); } catch (error) { showNotice(error.message, "error"); } });
 load();
+startOperatorSessionStatusRefresh();
 connectDashboardSocket();

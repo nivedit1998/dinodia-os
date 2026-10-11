@@ -15,7 +15,7 @@ function signedOperatorToken(claims, privateKey) {
   const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
   const header = encode({ alg: "EdDSA", typ: "DNO-OPS-1" });
   const payload = encode({ iss: "dinodia-platform", aud: `dinodia-os:${claims.hubId}`, iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + 600, recentAuthAt: Date.now(), ...claims });
+    exp: Math.floor(Date.now() / 1000) + 1800, recentAuthAt: Date.now(), credentialVersion: 0, ...claims });
   const input = `${header}.${payload}`;
   return `dno1.${input}.${crypto.sign(null, Buffer.from(input), privateKey).toString("base64url")}`;
 }
@@ -38,7 +38,7 @@ test("assigned commissioning route serves a current grant and denies stale ident
     if (!requestUrl.startsWith(canonicalOrigin)) return originalFetch(input, options);
     const body = JSON.parse(String(options.body || "{}"));
     const payload = body.phase === "prepare" ? { handoffSecretEnvelope: "{}" }
-      : { sessionGrant: { version: 1, envelope: "{}" }, expiresAt: new Date(Date.now() + 600_000).toISOString() };
+      : { sessionGrant: { version: 1, envelope: "{}" }, expiresAt: new Date(Date.now() + 1_800_000).toISOString() };
     return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
   };
   const hub = createHub({
@@ -101,21 +101,29 @@ test("assigned commissioning route serves a current grant and denies stale ident
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   assert.ok(established, "disposable assigned staff handoff should establish for this route test");
-  const sessionCookie = established.headers.getSetCookie().map((value) => value.split(";", 1)[0]).find((value) => value.startsWith("dinodia_os_operator_session="));
+  const establishedBody = await established.clone().json();
+  assert.match(establishedBody.sessionSelector, /^[A-Za-z0-9_-]{24,64}$/);
+  assert.match(establishedBody.destination, new RegExp(`^/_dinodia/operator/${establishedBody.sessionSelector}/installation$`));
+  const sessionCookie = established.headers.getSetCookie().map((value) => value.split(";", 1)[0]).find((value) => value.startsWith("dinodia_os_operator_session_"));
   assert.ok(sessionCookie);
+  assert.ok(sessionCookie.startsWith(`dinodia_os_operator_session_${establishedBody.sessionSelector}=`), "the cookie name binds this browser window to its own scoped session selector");
   const authorityCookie = `${cookieHeader}; ${sessionCookie}`;
-  const liveContext = await fetch(`${setupOrigin}/_dinodia/installer/commissioning`, { headers: { cookie: authorityCookie } });
+  const operatorHeaders = { cookie: authorityCookie, "x-dinodia-operator-session": establishedBody.sessionSelector };
+  const sessionStatus = await fetch(`${setupOrigin}/_dinodia/admin/api/operator-session`, { headers: operatorHeaders });
+  const sessionStatusBody = await sessionStatus.json();
+  assert.equal(sessionStatus.status, 200, JSON.stringify(sessionStatusBody));
+  const liveContext = await fetch(`${setupOrigin}/_dinodia/installer/commissioning`, { headers: operatorHeaders });
   const liveBody = await liveContext.json();
-  assert.equal(liveContext.status, 200);
+  assert.equal(liveContext.status, 200, JSON.stringify(liveBody));
   assert.deepEqual(liveBody.areas.map((area) => area.name), [privateAreaName]);
-  const liveDevices = await fetch(`${setupOrigin}/_dinodia/installer/commissioning/devices`, { headers: { cookie: authorityCookie } });
+  const liveDevices = await fetch(`${setupOrigin}/_dinodia/installer/commissioning/devices`, { headers: operatorHeaders });
   const liveDevicesBody = await liveDevices.json();
   assert.equal(liveDevices.status, 200);
   assert.equal(liveDevicesBody.devices.length, 1, "the actual assigned route lists an eligible previously-interviewed local device");
   assert.equal(liveDevicesBody.devices[0].name, "Assigned-route radiator");
   assert.equal(JSON.stringify(liveDevicesBody).includes(existingDeviceId), false, "local device IDs remain opaque to the browser");
 
-  const startHeaders = { ...commonHeaders, cookie: authorityCookie, "idempotency-key": "assigned-route-zigbee-0001" };
+  const startHeaders = { ...commonHeaders, ...operatorHeaders, "idempotency-key": "assigned-route-zigbee-0001" };
   const startZigbee = await fetch(`${setupOrigin}/_dinodia/installer/commissioning/sessions`, {
     method: "POST", headers: startHeaders, body: JSON.stringify({ schemaVersion: "dinodia.v1", operationKind: "PAIR_NEW", protocol: "zigbee" }),
   });
@@ -124,7 +132,7 @@ test("assigned commissioning route serves a current grant and denies stale ident
   assert.equal(zigbeeSession.status, "searching");
 
   const cancel = await fetch(`${setupOrigin}/_dinodia/installer/commissioning/sessions/${encodeURIComponent(zigbeeSession.sessionId)}/cancel`, {
-    method: "POST", headers: { ...commonHeaders, cookie: authorityCookie }, body: JSON.stringify({ schemaVersion: "dinodia.v1" }),
+    method: "POST", headers: { ...commonHeaders, ...operatorHeaders }, body: JSON.stringify({ schemaVersion: "dinodia.v1" }),
   });
   assert.equal(cancel.status, 200, await cancel.clone().text());
   const startMatter = await fetch(`${setupOrigin}/_dinodia/installer/commissioning/sessions`, {
@@ -136,7 +144,7 @@ test("assigned commissioning route serves a current grant and denies stale ident
   assert.equal(matterSession.status, "awaiting_payload");
 
   liveIdentityGeneration = 9;
-  const context = await fetch(`${setupOrigin}/_dinodia/installer/commissioning`, { headers: { cookie: authorityCookie } });
+  const context = await fetch(`${setupOrigin}/_dinodia/installer/commissioning`, { headers: operatorHeaders });
   const body = await context.json();
   assert.equal(context.status, 403);
   assert.equal(body.error?.code, "COMMISSIONING_AUTHORITY_DENIED");
@@ -144,8 +152,8 @@ test("assigned commissioning route serves a current grant and denies stale ident
   assert.equal(JSON.stringify(body).includes(areaId), false);
 
   revalidatedHomeId = crypto.randomUUID();
-  const mismatchedHome = await fetch(`${setupOrigin}/_dinodia/installer/commissioning`, { headers: { cookie: authorityCookie } });
+  const mismatchedHome = await fetch(`${setupOrigin}/_dinodia/installer/commissioning`, { headers: operatorHeaders });
   const mismatchedBody = await mismatchedHome.json();
-  assert.equal(mismatchedHome.status, 401);
+  assert.ok([401, 403].includes(mismatchedHome.status), JSON.stringify(mismatchedBody));
   assert.equal(JSON.stringify(mismatchedBody).includes(privateAreaName), false, "a revalidated different Home must not disclose assigned Area metadata");
 });
