@@ -1020,7 +1020,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   alexaIntegration.pairing = pairing;
   if (alexaIntegration.platformSync) alexaIntegration.platformSync.pairing = pairing;
   nativeCommissioningService = new NativeCommissioningService({ store: hubStore, mqtt, matter, pairing, vault, eventBus,
-    commissioningCapabilities: runtimeConfig.nativeCommissioningCapabilities, clock, logger });
+    commissioningCapabilities: runtimeConfig.nativeCommissioningCapabilities, identityBrokerRequired: runtimeConfig.nodeEnv === "production", clock, logger });
   eventBus.on("registry_updated", (event) => {
     if (event?.registry === "area") pairing.syncNow().catch(() => {});
   });
@@ -1801,7 +1801,7 @@ function nativeDeviceView(principal, device) {
       const assignedPrincipal = await currentAssignedDashboardPrincipal(req);
       if (!assignedPrincipal) return nativeContractError(res, 401, "AUTH_REQUIRED", "The assigned Home work is no longer current. Return to Company Portal and reopen the dashboard.");
       try {
-        return json(res, 200, nativeCommissioningService.listDashboardUnregisteredDevices(assignedPrincipal), { "Cache-Control": "no-store, private" });
+        return json(res, 200, await nativeCommissioningService.listDashboardUnregisteredDevices(assignedPrincipal), { "Cache-Control": "no-store, private" });
       } catch (error) {
         if (Number(error?.statusCode) === 403) return nativeContractError(res, 403, "SCOPE_DENIED", "Current assigned Home authority is required to view this inventory");
         throw error;
@@ -3570,11 +3570,14 @@ function nativeDeviceView(principal, device) {
     const session = operatorBrowserSessions.get(handle);
     if (!session || !session.handoffId || !session.jti || revokedOperatorJtis.has(String(session.jti)) || operatorNow() >= Number(session.expiresAt || 0)) return null;
     const principal = operatorSessionAuth(session.token);
+    let currentIdentity = null;
+    try { currentIdentity = await pairing.getPublicIdentity(); } catch { return null; }
     if (!principal || principal.scope.length !== 1 || principal.scope[0] !== "os:admin"
       || principal.jti !== session.jti || principal.handoffId !== session.handoffId
       || !principal.workflow || !principal.employeeSessionId || !Number.isSafeInteger(Number(principal.workRevision))
       || !principal.homeId || String(principal.hubId || "") !== String(serial)
-      || Number(principal.identityGeneration) !== Number(hubStore.getIdentity?.()?.generation || 0)) return null;
+      || !currentIdentity || String(currentIdentity.serial || "") !== String(serial)
+      || Number(currentIdentity.generation) < 1 || Number(principal.identityGeneration) !== Number(currentIdentity.generation)) return null;
     try {
       const result = await pairing.requestWithHubIdentity("/api/hub-agent/operator-session/revalidate", {
         handoffId: session.handoffId, jti: session.jti, credentialVersion: session.credentialVersion,

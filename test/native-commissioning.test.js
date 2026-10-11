@@ -398,7 +398,39 @@ test("assigned staff can review and register one already-paired unregistered pro
   assert.equal(afterRegistration.completedDevices[0].sync, "pending", "locally persisted canonical policy is not mislabeled as synced before cloud configuration confirms it");
 });
 
-test("assigned full dashboard can see eligible local devices read-only without exposing identities or tenant inventory", (t) => {
+test("assigned adoption validates against the live identity broker generation, not a legacy Store generation", async (t) => {
+  const f = fixture(); t.after(f.close);
+  // Production keeps signing identity in dinodia-identityd. The legacy
+  // application Store identity is intentionally not the authority for its
+  // generation and can remain zero after a healthy installation.
+  f.store.getIdentity = () => ({ generation: 0, serial: "DIN-HUB-1" });
+  f.service.pairing.getPublicIdentity = async () => ({ generation: 7, serial: "DIN-HUB-1" });
+  const staff = { principalType: "operator", scope: ["os:permanent-installation"], sub: uuid(), sid: uuid(), jti: uuid(),
+    handoffId: uuid(), homeId: f.homeId, workflow: uuid(), requestId: uuid(), employeeSessionId: uuid(), workRevision: 4,
+    hubId: "DIN-HUB-1", hubInstallId: f.hubInstallId, areaIds: [f.areaId], areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
+  const existing = { id: "zigbee:broker-generation-radiator", protocol: "zigbee", available: true, interviewStatus: "successful",
+    originalName: "Living room radiator", areaId: "os-area-1", protocolIdentity: { ieeeAddress: "0x00124b0000000201" },
+    setup: { status: "ready" }, entities: { climate: { name: "Heating", capability: { category: "control", readable: true, writable: true } } },
+    metadata: { manufacturer: "SONOFF", model: "TRVZB" } };
+  await f.store.upsertDevice(existing);
+  await f.store.addEvent({ type: "device_setup_completed", deviceId: existing.id, protocol: "zigbee", areaId: "os-area-1" });
+
+  const result = await f.service.listAdoptableDevices(staff);
+  assert.equal(result.devices.length, 1);
+  assert.equal(result.devices[0].name, "Living room radiator");
+
+  const dashboardStaff = { ...staff, scope: ["os:admin"] };
+  const dashboard = await f.service.listDashboardUnregisteredDevices(dashboardStaff);
+  assert.equal(dashboard.devices.length, 1, "the full-dashboard inventory also uses the live broker identity");
+  assert.equal(dashboard.devices[0].name, "Living room radiator");
+
+  f.service.identityBrokerRequired = true;
+  f.service.pairing.getPublicIdentity = async () => null;
+  await assert.rejects(f.service.listAdoptableDevices(staff), { code: "commissioning_authority_denied" },
+    "production fails closed instead of falling back to a stale Store identity when the broker is unavailable");
+});
+
+test("assigned full dashboard can see eligible local devices read-only without exposing identities or tenant inventory", async (t) => {
   const f = fixture(); t.after(f.close);
   const staff = { principalType: "operator", scope: ["os:admin"], sub: uuid(), sid: uuid(), jti: uuid(), handoffId: uuid(),
     homeId: f.homeId, workflow: uuid(), employeeSessionId: uuid(), workRevision: 4, hubId: "DIN-HUB-1", identityGeneration: 7 };
@@ -410,16 +442,16 @@ test("assigned full dashboard can see eligible local devices read-only without e
   f.devices.push(eligible, privateDevice);
   f.events.push({ type: "device_setup_completed", deviceId: eligible.id, areaId: "os-area-1" }, { type: "device_setup_completed", deviceId: privateDevice.id, areaId: "os-area-1" });
 
-  const listed = f.service.listDashboardUnregisteredDevices(staff);
+  const listed = await f.service.listDashboardUnregisteredDevices(staff);
   assert.equal(listed.devices.length, 1);
   assert.deepEqual(listed.devices[0], { protocol: "zigbee", name: "Living room radiator", manufacturer: "SONOFF", model: "TRVZB", status: "not_registered",
     areaName: "Living Room", available: true, controls: [{ name: "target_temperature", readable: true, writable: true }] });
   assert.equal(JSON.stringify(listed).includes(eligible.id), false);
   assert.equal(JSON.stringify(listed).includes("0x00124b0000000abc"), false);
   assert.equal(JSON.stringify(listed).includes(privateDevice.id), false);
-  assert.throws(() => f.service.listDashboardUnregisteredDevices({ ...staff, scope: ["os:permanent-installation"] }), { code: "commissioning_authority_denied" });
-  assert.throws(() => f.service.listDashboardUnregisteredDevices({ ...staff, identityGeneration: 8 }), { code: "commissioning_authority_denied" });
-  assert.throws(() => f.service.listDashboardUnregisteredDevices({ ...f.principal, scope: ["tenant:device-command"] }), { code: "commissioning_authority_denied" });
+  await assert.rejects(f.service.listDashboardUnregisteredDevices({ ...staff, scope: ["os:permanent-installation"] }), { code: "commissioning_authority_denied" });
+  await assert.rejects(f.service.listDashboardUnregisteredDevices({ ...staff, identityGeneration: 8 }), { code: "commissioning_authority_denied" });
+  await assert.rejects(f.service.listDashboardUnregisteredDevices({ ...f.principal, scope: ["tenant:device-command"] }), { code: "commissioning_authority_denied" });
 });
 
 test("Matter registration identity includes both fabric and node identifiers", (t) => {

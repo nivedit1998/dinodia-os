@@ -48,8 +48,9 @@ function fixedSession(session, afterCandidateRef = null) {
 }
 
 class NativeCommissioningService {
-  constructor({ store, mqtt, matter, pairing, vault, eventBus, commissioningCapabilities = {}, clock = () => Date.now(), logger = console } = {}) {
+  constructor({ store, mqtt, matter, pairing, vault, eventBus, commissioningCapabilities = {}, identityBrokerRequired = false, clock = () => Date.now(), logger = console } = {}) {
     this.store = store; this.mqtt = mqtt; this.matter = matter; this.pairing = pairing; this.vault = vault; this.eventBus = eventBus;
+    this.identityBrokerRequired = identityBrokerRequired === true;
     this.commissioningCapabilities = commissioningCapabilities;
     this.clock = clock; this.logger = logger; this.lock = Promise.resolve(); this.stopped = false;
     this.adoptionCandidates = new Map();
@@ -77,9 +78,28 @@ class NativeCommissioningService {
     return session;
   }
 
-  principal(principal) {
+  async currentIdentity() {
+    // Production identity is owned by the isolated broker, not the legacy
+    // JSON Store. The Store copy can legitimately have generation 0 even
+    // while the paired signing identity is healthy and current.
+    if (typeof this.pairing?.getPublicIdentity === "function") {
+      try {
+        const current = await this.pairing.getPublicIdentity();
+        const generation = Number(current?.generation || 0);
+        const serial = String(current?.serial || "");
+        if (serial && Number.isSafeInteger(generation) && generation > 0) return { serial, generation };
+      } catch { if (this.identityBrokerRequired) return null; }
+      if (this.identityBrokerRequired) return null;
+    }
+    const stored = this.store.getIdentity?.() || {};
+    const generation = Number(stored.generation || 0);
+    const serial = String(stored.serial || "");
+    return serial && Number.isSafeInteger(generation) && generation > 0 ? { serial, generation } : null;
+  }
+
+  async principal(principal, identity = null) {
     const platform = this.store.getPlatform?.() || {};
-    const identity = this.store.getIdentity?.() || {};
+    const currentIdentity = identity || await this.currentIdentity();
     const staff = principal?.principalType === "operator" && Array.isArray(principal.scope)
       && principal.scope.length === 1 && principal.scope[0] === "os:permanent-installation";
     if (staff) {
@@ -88,23 +108,23 @@ class NativeCommissioningService {
       if (!principal.sub || !principal.sid || !principal.jti || !principal.handoffId || !principal.workflow || !principal.requestId || !principal.employeeSessionId
         || !Number.isSafeInteger(Number(principal.workRevision)) || Number(principal.workRevision) < 1 || !principal.homeId || !platform.hubInstallId
         || String(platform.homeId || "") !== String(principal.homeId) || String(principal.hubInstallId || "") !== String(platform.hubInstallId)
-        || Number(identity.generation || 0) < 1 || Number(identity.generation) !== Number(principal.identityGeneration)
+        || !currentIdentity || String(principal.hubId || "") !== currentIdentity.serial || currentIdentity.generation !== Number(principal.identityGeneration)
         || authorizedAreas.length === 0 || authorizedAreas.length !== areaOptions.length || authorizedAreas.some((id) => !areaOptions.some((area) => area.id === id))) {
         fail(SAFE_ERROR.denied, 403, "A current assigned permanent-installation authority is required");
       }
       return { actorType: "STAFF_INSTALLER", employeeId: String(principal.sub), employeeSessionId: String(principal.employeeSessionId), operatorHandoffId: String(principal.handoffId),
         operatorJti: String(principal.jti), workItemId: String(principal.workflow), workRevision: Number(principal.workRevision), requestId: String(principal.requestId),
         tokenId: String(principal.jti), tokenHash: digest(String(principal.jti)), membershipId: null, accountId: null, customerSessionId: null, trustedDeviceId: null,
-        accessTokenHash: null, homeId: String(principal.homeId), hubInstallationId: String(platform.hubInstallId), identityGeneration: Number(identity.generation),
+        accessTokenHash: null, homeId: String(principal.homeId), hubInstallationId: String(platform.hubInstallId), identityGeneration: currentIdentity.generation,
         areaIds: authorizedAreas, areaOptions };
     }
     if (!principal || principal.principalType !== "app" || principal.householdRole !== "TENANT" || !principal.scope?.includes("tenant:device-command")
       || !principal.sub || !principal.sid || !principal.jti || !principal.trustedDeviceId || !principal.membershipId || !principal.homeId || !principal.hubInstallId || !/^[a-f0-9]{64}$/i.test(String(principal.accessTokenHash || ""))) fail(SAFE_ERROR.denied, 403, "A current selected tenant session is required");
     if (String(platform.homeId || "") !== String(principal.homeId) || String(platform.hubInstallId || "") !== String(principal.hubInstallId)
-      || Number(identity.generation || 0) < 1 || String(identity.generation) !== String(principal.identityGeneration || identity.generation)) fail(SAFE_ERROR.denied, 403, "The selected tenant session does not match this enrolled Home and hub");
+      || !currentIdentity || String(currentIdentity.generation) !== String(principal.identityGeneration || currentIdentity.generation)) fail(SAFE_ERROR.denied, 403, "The selected tenant session does not match this enrolled Home and hub");
     const authorizedAreas = [...new Set((principal.areaIds || []).map(String))].filter(Boolean).sort();
     if (!authorizedAreas.length) fail(SAFE_ERROR.denied, 403, "No active original Area is available to this membership");
-    return { actorType: "TENANT", accountId: String(principal.sub), customerSessionId: String(principal.sid), tokenId: String(principal.jti), trustedDeviceId: String(principal.trustedDeviceId), membershipId: String(principal.membershipId), homeId: String(principal.homeId), hubInstallationId: String(principal.hubInstallId), accessTokenHash: String(principal.accessTokenHash), identityGeneration: Number(identity.generation), areaIds: authorizedAreas };
+    return { actorType: "TENANT", accountId: String(principal.sub), customerSessionId: String(principal.sid), tokenId: String(principal.jti), trustedDeviceId: String(principal.trustedDeviceId), membershipId: String(principal.membershipId), homeId: String(principal.homeId), hubInstallationId: String(principal.hubInstallId), accessTokenHash: String(principal.accessTokenHash), identityGeneration: currentIdentity.generation, areaIds: authorizedAreas };
   }
 
   actorBinding(actor) {
@@ -166,7 +186,7 @@ class NativeCommissioningService {
   }
 
   async listAdoptableDevices(principal) {
-    const actor = this.principal(principal);
+    const actor = await this.principal(principal);
     if (actor.actorType !== "STAFF_INSTALLER") fail(SAFE_ERROR.denied, 403, "Only current assigned installation staff can inspect unregistered property devices");
     return this.exclusive(async () => {
       this.pruneAdoptionCandidates();
@@ -191,15 +211,15 @@ class NativeCommissioningService {
     });
   }
 
-  listDashboardUnregisteredDevices(principal) {
+  async listDashboardUnregisteredDevices(principal) {
     const platform = this.store.getPlatform?.() || {};
-    const identity = this.store.getIdentity?.() || {};
+    const identity = await this.currentIdentity();
     if (!principal || principal.principalType !== "operator" || principal.scope?.length !== 1 || principal.scope[0] !== "os:admin"
       || !principal.sub || !principal.sid || !principal.jti || !principal.handoffId || !principal.workflow
       || !principal.employeeSessionId || !Number.isSafeInteger(Number(principal.workRevision)) || Number(principal.workRevision) < 1
       || !principal.homeId || String(platform.homeId || "") !== String(principal.homeId) || !platform.hubInstallId
-      || !principal.hubId || String(principal.hubId) !== String(identity.serial || "")
-      || Number(identity.generation || 0) < 1 || Number(identity.generation) !== Number(principal.identityGeneration)) {
+      || !identity || !principal.hubId || String(principal.hubId) !== identity.serial
+      || identity.generation !== Number(principal.identityGeneration)) {
       fail(SAFE_ERROR.denied, 403, "A current assigned full-dashboard authority is required");
     }
     const areas = this.store.listAreas?.() || [];
@@ -290,7 +310,7 @@ class NativeCommissioningService {
   }
 
   async start(principal, input, idempotencyKey) {
-    const actor = this.principal(principal);
+    const actor = await this.principal(principal);
     if (!input || !["zigbee", "matter"].includes(String(input.protocol))) fail(SAFE_ERROR.invalid, 400, "Choose a supported native commissioning protocol");
     const operationKind = input.operationKind || "PAIR_NEW";
     if (!["PAIR_NEW", "REGISTER_EXISTING"].includes(operationKind)) fail(SAFE_ERROR.invalid, 400, "Choose a supported permanent-device operation");
@@ -411,7 +431,7 @@ class NativeCommissioningService {
   }
 
   async requireSession(sessionId, principal) {
-    const actor = this.principal(principal);
+    const actor = await this.principal(principal);
     const session = this.sessions()[String(sessionId)];
     const tenantBinding = actor.actorType === "TENANT" && session?.actorType !== "STAFF_INSTALLER"
       && session?.requesterAccountId === actor.accountId && session?.requesterSessionId === actor.customerSessionId
@@ -694,7 +714,7 @@ class NativeCommissioningService {
       if (session.status !== "interrupted") return this.publicStatus(session);
       if (session.operationKind === "REGISTER_EXISTING") {
         const device = this.store.getDevice(session.targetDeviceId);
-        const actor = this.principal(principal);
+        const actor = await this.principal(principal);
         if (!this.isCompleteRadioDevice(session, device, actor)) fail(SAFE_ERROR.conflict, 409, "The existing local device changed while installation was interrupted; refresh its review");
         session.status = "reviewing_existing";
         this.append(session, "existing_device_review_resumed");
