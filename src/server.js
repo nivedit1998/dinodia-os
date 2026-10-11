@@ -64,6 +64,13 @@ function safeEqual(left, right) {
   return a.length > 0 && a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+function shouldAttemptCloudflareVerification(status, { inFlight = false, retryAt = 0, now = Date.now() } = {}) {
+  const transportHealthy = status?.mode === "local" && status.connected === true
+    && status.connectorIdentityVerified === true && status.transport?.originState === "HEALTHY";
+  return transportHealthy && status.platformVerification?.fresh !== true
+    && !inFlight && Number(now) >= Number(retryAt);
+}
+
 function stableJson(value) {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
@@ -999,8 +1006,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       cloudflareHeartbeatRequestedAt = now;
       pairing.requestImmediateHeartbeat?.();
     }
-    const transportHealthy = status.mode === "local" && status.connected === true && status.transport?.originState === "HEALTHY";
-    if (!transportHealthy || status.platformVerification?.fresh || status.platformVerification?.state === "PLATFORM_REPORT_PENDING" || cloudflareVerificationInFlight || Date.now() < cloudflareVerificationRetryAt) return;
+    if (!shouldAttemptCloudflareVerification(status, { inFlight: cloudflareVerificationInFlight, retryAt: cloudflareVerificationRetryAt, now })) return;
     cloudflareVerificationInFlight = true;
     reportCloudflareVerification(status, { reverifyChallenge: true }).then(() => {
       cloudflareVerificationAttempts = 0;
@@ -4536,4 +4542,4 @@ if (require.main === module) {
   process.on("SIGTERM", shutdown);
 }
 
-module.exports = { createHub, safeEqual, hiveCredentialTransportAllowed: isHiveCredentialTransportAllowed, isPrivateLanRequest, isTrustedOfflineLanTransport };
+module.exports = { createHub, safeEqual, hiveCredentialTransportAllowed: isHiveCredentialTransportAllowed, isPrivateLanRequest, isTrustedOfflineLanTransport, shouldAttemptCloudflareVerification };
