@@ -1,4 +1,5 @@
 const crypto = require("node:crypto");
+const http = require("node:http");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
@@ -158,6 +159,120 @@ test("physical installer listener serves a bounded authenticated dashboard and i
     assert.equal((await fetch(`${physical}/_dinodia/setup/status`)).status, 403, "setup status remains locked until the originating browser completes its one-use handoff");
   } finally {
     await hub.stop();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("restricted assigned Home dashboard can inspect and reconnect only the existing reserved tunnel", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-tunnel-recovery-listener-"));
+  const [unifiedPort, customerPort] = await Promise.all([freePort(), freePort()]);
+  const hubId = "tunnel-recovery-listener-hub";
+  const tunnelId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const reservation = {
+    tunnelId,
+    reservedTunnelName: "Dinodia Existing Home",
+    reservedHostname: "dinodia-existing-home.dinodiasmartliving.com",
+    reservationToken: "R".repeat(48),
+  };
+  const platform = http.createServer((req, res) => {
+    if (req.method !== "POST" || req.url !== "/api/hub-agent/v2/pairing/reservation") {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ errorCode: "not_found" }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(reservation));
+  });
+  await new Promise((resolve, reject) => { platform.once("error", reject); platform.listen(0, "127.0.0.1", resolve); });
+
+  const hubIdentity = crypto.generateKeyPairSync("ed25519");
+  const encryptionIdentity = crypto.generateKeyPairSync("x25519");
+  const identityBroker = {
+    async getPublicIdentity() {
+      return {
+        serial: hubId,
+        signingPublicKeyPem: hubIdentity.publicKey.export({ format: "pem", type: "spki" }).toString(),
+        encryptionPublicKeyPem: encryptionIdentity.publicKey.export({ format: "pem", type: "spki" }).toString(),
+        generation: 1,
+      };
+    },
+    async signPlatformRequest() { return { signature: "disposable-test-signature" }; },
+  };
+  const operatorKeys = crypto.generateKeyPairSync("ed25519");
+  const adminToken = createOperatorSessionToken({
+    sub: "assigned-installation-staff", hubId, homeId: "assigned-home",
+    employeeSessionId: "employee-session", scope: ["os:admin"], recentAuthAt: Date.now(),
+  }, operatorKeys.privateKey);
+  const installationToken = createOperatorSessionToken({
+    sub: "assigned-installation-staff", hubId, homeId: "assigned-home",
+    employeeSessionId: "employee-session", workflow: "installation-work",
+    requestId: "installation-request", areaIds: [], areaOptions: [], workRevision: 1,
+    scope: ["os:permanent-installation"], recentAuthAt: Date.now(),
+  }, operatorKeys.privateKey);
+  const reconnectCalls = [];
+  const cloudflareTunnel = {
+    start() {}, async stop() {},
+    status() {
+      return {
+        configured: true, mode: "local", running: false, connected: false,
+        tunnelId, tunnelName: reservation.reservedTunnelName,
+        hostname: reservation.reservedHostname, publicUrl: `https://${reservation.reservedHostname}`,
+        recoveryState: "RECONNECT_REQUIRED", setupAllowed: false,
+      };
+    },
+    async reconnectExisting(input) {
+      reconnectCalls.push(input.reservation);
+      return { recoveryState: "RECONNECTING", configured: true, mode: "local" };
+    },
+  };
+  const hub = createHub({
+    config: {
+      nodeEnv: "production", v2Environment: "test", loopbackLanListenerForTest: true,
+      customerLanPortForTest: customerPort, hubId,
+      operatorPublicKey: operatorKeys.publicKey.export({ format: "pem", type: "spki" }).toString(),
+      platformApiUrl: `http://127.0.0.1:${platform.address().port}`,
+      port: 0, nativeApiPort: unifiedPort, dataDir: directory,
+      dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"),
+      staticDir: path.join(__dirname, "..", "public"), otbrUrl: "",
+    },
+    identityBroker, mqttBridge: mockIntegration(), matterBridge: mockIntegration(),
+    cloudflareTunnel,
+    platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
+  });
+
+  try {
+    await new Promise((resolve, reject) => { hub.setupServer.once("error", reject); hub.setupServer.listen(0, "127.0.0.1", resolve); });
+    const physical = `http://127.0.0.1:${hub.setupServer.address().port}`;
+    const route = "/_dinodia/admin/api/integrations/cloudflare";
+    const auth = (token) => ({ authorization: `Bearer ${token}` });
+
+    const anonymous = await request(physical, route);
+    assert.equal(anonymous.response.status, 401);
+    const installationOnly = await request(physical, route, { headers: auth(installationToken) });
+    assert.equal(installationOnly.response.status, 403);
+
+    const status = await request(physical, route, { headers: auth(adminToken) });
+    assert.equal(status.response.status, 200);
+    assert.equal(status.body.recoveryState, "RECONNECT_REQUIRED");
+    assert.equal(status.body.tunnelId, tunnelId);
+    assert.equal("reservationToken" in status.body, false);
+
+    const deniedMutation = await request(physical, route, {
+      method: "POST", headers: auth(installationToken), body: JSON.stringify({ action: "reconnect-existing" }),
+    });
+    assert.equal(deniedMutation.response.status, 403);
+    assert.equal(reconnectCalls.length, 0);
+
+    const recovered = await request(physical, route, {
+      method: "POST", headers: auth(adminToken), body: JSON.stringify({ action: "reconnect-existing" }),
+    });
+    assert.equal(recovered.response.status, 200, JSON.stringify(recovered.body));
+    assert.equal(recovered.body.recoveryState, "RECONNECTING");
+    assert.deepEqual(reconnectCalls, [reservation], "recovery uses the current signed Platform reservation, never a browser-selected tunnel");
+    assert.equal((await request(physical, route, { method: "DELETE", headers: auth(adminToken) })).response.status, 404);
+  } finally {
+    await hub.stop();
+    await new Promise((resolve) => platform.close(resolve));
     await fs.rm(directory, { recursive: true, force: true });
   }
 });

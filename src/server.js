@@ -4205,12 +4205,22 @@ function nativeDeviceView(principal, device) {
     const adminApiPath = pathname.startsWith("/_dinodia/admin/") ? pathname.slice("/_dinodia/admin".length) : "";
     const operatorReadRoute = req.method === "GET" && installerReadRoutes.has(adminApiPath);
     const operatorAreaCreateRoute = req.method === "POST" && adminApiPath === "/api/areas";
+    // The local assigned full-Home dashboard must be able to read the
+    // existing tunnel's recovery state and invoke its already-authorized
+    // recovery handler. handleDashboardRequest still requires os:admin;
+    // installation-only sessions cannot enter this surface. Production
+    // recovery itself validates the current signed reservation and retained
+    // tunnel identity, and refuses an explicit maintenance hold.
+    const operatorCloudflareStatusRoute = req.method === "GET" && adminApiPath === "/api/integrations/cloudflare";
+    const operatorCloudflareRecoveryRoute = req.method === "POST" && adminApiPath === "/api/integrations/cloudflare";
     const operatorEndRoute = req.method === "POST" && pathname === "/_dinodia/operator-session/end";
     const permanentInstallationRoute = pathname === "/_dinodia/installer/commissioning" || /^\/_dinodia\/installer\/commissioning\/sessions(?:\/[^/]+(?:\/(?:matter-payload|select|complete|cancel|resume))?)?$/.test(pathname);
-    const recognizedPath = setupRoute || staticRoute || operatorReadRoute || operatorAreaCreateRoute || operatorEndRoute || permanentInstallationRoute;
+    const recognizedPath = setupRoute || staticRoute || operatorReadRoute || operatorAreaCreateRoute
+      || operatorCloudflareStatusRoute || operatorCloudflareRecoveryRoute || operatorEndRoute || permanentInstallationRoute;
     if (!recognizedPath && ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(req.method)) return json(res, 404, { error: "Not found" });
     if (!recognizedPath) return text(res, 405, "Method not allowed");
-    if (!setupRoute && !staticRoute && !operatorReadRoute && !operatorAreaCreateRoute && !operatorEndRoute && !permanentInstallationRoute) return json(res, 404, { error: "Not found" });
+    if (!setupRoute && !staticRoute && !operatorReadRoute && !operatorAreaCreateRoute
+      && !operatorCloudflareStatusRoute && !operatorCloudflareRecoveryRoute && !operatorEndRoute && !permanentInstallationRoute) return json(res, 404, { error: "Not found" });
     return handleUnifiedRequest(req, res);
   });
   let httpsServer = null;
