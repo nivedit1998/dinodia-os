@@ -3769,15 +3769,25 @@ function nativeDeviceView(principal, device) {
       const platform = pairing.store?.getPlatform?.() || {};
       const machineCredential = pairing.vault?.get?.("platform.machineCredential");
       const machineVersion = Number(platform.provisioningCredentialVersion || 0);
-      if (!machineCredential || !Number.isInteger(machineVersion) || machineVersion < 1) throw Object.assign(new Error("machine credential unavailable"), { safeCode: "machine_credential_unavailable" });
-      const machineSignature = crypto.createHmac("sha256", crypto.createHash("sha256").update(String(machineCredential), "utf8").digest("hex")).update(["POST", "/api/hub-agent/operator-session/consume", String(timestamp), nonce, bodyHash].join("\n"), "utf8").digest("base64url");
+      const activeMachineCredential = platform.paired === true && machineCredential && Number.isInteger(machineVersion) && machineVersion > 0;
+      if (!activeMachineCredential && job.remote) throw Object.assign(new Error("machine credential unavailable"), { safeCode: "machine_credential_unavailable" });
+      const signature = activeMachineCredential
+        ? crypto.createHmac("sha256", crypto.createHash("sha256").update(String(machineCredential), "utf8").digest("hex")).update(["POST", "/api/hub-agent/operator-session/consume", String(timestamp), nonce, bodyHash].join("\n"), "utf8").digest("base64url")
+        : await pairing.signPlatformRequest({ method: "POST", path: "/api/hub-agent/operator-session/consume", timestamp, nonce, bodyHash });
       const platformOrigin = String(pairing.apiUrl || runtimeConfig.platformApiUrl || "").replace(/\/$/, "");
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 12_000);
       try {
+        const headers = { "content-type": "application/json", accept: "application/json", "x-dinodia-hub-timestamp": String(timestamp), "x-dinodia-hub-nonce": nonce, "x-dinodia-body-sha256": bodyHash };
+        if (activeMachineCredential) {
+          headers["x-dinodia-machine-version"] = String(machineVersion);
+          headers["x-dinodia-machine-signature"] = signature;
+        } else {
+          headers["x-dinodia-hub-signature"] = signature;
+        }
         return await fetch(`${platformOrigin}/api/hub-agent/operator-session/consume`, {
           method: "POST",
-          headers: { "content-type": "application/json", accept: "application/json", "x-dinodia-hub-timestamp": String(timestamp), "x-dinodia-hub-nonce": nonce, "x-dinodia-body-sha256": bodyHash, "x-dinodia-machine-version": String(machineVersion), "x-dinodia-machine-signature": machineSignature },
+          headers,
           body: JSON.stringify(signedBody),
           signal: controller.signal,
         });

@@ -82,6 +82,73 @@ test("retired bootstrap credentials cannot pair or synchronize a Native V2 insta
   assert.deepEqual(calls, []);
 });
 
+test("an unpaired installed hub publishes only its identity-signed local recovery endpoint", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-unpaired-local-recovery-"));
+  try {
+    const store = new Store(path.join(directory, "dinodia.json"));
+    const serial = "DINODIA-LOCAL-RECOVERY-HUB";
+    await store.saveIdentity({ serial });
+    const vault = new SecretVault({ dataDir: directory });
+    const identity = generateManufacturingIdentity({ serial });
+    const record = vaultIdentityRecord(identity);
+    for (const [key, value] of Object.entries({
+      "platform.identityPrivateKey": record.signingPrivateKey,
+      "platform.identityPublicKey": record.signingPublicKey,
+      "platform.encryptionPrivateKey": record.encryptionPrivateKey,
+      "platform.encryptionPublicKey": record.encryptionPublicKey,
+      "platform.identityFingerprint": record.publicKeyFingerprint,
+      "platform.encryptionFingerprint": record.encryptionKeyFingerprint,
+      "platform.identityGeneration": "1",
+      "platform.manufacturingCertificateSignature": "test-only-certificate-signature",
+    })) await vault.set(key, value);
+    await store.savePlatform({ paired: false, apiUrl: "https://platform.test" });
+    const calls = [];
+    let activeRequests = 0;
+    let maximumActiveRequests = 0;
+    let currentLanAddress = "192.168.1.76";
+    let nextLanAddresses = [];
+    const pairing = new PlatformPairing({
+      store, vault, apiUrl: "https://platform.test", serial, nativeApiPort: 8123,
+      runtime: { nodeEnv: "test" },
+      getLanEndpoint: () => ({ state: "CURRENT", address: nextLanAddresses.shift() || currentLanAddress, interfaceName: "wlan0" }),
+      fetchImpl: async (url, options) => {
+        calls.push({ url, options });
+        activeRequests += 1;
+        maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          const body = JSON.parse(options.body);
+          return { ok: true, status: 200, async json() { return { ok: true, lanEndpoint: { revision: body.lanEndpoint.revision, state: body.lanEndpoint.state } }; } };
+        } finally { activeRequests -= 1; }
+      },
+    });
+
+    pairing.start();
+    const publishDeadline = Date.now() + 1_000;
+    while ((!calls.length || pairing.recoveryEndpointInFlight) && Date.now() < publishDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+
+    assert.equal(calls.length, 1, "recovery performs one bounded Platform request");
+    assert.match(calls[0].url, /\/api\/hub-agent\/v2\/lan-endpoint$/);
+    assert.equal(calls[0].options.headers["x-dinodia-hub-signature"]?.length > 0, true);
+    assert.equal(Object.hasOwn(calls[0].options.headers, "x-dinodia-machine-signature"), false);
+    const body = JSON.parse(calls[0].options.body);
+    assert.deepEqual(Object.keys(body).sort(), ["identityGeneration", "lanEndpoint", "serial"].sort());
+    assert.deepEqual(body.lanEndpoint, { version: 1, revision: 1, state: "CURRENT", baseUrl: "http://192.168.1.76:8123", discoveryHost: "dinodia-dinodia-local-recovery-hub.local" });
+    assert.equal(store.getPlatform().paired, false, "publishing a local endpoint does not claim machine pairing");
+    assert.equal(store.getPlatform().provisioningAttemptId, undefined);
+    assert.equal(store.getSyncOutbox().acknowledgedSequence, 0, "no household sync receipt is created");
+    assert.equal(calls.some(({ url }) => /token-state|\/v2\/sync|\/heartbeat/.test(url)), false);
+    nextLanAddresses = ["192.168.1.77", "192.168.1.78"];
+    const publicIdentity = await pairing.getPublicIdentity();
+    await Promise.all([pairing.publishRecoveryLanEndpoint(), pairing.publishSignedHeartbeat(publicIdentity)]);
+    const serializedReports = calls.slice(1).map(({ options }) => JSON.parse(options.body).lanEndpoint);
+    assert.deepEqual(serializedReports.map((report) => report.revision), [2, 3], "racing recovery and heartbeat reports receive distinct monotonic revisions");
+    assert.deepEqual(serializedReports.map((report) => report.baseUrl), ["http://192.168.1.77:8123", "http://192.168.1.78:8123"]);
+    assert.equal(maximumActiveRequests, 1, "endpoint-bearing Platform requests are serialized through the shared report boundary");
+    pairing.stop();
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
+
 test("incident transitions use the durable native sync stream and retire only after its receipt", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-incident-sync-"));
   const store = new Store(path.join(directory, "dinodia.json"));

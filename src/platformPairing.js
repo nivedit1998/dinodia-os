@@ -72,6 +72,9 @@ class PlatformPairing {
     this.heartbeatIntervalMs = Math.max(15000, Number(heartbeatIntervalMs) || 120000);
     this.clock = clock;
     this.lastHeartbeatAt = 0;
+    this.recoveryEndpointInFlight = false;
+    this.recoveryEndpointTimer = null;
+    this.lanEndpointReportTail = Promise.resolve();
     this.getLanEndpoint = getLanEndpoint || (() => {
       const selected = privateInterface();
       return selected
@@ -257,7 +260,7 @@ class PlatformPairing {
     return result;
   }
 
-  async requestWithHubIdentity(path, body) {
+  async requestWithHubIdentity(path, body, { forceManufacturingIdentity = false } = {}) {
     if (!this.apiUrl) throw new Error("A native V2 platform URL is required");
     const identity = await this.getPublicIdentity();
     if (!identity?.generation) throw new Error("A registered hub identity generation is required");
@@ -266,7 +269,7 @@ class PlatformPairing {
     const nonce = crypto.randomBytes(24).toString("base64url");
     const bodyHash = crypto.createHash("sha256").update(JSON.stringify(signedBody), "utf8").digest("hex");
     const platform = this.store.getPlatform?.() || {};
-    const machineCredential = platform.paired ? this.vault?.get?.("platform.machineCredential") : null;
+    const machineCredential = !forceManufacturingIdentity && platform.paired ? this.vault?.get?.("platform.machineCredential") : null;
     const machineVersion = Number(platform.provisioningCredentialVersion || 0);
     const signature = machineCredential && machineVersion > 0
       ? crypto.createHmac("sha256", crypto.createHash("sha256").update(String(machineCredential), "utf8").digest("hex")).update(["POST", path, String(timestamp), nonce, bodyHash].join("\n"), "utf8").digest("base64url")
@@ -400,24 +403,57 @@ class PlatformPairing {
   }
 
   async publishSignedHeartbeat(nativeIdentity) {
-    const lanEndpoint = await this.buildLanEndpointObservation(nativeIdentity.generation);
-    const lanTlsIdentity = this.getLanTlsIdentity();
-    const heartbeat = await this.requestWithHubIdentity("/api/hub-agent/v2/heartbeat", {
-      serial: this.serial,
-      hubRuntime: this.runtimeWithCloudflareStatus(this.store.getSyncRuntime?.(this.runtime) || this.runtime, nativeIdentity?.generation),
-      lanEndpoint,
-      ...(lanTlsIdentity ? { lanTlsIdentity } : {}),
+    return this.withLanEndpointReport(async () => {
+      const lanEndpoint = await this.buildLanEndpointObservation(nativeIdentity.generation);
+      const lanTlsIdentity = this.getLanTlsIdentity();
+      const heartbeat = await this.requestWithHubIdentity("/api/hub-agent/v2/heartbeat", {
+        serial: this.serial,
+        hubRuntime: this.runtimeWithCloudflareStatus(this.store.getSyncRuntime?.(this.runtime) || this.runtime, nativeIdentity?.generation),
+        lanEndpoint,
+        ...(lanTlsIdentity ? { lanTlsIdentity } : {}),
+      });
+      if (Number(heartbeat?.lanEndpoint?.revision) !== lanEndpoint.revision || heartbeat?.lanEndpoint?.state !== lanEndpoint.state) {
+        throw Object.assign(new Error("Platform did not acknowledge the current LAN endpoint revision"), { code: "lan_endpoint_ack_mismatch" });
+      }
+      const acknowledgedTlsGeneration = Number(heartbeat?.lanTlsIdentity?.acknowledgedGeneration || 0);
+      if (acknowledgedTlsGeneration > 0 && !this.acknowledgeLanTlsIdentity(acknowledgedTlsGeneration)) {
+        throw Object.assign(new Error("Platform acknowledged an unknown customer LAN certificate generation"), { code: "lan_tls_ack_mismatch" });
+      }
+      this.lastHeartbeatAt = this.clock();
+      this.pendingEndpointHeartbeat = this.queuedImmediateSync;
+      return heartbeat;
     });
-    if (Number(heartbeat?.lanEndpoint?.revision) !== lanEndpoint.revision || heartbeat?.lanEndpoint?.state !== lanEndpoint.state) {
-      throw Object.assign(new Error("Platform did not acknowledge the current LAN endpoint revision"), { code: "lan_endpoint_ack_mismatch" });
+  }
+
+  async withLanEndpointReport(operation) {
+    const previous = this.lanEndpointReportTail;
+    let release;
+    this.lanEndpointReportTail = new Promise((resolve) => { release = resolve; });
+    await previous;
+    try { return await operation(); }
+    finally { release(); }
+  }
+
+  async publishRecoveryLanEndpoint() {
+    const platform = this.store?.getPlatform?.() || {};
+    // This path exists only to restore assigned staff's local recovery route.
+    // It never substitutes for a provisioning handshake or normal sync.
+    if (platform.paired || platform.provisioningAttemptId || this.recoveryEndpointInFlight || !this.apiUrl || !this.serial) return null;
+    this.recoveryEndpointInFlight = true;
+    try {
+      return await this.withLanEndpointReport(async () => {
+        const identity = await this.getPublicIdentity();
+        if (!identity?.generation) throw Object.assign(new Error("A registered hub identity generation is required"), { code: "hub_identity_unavailable" });
+        const lanEndpoint = await this.buildLanEndpointObservation(identity.generation);
+        const report = await this.requestWithHubIdentity("/api/hub-agent/v2/lan-endpoint", { lanEndpoint }, { forceManufacturingIdentity: true });
+        if (Number(report?.lanEndpoint?.revision) !== lanEndpoint.revision || report?.lanEndpoint?.state !== lanEndpoint.state) {
+          throw Object.assign(new Error("Platform did not acknowledge the current recovery endpoint revision"), { code: "lan_endpoint_ack_mismatch" });
+        }
+        return report;
+      });
+    } finally {
+      this.recoveryEndpointInFlight = false;
     }
-    const acknowledgedTlsGeneration = Number(heartbeat?.lanTlsIdentity?.acknowledgedGeneration || 0);
-    if (acknowledgedTlsGeneration > 0 && !this.acknowledgeLanTlsIdentity(acknowledgedTlsGeneration)) {
-      throw Object.assign(new Error("Platform acknowledged an unknown customer LAN certificate generation"), { code: "lan_tls_ack_mismatch" });
-    }
-    this.lastHeartbeatAt = this.clock();
-    this.pendingEndpointHeartbeat = this.queuedImmediateSync;
-    return heartbeat;
   }
 
   runtimeWithCloudflareStatus(runtime, identityGeneration = null) {
@@ -680,13 +716,24 @@ class PlatformPairing {
     this.syncNow().catch(() => {});
     this.timer = setInterval(() => this.syncNow().catch(() => {}), this.intervalMs);
     this.timer.unref?.();
+    const publishRecovery = () => {
+      this.publishRecoveryLanEndpoint().catch((error) => {
+        const code = String(error?.code || "recovery_endpoint_unavailable");
+        this.logger.warn(`[platform] signed local recovery endpoint unavailable (${/^[a-z0-9_.:-]{1,80}$/i.test(code) ? code : "recovery_endpoint_unavailable"})`);
+      });
+    };
+    publishRecovery();
+    this.recoveryEndpointTimer = setInterval(publishRecovery, this.heartbeatIntervalMs);
+    this.recoveryEndpointTimer.unref?.();
   }
 
   stop() {
     if (this.timer) clearInterval(this.timer);
     if (this.retryTimer) clearTimeout(this.retryTimer);
+    if (this.recoveryEndpointTimer) clearInterval(this.recoveryEndpointTimer);
     this.timer = null;
     this.retryTimer = null;
+    this.recoveryEndpointTimer = null;
   }
 }
 
