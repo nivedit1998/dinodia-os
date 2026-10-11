@@ -12,7 +12,7 @@ const script = fs.readFileSync(path.join(root, "public/permanent-installation.js
 class Element {
   constructor(id = "") {
     this.id = id; this.children = []; this.listeners = new Map(); this.textContent = "";
-    this.hidden = false; this.disabled = false; this.value = ""; this.className = "";
+    this.hidden = false; this.disabled = false; this.value = ""; this.className = ""; this.dataset = {};
   }
   addEventListener(name, listener) { this.listeners.set(name, listener); }
   replaceChildren(...children) { this.children = children; }
@@ -20,7 +20,7 @@ class Element {
   add(child) { this.children.push(child); }
 }
 
-function harness({ context, devicesStatus = 200, devices = [], holdDeviceList = false, seededStorage = {} } = {}) {
+function harness({ context, devicesStatus = 200, devices = [], session = null, holdDeviceList = false, seededStorage = {} } = {}) {
   let currentDevicesStatus = devicesStatus;
   const elements = new Map([...markup.matchAll(/\bid="([^"]+)"/g)].map(([, id]) => [id, new Element(id)]));
   const storage = new Map();
@@ -40,6 +40,16 @@ function harness({ context, devicesStatus = 200, devices = [], holdDeviceList = 
     cookie: "dinodia_setup_csrf=test-csrf",
     getElementById: (id) => elements.get(id) || null,
     createElement: () => new Element(),
+    querySelectorAll: (selector) => {
+      if (selector !== "[data-review-candidate]") return [];
+      const matches = [];
+      const visit = (element) => {
+        if (element?.dataset?.reviewCandidate === "true") matches.push(element);
+        for (const child of element?.children || []) visit(child);
+      };
+      for (const element of elements.values()) visit(element);
+      return matches;
+    },
     addEventListener: (name, listener) => documentListeners.set(name, listener),
     visibilityState: "visible",
   };
@@ -52,6 +62,7 @@ function harness({ context, devicesStatus = 200, devices = [], holdDeviceList = 
       return response(currentDevicesStatus, currentDevicesStatus === 200 ? { devices, completedDevices: [] }
         : { error: { code: currentDevicesStatus === 503 ? "AUTHORITY_UNAVAILABLE" : "COMMISSIONING_AUTHORITY_DENIED", message: currentDevicesStatus === 503 ? "Authority is temporarily unavailable" : "A current assigned permanent-installation authority is required" } });
     }
+    if (session && String(url).startsWith(`/_dinodia/installer/commissioning/sessions/${session.sessionId}`)) return response(200, session);
     return response(404, { error: "not_found" });
   };
   const timers = new Set();
@@ -180,4 +191,23 @@ test("assigned installation page renders eligible already-paired devices with an
   assert.equal(rendered.children[3].disabled, false);
   assert.equal(list.children.some((child) => JSON.stringify(child).includes(device.candidateRef)), false,
     "the opaque review reference is used only by the registration action and is not rendered into page text");
+});
+
+test("discovery candidate review stays enabled after the initial busy refresh completes", async () => {
+  const sessionId = "55555555-5555-4555-8555-555555555555";
+  const session = { sessionId, protocol: "zigbee", operationKind: "PAIR_NEW", status: "searching", revision: 1,
+    updatedAt: new Date().toISOString(), candidates: [{ candidateRef: "66666666-6666-4666-8666-666666666666",
+      name: "SONOFF TRVZB", manufacturer: "SONOFF", model: "TRVZB", stage: "interviewing" }] };
+  const requestId = "22222222-2222-4222-8222-222222222222";
+  const page = harness({ context: validContext(), session, seededStorage: {
+    [`dinodia-installation:${requestId}:session`]: sessionId,
+  } });
+  await page.flush();
+
+  const review = page.elements.get("candidate-list").children[0].children[2];
+  assert.equal(review.textContent, "Review candidate");
+  assert.equal(review.disabled, false, "the candidate action must be re-enabled after protected loading finishes");
+  review.listeners.get("click")();
+  assert.equal(page.elements.get("device-result").hidden, false, "review opens the real device/Area/name form");
+  assert.equal(page.elements.get("name").value, "SONOFF TRVZB");
 });

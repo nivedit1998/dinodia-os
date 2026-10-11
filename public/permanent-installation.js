@@ -73,6 +73,7 @@
     for (const id of ["submit-matter", "select", "install", "view-only", "retain-unsupported", "remove", "add-next", "finish-installation", "end-session"]) if ($(id)) $(id).disabled = state.busy || !authorized;
     $("area").disabled = !authorized;
     for (const id of ["label", "name"]) if ($(id)) $(id).disabled = !authorized;
+    for (const button of document.querySelectorAll("[data-review-candidate]")) button.disabled = state.busy || !authorized;
     const selected = state.session?.status === "selected";
     $("select").hidden = !state.selected || selected;
     $("install").hidden = !selected || state.session?.catalogueStatus !== "ready";
@@ -142,7 +143,7 @@
       const item = document.createElement("div"); item.className = "candidate";
       const title = document.createElement("strong"); title.textContent = candidate.name || "Unidentified device";
       const detail = document.createElement("p"); detail.className = "muted"; detail.textContent = [candidate.manufacturer, candidate.model, candidate.stage].filter(Boolean).join(" · ") || "The hub is interviewing this device";
-      const choose = document.createElement("button"); choose.type = "button"; choose.textContent = state.session?.operationKind === "REGISTER_EXISTING" ? "Review existing device" : "Review candidate"; choose.disabled = state.busy;
+      const choose = document.createElement("button"); choose.type = "button"; choose.dataset.reviewCandidate = "true"; choose.textContent = state.session?.operationKind === "REGISTER_EXISTING" ? "Review existing device" : "Review candidate"; choose.disabled = state.busy || !state.authorityVerified;
       choose.addEventListener("click", () => { state.selected = candidate; $("device-result").hidden = false; $("label").value = candidate.name || "New device"; $("name").value = candidate.name || "New device"; clearError(); updateButtons(); });
       item.append(title, detail, choose); list.append(item);
     }
