@@ -54,6 +54,8 @@ class MqttBridge {
     this.connected = false;
     this.lastError = null;
     this.lastMessageAt = null;
+    this.connectionGeneration = 0;
+    this.deviceInventory = null;
     this.permitJoinUntil = null;
     this.remoteEventWindow = new Map();
     this.pendingRemovals = new Map();
@@ -71,6 +73,11 @@ class MqttBridge {
     });
     this.client.on("connect", () => {
       this.connected = true;
+      this.connectionGeneration += 1;
+      // The retained bridge/devices snapshot is authoritative only after it
+      // has been observed on this MQTT connection. Never carry an old
+      // inventory across a broker outage and mistake it for current state.
+      this.deviceInventory = null;
       this.lastError = null;
       this.client.subscribe(`${this.baseTopic}/#`, (error) => {
         if (error) this.setError(error);
@@ -108,6 +115,17 @@ class MqttBridge {
     };
   }
 
+  deviceInventorySnapshot() {
+    const snapshot = this.deviceInventory;
+    if (!snapshot) return null;
+    return {
+      complete: snapshot.complete === true,
+      current: this.connected === true && snapshot.connectionGeneration === this.connectionGeneration,
+      observedAt: snapshot.observedAt,
+      devices: snapshot.devices.map((device) => JSON.parse(JSON.stringify(device))),
+    };
+  }
+
   async handleMessage(topic, payload) {
     this.lastMessageAt = new Date().toISOString();
     const text = payload.toString("utf8");
@@ -128,6 +146,19 @@ class MqttBridge {
     const relative = topic.startsWith(`${this.baseTopic}/`) ? topic.slice(this.baseTopic.length + 1) : topic;
     if (relative === "bridge/devices" && Array.isArray(value)) {
       if (this.store.saveConfigEntry) await this.store.saveConfigEntry({ entry_id: "ce_zigbee", domain: "zha", title: "Zigbee" });
+      const normalizedInventory = value.map((item) => normalizeZigbeeDevice(item))
+        .filter((device) => !device.infrastructure && device.id)
+        .map((device) => ({ ...device, protocolIdentity: { ieeeAddress: String(device.metadata?.ieee_address || device.id) } }));
+      // Zigbee2MQTT publishes this retained, complete inventory on connect
+      // and republishes it when a device joins or leaves. It is kept in
+      // memory for exact cleanup reconciliation only; it does not import
+      // arbitrary inventory into the Dinodia registry or expose it via HTTP.
+      this.deviceInventory = {
+        complete: true,
+        observedAt: this.lastMessageAt,
+        connectionGeneration: this.connectionGeneration,
+        devices: normalizedInventory,
+      };
       let stopPairingAfterSync = false;
       for (const item of value) {
         const normalized = normalizeZigbeeDevice(item);

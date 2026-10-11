@@ -4,6 +4,7 @@ const { execFileSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const { QrPairingCodeCodec } = require("@matter/types");
 const { NativeCommissioningService, fixedSession, MAX_CANDIDATES } = require("../src/commissioning/nativeCommissioningService");
+const { normalizeZigbeeDevice } = require("../src/integrations/zigbee/exposeNormalizer");
 
 const uuid = () => crypto.randomUUID();
 
@@ -93,15 +94,123 @@ function fixture({ dropFirstCreateResponse = false, matterCommission = async () 
     pairingStatus: () => ({ active: pairingActive, found: [] }),
     startPairing: async () => { radioEffects.zigbeeStart += 1; pairingActive = true; return { active: true }; },
     stopPairing: async () => { radioEffects.zigbeeStop += 1; pairingActive = false; return { active: false }; },
-    removeCommissioningCandidate: async (id) => { radioEffects.zigbeeRemove += 1; await store.removeDevice(id); return { acknowledged: true }; },
+    removeCommissioningCandidate: async (id) => { radioEffects.zigbeeRemove += 1; if (!store.getDevice(id)) throw new Error("Zigbee candidate is missing from the local registry"); await store.removeDevice(id); return { acknowledged: true }; },
   };
   const matter = { status: () => ({ connected: true }), commission: async (...args) => { radioEffects.matterCommission += 1; return matterCommission(...args); }, refresh: matterRefresh,
     remove: async () => { radioEffects.matterRemove += 1; return { ok: true }; } };
   const vaultValues = new Map();
   const vault = { set: async (key, value) => vaultValues.set(key, value), get: (key) => vaultValues.get(key) || null, delete: async (key) => vaultValues.delete(key) };
   const service = new NativeCommissioningService({ store, mqtt, matter, pairing, vault, commissioningCapabilities, clock: () => Date.now(), logger: { warn() {} } });
-  return { service, principal, store, devices, events, platformRequests, radioEffects, areaId, homeId, hubInstallId, vaultValues, matter, close: () => service.close() };
+  return { service, principal, store, devices, events, platformRequests, radioEffects, areaId, homeId, hubInstallId, vaultValues, mqtt, matter, close: () => service.close() };
 }
+
+function interruptedZigbeeCleanup(f, { ieee = "0xf044d3fffe1242f6" } = {}) {
+  const sessionId = uuid();
+  const candidate = normalizeZigbeeDevice({ friendly_name: ieee, ieee_address: ieee, interview_completed: true,
+    definition: { vendor: "SONOFF", model: "TRVZB", exposes: [{ type: "numeric", name: "occupied_heating_setpoint", access: 7 }] } });
+  const session = {
+    sessionId, protocol: "zigbee", operationKind: "PAIR_NEW", actorType: "TENANT", requesterAccountId: f.principal.sub,
+    requesterSessionId: f.principal.sid, ownerMembershipId: f.principal.membershipId, homeId: f.homeId, hubInstallationId: f.hubInstallId,
+    identityGeneration: 7, status: "cancelled_cleanup_pending", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(), revision: 2, candidates: [{ candidateRef: uuid(), deviceId: candidate.id,
+      identityHash: crypto.createHash("sha256").update(ieee).digest("hex"), name: "SONOFF TRVZB", manufacturer: "SONOFF", model: "TRVZB" }],
+    baselineDeviceIds: [], baselineIdentityHashes: [], cleanup: { state: "PENDING", pendingIds: [candidate.id], attempts: 1 }, events: [],
+  };
+  return { session, candidate };
+}
+
+test("fresh exact Zigbee inventory recovers an interrupted candidate for review and releases the stale radio lock", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const { session, candidate } = interruptedZigbeeCleanup(f);
+  await f.store.saveSecurity({ nativeCommissioningSessions: { [session.sessionId]: session } });
+  f.mqtt.pairingStatus = () => ({ active: false, found: [] });
+  f.mqtt.deviceInventorySnapshot = () => ({ complete: true, current: true, observedAt: new Date().toISOString(), devices: [candidate,
+    { ...candidate, id: "zigbee:unrelated", protocolIdentity: { ieeeAddress: "0x00124b0000009999" }, metadata: { ieee_address: "0x00124b0000009999" } }] });
+
+  await f.service.reconcileExpired();
+
+  const preserved = f.store.getDevice(candidate.id);
+  assert.ok(preserved, "the physically present device must be restored to the local review registry");
+  assert.equal(preserved.protocol, "zigbee");
+  assert.equal(preserved.setup.status, "needs_setup");
+  assert.equal(preserved.metadata.model, "TRVZB");
+  assert.ok(Object.keys(preserved.entities).length > 0, "dynamic Zigbee exposes must survive recovery");
+  assert.equal(f.store.getDevice("zigbee:unrelated"), null, "inventory recovery must be exact-candidate only");
+  assert.equal(f.radioEffects.zigbeeRemove, 0, "recovery must never remove or reset the paired device");
+  assert.equal(f.service.sessions()[session.sessionId].cleanup.state, "PRESERVED_FOR_REVIEW");
+  assert.deepEqual(f.service.sessions()[session.sessionId].cleanup.pendingIds, []);
+  assert.equal(f.service.sessions()[session.sessionId].status, "cancelled");
+  assert.equal(f.service.isQuarantinedDevice(candidate.id), true, "unregistered device stays private until canonical property registration");
+  await f.store.savePlatform({ devicePolicies: { [candidate.id]: { managementClass: "PROPERTY_DEVICE", ownerMembershipId: null, lifecycle: "INSTALLED" } } });
+  assert.equal(f.service.isQuarantinedDevice(candidate.id), false, "the preserved candidate becomes visible only after current canonical property ownership exists");
+
+  const next = await f.service.start(f.principal, { protocol: "zigbee" }, "commission-after-recovered-cleanup-01");
+  assert.equal(next.status, "searching");
+});
+
+test("stale Zigbee inventory cannot clear an interrupted cleanup lock", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const { session, candidate } = interruptedZigbeeCleanup(f);
+  await f.store.saveSecurity({ nativeCommissioningSessions: { [session.sessionId]: session } });
+  f.mqtt.pairingStatus = () => ({ active: false, found: [] });
+  f.mqtt.deviceInventorySnapshot = () => ({ complete: true, current: false, observedAt: new Date().toISOString(), devices: [] });
+
+  await f.service.reconcileExpired();
+
+  assert.equal(f.store.getDevice(candidate.id), null);
+  assert.equal(f.service.sessions()[session.sessionId].cleanup.pendingIds.includes(candidate.id), true);
+  assert.equal(f.radioEffects.zigbeeRemove, 0, "stale inventory must not trigger a destructive cleanup attempt");
+  await assert.rejects(f.service.start(f.principal, { protocol: "zigbee" }, "commission-stale-inventory-block-01"), { code: "commissioning_radio_busy" });
+});
+
+test("a fresh complete inventory confirms an exact pending Zigbee candidate is absent without radio removal", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const { session, candidate } = interruptedZigbeeCleanup(f);
+  await f.store.saveSecurity({ nativeCommissioningSessions: { [session.sessionId]: session } });
+  f.mqtt.pairingStatus = () => ({ active: false, found: [] });
+  f.mqtt.deviceInventorySnapshot = () => ({ complete: true, current: true, observedAt: new Date().toISOString(), devices: [] });
+
+  await f.service.reconcileExpired();
+
+  assert.equal(f.store.getDevice(candidate.id), null);
+  assert.equal(f.service.sessions()[session.sessionId].cleanup.state, "COMPLETE");
+  assert.deepEqual(f.service.sessions()[session.sessionId].cleanup.pendingIds, []);
+  assert.equal(f.radioEffects.zigbeeRemove, 0, "authoritative absence needs no removal command");
+  const next = await f.service.start(f.principal, { protocol: "zigbee" }, "commission-after-confirmed-absence-01");
+  assert.equal(next.status, "searching");
+});
+
+test("a lost Zigbee removal acknowledgement is reconciled from current inventory without repeating a radio removal", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const { session, candidate } = interruptedZigbeeCleanup(f);
+  await f.store.upsertDevice({ ...candidate, protocolIdentity: { ieeeAddress: candidate.metadata.ieee_address }, setup: { status: "needs_setup" } });
+  await f.store.saveSecurity({ nativeCommissioningSessions: { [session.sessionId]: session } });
+  f.mqtt.pairingStatus = () => ({ active: false, found: [] });
+  f.mqtt.deviceInventorySnapshot = () => ({ complete: true, current: true, observedAt: new Date().toISOString(), devices: [] });
+
+  await f.service.reconcileExpired();
+
+  assert.equal(f.store.getDevice(candidate.id), null, "the stale local candidate is retired only after current inventory confirms absence");
+  assert.equal(f.service.sessions()[session.sessionId].cleanup.state, "COMPLETE");
+  assert.equal(f.radioEffects.zigbeeRemove, 0, "do not retry a physical remove after the live adapter already reports absence");
+});
+
+test("a mismatched Zigbee identity in inventory is not adopted and cannot release the pending cleanup lock", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const { session, candidate } = interruptedZigbeeCleanup(f);
+  await f.store.saveSecurity({ nativeCommissioningSessions: { [session.sessionId]: session } });
+  f.mqtt.pairingStatus = () => ({ active: false, found: [] });
+  f.mqtt.deviceInventorySnapshot = () => ({ complete: true, current: true, observedAt: new Date().toISOString(), devices: [{
+    ...candidate, protocolIdentity: { ieeeAddress: "0x00124b0000009999" }, metadata: { ...candidate.metadata, ieee_address: "0x00124b0000009999" },
+  }] });
+
+  await f.service.reconcileExpired();
+
+  assert.equal(f.store.getDevice(candidate.id), null);
+  assert.equal(f.service.sessions()[session.sessionId].cleanup.pendingIds.includes(candidate.id), true);
+  assert.equal(f.radioEffects.zigbeeRemove, 0);
+  await assert.rejects(f.service.start(f.principal, { protocol: "zigbee" }, "commission-mismatched-inventory-block-01"), { code: "commissioning_radio_busy" });
+});
 
 test("tenant commissioning starts one bound Zigbee join and exact retry returns its original opaque session", async (t) => {
   const f = fixture(); t.after(f.close);

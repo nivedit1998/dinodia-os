@@ -12,6 +12,13 @@ const SAFE_ERROR = Object.freeze({ invalid: "commissioning_request_invalid", den
 function fail(code, statusCode = 409, message = "This commissioning operation is unavailable") {
   throw Object.assign(new Error(message), { statusCode, code });
 }
+function hasCurrentCanonicalDevicePolicy(policy) {
+  const managementClass = String(policy?.managementClass || "").toUpperCase();
+  const lifecycle = String(policy?.lifecycle || "").toUpperCase();
+  return ["INSTALLED", "VIEW_ONLY"].includes(lifecycle)
+    && ((managementClass === "PROPERTY_DEVICE" && policy.ownerMembershipId == null)
+      || (managementClass === "TENANT_DEVICE" && Boolean(String(policy.ownerMembershipId || ""))));
+}
 function text(value, max) {
   return typeof value === "string" && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value);
 }
@@ -364,7 +371,13 @@ class NativeCommissioningService {
           fail(SAFE_ERROR.conflict, 409, "This local device or its current ownership/interview evidence changed; refresh before continuing");
         }
       }
-      if (Object.values(this.sessions()).some((row) => (!TERMINAL.has(row.status) && Date.parse(row.expiresAt) > this.clock()) || row.radioOperationInFlight || row.radioOperationUncertain || row.cleanup?.pendingIds?.length)) fail(SAFE_ERROR.busy, 409, "Another radio commissioning operation or cleanup is still active on this hub");
+      const priorSessions = Object.values(this.sessions());
+      if (priorSessions.some((row) => row.cleanup?.pendingIds?.length)) {
+        fail(SAFE_ERROR.busy, 409, "The hub is reconciling a previous radio cleanup against the current adapter inventory. No new search was started; wait briefly and retry.");
+      }
+      if (priorSessions.some((row) => (!TERMINAL.has(row.status) && Date.parse(row.expiresAt) > this.clock()) || row.radioOperationInFlight || row.radioOperationUncertain)) {
+        fail(SAFE_ERROR.busy, 409, "Another radio commissioning operation is still active on this hub");
+      }
       if (operationKind === "PAIR_NEW" && input.protocol === "zigbee") {
         if (!this.mqtt?.status?.().connected || !this.store.getZigbee?.().adapterPath) fail(SAFE_ERROR.unavailable, 503, "The enrolled Zigbee coordinator is not ready; no join was opened");
         if (this.mqtt.pairingStatus?.().active) fail(SAFE_ERROR.busy, 409, "Another Zigbee pairing session is already active on this hub");
@@ -498,10 +511,15 @@ class NativeCommissioningService {
   isQuarantinedDevice(deviceId) {
     const id = String(deviceId || "");
     const device = this.store.getDevice(id);
-    return Object.values(this.sessions()).some((session) => session.operationKind !== "REGISTER_EXISTING" && session.status !== "completed"
-      && ((session.candidates || []).some((candidate) => String(candidate.deviceId) === id)
-        || (session.cleanup?.pendingIds || []).some((pendingId) => String(pendingId) === id)
-        || (device && String(device.protocol || "").toLowerCase() === session.protocol && !this.isBaselineDevice(session, device))));
+    const policy = this.store.getPlatform?.()?.devicePolicies?.[id] || null;
+    return Object.values(this.sessions()).some((session) => {
+      if (session.operationKind === "REGISTER_EXISTING") return false;
+      const isExactCandidate = (session.candidates || []).some((candidate) => String(candidate.deviceId) === id);
+      const isPending = (session.cleanup?.pendingIds || []).some((pendingId) => String(pendingId) === id);
+      if (session.cleanup?.state === "PRESERVED_FOR_REVIEW" && isExactCandidate) return !hasCurrentCanonicalDevicePolicy(policy);
+      return session.status !== "completed" && (isExactCandidate || isPending
+        || (device && String(device.protocol || "").toLowerCase() === session.protocol && !this.isBaselineDevice(session, device)));
+    });
   }
 
   isBaselineDevice(session, device) {
@@ -782,17 +800,124 @@ class NativeCommissioningService {
   async reconcileCleanupCandidates(session, candidateIds = new Set(session.cleanup?.pendingIds || [])) {
     if (session.operationKind === "REGISTER_EXISTING") return this.publicStatus(session);
     const pending = new Set(candidateIds);
+    let preservedCanonical = false;
     for (const id of [...pending]) {
+      const devicePolicy = this.store.getPlatform?.()?.devicePolicies?.[String(id)] || null;
+      if (hasCurrentCanonicalDevicePolicy(devicePolicy)) {
+        // A cancelled/stale commissioning session must never remove a device
+        // that already has a current canonical owner in Platform.
+        pending.delete(id);
+        preservedCanonical = true;
+        continue;
+      }
       try {
         if (session.protocol === "zigbee") await this.mqtt.removeCommissioningCandidate(id);
         else { await this.matter.remove(id); await this.store.removeDevice?.(id); }
         pending.delete(id);
-      } catch { /* keep the id quarantined until adapter acknowledgement */ }
+      } catch (error) {
+        // Keep the identity quarantined, but log only a fixed reason code.
+        // Adapter error strings can contain device identifiers or payloads.
+        const reason = /^[A-Z0-9_]{1,48}$/.test(String(error?.code || "")) ? String(error.code) : "ADAPTER_CLEANUP_UNCONFIRMED";
+        try { this.logger.warn?.(`[commissioning] cleanup_retry_pending protocol=${session.protocol} reason=${reason}`); } catch {}
+      }
     }
-    session.cleanup = { state: pending.size ? "PENDING" : session.radioOperationUncertain ? "REQUIRES_RADIO_RECONCILIATION" : "COMPLETE", pendingIds: [...pending], attempts: Number(session.cleanup?.attempts || 0) };
+    session.cleanup = { state: pending.size ? "PENDING" : preservedCanonical ? "PRESERVED_FOR_REVIEW" : session.radioOperationUncertain ? "REQUIRES_RADIO_RECONCILIATION" : "COMPLETE", pendingIds: [...pending], attempts: Number(session.cleanup?.attempts || 0) };
     if (!pending.size && !session.radioOperationInFlight && !session.radioOperationUncertain && session.status.endsWith("_cleanup_pending")) session.status = session.status.replace("_cleanup_pending", "");
     await this.save(session);
     return this.publicStatus(session);
+  }
+
+  async reconcileMissingZigbeeCleanupFromInventory(session) {
+    if (String(session.protocol || "").toLowerCase() !== "zigbee") return "not_applicable";
+    const pendingIds = [...new Set((session.cleanup?.pendingIds || []).map(String))];
+    if (!pendingIds.length) return "not_applicable";
+    const snapshot = this.mqtt?.deviceInventorySnapshot?.();
+    const missingIds = pendingIds.filter((id) => !this.store.getDevice(id));
+    if (!snapshot?.complete || snapshot.current !== true || !Array.isArray(snapshot.devices)) {
+      return missingIds.length ? "wait_for_authoritative_inventory" : "not_applicable";
+    }
+
+    const pending = new Set(pendingIds);
+    let preservedForReview = false;
+    let confirmedAbsent = 0;
+    let unresolvedMissing = false;
+    for (const id of pendingIds) {
+      const candidate = (session.candidates || []).find((row) => String(row.deviceId) === id);
+      const localDevice = this.store.getDevice(id);
+      if (!candidate) {
+        if (!localDevice) unresolvedMissing = true;
+        continue;
+      }
+      const observed = snapshot.devices.find((row) => String(row?.id || "") === id && String(row?.protocol || "").toLowerCase() === "zigbee");
+      if (observed) {
+        const identity = String(observed.protocolIdentity?.ieeeAddress || observed.metadata?.ieee_address || observed.metadata?.ieee || "").trim().toLowerCase();
+        if (!identity || digest(identity) !== String(candidate.identityHash || "") || observed.infrastructure === true) {
+          return "wait_for_authoritative_inventory";
+        }
+        const existingPolicy = this.store.getPlatform?.()?.devicePolicies?.[id] || null;
+        if (hasCurrentCanonicalDevicePolicy(existingPolicy) && localDevice) {
+          pending.delete(id);
+          preservedForReview = true;
+          continue;
+        }
+        if (localDevice) {
+          const localIdentity = String(localDevice.protocolIdentity?.ieeeAddress || localDevice.metadata?.ieee_address || localDevice.metadata?.ieee || "").trim().toLowerCase();
+          if (!localIdentity || digest(localIdentity) !== String(candidate.identityHash || "")) return "wait_for_authoritative_inventory";
+          // This is still a physically paired, locally registered candidate.
+          // Preserve normal explicit-cancel cleanup semantics by retrying the
+          // adapter removal and requiring its acknowledgement below.
+          continue;
+        }
+        const restored = {
+          ...observed,
+          protocolIdentity: { ieeeAddress: identity },
+          setup: { status: "needs_setup", assignmentMode: "device_inherited_v1", completedAt: null,
+            updatedAt: new Date(this.clock()).toISOString(), reason: "area_and_label_required" },
+          ...(String(existingPolicy?.managementClass || "").toUpperCase() === "PROPERTY_DEVICE" ? {
+            name: String(existingPolicy.overrideName || observed.name || candidate.name || "Zigbee device"),
+            managementClass: "property_device",
+            metadata: { ...(observed.metadata || {}), managementClass: "property_device", cloudDeviceId: existingPolicy.platformDeviceId || undefined },
+          } : String(existingPolicy?.managementClass || "").toUpperCase() === "TENANT_DEVICE" ? {
+            managementClass: "tenant_device", tenantOwnerMembershipId: existingPolicy.ownerMembershipId,
+            metadata: { ...(observed.metadata || {}), managementClass: "tenant_device", tenantOwnerMembershipId: existingPolicy.ownerMembershipId },
+          } : {}),
+        };
+        await this.store.upsertDevice(restored);
+        pending.delete(id);
+        preservedForReview = true;
+      } else {
+        // Only a current, complete inventory from this live MQTT connection
+        // can prove that the exact session candidate is no longer paired.
+        const existingPolicy = this.store.getPlatform?.()?.devicePolicies?.[id] || null;
+        if (hasCurrentCanonicalDevicePolicy(existingPolicy)) {
+          pending.delete(id);
+          preservedForReview = true;
+          continue;
+        }
+        if (localDevice && (String(localDevice.managementClass || localDevice.metadata?.managementClass || "").toLowerCase() === "tenant_device"
+          || Boolean(localDevice.tenantOwnerMembershipId || localDevice.metadata?.tenantOwnerMembershipId))) {
+          unresolvedMissing = true;
+          continue;
+        }
+        if (localDevice) await this.store.removeDevice?.(id);
+        pending.delete(id);
+        confirmedAbsent += 1;
+      }
+    }
+
+    session.cleanup = {
+      state: pending.size ? "PENDING" : preservedForReview ? "PRESERVED_FOR_REVIEW"
+        : session.radioOperationUncertain ? "REQUIRES_RADIO_RECONCILIATION" : "COMPLETE",
+      pendingIds: [...pending], attempts: Number(session.cleanup?.attempts || 0),
+    };
+    if (!pending.size && !session.radioOperationInFlight && !session.radioOperationUncertain && session.status.endsWith("_cleanup_pending")) {
+      session.status = session.status.replace("_cleanup_pending", "");
+    }
+    if (preservedForReview) this.append(session, "cleanup_candidate_preserved_for_review", { protocol: "zigbee", cleanupState: "PRESERVED_FOR_REVIEW" });
+    if (confirmedAbsent) this.append(session, "cleanup_candidate_confirmed_absent", { protocol: "zigbee", count: confirmedAbsent, cleanupState: session.cleanup.state });
+    await this.save(session);
+    if (unresolvedMissing) return "wait_for_authoritative_inventory";
+    return pending.size ? "continue_cleanup" : "resolved";
   }
 
   async expire(session) { return this.closeSession(session, "expired"); }
@@ -808,6 +933,9 @@ class NativeCommissioningService {
           await this.collectMatterCleanupCandidates(session);
         }
         if (!session.cleanup?.pendingIds?.length) continue;
+        const inventoryResult = await this.reconcileMissingZigbeeCleanupFromInventory(session);
+        if (inventoryResult === "wait_for_authoritative_inventory" || inventoryResult === "resolved") continue;
+        if (inventoryResult === "continue_cleanup" && !session.cleanup.pendingIds.length) continue;
         session.cleanup.attempts = Number(session.cleanup.attempts || 0) + 1;
         await this.reconcileCleanupCandidates(session);
       }

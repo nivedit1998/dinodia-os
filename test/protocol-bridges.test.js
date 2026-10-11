@@ -99,6 +99,25 @@ test("MQTT bridge never auto-pairs unsolicited inventory or state", async () => 
   assert.equal(store.listDevices().length, 0);
 });
 
+test("MQTT bridge retains a private complete Zigbee inventory snapshot without importing unsolicited devices", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-mqtt-inventory-snapshot-"));
+  const store = new Store(path.join(directory, "dinodia.json"));
+  const bridge = new MqttBridge({ url: "", store });
+  const payload = [{ friendly_name: "radiator", ieee_address: "0x00124b0000000101", interview_completed: true,
+    definition: { vendor: "SONOFF", model: "TRVZB", exposes: [{ type: "numeric", name: "occupied_heating_setpoint", access: 7 }] } }];
+
+  await bridge.handleMessage("zigbee2mqtt/bridge/devices", Buffer.from(JSON.stringify(payload)));
+
+  const inventory = bridge.deviceInventorySnapshot();
+  assert.equal(inventory.complete, true);
+  assert.ok(Number.isFinite(Date.parse(inventory.observedAt)));
+  assert.equal(inventory.devices.length, 1);
+  assert.equal(inventory.devices[0].protocol, "zigbee");
+  assert.equal(inventory.devices[0].metadata.model, "TRVZB");
+  assert.ok(inventory.devices[0].entities);
+  assert.equal(store.listDevices().length, 0, "an inventory snapshot must not auto-pair any device");
+});
+
 test("MQTT device removal addresses Zigbee2MQTT by friendly name and supports force removal", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-mqtt-remove-"));
   const store = new Store(path.join(directory, "dinodia.json"));
