@@ -1794,6 +1794,19 @@ function nativeDeviceView(principal, device) {
     if (!operatorPrincipal && !appPrincipal && !offlinePrincipal && !alexaPrincipal && !alexaStatePrincipal) {
       return json(res, 401, { error: "Authentication required" });
     }
+    if (pathname === "/api/commissioning/unregistered-devices" && req.method === "GET") {
+      if (!operatorPrincipal || operatorPrincipal.scope?.length !== 1 || operatorPrincipal.scope[0] !== "os:admin" || !nativeCommissioningService) {
+        return nativeContractError(res, 403, "SCOPE_DENIED", "Only staff with current assigned full-Home access can view local unregistered devices");
+      }
+      const assignedPrincipal = await currentAssignedDashboardPrincipal(req);
+      if (!assignedPrincipal) return nativeContractError(res, 401, "AUTH_REQUIRED", "The assigned Home work is no longer current. Return to Company Portal and reopen the dashboard.");
+      try {
+        return json(res, 200, nativeCommissioningService.listDashboardUnregisteredDevices(assignedPrincipal), { "Cache-Control": "no-store, private" });
+      } catch (error) {
+        if (Number(error?.statusCode) === 403) return nativeContractError(res, 403, "SCOPE_DENIED", "Current assigned Home authority is required to view this inventory");
+        throw error;
+      }
+    }
     const scopedPrincipal = appPrincipal || offlinePrincipal || alexaPrincipal || alexaStatePrincipal;
     const nativeTenantPrincipal = Boolean(scopedPrincipal && ["app", "offline", "alexa"].includes(scopedPrincipal.principalType)
       && scopedPrincipal.householdRole === "TENANT" && scopedPrincipal.scope?.includes("tenant:device-command"));
@@ -3135,6 +3148,7 @@ function nativeDeviceView(principal, device) {
       return json(res, 200, { ok: true, removed: { path: targetPath, name: settings.rcpName || "Thread RCP" }, settings: cleared, service, rescanAvailable: true, message: "The Thread RCP and OpenThread Border Router configuration were removed; the connected dongle is available to add again." });
     }
     if (resource === "integrations" && parts[2] === "zigbee" && parts[3] === "permit-join" && req.method === "POST") {
+      if (runtimeConfig.nodeEnv === "production") return json(res, 410, { error: "Untracked pairing is retired. Start Zigbee discovery from the current assigned installation in Company Portal so the device can be reviewed and registered to this Home.", errorCode: "tracked_commissioning_required" });
       const body = await readBody(req);
       const seconds = body.seconds === undefined ? 254 : body.seconds;
       const result = typeof mqtt.startPairing === "function" ? await mqtt.startPairing(seconds) : (await mqtt.permitJoin(seconds), { seconds: Number(seconds) });
@@ -3201,6 +3215,7 @@ function nativeDeviceView(principal, device) {
       return json(res, 400, { error: "action must be quick, setup, reconnect-existing, retry-recovery, finish, reverify, connect, or disconnect" });
     }
     if (resource === "integrations" && parts[2] === "matter" && parts[3] === "commission" && req.method === "POST") {
+      if (runtimeConfig.nodeEnv === "production") return json(res, 410, { error: "Untracked Matter commissioning is retired. Start setup from the current assigned installation in Company Portal so the device can be reviewed and registered to this Home.", errorCode: "tracked_commissioning_required" });
       const body = await readBody(req);
       if (!body.code) return json(res, 400, { error: "code is required" });
       try {
@@ -3549,6 +3564,34 @@ function nativeDeviceView(principal, device) {
     }
   }
 
+  async function currentAssignedDashboardPrincipal(req) {
+    const cookie = String(req.headers.cookie || "").split(";").map((part) => part.trim()).find((part) => part.startsWith("dinodia_os_operator_session="));
+    const handle = cookie ? decodeURIComponent(cookie.slice("dinodia_os_operator_session=".length)) : "";
+    const session = operatorBrowserSessions.get(handle);
+    if (!session || !session.handoffId || !session.jti || revokedOperatorJtis.has(String(session.jti)) || operatorNow() >= Number(session.expiresAt || 0)) return null;
+    const principal = operatorSessionAuth(session.token);
+    if (!principal || principal.scope.length !== 1 || principal.scope[0] !== "os:admin"
+      || principal.jti !== session.jti || principal.handoffId !== session.handoffId
+      || !principal.workflow || !principal.employeeSessionId || !Number.isSafeInteger(Number(principal.workRevision))
+      || !principal.homeId || String(principal.hubId || "") !== String(serial)
+      || Number(principal.identityGeneration) !== Number(hubStore.getIdentity?.()?.generation || 0)) return null;
+    try {
+      const result = await pairing.requestWithHubIdentity("/api/hub-agent/operator-session/revalidate", {
+        handoffId: session.handoffId, jti: session.jti, credentialVersion: session.credentialVersion,
+      });
+      if (result?.active !== true) {
+        await revokeLocalOperatorSession(session, "operator_dashboard_authority_changed");
+        return null;
+      }
+      session.lastAuthorizationCheckAt = operatorNow();
+      return operatorSessionAuth(session.token);
+    } catch {
+      // This is private local Home inventory; fail closed when current Portal
+      // authority cannot be independently revalidated.
+      return null;
+    }
+  }
+
   function operatorRequestTransportAllowed(req) {
     const local = localSetupHostAllowed(req);
     const remote = isHiveCredentialTransportAllowed(req, { nodeEnv: runtimeConfig.nodeEnv, configuredHostname: runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "", allowLoopback: false });
@@ -3577,10 +3620,14 @@ function nativeDeviceView(principal, device) {
     if (req.method !== "GET" && req.method !== "POST") return nativeContractError(res, 405, "METHOD_NOT_ALLOWED", "The commissioning method is not allowed");
     if (req.method === "POST" && (String(req.headers.origin || "") !== `${transport.expectedProtocol}://${req.headers.host}` || !String(req.headers["content-type"] || "").toLowerCase().startsWith("application/json")
       || String(req.headers["x-dinodia-setup-csrf"] || "") !== setupCookie(req, "dinodia_setup_csrf"))) return nativeContractError(res, 403, "AUTH_REQUIRED", "The assigned installation browser context is not valid");
-    const pathMatch = url.pathname.match(/^\/_dinodia\/installer\/commissioning(?:\/sessions(?:\/([^/]+)(?:\/(matter-payload|select|complete|cancel|resume))?)?)?$/);
-    if (!pathMatch) return nativeContractError(res, 404, "RESOURCE_NOT_FOUND", "The commissioning route is unavailable");
-    const sessionId = pathMatch[1] ? decodeURIComponent(pathMatch[1]) : "";
-    const action = pathMatch[2] || "";
+    const rootPath = "/_dinodia/installer/commissioning";
+    const listPath = `${rootPath}/devices`;
+    const isRootPath = url.pathname === rootPath;
+    const isDeviceListPath = url.pathname === listPath;
+    const pathMatch = url.pathname.match(/^\/_dinodia\/installer\/commissioning\/sessions(?:\/([^/]+)(?:\/(matter-payload|select|complete|cancel|resume))?)?$/);
+    if (!isRootPath && !isDeviceListPath && !pathMatch) return nativeContractError(res, 404, "RESOURCE_NOT_FOUND", "The commissioning route is unavailable");
+    const sessionId = pathMatch?.[1] ? decodeURIComponent(pathMatch[1]) : "";
+    const action = pathMatch?.[2] || "";
     // Matter setup codes are network credentials. Never accept them over the
     // physical installer HTTP listener, even for an otherwise valid staff
     // handoff. The approved CloudURL or current pinned LAN TLS listener is
@@ -3591,7 +3638,10 @@ function nativeDeviceView(principal, device) {
     const principal = await currentPermanentInstallationPrincipal(req);
     if (!principal) return nativeContractError(res, 401, "AUTH_REQUIRED", "The assigned work or Company Portal session expired. Close this window and reopen the work from Company Portal.");
     try {
-      if (req.method === "GET" && !sessionId && !action) {
+      if (req.method === "GET" && isDeviceListPath) {
+        return json(res, 200, await nativeCommissioningService.listAdoptableDevices(principal), { "Cache-Control": "no-store" });
+      }
+      if (req.method === "GET" && isRootPath) {
         const zigbeeSettings = hubStore.getZigbee?.() || {};
         const zigbeeRuntimeState = await zigbeeRuntime.status();
         const zigbeeBroker = mqtt.status();
@@ -3608,21 +3658,25 @@ function nativeDeviceView(principal, device) {
         return json(res, 200, { schemaVersion: "dinodia.v1", requestId: principal.requestId, workflowId: principal.workflow,
           areas: (Array.isArray(principal.areaOptions) ? principal.areaOptions : []).map((area) => ({ id: area.id, name: area.name })),
           protocols: {
-            zigbee: { enabled: runtimeConfig.nativeCommissioningCapabilities.nativeZigbeeCommissioningV1 === true, adapterReady: zigbeeAdapterReady,
+            registrationEnabled: runtimeConfig.nativeCommissioningCapabilities.nativeStaffDeviceRegistrationV1 === true,
+            zigbee: { enabled: runtimeConfig.nativeCommissioningCapabilities.nativeStaffZigbeeCommissioningV1 === true, adapterReady: zigbeeAdapterReady,
               readinessMessage: !zigbeeBroker.connected ? "The MQTT coordinator connection is offline. No Zigbee join will start."
                 : !Boolean(zigbeeSettings.adapterPath || runtimeConfig.zigbeeAdapterPath) ? "No Zigbee coordinator adapter is selected. Configure the installed coordinator in the full Home dashboard first."
                   : zigbeeRuntimeState.configured === true && zigbeeRuntimeState.running !== true ? "The Zigbee2MQTT service is not running. Check the coordinator and service in the full Home dashboard."
                     : "The Zigbee coordinator connection and configured service are ready." },
-            matter: { enabled: runtimeConfig.nativeCommissioningCapabilities.nativeMatterCommissioningV1 === true, adapterReady: matterStatus.connected === true,
+            matter: { enabled: runtimeConfig.nativeCommissioningCapabilities.nativeStaffMatterCommissioningV1 === true, adapterReady: matterStatus.connected === true,
               threadReady, threadConfigured: threadSettings.configured === true, threadServiceRunning: threadRuntimeState.running === true,
               readinessMessage: matterStatus.connected === true ? `Matter Server is connected.${threadReady ? " The Thread network is ready for compatible Matter-over-Thread devices." : " Matter-over-Thread devices additionally need a current Thread border-router network; the Matter controller connection is reported separately."}` : "Matter Server is not connected. No Matter setup payload will be accepted." },
           } }, { "Cache-Control": "no-store" });
       }
       if (!nativeCommissioningService) return nativeContractError(res, 503, "HUB_UNAVAILABLE", "The hub commissioning service is unavailable", true);
-      if (req.method === "POST" && !sessionId && !action) {
+      if (req.method === "POST" && isRootPath) {
         const body = await readBody(req, 4096);
-        if (Object.keys(body).sort().join("\n") !== "protocol\nschemaVersion" || body.schemaVersion !== "dinodia.v1") return nativeContractError(res, 400, "VALIDATION_FAILED", "The commissioning request is invalid");
-        return json(res, 201, await nativeCommissioningService.start(principal, { protocol: body.protocol }, String(req.headers["idempotency-key"] || "")), { "Cache-Control": "no-store" });
+        const operationKind = body.operationKind || "PAIR_NEW";
+        const expected = operationKind === "REGISTER_EXISTING" ? "candidateRef\noperationKind\nprotocol\nschemaVersion"
+          : body.operationKind === undefined ? "protocol\nschemaVersion" : "operationKind\nprotocol\nschemaVersion";
+        if (Object.keys(body).sort().join("\n") !== expected || body.schemaVersion !== "dinodia.v1") return nativeContractError(res, 400, "VALIDATION_FAILED", "The commissioning request is invalid");
+        return json(res, 201, await nativeCommissioningService.start(principal, { protocol: body.protocol, operationKind, ...(body.candidateRef ? { candidateRef: body.candidateRef } : {}) }, String(req.headers["idempotency-key"] || "")), { "Cache-Control": "no-store" });
       }
       if (req.method === "GET" && sessionId && !action) {
         const after = Number(url.searchParams.get("after") || 0);
@@ -4206,7 +4260,7 @@ function nativeDeviceView(principal, device) {
     const installerReadRoutes = new Set([
       "/api/status", "/api/devices", "/api/automations", "/api/areas", "/api/labels",
       "/api/provisioning", "/api/readiness", "/api/integrations/zigbee/pairing",
-      "/api/heating-demand-controller", "/api/activity",
+      "/api/heating-demand-controller", "/api/activity", "/api/commissioning/unregistered-devices",
     ]);
     const adminApiPath = pathname.startsWith("/_dinodia/admin/") ? pathname.slice("/_dinodia/admin".length) : "";
     const operatorReadRoute = req.method === "GET" && installerReadRoutes.has(adminApiPath);
@@ -4220,7 +4274,8 @@ function nativeDeviceView(principal, device) {
     const operatorCloudflareStatusRoute = req.method === "GET" && adminApiPath === "/api/integrations/cloudflare";
     const operatorCloudflareRecoveryRoute = req.method === "POST" && adminApiPath === "/api/integrations/cloudflare";
     const operatorEndRoute = req.method === "POST" && pathname === "/_dinodia/operator-session/end";
-    const permanentInstallationRoute = pathname === "/_dinodia/installer/commissioning" || /^\/_dinodia\/installer\/commissioning\/sessions(?:\/[^/]+(?:\/(?:matter-payload|select|complete|cancel|resume))?)?$/.test(pathname);
+    const permanentInstallationRoute = pathname === "/_dinodia/installer/commissioning" || pathname === "/_dinodia/installer/commissioning/devices"
+      || /^\/_dinodia\/installer\/commissioning\/sessions(?:\/[^/]+(?:\/(?:matter-payload|select|complete|cancel|resume))?)?$/.test(pathname);
     const recognizedPath = setupRoute || staticRoute || operatorReadRoute || operatorAreaCreateRoute
       || operatorCloudflareStatusRoute || operatorCloudflareRecoveryRoute || operatorEndRoute || permanentInstallationRoute;
     if (!recognizedPath && ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(req.method)) return json(res, 404, { error: "Not found" });

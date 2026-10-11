@@ -33,6 +33,32 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function normalizePendingPropertyDevicePolicies(value) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const result = {};
+  for (const [osDeviceId, policy] of Object.entries(source).slice(-5000)) {
+    if (!/^[A-Za-z0-9:_-]{1,160}$/.test(osDeviceId) || !policy || typeof policy !== "object" || Array.isArray(policy)
+      || policy.managementClass !== "PROPERTY_DEVICE" || policy.ownerMembershipId != null
+      || !["INSTALLED", "VIEW_ONLY"].includes(String(policy.lifecycle || ""))
+      || !/^[0-9a-f-]{36}$/i.test(String(policy.platformDeviceId || ""))
+      || !/^[0-9a-f-]{36}$/i.test(String(policy.installationRequestId || ""))
+      || !Array.isArray(policy.canonicalAreaIds) || policy.canonicalAreaIds.length < 1 || policy.canonicalAreaIds.length > 64
+      || policy.canonicalAreaIds.some((id) => !/^[0-9a-f-]{36}$/i.test(String(id)))
+      || !["ready", "no_safe_controls", "unsupported"].includes(String(policy.catalogueStatus || ""))
+      || typeof policy.usefulReadings !== "boolean"
+      || !Number.isSafeInteger(Number(policy.descriptorRevision)) || Number(policy.descriptorRevision) < 1
+      || !/^[a-f0-9]{64}$/i.test(String(policy.descriptorDigest || ""))) continue;
+    result[osDeviceId] = {
+      managementClass: "PROPERTY_DEVICE", ownerMembershipId: null, lifecycle: String(policy.lifecycle),
+      platformDeviceId: String(policy.platformDeviceId), installationRequestId: String(policy.installationRequestId),
+      canonicalAreaIds: policy.canonicalAreaIds.map(String), catalogueStatus: String(policy.catalogueStatus), usefulReadings: policy.usefulReadings,
+      descriptorRevision: Number(policy.descriptorRevision), descriptorDigest: String(policy.descriptorDigest),
+      overrideName: typeof policy.overrideName === "string" ? policy.overrideName.slice(0, 80) : null,
+    };
+  }
+  return result;
+}
+
 function nativeSyncDeviceProjection(device) {
   const protocol = String(device?.protocol || "unknown").toLowerCase();
   return {
@@ -240,10 +266,16 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
   }
 }
 
-function nativeIncidentSyncProjection(envelope = {}) {
+function nativeIncidentSyncProjection(envelope = {}, state = null) {
   const incidentId = String(envelope.incidentId || "");
   const revision = Number(envelope.revision || 1);
   if (!incidentId || !Number.isSafeInteger(revision) || revision < 1) return null;
+  const sourceDeviceId = String(envelope.device?.id || envelope.osDeviceId || envelope.deviceId || "").trim();
+  if (sourceDeviceId) {
+    const policy = state?.platform?.devicePolicies?.[sourceDeviceId];
+    if (policy?.managementClass !== "PROPERTY_DEVICE" || policy.ownerMembershipId != null
+      || !["INSTALLED", "VIEW_ONLY"].includes(String(policy.lifecycle || ""))) return null;
+  }
   const incidentKey = crypto.createHash("sha256").update(incidentId, "utf8").digest("hex");
   const occurredAt = new Date(envelope.occurredAt || Date.now());
   const firstObservedAt = new Date(envelope.firstObservedAt || occurredAt);
@@ -261,7 +293,7 @@ function nativeIncidentSyncProjection(envelope = {}) {
     firstObservedAt: firstObservedAt.toISOString(),
     lastObservedAt: lastObservedAt.toISOString(),
     resolvedAt: resolvedAt?.toISOString() || null,
-    osDeviceId: typeof envelope.device?.id === "string" ? envelope.device.id.slice(0, 160) : null,
+    osDeviceId: sourceDeviceId ? sourceDeviceId.slice(0, 160) : null,
   };
 }
 
@@ -439,6 +471,7 @@ function initialState() {
       cloudConfigurationChecksum: null,
       cloudConfiguration: null,
       devicePolicies: {},
+      pendingPropertyDevicePolicies: {},
       pendingTenantDeviceRemovals: [],
       updaterStatus: null,
       updaterStatusRevision: 0,
@@ -573,6 +606,11 @@ function normalizeState(value) {
     ? { automations: value.automations && typeof value.automations === "object" ? value.automations : {}, automationTriggers: value.automationTriggers && typeof value.automationTriggers === "object" ? value.automationTriggers : {}, automationActions: value.automationActions && typeof value.automationActions === "object" ? value.automationActions : {}, legacyAutomations: oldAutomationMap, report: value.nativeAutomationMigration || { fromVersion: sourceVersion, native: 0, legacy: Object.keys(oldAutomationMap).length, rejected: 0, completedAt: null } }
     : migrateLegacyAutomations(oldAutomationMap, localHomeId);
   const persistedPlatform = value.platform && typeof value.platform === "object" ? value.platform : {};
+  const persistedCloudConfigurationValid = validateCloudConfiguration(persistedPlatform.cloudConfiguration, persistedPlatform);
+  const persistedCloudDevicePolicies = persistedCloudConfigurationValid
+    ? Object.fromEntries(persistedPlatform.cloudConfiguration.devicePolicies.map((policy) => [String(policy.osDeviceId), clone(policy)])) : {};
+  const pendingPropertyDevicePolicies = normalizePendingPropertyDevicePolicies(persistedPlatform.pendingPropertyDevicePolicies);
+  for (const osDeviceId of Object.keys(persistedCloudDevicePolicies)) delete pendingPropertyDevicePolicies[osDeviceId];
   const persistedApiUrl = String(persistedPlatform.apiUrl || "").replace(/\/$/, "");
   const productionPlatformUrl = String(process.env.NODE_ENV || "development") === "production"
     ? (persistedApiUrl === CANONICAL_PLATFORM_ORIGIN ? persistedApiUrl : "")
@@ -626,9 +664,12 @@ function normalizeState(value) {
       cloudRevision: Math.max(0, Number(persistedPlatform.cloudRevision) || 0),
       policyRevision: Math.max(0, Number(persistedPlatform.policyRevision) || 0),
       cloudConfigurationChecksum: typeof persistedPlatform.cloudConfigurationChecksum === "string" && /^[a-f0-9]{64}$/i.test(persistedPlatform.cloudConfigurationChecksum) ? persistedPlatform.cloudConfigurationChecksum : null,
-      cloudConfiguration: validateCloudConfiguration(persistedPlatform.cloudConfiguration, persistedPlatform) ? persistedPlatform.cloudConfiguration : null,
-      devicePolicies: validateCloudConfiguration(persistedPlatform.cloudConfiguration, persistedPlatform)
-        ? Object.fromEntries(persistedPlatform.cloudConfiguration.devicePolicies.map((policy) => [String(policy.osDeviceId), clone(policy)])) : {},
+      cloudConfiguration: persistedCloudConfigurationValid ? persistedPlatform.cloudConfiguration : null,
+      pendingPropertyDevicePolicies,
+      devicePolicies: {
+        ...pendingPropertyDevicePolicies,
+        ...persistedCloudDevicePolicies,
+      },
       pendingTenantDeviceRemovals: Array.isArray(persistedPlatform.pendingTenantDeviceRemovals)
         ? persistedPlatform.pendingTenantDeviceRemovals.filter((entry) => entry && typeof entry.osDeviceId === "string" && entry.osDeviceId.length > 0 && entry.osDeviceId.length <= 160 && typeof entry.ownerMembershipId === "string" && entry.ownerMembershipId.length > 0 && entry.ownerMembershipId.length <= 160 && Number.isSafeInteger(entry.cloudRevision) && entry.cloudRevision >= 0).slice(-500).map((entry) => ({ osDeviceId: entry.osDeviceId, ownerMembershipId: entry.ownerMembershipId, cloudRevision: entry.cloudRevision }))
         : [],
@@ -984,7 +1025,10 @@ class Store {
           });
         }
       }
-      state.platform = { ...(state.platform || {}), ...clone(platformPatch) };
+      const pendingPropertyDevicePolicies = { ...(state.platform?.pendingPropertyDevicePolicies || {}) };
+      for (const osDeviceId of Object.keys(incomingPolicies)) delete pendingPropertyDevicePolicies[osDeviceId];
+      state.platform = { ...(state.platform || {}), ...clone(platformPatch), pendingPropertyDevicePolicies };
+      state.platform.devicePolicies = { ...pendingPropertyDevicePolicies, ...incomingPolicies };
       const currentPropertyDeviceIds = new Set(Object.entries(incomingPolicies)
         .filter(([, policy]) => policy?.managementClass === "PROPERTY_DEVICE"
           && !["REMOVAL_PENDING", "REMOVED", "RETIRED", "RECOMMISSION_REQUIRED"].includes(String(policy.lifecycle)))
@@ -1115,6 +1159,13 @@ class Store {
     next.setup = normalizeSetup(device.setup || existing.setup, { status: "needs_setup", reason: "area_and_label_required" });
     next.presentation = buildPresentation({ ...next, presentation: existing.presentation || null });
     const observationNow = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
+    if (options.devicePolicy && typeof options.devicePolicy === "object" && !Array.isArray(options.devicePolicy)) {
+      this.state.platform = this.state.platform || initialState().platform;
+      this.state.platform.devicePolicies = { ...(this.state.platform.devicePolicies || {}), [id]: clone(options.devicePolicy) };
+      if (options.devicePolicy.managementClass === "PROPERTY_DEVICE") {
+        this.state.platform.pendingPropertyDevicePolicies = { ...(this.state.platform.pendingPropertyDevicePolicies || {}), [id]: clone(options.devicePolicy) };
+      }
+    }
     const areaChanged = Boolean(existing.id) && String(existing.areaId || "") !== String(next.areaId || "");
     if (areaChanged && existing.areaId) {
       const usage = this.state.syncUsage = initialUsageState(this.state.syncUsage);
@@ -1899,7 +1950,7 @@ class Store {
       let queued = 0;
       for (const entry of pending) {
         const incident = entry.envelope || {};
-        const projection = nativeIncidentSyncProjection(incident);
+        const projection = nativeIncidentSyncProjection(incident, this.state);
         if (!projection) continue;
         const revision = projection.revision;
         const sequenceBefore = Number(this.state.syncOutbox?.nextSequence || 1);
@@ -2661,7 +2712,7 @@ class Store {
       createdAt: new Date().toISOString(),
     };
     if (pending.length >= 10_000) throw Object.assign(new Error("The durable incident backlog has reached its safety bound"), { code: "sync_critical_backlog_full" });
-    const projection = nativeIncidentSyncProjection(envelope);
+    const projection = nativeIncidentSyncProjection(envelope, this.state);
     if (projection) enqueueSyncEventInState(this.state, "incident.transition", projection.incidentKey, projection, { critical: true, dedupeRevision: projection.revision });
     this.state.incidentOutbox.pending = [...pending, entry];
     this.state.incidentOutbox.lastError = null;

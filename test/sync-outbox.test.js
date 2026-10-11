@@ -297,6 +297,7 @@ test("reportable incident transitions join the durable stream without private de
   const { directory, store } = temporaryStore();
   try {
     const incidentId = "private-device-offline:internal-device-77";
+    store.state.platform.devicePolicies = { "internal-device-77": { managementClass: "PROPERTY_DEVICE", ownerMembershipId: null, lifecycle: "INSTALLED" } };
     await store.queueIncidentEnvelope({
       id: `${incidentId}:1`, incidentId, revision: 1, kind: "device_offline", state: "open",
       severity: "critical", summary: "Private tenant room device offline", detail: "private narrative that must not be sent",
@@ -314,6 +315,33 @@ test("reportable incident transitions join the durable stream without private de
     assert.equal(store.listPendingIncidentEnvelopes().length, 1);
     await store.acknowledgeSyncBatch({ streamId: batch.streamId, acceptedThroughSequence: batch.toSequence, cloudRevision: 1 }, Date.parse("2026-10-04T10:03:00.000Z"));
     assert.equal(store.listPendingIncidentEnvelopes().length, 0, "incident source queue only clears after the durable sync cursor ack");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("unregistered and tenant-device incidents stay local until current canonical property policy permits the bounded projection", async () => {
+  const { directory, store } = temporaryStore();
+  try {
+    const incidentId = "device-offline:unregistered-77";
+    const envelope = { id: `${incidentId}:1`, incidentId, revision: 1, kind: "device_offline", state: "open", severity: "critical",
+      occurredAt: "2026-10-11T09:00:00.000Z", firstObservedAt: "2026-10-11T08:00:00.000Z", lastObservedAt: "2026-10-11T09:00:00.000Z",
+      device: { id: "unregistered-77", name: "Private radiator" } };
+    await store.queueIncidentEnvelope(envelope);
+    assert.equal(store.getSyncOutbox().events.length, 0, "unknown local devices cannot create property-stream incidents");
+    assert.equal(store.listPendingIncidentEnvelopes().length, 1, "the genuine diagnostic remains locally retained");
+    store.state.platform.devicePolicies = { "unregistered-77": { managementClass: "TENANT_DEVICE", ownerMembershipId: "tenant-membership", lifecycle: "INSTALLED" } };
+    assert.equal(await store.ensureSyncIncidentEvents(Date.parse("2026-10-11T09:01:00.000Z")), 0, "tenant-private incidents never enter the property stream");
+    assert.equal(store.getSyncOutbox().events.length, 0);
+    store.state.platform.devicePolicies["unregistered-77"] = { managementClass: "PROPERTY_DEVICE", ownerMembershipId: null, lifecycle: "INSTALLED" };
+    assert.equal(await store.ensureSyncIncidentEvents(Date.parse("2026-10-11T09:02:00.000Z")), 1, "canonical registration makes only the original bounded event eligible");
+    assert.equal(store.getSyncOutbox().events.length, 1);
+    assert.equal(store.getSyncOutbox().events[0].payload.occurredAt, envelope.occurredAt, "registration time does not replace genuine incident time");
+    assert.equal(await store.ensureSyncIncidentEvents(Date.parse("2026-10-11T09:03:00.000Z")), 0, "reconciliation is revision-deduplicated");
+    assert.equal(store.getSyncOutbox().events.length, 1);
+    const encoded = JSON.stringify(store.getSyncOutbox().events[0]);
+    assert.equal(encoded.includes("Private radiator"), false);
+    assert.equal(encoded.includes("unregistered-77"), true, "only the approved OS source identity is included after canonical property registration");
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

@@ -42,6 +42,19 @@ test("dashboard keeps the intended setup order and production safety boundary", 
   assert.doesNotMatch(html, /Add test device|Raw JSON command/i);
 });
 
+test("full Home dashboard shows the same unregistered-device status and routes changes through assigned Portal work", () => {
+  assert.match(html, /id="property-device-registration"/);
+  assert.match(html, /Not registered to this property yet/);
+  assert.match(html, /id="open-assigned-device-installation"[^>]+href="https:\/\/dinodia-platform-v2\.vercel\.app\/installer"/);
+  assert.match(app, /commissioning\/unregistered-devices/);
+  assert.match(app, /loadUnregisteredPropertyDevices/);
+  assert.match(app, /Confirm the device and its current Area in the assigned installation workflow/);
+  const server = fs.readFileSync(path.join(__dirname, "../src/server.js"), "utf8");
+  assert.match(server, /currentAssignedDashboardPrincipal\(req\)/);
+  assert.match(server, /Only staff with current assigned full-Home access can view local unregistered devices/);
+  assert.match(server, /operator-session\/revalidate/);
+});
+
 test("pairing status renders friendly Zigbee and Matter device identities", () => {
   assert.match(app, /foundDevices\.map/);
   assert.match(app, /loadMatterPairingStatus/);

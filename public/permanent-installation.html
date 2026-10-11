@@ -42,8 +42,16 @@
       <p id="status" role="status" aria-live="polite" class="muted">Waiting for the paired hub.</p>
       <p id="error" role="alert" class="error" hidden></p>
     </section>
+    <section id="existing-devices" class="install-card" aria-labelledby="existing-heading" hidden>
+      <div class="row"><div><h2 id="existing-heading">Already paired on this hub</h2><p class="muted">These devices have a completed local interview but are not yet registered to this property. Nothing is adopted automatically.</p></div><button id="refresh-existing" type="button">Refresh local devices</button></div>
+      <p id="existing-device-empty" class="muted" hidden>No eligible unregistered local devices were found for this assigned Home and its authorized Areas.</p>
+      <p id="existing-device-hold" class="muted" hidden>Permanent-device registration is held by the current maintenance policy. No device or radio state was changed.</p>
+      <div id="existing-device-list"></div>
+    </section>
     <section id="device-result" class="install-card" hidden>
-      <h2>Review discovered device</h2>
+      <h2 id="review-heading">Review discovered device</h2>
+      <p id="review-instructions" class="muted">Review the device interview, select an authorized original Area, and confirm its current controls before registration.</p>
+      <div id="selected-controls" class="muted" role="status"></div>
       <div class="row"><label for="area">Original Area</label><select id="area"></select></div>
       <div class="row"><label for="label">Customer label</label><input id="label" maxlength="40" autocomplete="off"></div>
       <div class="row"><label for="name">Device name</label><input id="name" maxlength="80" autocomplete="off"></div>
@@ -55,10 +63,13 @@
         <button id="remove" type="button" hidden>Remove unsupported candidate</button>
       </div>
     </section>
-    <section id="candidates" class="install-card" hidden aria-label="Discovered devices"><h2>Discovery results</h2><div id="candidate-list"></div></section>
+    <section id="candidates" class="install-card" hidden aria-label="Discovered devices"><h2>Discovery results</h2><p class="muted">New radio discoveries are candidates only; they are not property devices until reviewed and registered.</p><div id="candidate-list"></div></section>
+    <section id="completed-devices" class="install-card" hidden aria-label="Completed devices"><h2>Completed in this installation</h2><ul id="completed-device-list"></ul></section>
     <footer class="muted"><p>This workspace is limited to the current assigned request, paired hub, and active original Areas. It does not grant homeowner or tenant ownership.</p>
-      <button id="add-next" type="button" hidden>Add next device</button>
-      <button id="end-session" type="button">End installation session</button></footer>
+      <button id="add-next" type="button" hidden>Add another device</button>
+      <p id="finish-installation-help" class="muted">When all devices are recorded, this returns to Company Portal. Review current sync status there and use its authorized completion action.</p>
+      <button id="finish-installation" type="button" hidden>Finish installation</button>
+      <button id="end-session" type="button">End this session</button></footer>
   </main>
   <script src="/permanent-installation.js" defer></script>
 </body>

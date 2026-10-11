@@ -1,7 +1,7 @@
 (() => {
   "use strict";
   const $ = (id) => document.getElementById(id);
-  const state = { context: null, session: null, selected: null, busy: false, poll: null };
+  const state = { context: null, session: null, selected: null, existingDevices: [], completedDevices: [], busy: false, poll: null };
   const key = (suffix) => `dinodia-installation:${state.context?.requestId || "unknown"}:${suffix}`;
   const post = async (path, body, idempotencyKey = null) => {
     const headers = { "content-type": "application/json", "x-dinodia-setup-csrf": cookie("dinodia_setup_csrf") };
@@ -23,8 +23,8 @@
   function showError(error) { $("error").textContent = error instanceof Error ? error.message : "The action could not be completed"; $("error").hidden = false; }
   function clearError() { $("error").hidden = true; $("error").textContent = ""; }
   const terminal = new Set(["completed", "cancelled", "expired", "failed"]);
-  function setBusy(value) { state.busy = value; for (const id of ["start-zigbee", "start-matter", "refresh", "cancel", "submit-matter", "select", "install", "view-only", "retain-unsupported", "remove", "add-next"]) $(id).disabled = value; }
-  function canStart(protocol) { const entry = state.context?.protocols?.[protocol]; return entry?.enabled === true && entry?.adapterReady === true && (!state.session || terminal.has(state.session.status)); }
+  function setBusy(value) { state.busy = value; for (const id of ["start-zigbee", "start-matter", "refresh", "refresh-existing", "cancel", "submit-matter", "select", "install", "view-only", "retain-unsupported", "remove", "add-next", "finish-installation"]) if ($(id)) $(id).disabled = value; }
+  function canStart(protocol) { const entry = state.context?.protocols?.[protocol]; return state.context?.protocols?.registrationEnabled === true && entry?.enabled === true && entry?.adapterReady === true && (!state.session || terminal.has(state.session.status)); }
   function updateButtons() {
     $("start-zigbee").disabled = state.busy || !canStart("zigbee");
     $("start-matter").disabled = state.busy || !canStart("matter");
@@ -35,16 +35,30 @@
     $("install").hidden = !selected || state.session?.catalogueStatus !== "ready";
     $("view-only").hidden = !selected || state.session?.catalogueStatus !== "no_safe_controls" || state.session?.catalogueUsefulReadings !== true;
     $("retain-unsupported").hidden = !selected || state.session?.catalogueStatus !== "unsupported";
-    $("remove").hidden = !selected || !["unsupported", "no_safe_controls"].includes(state.session?.catalogueStatus);
+    $("remove").hidden = state.session?.operationKind === "REGISTER_EXISTING" || !selected || !["unsupported", "no_safe_controls"].includes(state.session?.catalogueStatus);
+    if (state.session?.operationKind === "REGISTER_EXISTING" && state.session?.catalogueStatus === "unsupported") $("retain-unsupported").textContent = "Register as view-only";
+    else $("retain-unsupported").textContent = "Keep visible without controls";
     $("add-next").hidden = !state.session || !terminal.has(state.session.status) || (state.session.cleanup?.pendingCount || 0) > 0;
+    $("finish-installation").hidden = !state.session || !terminal.has(state.session.status) || (state.session.cleanup?.pendingCount || 0) > 0;
+    $("finish-installation-help").hidden = $("finish-installation").hidden;
+    $("select").textContent = state.session?.operationKind === "REGISTER_EXISTING" ? "Review device and Area" : "Review this device";
+    $("install").textContent = state.session?.operationKind === "REGISTER_EXISTING" ? "Register as permanent device" : "Install and sync";
   }
   function render(session) {
     state.session = session;
+    if (session.operationKind === "REGISTER_EXISTING" && !state.selected) state.selected = (session.candidates || [])[0] || null;
     sessionStorage.setItem(key("session"), session.sessionId);
     $("status").textContent = `${session.protocol.toUpperCase()} · ${session.status.replaceAll("_", " ")} · updated ${new Date(session.updatedAt).toLocaleTimeString()}`;
     $("matter-entry").hidden = session.protocol !== "matter" || !["awaiting_payload", "interrupted"].includes(session.status);
     $("matter-entry-row").hidden = $("matter-entry").hidden;
     $("device-result").hidden = !session.selectedCandidateRef;
+    const controls = Array.isArray(session.selectedControls) ? session.selectedControls : [];
+    $("selected-controls").textContent = controls.length ? `Detected controls: ${controls.map((control) => `${control.name}${control.readable ? " · reading" : ""}${control.writable ? " · control" : ""}`).join("; ")}`
+      : session.selectedCandidateRef ? `Control/readings status: ${session.catalogueStatus === "unsupported" ? "not understood yet; no controls are being invented" : session.catalogueStatus === "no_safe_controls" ? "no safe control was detected" : "no current control descriptor is available"}` : "";
+    if (session.operationKind === "REGISTER_EXISTING") {
+      $("review-heading").textContent = "Review already-paired device";
+      $("review-instructions").textContent = "Confirm its current Area, name, customer label and detected controls. Registration does not open pairing, stop joining, remove or re-pair this device.";
+    }
     updateButtons();
     if (session.nextCandidateCursor) void loadCandidatePages(session.nextCandidateCursor);
   }
@@ -66,20 +80,71 @@
       const item = document.createElement("div"); item.className = "candidate";
       const title = document.createElement("strong"); title.textContent = candidate.name || "Unidentified device";
       const detail = document.createElement("p"); detail.className = "muted"; detail.textContent = [candidate.manufacturer, candidate.model, candidate.stage].filter(Boolean).join(" · ") || "The hub is interviewing this device";
-      const choose = document.createElement("button"); choose.type = "button"; choose.textContent = "Review candidate"; choose.disabled = state.busy;
+      const choose = document.createElement("button"); choose.type = "button"; choose.textContent = state.session?.operationKind === "REGISTER_EXISTING" ? "Review existing device" : "Review candidate"; choose.disabled = state.busy;
       choose.addEventListener("click", () => { state.selected = candidate; $("device-result").hidden = false; $("label").value = candidate.name || "New device"; $("name").value = candidate.name || "New device"; clearError(); updateButtons(); });
       item.append(title, detail, choose); list.append(item);
     }
+  }
+  function renderCompleted() {
+    const rows = state.completedDevices; const section = $("completed-devices"); const list = $("completed-device-list");
+    section.hidden = rows.length === 0; list.replaceChildren();
+    for (const row of rows) {
+      const item = document.createElement("li");
+      const sync = row.sync === "pending" ? "Home sync pending" : row.sync === "acknowledged" ? "Home sync acknowledged" : "Home sync not verified";
+      item.textContent = `${row.name}${row.model ? ` · ${row.model}` : ""} · ${row.protocol || "device"} · ${row.areaName || "Area unavailable"} · ${row.lifecycle === "VIEW_ONLY" ? "view-only" : "permanent"} · ${sync}`;
+      list.append(item);
+    }
+  }
+  async function refreshExistingDevices() {
+    if (!state.context?.protocols?.registrationEnabled) { state.existingDevices = []; state.completedDevices = []; renderExistingDevices(); renderCompleted(); return; }
+    const result = await get("/_dinodia/installer/commissioning/devices");
+    state.existingDevices = Array.isArray(result.devices) ? result.devices : [];
+    state.completedDevices = Array.isArray(result.completedDevices) ? result.completedDevices : [];
+    renderExistingDevices();
+    renderCompleted();
+  }
+  function renderExistingDevices() {
+    const section = $("existing-devices"); const list = $("existing-device-list"); const held = state.context?.protocols?.registrationEnabled !== true;
+    section.hidden = false;
+    $("existing-device-hold").hidden = !held;
+    list.replaceChildren();
+    for (const device of held ? [] : state.existingDevices) {
+      const item = document.createElement("article"); item.className = "candidate";
+      const title = document.createElement("strong"); title.textContent = device.name || "Unidentified local device";
+      const detail = document.createElement("p"); detail.className = "muted";
+      detail.textContent = [device.protocol?.toUpperCase(), device.manufacturer, device.model, `Currently in ${device.originalAreaName || "an authorized Area"}`].filter(Boolean).join(" · ");
+      const badge = document.createElement("p"); badge.className = "muted"; badge.textContent = "Not registered to this property yet. Review its live descriptor and choose the correct property Area before registering.";
+      const choose = document.createElement("button"); choose.type = "button"; choose.textContent = "Review and register"; choose.disabled = state.busy || Boolean(state.session && !terminal.has(state.session.status));
+      choose.addEventListener("click", () => startExisting(device));
+      item.append(title, detail, badge, choose); list.append(item);
+    }
+    $("existing-device-empty").hidden = held || state.existingDevices.length > 0;
   }
   async function start(protocol) {
     if (!canStart(protocol)) return;
     setBusy(true); clearError();
     try {
-      const session = await post("/_dinodia/installer/commissioning/sessions", { schemaVersion: "dinodia.v1", protocol }, `install-start-${crypto.randomUUID()}`);
+      const session = await post("/_dinodia/installer/commissioning/sessions", { schemaVersion: "dinodia.v1", operationKind: "PAIR_NEW", protocol }, `install-start-${crypto.randomUUID()}`);
       render(session); renderCandidates();
       if (state.poll) clearInterval(state.poll);
       state.poll = setInterval(() => refresh().catch(showError), 3000);
     } catch (error) { showError(error); }
+    finally { setBusy(false); updateButtons(); }
+  }
+  async function startExisting(device) {
+    if (state.busy || !state.context?.protocols?.registrationEnabled || state.session && !terminal.has(state.session.status)) return;
+    setBusy(true); clearError(); state.selected = device;
+    try {
+      const session = await post("/_dinodia/installer/commissioning/sessions", { schemaVersion: "dinodia.v1", operationKind: "REGISTER_EXISTING", protocol: device.protocol, candidateRef: device.candidateRef }, `install-adopt-${crypto.randomUUID()}`);
+      render(session); renderCandidates();
+      $("device-result").hidden = false;
+      $("review-heading").textContent = "Review already-paired device";
+      $("review-instructions").textContent = "Confirm its current Area, name, customer label and detected controls. Registering does not open pairing, stop joining, remove or re-pair this device.";
+      $("label").value = device.name || "Device"; $("name").value = device.name || "Device";
+      const area = $("area"); if (device.availableAreas?.some((row) => row.id === device.originalAreaId)) area.value = device.originalAreaId;
+      if (state.poll) clearInterval(state.poll);
+      state.poll = setInterval(() => refresh().catch(showError), 3000);
+    } catch (error) { state.selected = null; showError(error); await refreshExistingDevices().catch(() => {}); }
     finally { setBusy(false); updateButtons(); }
   }
   async function refresh() {
@@ -88,6 +153,7 @@
     setBusy(true);
     try {
       await refreshContext();
+      await refreshExistingDevices();
       if (!state.session) return;
       const session = await get(`/_dinodia/installer/commissioning/sessions/${encodeURIComponent(state.session.sessionId)}`);
       render(session); renderCandidates();
@@ -116,7 +182,8 @@
     for (const protocol of ["zigbee", "matter"]) {
       const entry = state.context.protocols?.[protocol];
       const title = protocol === "zigbee" ? "Zigbee coordinator" : "Matter controller";
-      const reason = !entry?.enabled ? `${title} commissioning is held by this hub's operational configuration.`
+      const reason = state.context.protocols?.registrationEnabled !== true ? "Permanent-device registration is held by the current staff maintenance policy. No pairing or adoption action is available."
+        : !entry?.enabled ? `${title} commissioning is held by this hub's operational configuration.`
         : !entry?.adapterReady ? entry?.readinessMessage || `The ${title.toLowerCase()} is not ready; no commissioning action can start.`
           : protocol === "matter" ? (entry.readinessMessage || `${title} is connected.`)
             : `${title} is ready for a user-started device search/setup.`;
@@ -141,9 +208,11 @@
     if (!state.session) return;
     setBusy(true); clearError();
     try {
+      const candidate = state.selected || (state.session.candidates || []).find((row) => row.candidateRef === state.session.selectedCandidateRef) || (state.session.candidates || [])[0];
       const result = await post(`/_dinodia/installer/commissioning/sessions/${encodeURIComponent(state.session.sessionId)}/complete`, { schemaVersion: "dinodia.v1", disposition });
       render(result); renderCandidates();
-      $("status").textContent = result.status === "completed_cleanup_pending" ? "The device result is recorded; cleanup is still being confirmed by the hub." : "The device result is recorded by the hub and Platform.";
+      $("status").textContent = result.status === "completed_cleanup_pending" ? "The device result is recorded; cleanup is still being confirmed by the hub." : result.localSyncState === "pending" ? "Registered by the hub and Platform. Home sync is still pending acknowledgement." : result.localSyncState === "acknowledged" ? "Registered by the hub and Platform; the Home sync was acknowledged." : "Registered by the hub and Platform. Home sync acknowledgement is not verified.";
+      await refreshExistingDevices().catch(() => {});
     } catch (error) { showError(error); }
     finally { setBusy(false); updateButtons(); }
   }
@@ -157,6 +226,7 @@
   $("start-zigbee").addEventListener("click", () => start("zigbee"));
   $("start-matter").addEventListener("click", () => start("matter"));
   $("refresh").addEventListener("click", () => refresh());
+  $("refresh-existing").addEventListener("click", () => refreshExistingDevices().catch(showError));
   $("cancel").addEventListener("click", () => cancel());
   $("select").addEventListener("click", () => chooseCandidate());
   $("install").addEventListener("click", () => complete("install"));
@@ -167,7 +237,16 @@
     if (!state.session || !terminal.has(state.session.status) || (state.session.cleanup?.pendingCount || 0) > 0) return;
     sessionStorage.removeItem(key("session")); state.session = null; state.selected = null;
     $("device-result").hidden = true; $("candidates").hidden = true;
+    $("review-heading").textContent = "Review discovered device";
+    $("review-instructions").textContent = "Review the device interview, select an authorized original Area, and confirm its current controls before registration.";
+    state.selected = null;
     await refresh().catch(showError); updateButtons();
+  });
+  $("finish-installation").addEventListener("click", async () => {
+    if (state.session && !terminal.has(state.session.status)) return;
+    await fetch("/_dinodia/operator-session/end", { method: "POST", credentials: "same-origin", headers: { "x-dinodia-setup-csrf": cookie("dinodia_setup_csrf") } }).catch(() => {});
+    if (window.opener && !window.opener.closed) { window.close(); return; }
+    location.replace("/support-access");
   });
   $("submit-matter").addEventListener("click", async () => {
     if (location.protocol !== "https:") { showError(new Error("Matter setup codes are accepted only through the verified secure Dinodia OS address. Reopen this assigned work using secure access.")); return; }
@@ -187,9 +266,11 @@
   async function init() {
     try {
       await refreshContext();
+      await refreshExistingDevices();
       const saved = sessionStorage.getItem(key("session"));
       if (saved && /^[0-9a-f-]{36}$/i.test(saved)) { state.session = { sessionId: saved }; await refresh(); }
       updateButtons();
+    renderCompleted();
     } catch (error) { $("summary").textContent = "This assigned work is unavailable."; showError(error); }
   }
   void init();

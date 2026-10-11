@@ -16,14 +16,14 @@ function text(value, max) {
   return typeof value === "string" && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value);
 }
 function fixedSession(session, afterCandidateRef = null) {
-  const statuses = new Set(["requested", "advertising", "awaiting_payload", "commissioning", "searching", "interrupted", "selected", "completed", "completed_cleanup_pending", "cancelled", "expired", "failed", "cancelled_cleanup_pending", "expired_cleanup_pending"]);
+  const statuses = new Set(["requested", "advertising", "awaiting_payload", "commissioning", "searching", "reviewing_existing", "interrupted", "selected", "completed", "completed_cleanup_pending", "cancelled", "expired", "failed", "cancelled_cleanup_pending", "expired_cleanup_pending"]);
   const candidates = Array.isArray(session.candidates) ? session.candidates : [];
   const cursorIndex = afterCandidateRef == null ? -1 : candidates.findIndex((candidate) => candidate.candidateRef === afterCandidateRef);
   if (afterCandidateRef != null && cursorIndex < 0) fail(SAFE_ERROR.conflict, 409, "The candidate page changed; refresh the discovery list");
   const start = cursorIndex + 1;
   const page = candidates.slice(start, start + MAX_CANDIDATES);
   return {
-    sessionId: String(session.sessionId), protocol: String(session.protocol),
+    sessionId: String(session.sessionId), protocol: String(session.protocol), operationKind: String(session.operationKind || "PAIR_NEW"),
     status: statuses.has(String(session.status)) || String(session.status).endsWith("_cleanup_pending") ? session.status : "failed",
     createdAt: String(session.createdAt), updatedAt: String(session.updatedAt || session.createdAt), expiresAt: String(session.expiresAt),
     revision: Number(session.revision) || 1,
@@ -33,6 +33,13 @@ function fixedSession(session, afterCandidateRef = null) {
     selectedName: session.selectedName || null, selectedCustomerLabel: session.selectedCustomerLabel || null,
     catalogueStatus: session.selectedCatalogue?.capabilityStatus || null,
     catalogueUsefulReadings: session.selectedCatalogue?.usefulReadings === true,
+    selectedControls: (session.selectedCatalogue?.controls || []).slice(0, 64).map((control) => ({
+      name: String(control.name || control.semanticRole || control.kind || "Control").slice(0, 100),
+      semanticRole: String(control.semanticRole || "unknown").slice(0, 80),
+      kind: String(control.valueType || control.kind || "unknown").slice(0, 40),
+      readable: control.readable === true, writable: control.writable === true,
+    })),
+    localSyncState: ["pending", "acknowledged", "unknown"].includes(String(session.localSyncState || "")) ? session.localSyncState : "unknown",
     finalDisposition: session.finalDisposition || null,
     finalDeviceId: session.finalDeviceId || null,
     cleanup: { state: String(session.cleanup?.state || "NONE"), pendingCount: (Array.isArray(session.cleanup?.pendingIds) ? session.cleanup.pendingIds.length : 0) + (session.radioOperationInFlight || session.radioOperationUncertain ? 1 : 0) },
@@ -45,6 +52,7 @@ class NativeCommissioningService {
     this.store = store; this.mqtt = mqtt; this.matter = matter; this.pairing = pairing; this.vault = vault; this.eventBus = eventBus;
     this.commissioningCapabilities = commissioningCapabilities;
     this.clock = clock; this.logger = logger; this.lock = Promise.resolve(); this.stopped = false;
+    this.adoptionCandidates = new Map();
     this.expiryTimer = setInterval(() => { this.reconcileExpired().catch(() => {}); }, 5000);
     this.expiryTimer.unref?.();
     this.recover().catch(() => {});
@@ -99,6 +107,156 @@ class NativeCommissioningService {
     return { actorType: "TENANT", accountId: String(principal.sub), customerSessionId: String(principal.sid), tokenId: String(principal.jti), trustedDeviceId: String(principal.trustedDeviceId), membershipId: String(principal.membershipId), homeId: String(principal.homeId), hubInstallationId: String(principal.hubInstallId), accessTokenHash: String(principal.accessTokenHash), identityGeneration: Number(identity.generation), areaIds: authorizedAreas };
   }
 
+  actorBinding(actor) {
+    return digest(JSON.stringify({ actorType: actor.actorType, employeeId: actor.employeeId || null, employeeSessionId: actor.employeeSessionId || null,
+      operatorHandoffId: actor.operatorHandoffId || null, operatorJti: actor.operatorJti || null, workItemId: actor.workItemId || null,
+      workRevision: actor.workRevision || null, requestId: actor.requestId || null, accountId: actor.accountId || null,
+      customerSessionId: actor.customerSessionId || null, membershipId: actor.membershipId || null, homeId: actor.homeId,
+      hubInstallationId: actor.hubInstallationId, identityGeneration: actor.identityGeneration, areaIds: [...actor.areaIds].sort() }));
+  }
+
+  protocolIdentity(device) {
+    const protocol = String(device?.protocol || "").toLowerCase();
+    if (protocol === "zigbee") {
+      const identity = String(device?.protocolIdentity?.ieeeAddress || device?.metadata?.ieee_address || device?.metadata?.ieee || "").trim().toLowerCase();
+      return identity ? { identity, hash: digest(`zigbee\n${identity}`) } : null;
+    }
+    if (protocol === "matter") {
+      const nodeId = String(device?.protocolIdentity?.nodeId || device?.metadata?.node_id || "").trim().toLowerCase();
+      const fabricId = String(device?.protocolIdentity?.fabricId || device?.metadata?.fabric_id || "default").trim().toLowerCase();
+      if (!nodeId || !fabricId) return null;
+      const identity = `${fabricId}\n${nodeId}`;
+      return { identity, hash: digest(`matter\n${identity}`) };
+    }
+    return null;
+  }
+
+  adoptionProvenance(actor, device) {
+    if (actor.actorType !== "STAFF_INSTALLER" || !device || device.infrastructure === true) return null;
+    const protocol = String(device.protocol || "").toLowerCase();
+    if (!(["zigbee", "matter"].includes(protocol)) || device.available === false) return null;
+    const policy = this.store.getPlatform?.()?.devicePolicies?.[String(device.id || "")];
+    const ownerMembershipId = String(device.tenantOwnerMembershipId || device.metadata?.tenantOwnerMembershipId || "");
+    const managementClass = String(policy?.managementClass || device.managementClass || device.metadata?.managementClass || "").trim().toUpperCase();
+    // Any retained tenant marker or canonical policy is a hard exclusion. Do
+    // not turn a departed tenant's stale local record into property inventory.
+    if (policy || ownerMembershipId || managementClass === "TENANT_DEVICE") return null;
+    const priorTenantRegistration = (this.store.listEvents?.(500) || []).some((event) => event
+      && event.type === "tenant_device_commissioned" && String(event.deviceId || "") === String(device.id));
+    if (priorTenantRegistration) return null;
+    const protocolIdentity = this.protocolIdentity(device);
+    if (!protocolIdentity || device.interviewStatus !== "successful" || !Object.keys(device.entities || {}).length
+      || !["ready", "complete"].includes(String(device.setup?.status || "").toLowerCase())) return null;
+    const bindings = this.store.getPlatform?.()?.areaBindings || [];
+    const areaBinding = bindings.find((row) => String(row.hubAreaId || "") === String(device.areaId || "") && actor.areaIds.includes(String(row.areaId || "")));
+    if (!areaBinding) return null;
+    const events = this.store.listEvents?.(500) || [];
+    const setupEvent = events.find((event) => event && event.type === "device_setup_completed"
+      && String(event.deviceId || "") === String(device.id) && String(event.areaId || "") === String(device.areaId || ""));
+    // A mutable setup.status is not ownership evidence. Require the retained
+    // full-dashboard setup event plus live protocol identity/interview.
+    if (!setupEvent) return null;
+    return { protocolIdentityHash: protocolIdentity.hash, areaId: String(areaBinding.areaId), hubAreaId: String(areaBinding.hubAreaId), setupEventAt: String(setupEvent.timestamp || "") };
+  }
+
+  pruneAdoptionCandidates() {
+    const now = this.clock();
+    for (const [ref, item] of this.adoptionCandidates) if (now >= item.expiresAt) this.adoptionCandidates.delete(ref);
+    while (this.adoptionCandidates.size >= 256) this.adoptionCandidates.delete(this.adoptionCandidates.keys().next().value);
+  }
+
+  async listAdoptableDevices(principal) {
+    const actor = this.principal(principal);
+    if (actor.actorType !== "STAFF_INSTALLER") fail(SAFE_ERROR.denied, 403, "Only current assigned installation staff can inspect unregistered property devices");
+    return this.exclusive(async () => {
+      this.pruneAdoptionCandidates();
+      const actorHash = this.actorBinding(actor);
+      const devices = [];
+      for (const device of this.store.listDevices()) {
+        const provenance = this.adoptionProvenance(actor, device);
+        if (!provenance) continue;
+        const candidateRef = crypto.randomUUID();
+        this.adoptionCandidates.set(candidateRef, { actorHash, expiresAt: this.clock() + 5 * 60 * 1000, deviceId: String(device.id),
+          protocol: String(device.protocol).toLowerCase(), protocolIdentityHash: provenance.protocolIdentityHash, originalAreaId: provenance.areaId,
+          hubAreaId: provenance.hubAreaId, setupEventAt: provenance.setupEventAt });
+        const area = actor.areaOptions.find((row) => String(row.id) === provenance.areaId);
+        devices.push({ candidateRef, protocol: String(device.protocol).toLowerCase(), name: String(device.originalName || device.name || "Unidentified device").slice(0, 100),
+          manufacturer: String(device.metadata?.manufacturer || device.metadata?.manufacturer_name || "").slice(0, 80),
+          model: String(device.metadata?.model || device.metadata?.model_id || "").slice(0, 80),
+          status: "not_registered", interviewStatus: "verified", originalAreaId: provenance.areaId, originalAreaName: String(area?.name || "Current authorized Area"),
+          availableAreas: actor.areaOptions.map(({ id, name }) => ({ id, name })) });
+      }
+      return { schemaVersion: "dinodia.v1", operationKind: "REGISTER_EXISTING", devices: devices.slice(0, 100),
+        completedDevices: this.completedPropertyDevices(actor), registrationEnabled: this.commissioningCapabilities.nativeStaffDeviceRegistrationV1 !== false };
+    });
+  }
+
+  listDashboardUnregisteredDevices(principal) {
+    const platform = this.store.getPlatform?.() || {};
+    const identity = this.store.getIdentity?.() || {};
+    if (!principal || principal.principalType !== "operator" || principal.scope?.length !== 1 || principal.scope[0] !== "os:admin"
+      || !principal.sub || !principal.sid || !principal.jti || !principal.handoffId || !principal.workflow
+      || !principal.employeeSessionId || !Number.isSafeInteger(Number(principal.workRevision)) || Number(principal.workRevision) < 1
+      || !principal.homeId || String(platform.homeId || "") !== String(principal.homeId) || !platform.hubInstallId
+      || !principal.hubId || String(principal.hubId) !== String(identity.serial || "")
+      || Number(identity.generation || 0) < 1 || Number(identity.generation) !== Number(principal.identityGeneration)) {
+      fail(SAFE_ERROR.denied, 403, "A current assigned full-dashboard authority is required");
+    }
+    const areas = this.store.listAreas?.() || [];
+    const bindings = Array.isArray(platform.areaBindings) ? platform.areaBindings : [];
+    const areaOptions = bindings.flatMap((binding) => {
+      const area = areas.find((candidate) => String(candidate.id) === String(binding.hubAreaId));
+      return area && /^[0-9a-f-]{36}$/i.test(String(binding.areaId || ""))
+        ? [{ id: String(binding.areaId), name: String(area.name || "").slice(0, 120) }] : [];
+    }).filter((area) => area.name);
+    const actor = { actorType: "STAFF_INSTALLER", areaIds: areaOptions.map((area) => area.id) };
+    const devices = [];
+    for (const device of this.store.listDevices()) {
+      const provenance = this.adoptionProvenance(actor, device);
+      if (!provenance) continue;
+      const area = areaOptions.find((row) => row.id === provenance.areaId);
+      devices.push({ protocol: String(device.protocol).toLowerCase(), name: String(device.originalName || device.name || "Unidentified device").slice(0, 100),
+        manufacturer: String(device.metadata?.manufacturer || device.metadata?.manufacturer_name || "").slice(0, 80),
+        model: String(device.metadata?.model || device.metadata?.model_id || "").slice(0, 80),
+        status: "not_registered", areaName: area?.name || "Current Home Area", available: device.available !== false,
+        controls: Object.values(device.entities || {}).flatMap((entity) => {
+          const capability = entity?.capability || {};
+          return capability.category === "control" && (capability.readable === true || capability.writable === true)
+            ? [{ name: String(capability.name || capability.semanticRole || entity.name || "Control").slice(0, 80), readable: capability.readable === true, writable: capability.writable === true }]
+            : [];
+        }).slice(0, 24) });
+    }
+    return { schemaVersion: "dinodia.v1", devices: devices.slice(0, 100) };
+  }
+
+  completedPropertyDevices(actor) {
+    const platform = this.store.getPlatform?.() || {};
+    const policies = platform.devicePolicies && typeof platform.devicePolicies === "object" ? platform.devicePolicies : {};
+    const pendingPolicies = platform.pendingPropertyDevicePolicies && typeof platform.pendingPropertyDevicePolicies === "object" ? platform.pendingPropertyDevicePolicies : {};
+    const outbox = this.store.getSyncOutbox?.() || {};
+    const ack = Number(outbox.acknowledgedSequence || 0);
+    const pendingEvents = [...(Array.isArray(outbox.events) ? outbox.events : []), ...(Array.isArray(outbox.inFlight?.events) ? outbox.inFlight.events : [])];
+    const result = [];
+    for (const [osDeviceId, policy] of Object.entries(policies)) {
+      if (policy?.managementClass !== "PROPERTY_DEVICE" || String(policy.installationRequestId || "") !== actor.requestId
+        || !/^[a-f0-9-]{36}$/i.test(String(policy.platformDeviceId || ""))
+        || !["INSTALLED", "VIEW_ONLY"].includes(String(policy.lifecycle || ""))) continue;
+      const device = this.store.getDevice(osDeviceId);
+      if (!device || String(device.metadata?.cloudDeviceId || "") !== String(policy.platformDeviceId)) continue;
+      const areaId = Array.isArray(policy.canonicalAreaIds) ? String(policy.canonicalAreaIds[0] || "") : "";
+      const area = actor.areaOptions.find((row) => String(row.id) === areaId);
+      const hasPendingEvent = pendingEvents.some((event) => Number(event.sequence) > ack
+        && ["device.upsert", "control.catalog.upsert"].includes(String(event.type)) && String(event.aggregateId || "") === osDeviceId);
+      const syncState = pendingPolicies[osDeviceId] || hasPendingEvent ? "pending" : "acknowledged";
+      result.push({ name: String(policy.overrideName || policy.customerLabel || device.name || "Permanent device").slice(0, 80),
+        model: String(device.metadata?.model || device.metadata?.model_id || "").slice(0, 80),
+        protocol: String(device.protocol || "").toUpperCase(), areaName: String(area?.name || "Authorized Area"),
+        lifecycle: String(policy.lifecycle), catalogueStatus: String(policy.catalogueStatus || "unknown"), sync: syncState,
+        completedAt: String(device.updatedAt || "") });
+    }
+    return result.slice(0, 100);
+  }
+
   async platform(action, session, extra = {}) {
     if (!this.pairing?.requestWithHubIdentity) fail(SAFE_ERROR.unavailable, 503, "The enrolled Platform connection is unavailable");
     const actor = session.actorType === "STAFF_INSTALLER" ? {
@@ -112,6 +270,9 @@ class NativeCommissioningService {
     const result = await this.pairing.requestWithHubIdentity("/api/hub-agent/v2/commissioning-sessions", {
       action, sessionId: session.sessionId, homeId: session.homeId, hubInstallationId: session.hubInstallationId, ...actor,
       identityGeneration: session.identityGeneration, protocol: session.protocol, expiresAt: session.expiresAt,
+      operationKind: session.operationKind || "PAIR_NEW",
+      ...(session.operationKind === "REGISTER_EXISTING" ? { candidateRef: session.targetCandidateRef, targetOsDeviceId: session.targetDeviceId,
+        targetIdentityHash: session.targetIdentityHash } : {}),
       expectedRevision: session.expectedPlatformRevision || 1, ...extra,
     });
     if (Number.isInteger(Number(result?.revision))) session.expectedPlatformRevision = Number(result.revision);
@@ -131,41 +292,72 @@ class NativeCommissioningService {
   async start(principal, input, idempotencyKey) {
     const actor = this.principal(principal);
     if (!input || !["zigbee", "matter"].includes(String(input.protocol))) fail(SAFE_ERROR.invalid, 400, "Choose a supported native commissioning protocol");
+    const operationKind = input.operationKind || "PAIR_NEW";
+    if (!["PAIR_NEW", "REGISTER_EXISTING"].includes(operationKind)) fail(SAFE_ERROR.invalid, 400, "Choose a supported permanent-device operation");
+    if (operationKind === "REGISTER_EXISTING" && actor.actorType !== "STAFF_INSTALLER") fail(SAFE_ERROR.denied, 403, "Existing radio devices are visible only to current assigned installation staff");
+    const candidateRef = operationKind === "REGISTER_EXISTING" ? String(input.candidateRef || "") : "";
+    if (operationKind === "REGISTER_EXISTING" && !/^[0-9a-f-]{36}$/i.test(candidateRef)) fail(SAFE_ERROR.invalid, 400, "Refresh the assigned local-device list before registration");
     if (!/^[A-Za-z0-9._:-]{16,160}$/.test(String(idempotencyKey || ""))) fail(SAFE_ERROR.invalid, 400, "A valid commissioning operation key is required");
-    const bodyHash = digest(JSON.stringify({ protocol: input.protocol }));
+    const bodyHash = digest(JSON.stringify({ operationKind, protocol: input.protocol, ...(operationKind === "REGISTER_EXISTING" ? { candidateRef } : {}) }));
     const keyHash = digest(`${actor.actorType}\n${actor.accountId || actor.employeeId}\n${actor.customerSessionId || actor.employeeSessionId}\n${actor.membershipId || actor.operatorHandoffId}\n${idempotencyKey}`);
     return this.exclusive(async () => {
       const prior = Object.values(this.sessions()).find((row) => row.idempotencyHash === keyHash);
       if (prior) {
-        if (prior.requestHash !== bodyHash || prior.actorType !== actor.actorType || prior.requesterAccountId !== actor.accountId || prior.ownerMembershipId !== actor.membershipId
+        if (prior.requestHash !== bodyHash || prior.operationKind !== operationKind || prior.actorType !== actor.actorType || prior.requesterAccountId !== actor.accountId || prior.ownerMembershipId !== actor.membershipId
           || prior.employeeId !== actor.employeeId || prior.operatorHandoffId !== actor.operatorHandoffId || prior.requestId !== actor.requestId) fail(SAFE_ERROR.conflict, 409, "This operation key was already used for another commissioning request");
         if (prior.status === "creating" && prior.platformCreatePending === true) await this.establishPlatformSession(prior);
         if (Date.parse(prior.expiresAt) <= this.clock() && !TERMINAL.has(prior.status)) await this.expire(prior);
         return this.publicStatus(this.sessions()[prior.sessionId] || prior);
       }
-      const capability = input.protocol === "zigbee" ? "nativeZigbeeCommissioningV1" : "nativeMatterCommissioningV1";
-      if (this.commissioningCapabilities[capability] !== true) {
+      if (actor.actorType === "STAFF_INSTALLER" && this.commissioningCapabilities.nativeStaffDeviceRegistrationV1 !== true) {
+        fail(SAFE_ERROR.unavailable, 503, "Permanent-device registration is held by the current staff maintenance policy");
+      }
+      const capability = actor.actorType === "STAFF_INSTALLER"
+        ? input.protocol === "zigbee" ? "nativeStaffZigbeeCommissioningV1" : "nativeStaffMatterCommissioningV1"
+        : input.protocol === "zigbee" ? "nativeZigbeeCommissioningV1" : "nativeMatterCommissioningV1";
+      if (operationKind === "PAIR_NEW" && this.commissioningCapabilities[capability] !== true) {
         fail(SAFE_ERROR.unavailable, 503, "This protocol is disabled for this hub by its current operational configuration");
       }
+      let adoption = null;
+      if (operationKind === "REGISTER_EXISTING") {
+        this.pruneAdoptionCandidates();
+        adoption = this.adoptionCandidates.get(candidateRef) || null;
+        if (!adoption || adoption.actorHash !== this.actorBinding(actor) || adoption.protocol !== input.protocol) fail(SAFE_ERROR.denied, 404, "This local device review has expired; refresh the device list");
+        const device = this.store.getDevice(adoption.deviceId);
+        const provenance = this.adoptionProvenance(actor, device);
+        if (!provenance || provenance.protocolIdentityHash !== adoption.protocolIdentityHash || provenance.areaId !== adoption.originalAreaId) {
+          fail(SAFE_ERROR.conflict, 409, "This local device or its current ownership/interview evidence changed; refresh before continuing");
+        }
+      }
       if (Object.values(this.sessions()).some((row) => (!TERMINAL.has(row.status) && Date.parse(row.expiresAt) > this.clock()) || row.radioOperationInFlight || row.radioOperationUncertain || row.cleanup?.pendingIds?.length)) fail(SAFE_ERROR.busy, 409, "Another radio commissioning operation or cleanup is still active on this hub");
-      if (input.protocol === "zigbee") {
+      if (operationKind === "PAIR_NEW" && input.protocol === "zigbee") {
         if (!this.mqtt?.status?.().connected || !this.store.getZigbee?.().adapterPath) fail(SAFE_ERROR.unavailable, 503, "The enrolled Zigbee coordinator is not ready; no join was opened");
         if (this.mqtt.pairingStatus?.().active) fail(SAFE_ERROR.busy, 409, "Another Zigbee pairing session is already active on this hub");
-      } else if (!this.matter?.status?.().connected) fail(SAFE_ERROR.unavailable, 503, "The enrolled Matter commissioning controller is unavailable; no setup payload was accepted");
+      } else if (operationKind === "PAIR_NEW" && !this.matter?.status?.().connected) fail(SAFE_ERROR.unavailable, 503, "The enrolled Matter commissioning controller is unavailable; no setup payload was accepted");
       const now = this.clock(); const sessionId = crypto.randomUUID();
+      const existingDevice = adoption ? this.store.getDevice(adoption.deviceId) : null;
+      const platformRequest = { operationKind, protocol: input.protocol, ...(adoption ? { candidateRef, targetOsDeviceId: adoption.deviceId, targetIdentityHash: adoption.protocolIdentityHash } : {}) };
       const session = {
-        sessionId, protocol: input.protocol, actorType: actor.actorType, requesterAccountId: actor.accountId, requesterSessionId: actor.customerSessionId,
+        sessionId, protocol: input.protocol, operationKind, actorType: actor.actorType, requesterAccountId: actor.accountId, requesterSessionId: actor.customerSessionId,
         requesterTokenId: actor.tokenId, requesterTrustedDeviceId: actor.trustedDeviceId, requesterTokenHash: actor.accessTokenHash,
         ownerMembershipId: actor.membershipId, homeId: actor.homeId, hubInstallationId: actor.hubInstallationId,
         ...(actor.actorType === "STAFF_INSTALLER" ? { employeeId: actor.employeeId, employeeSessionId: actor.employeeSessionId, operatorHandoffId: actor.operatorHandoffId, operatorJti: actor.operatorJti, workItemId: actor.workItemId, workRevision: actor.workRevision, requestId: actor.requestId, areaOptions: actor.areaOptions } : {}),
         identityGeneration: actor.identityGeneration, allowedAreaIds: actor.areaIds,
         status: "creating", createdAt: new Date(now).toISOString(), expiresAt: new Date(now + SESSION_MS).toISOString(),
-        revision: 1, expectedPlatformRevision: 1, idempotencyHash: keyHash, requestHash: bodyHash, platformCreatePending: true,
+        revision: 1, expectedPlatformRevision: 1, idempotencyHash: keyHash, requestHash: bodyHash, platformRequestHash: digest(JSON.stringify(platformRequest)), platformCreatePending: true,
         baselineDeviceIds: this.store.listDevices().map((device) => String(device.id)),
         baselineIdentityHashes: this.store.listDevices().map((device) => digest(String(device.protocolIdentity?.ieeeAddress || device.protocolIdentity?.nodeId || device.metadata?.ieee_address || device.id))),
-        candidates: [], selectedCandidateRef: null, finalDeviceId: null, cleanup: { state: "NONE", pendingIds: [], attempts: 0 }, events: [], createdByToken: actor.tokenId,
+        ...(adoption ? { targetCandidateRef: candidateRef, targetDeviceId: adoption.deviceId, targetIdentityHash: adoption.protocolIdentityHash,
+          targetDescriptorRevision: Number(existingDevice?.presentation?.descriptorRevision || 0), targetDescriptorDigest: digest(JSON.stringify(existingDevice?.entities || {})),
+          targetOriginalAreaId: adoption.originalAreaId, targetSetupEventAt: adoption.setupEventAt } : {}),
+        candidates: adoption ? [{ candidateRef, deviceId: adoption.deviceId, identityHash: adoption.protocolIdentityHash,
+          name: String(existingDevice?.originalName || existingDevice?.name || "Device").slice(0, 80),
+          manufacturer: String(existingDevice?.metadata?.manufacturer || existingDevice?.metadata?.manufacturer_name || "").slice(0, 80),
+          model: String(existingDevice?.metadata?.model || existingDevice?.metadata?.model_id || "").slice(0, 80), stage: "existing_interview_verified", observedAt: new Date(now).toISOString() }] : [],
+        selectedCandidateRef: null, finalDeviceId: null, cleanup: { state: "NONE", pendingIds: [], attempts: 0 }, events: [], createdByToken: actor.tokenId,
       };
       await this.save(session);
+      if (adoption) this.adoptionCandidates.delete(candidateRef);
       return this.publicStatus(await this.establishPlatformSession(session));
     });
   }
@@ -173,7 +365,7 @@ class NativeCommissioningService {
   async establishPlatformSession(session) {
     if (!session.platformCreatePending) return session;
     try {
-      const cloud = await this.platform("create", session, { idempotencyHash: session.idempotencyHash, requestHash: session.requestHash });
+      const cloud = await this.platform("create", session, { idempotencyHash: session.idempotencyHash, requestHash: session.platformRequestHash });
       if (!/^[0-9a-f-]{36}$/i.test(String(cloud.sessionId || "")) || !Number.isFinite(Date.parse(String(cloud.expiresAt || "")))) fail(SAFE_ERROR.unavailable, 503, "Platform did not confirm the commissioning session");
       if (String(cloud.sessionId) !== String(session.sessionId)) {
         if (Object.values(this.sessions()).some((row) => row.sessionId === String(cloud.sessionId))) fail(SAFE_ERROR.conflict, 409, "The Platform session is already bound to another local operation");
@@ -186,6 +378,12 @@ class NativeCommissioningService {
       session.platformCreatePending = false;
       session.platformCreated = true;
       await this.save(session);
+      if (session.operationKind === "REGISTER_EXISTING") {
+        session.status = "reviewing_existing";
+        this.append(session, "existing_device_review_started", { protocol: session.protocol });
+        await this.save(session);
+        return session;
+      }
       if (session.protocol === "zigbee") {
         await this.mqtt.startPairing(254, { sessionId: session.sessionId, sessionExpiresAt: session.expiresAt });
         session.status = "searching";
@@ -231,16 +429,21 @@ class NativeCommissioningService {
 
   async status(sessionId, principal, afterSequence = 0, afterCandidateRef = null) {
     return this.exclusive(async () => {
-      const { session } = await this.requireSession(sessionId, principal);
-      await this.refreshCandidates(session);
+      const { session, actor } = await this.requireSession(sessionId, principal);
+      await this.refreshCandidates(session, actor);
       const safe = this.publicStatus(session, afterCandidateRef);
       safe.events = safe.events.filter((event) => Number(event.sequence) > Number(afterSequence)).slice(0, 40);
       return safe;
     });
   }
 
-  async refreshCandidates(session) {
+  async refreshCandidates(session, actor = null) {
     if (TERMINAL.has(session.status)) return;
+    if (session.operationKind === "REGISTER_EXISTING") {
+      const device = this.store.getDevice(session.targetDeviceId);
+      if (!actor || !this.isCompleteRadioDevice(session, device, actor)) fail(SAFE_ERROR.conflict, 409, "The existing device changed or is no longer eligible; return to the assigned device list");
+      return;
+    }
     const devices = session.protocol === "zigbee"
       ? (this.mqtt.pairingStatus?.().found || []).map((id) => this.store.getDevice(String(id))).filter(Boolean)
       : this.store.listDevices().filter((device) => device.protocol === "matter" && !this.isBaselineDevice(session, device));
@@ -260,7 +463,7 @@ class NativeCommissioningService {
   isQuarantinedDevice(deviceId) {
     const id = String(deviceId || "");
     const device = this.store.getDevice(id);
-    return Object.values(this.sessions()).some((session) => session.status !== "completed"
+    return Object.values(this.sessions()).some((session) => session.operationKind !== "REGISTER_EXISTING" && session.status !== "completed"
       && ((session.candidates || []).some((candidate) => String(candidate.deviceId) === id)
         || (session.cleanup?.pendingIds || []).some((pendingId) => String(pendingId) === id)
         || (device && String(device.protocol || "").toLowerCase() === session.protocol && !this.isBaselineDevice(session, device))));
@@ -365,30 +568,48 @@ class NativeCommissioningService {
       const label = input.customerLabel == null || input.customerLabel === "" ? null : String(input.customerLabel).normalize("NFC").trim();
       if (!text(name, 80) || label === null || !text(label, 40) || !label) fail(SAFE_ERROR.invalid, 400, "Enter a customer label between 1 and 40 characters");
       const device = this.store.getDevice(candidate.deviceId);
-      if (!this.isCompleteRadioDevice(session, device)) fail(SAFE_ERROR.unavailable, 409, "The hub has not completed the device interview yet");
+      if (!this.isCompleteRadioDevice(session, device, actor)) fail(SAFE_ERROR.unavailable, 409, "The hub has not completed the device interview or ownership review yet");
       const catalogue = buildPublicCommissioningCatalogue({ device, homeId: actor.homeId, membershipId: actor.membershipId, managementClass: actor.actorType === "STAFF_INSTALLER" ? "property_device" : "tenant_device", areaId: area.areaId,
         name: name || undefined, customerLabel: label, now: this.clock() });
       if (!catalogue) fail(SAFE_ERROR.unavailable, 409, "The hub could not produce a safe device catalogue");
       Object.assign(session, { selectedCandidateRef: candidate.candidateRef, selectedDeviceId: device.id, selectedAreaId: area.areaId,
-        selectedHubAreaId: area.hubAreaId, selectedName: name, selectedCustomerLabel: label, selectedCatalogue: catalogue, status: "selected" });
+        selectedHubAreaId: area.hubAreaId, selectedName: name, selectedCustomerLabel: label, selectedCatalogue: catalogue,
+        selectedDescriptorRevision: catalogue.descriptorRevision, selectedDescriptorDigest: catalogue.descriptorDigest, status: "selected" });
       this.append(session, "device_selected"); await this.save(session);
       await this.platform("transition", session, { status: "READY", selectedAreaId: area.areaId, candidateRef: candidate.candidateRef,
         osDeviceId: String(device.id), requestedName: name || null, customerLabel: label,
-        catalogueStatus: catalogue.capabilityStatus, catalogueRevision: catalogue.descriptorRevision, descriptorDigest: catalogue.descriptorDigest }); await this.save(session);
+        catalogueStatus: catalogue.capabilityStatus, catalogueRevision: catalogue.descriptorRevision, descriptorDigest: catalogue.descriptorDigest,
+        operationKind: session.operationKind || "PAIR_NEW", targetIdentityHash: session.operationKind === "REGISTER_EXISTING" ? session.targetIdentityHash : undefined }); await this.save(session);
       return this.publicStatus(session);
     });
   }
 
-  isCompleteRadioDevice(session, device) {
+  isCompleteRadioDevice(session, device, actor = null) {
     if (!device || String(device.protocol || "").toLowerCase() !== session.protocol || device.available === false) return false;
     const id = String(device.id || "");
-    const identity = String(device.protocolIdentity?.ieeeAddress || device.protocolIdentity?.nodeId || device.metadata?.ieee_address || "");
+    const protocolIdentity = this.protocolIdentity(device);
     const setup = String(device.setup?.status || "").toLowerCase();
     const interviewComplete = String(device.setup?.status || "").toLowerCase() === "ready"
       || String(device.setup?.status || "").toLowerCase() === "complete"
       || device.interviewStatus === "successful";
-    return Boolean(id && identity && !this.isBaselineDevice(session, device) && session.candidates.some((row) => row.deviceId === id)
-      && interviewComplete);
+    if (!id || !protocolIdentity || !interviewComplete || !session.candidates.some((row) => row.deviceId === id)) return false;
+    if (session.operationKind === "REGISTER_EXISTING") {
+      const policy = this.store.getPlatform?.()?.devicePolicies?.[id];
+      const reconciledByThisWork = policy?.managementClass === "PROPERTY_DEVICE" && String(policy.installationRequestId || "") === String(session.requestId || "")
+        && String(policy.platformDeviceId || "") === String(device.metadata?.cloudDeviceId || "") && Boolean(policy.platformDeviceId)
+        && protocolIdentity.hash === session.targetIdentityHash;
+      if (reconciledByThisWork) return true;
+      const platformFinalization = session.platformFinalization;
+      if (platformFinalization && actor?.actorType === "STAFF_INSTALLER" && id === String(session.targetDeviceId || "")
+        && protocolIdentity.hash === session.targetIdentityHash && platformFinalization.actorBinding === this.actorBinding(actor)
+        && platformFinalization.requestId === session.requestId && platformFinalization.homeId === session.homeId
+        && platformFinalization.protocolIdentityHash === session.targetIdentityHash) return true;
+      const provenance = actor && this.adoptionProvenance(actor, device);
+      return Boolean(actor?.actorType === "STAFF_INSTALLER" && id === String(session.targetDeviceId || "")
+        && protocolIdentity.hash === session.targetIdentityHash && provenance?.protocolIdentityHash === session.targetIdentityHash
+        && provenance.areaId === session.targetOriginalAreaId && session.candidates.some((row) => row.candidateRef === session.targetCandidateRef));
+    }
+    return Boolean(!this.isBaselineDevice(session, device));
   }
 
   async complete(sessionId, principal, disposition = "install") {
@@ -397,8 +618,13 @@ class NativeCommissioningService {
       if (session.status === "completed" || session.status === "completed_cleanup_pending") return this.publicStatus(session);
       if (session.status !== "selected" || !session.selectedDeviceId || !session.selectedAreaId || !session.selectedCatalogue) fail(SAFE_ERROR.conflict, 409, "Select a discovered device and permitted Area before completing");
       const device = this.store.getDevice(session.selectedDeviceId);
-      if (!this.isCompleteRadioDevice(session, device)) fail(SAFE_ERROR.unavailable, 409, "The selected device is not fully discovered and usable yet");
+      if (!this.isCompleteRadioDevice(session, device, actor)) fail(SAFE_ERROR.unavailable, 409, "The selected device is not fully discovered, currently owned, and usable yet");
       const catalogue = session.selectedCatalogue;
+      const currentCatalogue = buildPublicCommissioningCatalogue({ device, homeId: actor.homeId, membershipId: actor.membershipId,
+        managementClass: actor.actorType === "STAFF_INSTALLER" ? "property_device" : "tenant_device", areaId: session.selectedAreaId,
+        name: session.selectedName || undefined, customerLabel: session.selectedCustomerLabel, now: this.clock() });
+      if (!currentCatalogue || currentCatalogue.descriptorRevision !== session.selectedDescriptorRevision
+        || currentCatalogue.descriptorDigest !== session.selectedDescriptorDigest) fail(SAFE_ERROR.conflict, 409, "The device descriptor changed after review; refresh and review it again");
       if (catalogue.capabilityStatus === "ready" ? disposition !== "install"
         : catalogue.capabilityStatus === "no_safe_controls"
           ? disposition !== "remove" && (disposition !== "view_only" || catalogue.usefulReadings !== true)
@@ -408,6 +634,7 @@ class NativeCommissioningService {
         fail(SAFE_ERROR.conflict, 409, "Review the discovered device result and choose a permitted keep or remove action");
       }
       if (disposition === "remove") {
+        if (session.operationKind === "REGISTER_EXISTING") fail(SAFE_ERROR.denied, 403, "An already-paired local device is never removed as part of property adoption; cancel registration to leave it unchanged");
         const cleaned = await this.reconcileCleanupCandidates(session, new Set([String(device.id)]));
         const pending = cleaned.cleanup.pendingCount > 0;
         const platform = await this.platform("transition", session, { status: "COMPLETED", result: "REMOVED" });
@@ -422,6 +649,7 @@ class NativeCommissioningService {
         readable: control.readable === true, writable: control.writable === true, domain: String(control.semanticRole || "unknown") }));
       const deviceProjection = { osDeviceId: catalogue.osDeviceId, originalName: catalogue.originalName, technicalLabel: catalogue.technicalLabel,
         deviceType: catalogue.deviceType, manufacturer: catalogue.manufacturer, model: catalogue.model, protocol: catalogue.protocol,
+        protocolIdentityHash: this.protocolIdentity(device)?.hash || null,
         descriptorRevision: catalogue.descriptorRevision, descriptorDigest: catalogue.descriptorDigest, capabilitySummary: { controls },
         catalogueStatus: catalogue.capabilityStatus, usefulReadings: catalogue.usefulReadings,
         areaId: session.selectedAreaId, name: session.selectedName || null, customerLabel: session.selectedCustomerLabel };
@@ -430,21 +658,31 @@ class NativeCommissioningService {
       const expectedLifecycle = platformDisposition === "view_only" ? "VIEW_ONLY" : "INSTALLED";
       const expectedClass = actor.actorType === "STAFF_INSTALLER" ? "PROPERTY_DEVICE" : "TENANT_DEVICE";
       if (!cloud?.ok || !cloud.device?.id || cloud.device.managementClass !== expectedClass || (cloud.device.ownerMembershipId ?? null) !== actor.membershipId || cloud.device.lifecycle !== expectedLifecycle) fail(SAFE_ERROR.unavailable, 503, "Platform did not confirm the correctly scoped canonical device record and catalogue result");
-      await this.mqtt.stopPairing?.().catch(() => {});
+      if (session.operationKind === "REGISTER_EXISTING") {
+        session.platformFinalization = { platformDeviceId: String(cloud.device.id), actorBinding: this.actorBinding(actor), requestId: actor.requestId,
+          homeId: actor.homeId, protocolIdentityHash: this.protocolIdentity(device)?.hash || null, confirmedAt: new Date(this.clock()).toISOString() };
+        await this.save(session);
+      }
+      if (session.operationKind !== "REGISTER_EXISTING") await this.mqtt.stopPairing?.().catch(() => {});
       const propertyDevice = actor.actorType === "STAFF_INSTALLER";
+      const policy = {
+        managementClass: expectedClass, ownerMembershipId: actor.membershipId, lifecycle: expectedLifecycle, catalogueStatus: catalogue.capabilityStatus, usefulReadings: catalogue.usefulReadings,
+        descriptorRevision: catalogue.descriptorRevision, descriptorDigest: catalogue.descriptorDigest, customerLabel: session.selectedCustomerLabel,
+        canonicalAreaIds: [session.selectedAreaId], platformDeviceId: cloud.device.id, overrideName: session.selectedName || null,
+        ...(propertyDevice ? { installationRequestId: actor.requestId } : {}),
+      };
       const updated = await this.store.upsertDevice({ ...device, name: session.selectedName || device.originalName || device.name, areaId: session.selectedHubAreaId,
         managementClass: propertyDevice ? "property_device" : "tenant_device", tenantOwnerMembershipId: propertyDevice ? undefined : actor.membershipId,
         setup: { ...(device.setup || {}), status: "ready", viewOnly: platformDisposition === "view_only", unsupported: catalogue.capabilityStatus === "unsupported", commissionedAt: new Date(this.clock()).toISOString() },
-        metadata: { ...(device.metadata || {}), managementClass: propertyDevice ? "property_device" : "tenant_device", ...(propertyDevice ? { tenantOwnerMembershipId: undefined, installationRequestId: actor.requestId } : { tenantOwnerMembershipId: actor.membershipId }), cloudDeviceId: cloud.device.id } });
-      const platform = this.store.getPlatform?.() || {};
-      await this.store.savePlatform({ devicePolicies: { ...(platform.devicePolicies || {}), [updated.id]: {
-        managementClass: expectedClass, ownerMembershipId: actor.membershipId, lifecycle: expectedLifecycle, catalogueStatus: catalogue.capabilityStatus, usefulReadings: catalogue.usefulReadings, customerLabel: session.selectedCustomerLabel,
-        canonicalAreaIds: [session.selectedAreaId], platformDeviceId: cloud.device.id, overrideName: session.selectedName || null,
-        ...(propertyDevice ? { installationRequestId: actor.requestId } : {}),
-      } } });
-      await this.store.addEvent({ type: propertyDevice ? "property_device_commissioned" : "tenant_device_commissioned", deviceId: updated.id, protocol: session.protocol, areaId: session.selectedAreaId });
+        metadata: { ...(device.metadata || {}), managementClass: propertyDevice ? "property_device" : "tenant_device", ...(propertyDevice ? { tenantOwnerMembershipId: undefined, installationRequestId: actor.requestId } : { tenantOwnerMembershipId: actor.membershipId }), cloudDeviceId: cloud.device.id } }, { devicePolicy: policy });
+      const outbox = this.store.getSyncOutbox?.();
+      session.localSyncState = outbox && Array.isArray(outbox.events)
+        ? (outbox.events.some((event) => Number(event.sequence) > Number(outbox.acknowledgedSequence || 0)
+          && ["device.upsert", "control.catalog.upsert"].includes(String(event.type)) && String(event.aggregateId || "") === String(updated.id)) ? "pending" : "acknowledged")
+        : "unknown";
       Object.assign(session, { status: "completed", finalDisposition: disposition, finalDeviceId: cloud.device.id, completedAt: new Date(this.clock()).toISOString(), cleanup: { state: "COMPLETE", pendingIds: [], attempts: 0 } });
       this.append(session, "commissioning_completed"); await this.save(session);
+      await this.store.addEvent({ type: propertyDevice ? (session.operationKind === "REGISTER_EXISTING" ? "property_device_adopted" : "property_device_commissioned") : "tenant_device_commissioned", deviceId: updated.id, protocol: session.protocol, areaId: session.selectedAreaId }).catch(() => {});
       await this.vault.delete(`commissioning.matter.${session.sessionId}`).catch(() => {});
       return this.publicStatus(session);
     });
@@ -454,6 +692,15 @@ class NativeCommissioningService {
     return this.exclusive(async () => {
       const { session } = await this.requireSession(sessionId, principal);
       if (session.status !== "interrupted") return this.publicStatus(session);
+      if (session.operationKind === "REGISTER_EXISTING") {
+        const device = this.store.getDevice(session.targetDeviceId);
+        const actor = this.principal(principal);
+        if (!this.isCompleteRadioDevice(session, device, actor)) fail(SAFE_ERROR.conflict, 409, "The existing local device changed while installation was interrupted; refresh its review");
+        session.status = "reviewing_existing";
+        this.append(session, "existing_device_review_resumed");
+        await this.save(session);
+        return this.publicStatus(session);
+      }
       if (session.protocol === "matter" && session.matterPayloadSubmittedAt) fail(SAFE_ERROR.conflict, 409, "This Matter attempt was interrupted after code submission; cancel it and scan again in a new session");
       if (session.protocol === "zigbee") await this.mqtt.startPairing(254, { sessionId: session.sessionId, sessionExpiresAt: session.expiresAt });
       session.status = session.protocol === "zigbee" ? "searching" : "awaiting_payload";
@@ -471,10 +718,11 @@ class NativeCommissioningService {
 
   async closeSession(session, terminal) {
     const pending = new Set(session.cleanup?.pendingIds || []);
-    for (const candidate of session.candidates || []) pending.add(String(candidate.deviceId));
-    if (session.protocol === "zigbee") await this.mqtt.stopPairing?.().catch(() => {});
+    if (session.operationKind !== "REGISTER_EXISTING") for (const candidate of session.candidates || []) pending.add(String(candidate.deviceId));
+    if (session.operationKind !== "REGISTER_EXISTING" && session.protocol === "zigbee") await this.mqtt.stopPairing?.().catch(() => {});
     const waitingForRadio = session.radioOperationInFlight || session.radioOperationUncertain;
-    if (!waitingForRadio) await this.reconcileCleanupCandidates(session, pending);
+    if (session.operationKind === "REGISTER_EXISTING") session.cleanup = { state: "NONE", pendingIds: [], attempts: Number(session.cleanup?.attempts || 0) };
+    else if (!waitingForRadio) await this.reconcileCleanupCandidates(session, pending);
     else session.cleanup = { state: session.radioOperationUncertain ? "REQUIRES_RADIO_RECONCILIATION" : "AWAITING_RADIO_SETTLEMENT", pendingIds: [...pending], attempts: Number(session.cleanup?.attempts || 0) };
     session.status = (pending.size || waitingForRadio) ? `${terminal}_cleanup_pending` : terminal;
     this.append(session, terminal === "expired" ? "session_expired" : terminal === "failed" ? "commissioning_failed" : "session_cancelled", { cleanupState: session.cleanup.state }); await this.save(session);
@@ -497,6 +745,7 @@ class NativeCommissioningService {
   }
 
   async reconcileCleanupCandidates(session, candidateIds = new Set(session.cleanup?.pendingIds || [])) {
+    if (session.operationKind === "REGISTER_EXISTING") return this.publicStatus(session);
     const pending = new Set(candidateIds);
     for (const id of [...pending]) {
       try {
@@ -534,8 +783,14 @@ class NativeCommissioningService {
 
   async recover() {
     await this.exclusive(async () => {
-      await this.mqtt.stopPairing?.().catch(() => {});
-      for (const session of Object.values(this.sessions())) {
+      const sessions = Object.values(this.sessions());
+      // REGISTER_EXISTING is a metadata/ownership operation, not a radio
+      // operation. Do not close a live permit-join window merely because the
+      // service recovered while such a session (or no session) was stored.
+      const hasRecoverableZigbeePairing = sessions.some((session) => session.operationKind !== "REGISTER_EXISTING"
+        && session.protocol === "zigbee" && !TERMINAL.has(session.status));
+      if (hasRecoverableZigbeePairing) await this.mqtt.stopPairing?.().catch(() => {});
+      for (const session of sessions) {
         if (TERMINAL.has(session.status)) {
           if (session.radioOperationInFlight && session.protocol === "matter") {
             session.radioOperationInFlight = false; session.radioOperationUncertain = true;
@@ -557,7 +812,12 @@ class NativeCommissioningService {
     });
   }
 
-  async close() { this.stopped = true; clearInterval(this.expiryTimer); await this.mqtt.stopPairing?.().catch(() => {}); }
+  async close() {
+    this.stopped = true; clearInterval(this.expiryTimer);
+    const hasActiveZigbeePairing = Object.values(this.sessions()).some((session) => session.operationKind !== "REGISTER_EXISTING"
+      && session.protocol === "zigbee" && !TERMINAL.has(session.status));
+    if (hasActiveZigbeePairing) await this.mqtt.stopPairing?.().catch(() => {});
+  }
 }
 
 module.exports = { NativeCommissioningService, SESSION_MS, MAX_CANDIDATES, MAX_TOTAL_CANDIDATES, fixedSession };

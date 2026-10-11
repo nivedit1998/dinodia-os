@@ -56,8 +56,14 @@ module.exports = {
   nativeCommissioningCapabilities: Object.freeze({
     // These remain explicit operational holds. A model-catalogue marker is
     // not protocol authority and must not be required to discover a device.
+    // Tenant commissioning keeps its legacy explicit-off default. Assigned
+    // company installation has its own default-ready policy; an explicit
+    // false remains a deliberate maintenance hold.
     nativeZigbeeCommissioningV1: stringEnv("DINODIA_NATIVE_ZIGBEE_COMMISSIONING_ENABLED", "false") === "true",
     nativeMatterCommissioningV1: stringEnv("DINODIA_NATIVE_MATTER_COMMISSIONING_ENABLED", "false") === "true",
+    nativeStaffZigbeeCommissioningV1: stringEnv("DINODIA_NATIVE_STAFF_ZIGBEE_COMMISSIONING_ENABLED", "true") === "true",
+    nativeStaffMatterCommissioningV1: stringEnv("DINODIA_NATIVE_STAFF_MATTER_COMMISSIONING_ENABLED", "true") === "true",
+    nativeStaffDeviceRegistrationV1: stringEnv("DINODIA_NATIVE_STAFF_DEVICE_REGISTRATION_ENABLED", "true") === "true",
   }),
   operatorSessionTtlMs: 900_000,
   manufacturingRootPublicKeys: stringEnv("DINODIA_MANUFACTURING_ROOT_PUBLIC_KEYS", ""),

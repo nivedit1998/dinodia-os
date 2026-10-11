@@ -22,6 +22,31 @@ test("store persists devices and automations atomically", async () => {
   assert.match(backup, /dinodia-.*\.json$/);
 });
 
+test("permanent-device registration commits its property policy before creating inventory sync", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-property-registration-outbox-"));
+  const store = new Store(path.join(directory, "dinodia.json"));
+  const homeId = "11111111-1111-4111-8111-111111111111";
+  const hubInstallId = "22222222-2222-4222-8222-222222222222";
+  const canonicalAreaId = "33333333-3333-4333-8333-333333333333";
+  const area = await store.saveArea({ name: "Living room" }, "living-room");
+  await store.savePlatform({ paired: true, homeId, hubInstallId, devicePolicies: {} });
+  const device = await store.upsertDevice({ id: "zigbee:existing-radiator", name: "Living room radiator", protocol: "zigbee", areaId: area.id,
+    setup: { status: "ready" }, interviewStatus: "successful", protocolIdentity: { ieeeAddress: "0x00124b0000000999" },
+    entities: { heat: { id: "heat", name: "Heat", domain: "climate", capability: { category: "control", controlId: "target-temperature", semanticRole: "target_temperature", readable: true, writable: true, kind: "number", bindings: [{ serviceId: "climate.set_temperature" }] } } } },
+  { devicePolicy: { managementClass: "PROPERTY_DEVICE", ownerMembershipId: null, lifecycle: "INSTALLED", canonicalAreaIds: [canonicalAreaId], platformDeviceId: "44444444-4444-4444-8444-444444444444",
+    installationRequestId: "55555555-5555-4555-8555-555555555555", catalogueStatus: "ready", usefulReadings: true, descriptorRevision: 1,
+    descriptorDigest: "a".repeat(64), overrideName: "Living room radiator" } });
+  const policy = store.getPlatform().devicePolicies[device.id];
+  const events = store.getSyncOutbox().events.filter((event) => event.aggregateId === device.id);
+  assert.equal(policy.managementClass, "PROPERTY_DEVICE");
+  assert.deepEqual(events.map((event) => event.type), ["device.upsert", "control.catalog.upsert"]);
+  assert.equal(events[0].payload.osDeviceId, device.id);
+  assert.equal(events[0].payload.areaId, area.id);
+  const restored = new Store(path.join(directory, "dinodia.json"));
+  assert.equal(restored.getPlatform().devicePolicies[device.id].managementClass, "PROPERTY_DEVICE");
+  assert.deepEqual(restored.getSyncOutbox().events.filter((event) => event.aggregateId === device.id).map((event) => event.type), ["device.upsert", "control.catalog.upsert"]);
+});
+
 test("sensitive capability step-up survives store normalization and restart", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-sensitive-capability-"));
   const file = path.join(directory, "dinodia.json");

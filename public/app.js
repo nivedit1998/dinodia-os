@@ -665,7 +665,33 @@ function renderHeatingDemandController(model = state.heatingDemandController || 
   $("#heating-demand-verify")?.addEventListener("click", runHeatingDemandReadOnlyVerification);
   $("#heating-demand-evaluate")?.addEventListener("click", runHeatingDemandEvaluation);
 }
-async function loadDashboard() { try { const [status, devices, areas, labels, provisioning, readiness, pairing, heatingDemandController] = await Promise.all([api("/api/status"), api("/api/devices"), api("/api/areas"), api("/api/labels"), api("/api/provisioning"), api("/api/readiness"), api("/api/integrations/zigbee/pairing"), api("/api/heating-demand-controller")]); window.DinodiaStore.reconcile(state, { devices: devices.devices.filter((device) => !window.DinodiaDevices.isInfrastructureDevice(device)), areas: areas.areas, labels: labels.labels }); renderStatus(status, readiness); renderProvisioning(provisioning); await loadAlexaStatus(); renderAreaControls(); renderAreasDashboard(); renderAreas(); renderLabels(); renderDevices(); window.DinodiaAutomations?.load(); await loadHeatingDemandController(heatingDemandController); await loadActivity({ reset: true }); renderPairingStatus(pairing); await loadMatterPairingStatus(); await loadHiveStatus(); await loadGoogleNestStatus(); await loadAdapters(); await loadThreadAdapters(); showNotice(""); } catch (error) { showNotice(`${error.message}. Open the authenticated Company Portal session and try again.`, "error"); } }
+async function loadDashboard() { try { const [status, devices, areas, labels, provisioning, readiness, pairing, heatingDemandController] = await Promise.all([api("/api/status"), api("/api/devices"), api("/api/areas"), api("/api/labels"), api("/api/provisioning"), api("/api/readiness"), api("/api/integrations/zigbee/pairing"), api("/api/heating-demand-controller")]); window.DinodiaStore.reconcile(state, { devices: devices.devices.filter((device) => !window.DinodiaDevices.isInfrastructureDevice(device)), areas: areas.areas, labels: labels.labels }); renderStatus(status, readiness); renderProvisioning(provisioning); await loadAlexaStatus(); renderAreaControls(); renderAreasDashboard(); renderAreas(); renderLabels(); renderDevices(); await loadUnregisteredPropertyDevices(); window.DinodiaAutomations?.load(); await loadHeatingDemandController(heatingDemandController); await loadActivity({ reset: true }); renderPairingStatus(pairing); await loadMatterPairingStatus(); await loadHiveStatus(); await loadGoogleNestStatus(); await loadAdapters(); await loadThreadAdapters(); showNotice(""); } catch (error) { showNotice(`${error.message}. Open the authenticated Company Portal session and try again.`, "error"); } }
+async function loadUnregisteredPropertyDevices() {
+  const status = $("#unregistered-property-device-status"); const list = $("#unregistered-property-device-list");
+  if (!status || !list) return;
+  status.textContent = "Checking eligible local devices…"; list.replaceChildren();
+  try {
+    const result = await api("/api/commissioning/unregistered-devices");
+    const devices = Array.isArray(result.devices) ? result.devices : [];
+    if (!devices.length) { status.textContent = "No eligible paired-but-unregistered devices were found in the current Home Areas."; return; }
+    status.textContent = `${devices.length} local device${devices.length === 1 ? " is" : "s are"} not registered to this property yet.`;
+    for (const device of devices) {
+      const card = document.createElement("article"); card.className = "candidate";
+      const title = document.createElement("strong"); title.textContent = device.name || "Unidentified local device";
+      const detail = document.createElement("p"); detail.className = "muted";
+      detail.textContent = [String(device.protocol || "device").toUpperCase(), device.manufacturer, device.model, `Area: ${device.areaName || "Current Home Area"}`, device.available ? "Available" : "Offline"].filter(Boolean).join(" · ");
+      const marker = document.createElement("p"); marker.className = "muted"; marker.textContent = "Not registered to this property yet. Confirm the device and its current Area in the assigned installation workflow before adoption.";
+      const controls = Array.isArray(device.controls) ? device.controls : [];
+      const descriptor = document.createElement("p"); descriptor.className = "muted";
+      descriptor.textContent = controls.length ? `Current descriptor: ${controls.map((control) => `${control.name}${control.readable ? " · reading" : ""}${control.writable ? " · control" : " · read-only"}`).join("; ")}` : "No current safe control descriptor is available; registration review will show the truthful device capability status.";
+      card.append(title, detail, marker, descriptor); list.append(card);
+    }
+  } catch (error) {
+    status.textContent = error.status === 401 || error.status === 403
+      ? "Current assigned Company Portal authority is required to view this Home’s unregistered devices."
+      : "The local device list is temporarily unavailable. Refresh after the hub and Company Portal connection recover.";
+  }
+}
 async function loadMatterPairingStatus() { try { const pairing = await api("/api/integrations/matter/pairing"); const needsSetup = Array.isArray(pairing.needsSetup) ? pairing.needsSetup : []; const active = Array.isArray(pairing.active) ? pairing.active : []; const progress = $("#matter-pairing-progress"); if (!active.length && !needsSetup.length) return progress.classList.add("hidden"); progress.classList.remove("hidden"); const line = (device) => `<span>${escapeHtml(device.name || device.deviceId || "Matter device")}${device.manufacturer || device.model ? ` · ${escapeHtml([device.manufacturer, device.model].filter(Boolean).join(" "))}` : ""}</span>`; progress.innerHTML = `${active.length ? `<strong>Matter pairing is active</strong><span>Commissioning is in progress.</span>` : ""}${needsSetup.length ? `<strong>${needsSetup.length} Matter device${needsSetup.length === 1 ? "" : "s"} ready for assignment</strong><span>Open Devices & entities below to choose a name, area and label.</span><div class="pairing-devices">${needsSetup.map(line).join("")}</div>` : ""}`; } catch { /* The main dashboard remains usable if Matter pairing status is unavailable. */ } }
 let loadInFlight = null;
 let loadQueued = false;
@@ -758,11 +784,31 @@ $("#scan-adapters").addEventListener("click", loadAdapters);
 $("#scan-adapters").addEventListener("click", loadThreadAdapters);
 $("#save-adapter").addEventListener("click", async () => { const adapterPath = $("#adapter-select").value; if (!adapterPath) return showNotice("Choose a connected dongle first.", "error"); try { const probe = await api("/api/integrations/zigbee/probe", { method: "POST", body: JSON.stringify({ path: adapterPath }) }); if (!probe.ok) return showNotice(probe.message || "The selected dongle could not be opened.", "error"); await api("/api/integrations/zigbee/adapter", { method: "POST", body: JSON.stringify({ path: adapterPath }) }); showNotice("Coordinator selected. Restart Zigbee2MQTT if requested, then open pairing."); await load(); } catch (error) { showNotice(error.message, "error"); } });
 $("#save-thread-adapter").addEventListener("click", async () => { const adapterPath = $("#thread-adapter-select").value; if (!adapterPath) return showNotice("Choose the connected Thread RCP first.", "error"); try { await api("/api/integrations/thread/adapter", { method: "POST", body: JSON.stringify({ path: adapterPath }) }); showNotice("Thread RCP selected. OpenThread Border Router is starting."); await load(); } catch (error) { showNotice(error.message, "error"); } });
-$("#permit-join").addEventListener("click", async () => { try { const result = await api("/api/integrations/zigbee/permit-join", { method: "POST", body: JSON.stringify({ seconds: Number($("#join-seconds").value) || 120 }) }); renderPairingStatus(result.pairing); showNotice("Pairing is open. Put your Zigbee device into pairing mode now."); } catch (error) { showNotice(error.message, "error"); } });
+function openAssignedInstallation() { window.open("https://dinodia-platform-v2.vercel.app/installer", "_blank", "noopener,noreferrer"); showNotice("Continue in Company Portal: choose the current assigned Home installation, then select Open assigned device installation. Pairing and property registration are handled together there."); }
+$("#refresh-unregistered-property-devices")?.addEventListener("click", () => loadUnregisteredPropertyDevices());
+function showTrackedCommissioningHandoff() {
+  const section = $("#pairing-section");
+  if (!section) return;
+  const intro = section.querySelector(".section-heading .subtle");
+  if (intro) intro.textContent = "For permanent Zigbee and Matter devices, use the current assigned Company Portal installation. It links radio discovery, device review, Area selection and property registration in one tracked operation.";
+  for (const [protocol, message] of [["zigbee", "Open the current assigned installation in Company Portal to start a tracked Zigbee search."], ["matter", "Open the current assigned installation in Company Portal to start tracked Matter setup. Matter setup codes are entered only in that secure scoped workspace."]]) {
+    const pane = $(`#${protocol}-pairing`);
+    if (!pane) continue;
+    const oldRow = pane.querySelector(".pair-row"); if (oldRow) oldRow.hidden = true;
+    const helper = pane.querySelector(".helper"); if (helper) helper.textContent = message;
+    if (!pane.querySelector(".assigned-installation-link")) {
+      const link = document.createElement("a"); link.className = "primary assigned-installation-link"; link.href = "https://dinodia-platform-v2.vercel.app/installer";
+      link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = "Open Company Portal assigned work";
+      pane.append(link);
+    }
+  }
+}
+showTrackedCommissioningHandoff();
+$("#permit-join")?.addEventListener("click", (event) => { event.preventDefault(); openAssignedInstallation(); });
 $("#stop-pairing").addEventListener("click", async () => { try { await api("/api/integrations/zigbee/pairing/stop", { method: "POST", body: "{}" }); if (pairingRefreshTimer) { clearInterval(pairingRefreshTimer); pairingRefreshTimer = null; } renderPairingStatus({}); showNotice("Zigbee pairing closed."); } catch (error) { showNotice(error.message, "error"); } });
 ensureGoogleNestUi();
 document.querySelectorAll("[data-pairing-tab]").forEach((tab) => tab.addEventListener("click", () => { document.querySelectorAll("[data-pairing-tab]").forEach((item) => item.classList.toggle("active", item === tab)); document.querySelectorAll(".pairing-pane").forEach((pane) => pane.classList.toggle("hidden", pane.id !== `${tab.dataset.pairingTab}-pairing`)); }));
-$("#commission-matter").addEventListener("click", async () => { const code = $("#matter-code").value.trim(); if (!code) return showNotice("Enter the Matter QR/manual setup code.", "error"); try { const session = await api("/api/integrations/matter/commission", { method: "POST", body: JSON.stringify({ code }) }); $("#matter-pairing-progress").classList.remove("hidden"); $("#matter-pairing-progress").textContent = `Matter commissioning ${session.stage}.`; await load(); } catch (error) { showNotice(error.message, "error"); } });
+$("#commission-matter")?.addEventListener("click", (event) => { event.preventDefault(); openAssignedInstallation(); });
 $("#hive-connect-open").addEventListener("click", () => hiveAuthDialog(false, "connect"));
 $("#hive-reauthenticate").addEventListener("click", () => hiveAuthDialog(false, "reauthenticate"));
 $("#hive-auth-close").addEventListener("click", cancelHiveAuth);

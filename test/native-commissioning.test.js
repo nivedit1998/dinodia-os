@@ -12,25 +12,40 @@ test("protocol operational flags are independent of any removed catalogue marker
   const readFlags = (overrides = {}) => JSON.parse(execFileSync(process.execPath, ["-e", "process.stdout.write(JSON.stringify(require('./src/config').nativeCommissioningCapabilities))"], {
     cwd: process.cwd(), env: { ...env, ...overrides }, encoding: "utf8",
   }));
-  assert.deepEqual(readFlags(), { nativeZigbeeCommissioningV1: false, nativeMatterCommissioningV1: false });
+  assert.deepEqual(readFlags(), { nativeZigbeeCommissioningV1: false, nativeMatterCommissioningV1: false,
+    nativeStaffZigbeeCommissioningV1: true, nativeStaffMatterCommissioningV1: true, nativeStaffDeviceRegistrationV1: true });
   assert.deepEqual(readFlags({ DINODIA_NATIVE_ZIGBEE_COMMISSIONING_ENABLED: "false", DINODIA_NATIVE_MATTER_COMMISSIONING_ENABLED: "false" }), {
     nativeZigbeeCommissioningV1: false, nativeMatterCommissioningV1: false,
+    nativeStaffZigbeeCommissioningV1: true, nativeStaffMatterCommissioningV1: true, nativeStaffDeviceRegistrationV1: true,
   });
   assert.deepEqual(readFlags({ DINODIA_NATIVE_ZIGBEE_COMMISSIONING_ENABLED: "true", DINODIA_NATIVE_MATTER_COMMISSIONING_ENABLED: "true" }), {
     nativeZigbeeCommissioningV1: true, nativeMatterCommissioningV1: true,
+    nativeStaffZigbeeCommissioningV1: true, nativeStaffMatterCommissioningV1: true, nativeStaffDeviceRegistrationV1: true,
   });
   assert.deepEqual(readFlags({ DINODIA_NATIVE_ZIGBEE_COMMISSIONING_ENABLED: "yes", DINODIA_NATIVE_MATTER_COMMISSIONING_ENABLED: "1" }), {
     nativeZigbeeCommissioningV1: false, nativeMatterCommissioningV1: false,
+    nativeStaffZigbeeCommissioningV1: true, nativeStaffMatterCommissioningV1: true, nativeStaffDeviceRegistrationV1: true,
+  });
+  assert.deepEqual(readFlags({ DINODIA_NATIVE_STAFF_ZIGBEE_COMMISSIONING_ENABLED: "false", DINODIA_NATIVE_STAFF_MATTER_COMMISSIONING_ENABLED: "false" }), {
+    nativeZigbeeCommissioningV1: false, nativeMatterCommissioningV1: false,
+    nativeStaffZigbeeCommissioningV1: false, nativeStaffMatterCommissioningV1: false, nativeStaffDeviceRegistrationV1: true,
+  });
+  assert.deepEqual(readFlags({ DINODIA_NATIVE_STAFF_DEVICE_REGISTRATION_ENABLED: "false" }), {
+    nativeZigbeeCommissioningV1: false, nativeMatterCommissioningV1: false,
+    nativeStaffZigbeeCommissioningV1: true, nativeStaffMatterCommissioningV1: true, nativeStaffDeviceRegistrationV1: false,
   });
 });
 function fixture({ dropFirstCreateResponse = false, matterCommission = async () => ({}), matterRefresh = async () => [], commissioningCapabilities = {
   nativeZigbeeCommissioningV1: true, nativeMatterCommissioningV1: true,
+  nativeStaffZigbeeCommissioningV1: true, nativeStaffMatterCommissioningV1: true, nativeStaffDeviceRegistrationV1: true,
 } } = {}) {
   const areaId = uuid(); const homeId = uuid(); const hubInstallId = uuid(); const accountId = uuid();
   const membershipId = uuid(); const sid = uuid(); const trustedDeviceId = uuid();
   const principal = { principalType: "app", householdRole: "TENANT", scope: ["tenant:device-command"], sub: accountId, sid, jti: uuid(),
     trustedDeviceId, membershipId, homeId, hubInstallId, areaIds: [areaId], accessTokenHash: crypto.randomBytes(32).toString("hex"), identityGeneration: 7 };
   const devices = [];
+  const events = [];
+  const syncOutbox = { acknowledgedSequence: 0, events: [], inFlight: null };
   let security = {};
   const platformState = { homeId, hubInstallId, areaBindings: [{ areaId, hubAreaId: "os-area-1" }] };
   const store = {
@@ -38,16 +53,23 @@ function fixture({ dropFirstCreateResponse = false, matterCommission = async () 
     saveSecurity: async (patch) => { security = { ...security, ...patch }; },
     getPlatform: () => platformState,
     savePlatform: async (patch) => Object.assign(platformState, patch),
-    getIdentity: () => ({ generation: 7 }),
+    getSyncOutbox: () => syncOutbox,
+    getIdentity: () => ({ generation: 7, serial: "DIN-HUB-1" }),
     getZigbee: () => ({ adapterPath: "/dev/zigbee-test" }),
     getThread: () => ({ configured: true }),
     listDevices: () => devices.slice(),
+    listAreas: () => [{ id: "os-area-1", name: "Living Room" }],
     getDevice: (id) => devices.find((row) => row.id === id) || null,
-    upsertDevice: async (row) => { const index = devices.findIndex((candidate) => candidate.id === row.id); if (index < 0) devices.push(row); else devices[index] = row; return row; },
+    upsertDevice: async (row, options = {}) => { if (options.devicePolicy) {
+      platformState.devicePolicies = { ...(platformState.devicePolicies || {}), [row.id]: options.devicePolicy };
+      if (options.devicePolicy.managementClass === "PROPERTY_DEVICE") platformState.pendingPropertyDevicePolicies = { ...(platformState.pendingPropertyDevicePolicies || {}), [row.id]: options.devicePolicy };
+    } const index = devices.findIndex((candidate) => candidate.id === row.id); if (index < 0) devices.push(row); else devices[index] = row; return row; },
     removeDevice: async (id) => { const index = devices.findIndex((row) => row.id === id); if (index >= 0) devices.splice(index, 1); },
-    addEvent: async () => {},
+    addEvent: async (event) => { events.unshift(event); },
+    listEvents: () => events.slice(),
   };
   const platformRequests = [];
+  const radioEffects = { zigbeeStart: 0, zigbeeStop: 0, zigbeeRemove: 0, matterCommission: 0, matterRemove: 0 };
   const platformSessions = new Map();
   let droppedCreateResponse = false;
   const pairing = { requestWithHubIdentity: async (_path, body) => {
@@ -69,15 +91,16 @@ function fixture({ dropFirstCreateResponse = false, matterCommission = async () 
   const mqtt = {
     status: () => ({ connected: true }),
     pairingStatus: () => ({ active: pairingActive, found: [] }),
-    startPairing: async () => { pairingActive = true; return { active: true }; },
-    stopPairing: async () => { pairingActive = false; return { active: false }; },
-    removeCommissioningCandidate: async (id) => { await store.removeDevice(id); return { acknowledged: true }; },
+    startPairing: async () => { radioEffects.zigbeeStart += 1; pairingActive = true; return { active: true }; },
+    stopPairing: async () => { radioEffects.zigbeeStop += 1; pairingActive = false; return { active: false }; },
+    removeCommissioningCandidate: async (id) => { radioEffects.zigbeeRemove += 1; await store.removeDevice(id); return { acknowledged: true }; },
   };
-  const matter = { status: () => ({ connected: true }), commission: matterCommission, refresh: matterRefresh, remove: async () => ({ ok: true }) };
+  const matter = { status: () => ({ connected: true }), commission: async (...args) => { radioEffects.matterCommission += 1; return matterCommission(...args); }, refresh: matterRefresh,
+    remove: async () => { radioEffects.matterRemove += 1; return { ok: true }; } };
   const vaultValues = new Map();
   const vault = { set: async (key, value) => vaultValues.set(key, value), get: (key) => vaultValues.get(key) || null, delete: async (key) => vaultValues.delete(key) };
   const service = new NativeCommissioningService({ store, mqtt, matter, pairing, vault, commissioningCapabilities, clock: () => Date.now(), logger: { warn() {} } });
-  return { service, principal, store, devices, platformRequests, areaId, homeId, hubInstallId, vaultValues, matter, close: () => service.close() };
+  return { service, principal, store, devices, events, platformRequests, radioEffects, areaId, homeId, hubInstallId, vaultValues, matter, close: () => service.close() };
 }
 
 test("tenant commissioning starts one bound Zigbee join and exact retry returns its original opaque session", async (t) => {
@@ -302,6 +325,111 @@ test("assigned permanent-installation scope uses the same radio engine but regis
   assert.equal(f.store.getPlatform().devicePolicies[device.id].managementClass, "PROPERTY_DEVICE");
   assert.equal(f.store.getPlatform().devicePolicies[device.id].ownerMembershipId, null);
   assert.equal(f.store.getPlatform().devicePolicies[device.id].installationRequestId, staff.requestId);
+});
+
+test("assigned staff can review and register one already-paired unregistered property device without radio or removal effects", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const staff = { principalType: "operator", scope: ["os:permanent-installation"], sub: uuid(), sid: uuid(), jti: uuid(),
+    handoffId: uuid(), homeId: f.homeId, workflow: uuid(), requestId: uuid(), employeeSessionId: uuid(), workRevision: 4,
+    hubId: "DIN-HUB-1", hubInstallId: f.hubInstallId, areaIds: [f.areaId], areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
+  const existing = { id: "zigbee:existing-radiator", protocol: "zigbee", available: true, interviewStatus: "successful",
+    originalName: "Radiator", name: "Radiator", areaId: "os-area-1", protocolIdentity: { ieeeAddress: "0x00124b0000000201" },
+    setup: { status: "ready" }, entities: { climate: { id: "climate-radiator", name: "Heating", domain: "climate", state: "heat",
+      capability: { category: "control", controlId: "target-temperature", semanticRole: "target_temperature", primary: true, readable: true, writable: true,
+        kind: "number", bindings: [{ serviceId: "climate.set_temperature" }] } } }, metadata: { model: "TRV", deviceType: "radiator", manufacturer: "Test" } };
+  const privateDevice = { ...existing, id: "zigbee:tenant-radiator", tenantOwnerMembershipId: uuid(), metadata: { ...existing.metadata, managementClass: "tenant_device" },
+    protocolIdentity: { ieeeAddress: "0x00124b0000000202" } };
+  await f.store.upsertDevice(existing);
+  await f.store.upsertDevice(privateDevice);
+  await f.store.addEvent({ type: "device_setup_completed", deviceId: existing.id, protocol: "zigbee", areaId: "os-area-1" });
+  await f.store.addEvent({ type: "device_setup_completed", deviceId: privateDevice.id, protocol: "zigbee", areaId: "os-area-1" });
+  const formerlyTenant = { ...existing, id: "zigbee:former-tenant-radiator", protocolIdentity: { ieeeAddress: "0x00124b0000000203" } };
+  await f.store.upsertDevice(formerlyTenant);
+  await f.store.addEvent({ type: "device_setup_completed", deviceId: formerlyTenant.id, protocol: "zigbee", areaId: "os-area-1" });
+  await f.store.addEvent({ type: "tenant_device_commissioned", deviceId: formerlyTenant.id, areaId: "os-area-1" });
+
+  const listed = await f.service.listAdoptableDevices(staff);
+  assert.equal(listed.devices.length, 1);
+  assert.equal(listed.devices[0].protocol, "zigbee");
+  assert.equal(listed.devices[0].name, "Radiator");
+  assert.equal(JSON.stringify(listed).includes(existing.id), false);
+  assert.equal(JSON.stringify(listed).includes("0x00124b0000000201"), false);
+  assert.equal(JSON.stringify(listed).includes(privateDevice.id), false);
+  assert.equal(JSON.stringify(listed).includes(formerlyTenant.id), false, "a retained tenant commissioning receipt is a hard exclusion if a later projection loses its local tenant marker");
+  await assert.rejects(f.service.listAdoptableDevices(f.principal), { code: "commissioning_authority_denied" });
+  const alternateCandidateRef = (await f.service.listAdoptableDevices(staff)).devices[0].candidateRef;
+  f.service.commissioningCapabilities.nativeStaffZigbeeCommissioningV1 = false;
+
+  const beforeCreate = f.platformRequests.length;
+  const session = await f.service.start(staff, { protocol: "zigbee", operationKind: "REGISTER_EXISTING", candidateRef: listed.devices[0].candidateRef }, "adopt-radiator-existing-0001");
+  const exactRetry = await f.service.start(staff, { protocol: "zigbee", operationKind: "REGISTER_EXISTING", candidateRef: listed.devices[0].candidateRef }, "adopt-radiator-existing-0001");
+  assert.equal(exactRetry.sessionId, session.sessionId, "an exact retry reconciles the original existing-device operation");
+  await assert.rejects(f.service.start(staff, { protocol: "zigbee", operationKind: "REGISTER_EXISTING", candidateRef: alternateCandidateRef }, "adopt-radiator-existing-0001"),
+    { code: "commissioning_revision_conflict" }, "reusing an operation key for a different candidate is rejected");
+  assert.equal(session.operationKind, "REGISTER_EXISTING");
+  assert.equal(session.status, "reviewing_existing");
+  assert.equal(f.platformRequests.slice(beforeCreate).filter((row) => row.action === "create").length, 1);
+  assert.equal(f.service.mqtt.pairingStatus().active, false);
+  assert.deepEqual(f.radioEffects, { zigbeeStart: 0, zigbeeStop: 0, zigbeeRemove: 0, matterCommission: 0, matterRemove: 0 });
+  await f.service.markInterrupted(f.service.sessions()[session.sessionId], "test_restart");
+  const resumed = await f.service.resume(session.sessionId, staff);
+  assert.equal(resumed.status, "reviewing_existing", "an interrupted adoption resumes its review without opening radio pairing");
+  assert.deepEqual(f.radioEffects, { zigbeeStart: 0, zigbeeStop: 0, zigbeeRemove: 0, matterCommission: 0, matterRemove: 0 });
+
+  const current = f.service.sessions()[session.sessionId];
+  const selected = await f.service.select(session.sessionId, staff, { schemaVersion: "dinodia.v1", expectedRevision: current.revision,
+    candidateRef: current.candidates[0].candidateRef, areaId: f.areaId, name: "Living room radiator", customerLabel: "Living room radiator" });
+  assert.equal(selected.status, "selected");
+  const result = await f.service.complete(session.sessionId, staff, "install");
+  assert.equal(result.status, "completed");
+  assert.match(result.finalDeviceId, /^[0-9a-f-]{36}$/i);
+  assert.equal(f.store.getDevice(existing.id).protocolIdentity.ieeeAddress, "0x00124b0000000201");
+  assert.equal(f.store.getDevice(existing.id).setup.status, "ready");
+  assert.equal(f.store.getPlatform().devicePolicies[existing.id].managementClass, "PROPERTY_DEVICE");
+  assert.equal(f.store.getPlatform().devicePolicies[existing.id].installationRequestId, staff.requestId);
+  assert.equal(f.store.getDevice(privateDevice.id).metadata.managementClass, "tenant_device");
+  assert.equal(f.platformRequests.filter((row) => row.action === "finalize").at(-1).operationKind, "REGISTER_EXISTING");
+  assert.equal(f.platformRequests.filter((row) => row.action === "finalize").at(-1).device.osDeviceId, existing.id);
+  assert.deepEqual(f.radioEffects, { zigbeeStart: 0, zigbeeStop: 0, zigbeeRemove: 0, matterCommission: 0, matterRemove: 0 });
+  const afterRegistration = await f.service.listAdoptableDevices(staff);
+  assert.equal(afterRegistration.devices.length, 0, "a canonical device is no longer shown as awaiting registration");
+  assert.equal(afterRegistration.completedDevices.length, 1, "completed results are reconstructed from the current request's canonical policy after refresh");
+  assert.equal(afterRegistration.completedDevices[0].areaName, "Living Room");
+  assert.equal(afterRegistration.completedDevices[0].sync, "pending", "locally persisted canonical policy is not mislabeled as synced before cloud configuration confirms it");
+});
+
+test("assigned full dashboard can see eligible local devices read-only without exposing identities or tenant inventory", (t) => {
+  const f = fixture(); t.after(f.close);
+  const staff = { principalType: "operator", scope: ["os:admin"], sub: uuid(), sid: uuid(), jti: uuid(), handoffId: uuid(),
+    homeId: f.homeId, workflow: uuid(), employeeSessionId: uuid(), workRevision: 4, hubId: "DIN-HUB-1", identityGeneration: 7 };
+  const eligible = { id: "zigbee:dashboard-radiator", protocol: "zigbee", available: true, interviewStatus: "successful", originalName: "Living room radiator",
+    areaId: "os-area-1", protocolIdentity: { ieeeAddress: "0x00124b0000000abc" }, setup: { status: "ready" },
+    entities: { climate: { name: "Heating", capability: { category: "control", semanticRole: "target_temperature", readable: true, writable: true } } },
+    metadata: { manufacturer: "SONOFF", model: "TRVZB" } };
+  const privateDevice = { ...eligible, id: "zigbee:dashboard-private", tenantOwnerMembershipId: uuid(), metadata: { managementClass: "tenant_device" }, protocolIdentity: { ieeeAddress: "0x00124b0000000def" } };
+  f.devices.push(eligible, privateDevice);
+  f.events.push({ type: "device_setup_completed", deviceId: eligible.id, areaId: "os-area-1" }, { type: "device_setup_completed", deviceId: privateDevice.id, areaId: "os-area-1" });
+
+  const listed = f.service.listDashboardUnregisteredDevices(staff);
+  assert.equal(listed.devices.length, 1);
+  assert.deepEqual(listed.devices[0], { protocol: "zigbee", name: "Living room radiator", manufacturer: "SONOFF", model: "TRVZB", status: "not_registered",
+    areaName: "Living Room", available: true, controls: [{ name: "target_temperature", readable: true, writable: true }] });
+  assert.equal(JSON.stringify(listed).includes(eligible.id), false);
+  assert.equal(JSON.stringify(listed).includes("0x00124b0000000abc"), false);
+  assert.equal(JSON.stringify(listed).includes(privateDevice.id), false);
+  assert.throws(() => f.service.listDashboardUnregisteredDevices({ ...staff, scope: ["os:permanent-installation"] }), { code: "commissioning_authority_denied" });
+  assert.throws(() => f.service.listDashboardUnregisteredDevices({ ...staff, identityGeneration: 8 }), { code: "commissioning_authority_denied" });
+  assert.throws(() => f.service.listDashboardUnregisteredDevices({ ...f.principal, scope: ["tenant:device-command"] }), { code: "commissioning_authority_denied" });
+});
+
+test("Matter registration identity includes both fabric and node identifiers", (t) => {
+  const f = fixture(); t.after(f.close);
+  const firstFabric = f.service.protocolIdentity({ protocol: "matter", protocolIdentity: { fabricId: "Fabric-A", nodeId: "42" } });
+  const secondFabric = f.service.protocolIdentity({ protocol: "matter", protocolIdentity: { fabricId: "Fabric-B", nodeId: "42" } });
+  assert.ok(firstFabric?.hash);
+  assert.ok(secondFabric?.hash);
+  assert.notEqual(firstFabric.hash, secondFabric.hash);
+  assert.equal(firstFabric.identity, "fabric-a\n42");
 });
 
 test("installer commissioning rejects missing scoped-work claims before the first Platform or radio call", async (t) => {
