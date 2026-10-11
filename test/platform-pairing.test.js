@@ -167,6 +167,81 @@ test("an unpaired installed hub publishes only its identity-signed local recover
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });
 
+test("an existing active machine credential is reconciled before normal sync without repeating pairing", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-existing-credential-reconcile-"));
+  try {
+    const serial = "DINODIA-EXISTING-CREDENTIAL-RECONCILE";
+    const store = new Store(path.join(directory, "dinodia.json"));
+    await store.saveIdentity({ serial });
+    const vault = new SecretVault({ dataDir: directory });
+    const identity = generateManufacturingIdentity({ serial });
+    const record = vaultIdentityRecord(identity);
+    await vault.set("platform.identityPrivateKey", record.signingPrivateKey);
+    await vault.set("platform.identityPublicKey", record.signingPublicKey);
+    await vault.set("platform.encryptionPrivateKey", record.encryptionPrivateKey);
+    await vault.set("platform.encryptionPublicKey", record.encryptionPublicKey);
+    await vault.set("platform.identityFingerprint", record.publicKeyFingerprint);
+    await vault.set("platform.encryptionFingerprint", record.encryptionKeyFingerprint);
+    await vault.set("platform.identityGeneration", "1");
+    const machineCredential = "dno-existing-current-machine-credential";
+    await vault.set("platform.machineCredential", machineCredential);
+    await store.savePlatform({ paired: false, provisioningCredentialVersion: 0, apiUrl: "https://platform.test" });
+
+    const hubInstallId = "33333333-3333-4333-8333-333333333333";
+    const homeId = "44444444-4444-4444-8444-444444444444";
+    const paths = [];
+    let reconcileRequests = 0;
+    let signalReconcileStarted;
+    let releaseReconcile;
+    const reconcileStarted = new Promise((resolve) => { signalReconcileStarted = resolve; });
+    const reconcileGate = new Promise((resolve) => { releaseReconcile = resolve; });
+    const pairing = new PlatformPairing({
+      store, vault, apiUrl: "https://platform.test", serial, intervalMs: 60000,
+      runtime: { nodeEnv: "test" },
+      fetchImpl: async (url, options) => {
+        const requestPath = new URL(url).pathname;
+        paths.push(requestPath);
+        const body = JSON.parse(options.body || "{}");
+        if (requestPath.endsWith("/pairing/reconcile")) {
+          reconcileRequests += 1;
+          if (reconcileRequests === 1) {
+            signalReconcileStarted();
+            await reconcileGate;
+          }
+          assert.equal(options.headers["x-dinodia-hub-signature"]?.length > 0, true, "only the registered manufacturing identity asks Platform to validate the retained credential fingerprint");
+          assert.equal(Object.hasOwn(options.headers, "x-dinodia-machine-signature"), false);
+          assert.deepEqual(Object.keys(body).sort(), ["credentialFingerprint", "identityGeneration", "serial"].sort());
+          assert.equal(body.credentialFingerprint, crypto.createHash("sha256").update(machineCredential, "utf8").digest("hex"));
+          assert.equal(JSON.stringify(body).includes(machineCredential), false, "the machine credential itself is never sent");
+          return { ok: true, status: 200, async json() { return { ok: true, paired: true, version: 1, hubInstallId, homeId }; } };
+        }
+        if (requestPath.endsWith("/token-state")) return { ok: true, async json() { return { hubInstallId, homeId, latestVersion: 0, publishedVersion: 0, operatorCredentialStates: [], offlineAuthorisations: [], areaBindings: [], policyRevision: 1, syncStreamId: null, syncAcceptedSequence: 0 }; } };
+        if (requestPath.endsWith("/v2/sync")) return { ok: true, async json() { return nativeSyncAck(body); } };
+        if (requestPath.endsWith("/heartbeat")) return { ok: true, async json() { return { ok: true, online: true, lanEndpoint: { revision: body.lanEndpoint.revision, state: body.lanEndpoint.state } }; } };
+        throw new Error(`Unexpected Platform route during existing-credential recovery: ${requestPath}`);
+      },
+    });
+
+    const firstSync = pairing.syncNow();
+    await reconcileStarted;
+    const overlappingSync = await pairing.syncNow();
+    releaseReconcile();
+    await firstSync;
+
+    assert.equal(overlappingSync, null, "overlapping interval ticks cannot start duplicate reconciliation or parallel sync while the original request is in flight");
+    assert.equal(reconcileRequests, 1, "one in-flight reconciliation is serialized");
+    assert.equal(store.getPlatform().paired, true, "the active retained credential is adopted only after Platform confirms its exact current fingerprint and installation binding");
+    assert.equal(store.getPlatform().provisioningCredentialVersion, 1);
+    assert.equal(store.getPlatform().hubInstallId, hubInstallId);
+    assert.equal(store.getPlatform().homeId, homeId);
+    assert.equal(paths[0], "/api/hub-agent/v2/pairing/reconcile");
+    assert.deepEqual(paths.slice(1), ["/api/hub-agent/token-state", "/api/hub-agent/v2/sync", "/api/hub-agent/v2/heartbeat"]);
+    assert.equal(paths.some((route) => route.endsWith("/pairing/register") || route.endsWith("/pairing/challenge") || route.endsWith("/pairing/prove") || route.endsWith("/pairing/acknowledge")), false, "reconciliation is not a second provisioning/pairing handshake");
+    assert.equal(store.getSyncOutbox().acknowledgedSequence, 0, "credential reconciliation does not fabricate a household sync acknowledgement");
+    pairing.stop();
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
+
 test("incident transitions use the durable native sync stream and retire only after its receipt", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-incident-sync-"));
   const store = new Store(path.join(directory, "dinodia.json"));

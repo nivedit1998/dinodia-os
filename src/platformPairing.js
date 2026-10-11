@@ -474,6 +474,40 @@ class PlatformPairing {
     }
   }
 
+  async reconcileExistingMachineCredential() {
+    const platform = this.store?.getPlatform?.() || {};
+    if (platform.paired === true || platform.provisioningAttemptId
+      || Number(platform.provisioningCredentialVersion || 0) !== 0) return false;
+    const credential = this.vault?.get?.("platform.machineCredential");
+    if (typeof credential !== "string" || credential.length < 1) return false;
+    const identity = await this.getPublicIdentity();
+    if (!identity?.generation) throw Object.assign(new Error("A registered hub identity is required to reconcile the retained machine credential"), { code: "hub_identity_unavailable" });
+    const credentialFingerprint = sha256(credential);
+    const result = await this.requestWithHubIdentity("/api/hub-agent/v2/pairing/reconcile", { credentialFingerprint }, { forceManufacturingIdentity: true });
+    const expectedKeys = ["homeId", "hubInstallId", "ok", "paired", "version"];
+    if (!result || typeof result !== "object" || Array.isArray(result)
+      || Object.keys(result).sort().join(",") !== expectedKeys.join(",")
+      || result.ok !== true || result.paired !== true
+      || !Number.isSafeInteger(Number(result.version)) || Number(result.version) < 1
+      || typeof result.hubInstallId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(result.hubInstallId)
+      || typeof result.homeId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(result.homeId)) {
+      throw Object.assign(new Error("Platform returned an invalid existing-credential reconciliation receipt"), { code: "machine_credential_reconciliation_response_invalid" });
+    }
+    if ((platform.hubInstallId && String(platform.hubInstallId) !== result.hubInstallId)
+      || (platform.homeId && String(platform.homeId) !== result.homeId)) {
+      throw Object.assign(new Error("The retained machine credential belongs to a different local Home installation"), { code: "machine_credential_reconciliation_binding_changed" });
+    }
+    await this.store.savePlatform({
+      paired: true,
+      provisioningCredentialVersion: Number(result.version),
+      hubInstallId: result.hubInstallId,
+      homeId: result.homeId,
+      machineCredentialReconciledAt: new Date(this.clock()).toISOString(),
+      lastError: null,
+    });
+    return true;
+  }
+
   runtimeWithCloudflareStatus(runtime, identityGeneration = null) {
     const base = runtime && typeof runtime === "object" ? runtime : this.runtime;
     const capabilities = base.capabilities && typeof base.capabilities === "object" && !Array.isArray(base.capabilities) ? { ...base.capabilities } : {};
@@ -501,20 +535,38 @@ class PlatformPairing {
   async syncNow() {
     if (this.syncing) return null;
     if (this.nextRetryAt && Date.now() < this.nextRetryAt) return null;
-    let platform = this.store.getPlatform();
-    if (!platform.paired && platform.provisioningAttemptId) {
-      try { await this.completeProvisioningHandshake(); } catch (error) {
-        this.lastError = String(error.message || error);
-        await this.store.savePlatform({ lastError: this.lastError });
-        return null;
-      }
-      platform = this.store.getPlatform();
-    }
-    if (!platform.paired) return null;
     this.syncing = true;
     let heartbeatIdentity = null;
     let heartbeatAuthorityConfirmed = false;
     try {
+      let platform = this.store.getPlatform();
+      if (!platform.paired && platform.provisioningAttemptId) {
+        try { await this.completeProvisioningHandshake(); } catch (error) {
+          this.lastError = String(error.message || error);
+          await this.store.savePlatform({ lastError: this.lastError });
+          return null;
+        }
+        platform = this.store.getPlatform();
+      }
+      if (!platform.paired && !platform.provisioningAttemptId
+        && Number(platform.provisioningCredentialVersion || 0) === 0
+        && this.vault?.get?.("platform.machineCredential")) {
+        try {
+          await this.reconcileExistingMachineCredential();
+          platform = this.store.getPlatform();
+          this.retryAttempt = 0;
+          this.nextRetryAt = 0;
+        } catch (error) {
+          const candidateCode = String(error?.code || "");
+          this.lastError = /^[a-z0-9_.:-]{1,80}$/i.test(candidateCode) ? candidateCode : "machine_credential_reconciliation_unavailable";
+          this.retryAttempt = Math.min(this.retryAttempt + 1, 8);
+          const retryDelay = Math.min(5 * 60_000, 1000 * (2 ** (this.retryAttempt - 1)));
+          this.nextRetryAt = Date.now() + retryDelay;
+          await this.store.savePlatform({ lastError: this.lastError });
+          return null;
+        }
+      }
+      if (!platform.paired) return null;
       await this.store.ensureSyncSnapshot?.(this.clock());
       await this.store.ensureSyncIncidentEvents?.(this.clock());
       await this.store.ensureAutomationOutcomeEvents?.(this.clock());
