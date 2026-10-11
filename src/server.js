@@ -3551,12 +3551,15 @@ function nativeDeviceView(principal, device) {
     if (!principal || principal.scope.length !== 1 || principal.scope[0] !== "os:permanent-installation") return null;
     try {
       const result = await pairing.requestWithHubIdentity("/api/hub-agent/operator-session/revalidate", { handoffId: session.handoffId, jti: session.jti, credentialVersion: session.credentialVersion });
-      if (result?.active !== true) {
+      const platform = hubStore.getPlatform?.() || {};
+      if (result?.active !== true || String(result.homeId || "") !== String(principal.homeId || "")
+        || !platform.hubInstallId || String(result.hubInstallationId || "") !== String(platform.hubInstallId)) {
         await revokeLocalOperatorSession(session, "operator_installation_authority_changed");
         return null;
       }
       session.lastAuthorizationCheckAt = operatorNow();
-      return operatorSessionAuth(session.token);
+      const current = operatorSessionAuth(session.token);
+      return current ? Object.freeze({ ...current, verifiedHubInstallationId: String(result.hubInstallationId) }) : null;
     } catch {
       // An installer mutation must have a fresh Platform authorization result;
       // unlike a dashboard session, an old successful check is not sufficient.
@@ -3582,12 +3585,15 @@ function nativeDeviceView(principal, device) {
       const result = await pairing.requestWithHubIdentity("/api/hub-agent/operator-session/revalidate", {
         handoffId: session.handoffId, jti: session.jti, credentialVersion: session.credentialVersion,
       });
-      if (result?.active !== true) {
+      const platform = hubStore.getPlatform?.() || {};
+      if (result?.active !== true || String(result.homeId || "") !== String(principal.homeId || "")
+        || !platform.hubInstallId || String(result.hubInstallationId || "") !== String(platform.hubInstallId)) {
         await revokeLocalOperatorSession(session, "operator_dashboard_authority_changed");
         return null;
       }
       session.lastAuthorizationCheckAt = operatorNow();
-      return operatorSessionAuth(session.token);
+      const current = operatorSessionAuth(session.token);
+      return current ? Object.freeze({ ...current, verifiedHubInstallationId: String(result.hubInstallationId) }) : null;
     } catch {
       // This is private local Home inventory; fail closed when current Portal
       // authority cannot be independently revalidated.
@@ -4267,6 +4273,7 @@ function nativeDeviceView(principal, device) {
     const installerReadRoutes = new Set([
       "/api/status", "/api/devices", "/api/automations", "/api/areas", "/api/labels",
       "/api/provisioning", "/api/readiness", "/api/integrations/zigbee/pairing",
+      "/api/integrations/zigbee/adapters", "/api/integrations/thread/adapters",
       "/api/heating-demand-controller", "/api/activity", "/api/commissioning/unregistered-devices",
     ]);
     const adminApiPath = pathname.startsWith("/_dinodia/admin/") ? pathname.slice("/_dinodia/admin".length) : "";

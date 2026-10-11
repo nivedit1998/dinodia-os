@@ -29,7 +29,7 @@ test("assigned commissioning route serves a current grant and denies stale ident
   const employeeSessionId = crypto.randomUUID(); const sub = crypto.randomUUID(); const sid = crypto.randomUUID(); const jti = crypto.randomUUID();
   const privateAreaName = "Secret assigned Area";
   const operatorToken = signedOperatorToken({ sub, sid, jti, hubId, scope: ["os:permanent-installation"],
-    handoffId, homeId, hubInstallId, workflow, requestId, employeeSessionId, workRevision: 3,
+    handoffId, homeId, workflow, requestId, employeeSessionId, workRevision: 3,
     identityGeneration: 8, areaIds: [areaId], areaOptions: [{ id: areaId, name: privateAreaName }] }, keys.privateKey);
   const canonicalOrigin = "https://dinodia-platform-v2.vercel.app";
   const originalFetch = global.fetch;
@@ -60,9 +60,11 @@ test("assigned commissioning route serves a current grant and denies stale ident
   hub.pairing.start = () => {};
   hub.pairing.signPlatformRequest = async () => "test-signature";
   hub.pairing.decryptCredentialDelivery = async (_delivery, purpose) => purpose === "operator-handoff" ? "disposable-handoff" : operatorToken;
+  let revalidatedHomeId = homeId;
+  let revalidatedHubInstallId = hubInstallId;
   hub.pairing.requestWithHubIdentity = async (route, body) => {
     if (route.endsWith("/operator-session/attempt")) return { setupAttemptId: body.setupAttemptId, expiresAt: new Date(Date.now() + 60_000).toISOString() };
-    if (route.endsWith("/operator-session/revalidate")) return { active: true };
+    if (route.endsWith("/operator-session/revalidate")) return { active: true, homeId: revalidatedHomeId, hubInstallationId: revalidatedHubInstallId };
     return { ok: true };
   };
 
@@ -102,4 +104,10 @@ test("assigned commissioning route serves a current grant and denies stale ident
   assert.equal(body.error?.code, "COMMISSIONING_AUTHORITY_DENIED");
   assert.equal(JSON.stringify(body).includes(privateAreaName), false, "unvalidated Area metadata must not be disclosed");
   assert.equal(JSON.stringify(body).includes(areaId), false);
+
+  revalidatedHomeId = crypto.randomUUID();
+  const mismatchedHome = await fetch(`${setupOrigin}/_dinodia/installer/commissioning`, { headers: { cookie: authorityCookie } });
+  const mismatchedBody = await mismatchedHome.json();
+  assert.equal(mismatchedHome.status, 401);
+  assert.equal(JSON.stringify(mismatchedBody).includes(privateAreaName), false, "a revalidated different Home must not disclose assigned Area metadata");
 });

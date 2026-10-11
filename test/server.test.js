@@ -71,6 +71,29 @@ test("default native MQTT composition does not depend on the retired Home Assist
   }
 });
 
+test("local full-Home dashboard exposes the same read-only dongle inventory as the secure dashboard", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-local-radio-inventory-"));
+  const adapter = { path: "/dev/serial/by-id/usb-test-coordinator", target: "/dev/ttyACM0", name: "Test Zigbee coordinator", adapterType: "ember", supported: true, connected: true };
+  const hub = createHub({
+    config: { nodeEnv: "development", adminToken: "test-token", dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    mqttBridge: mockIntegration(), matterBridge: mockIntegration(), cloudflareTunnel: mockCloudflare(),
+    platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
+    serialAdapterLister: async () => [adapter],
+  });
+  t.after(async () => { await hub.stop().catch(() => {}); await fs.rm(directory, { recursive: true, force: true }); });
+  await new Promise((resolve) => hub.server.listen(0, "127.0.0.1", resolve));
+  await new Promise((resolve) => hub.setupServer.listen(0, "127.0.0.1", resolve));
+  for (const route of ["/api/integrations/zigbee/adapters", "/api/integrations/thread/adapters"]) {
+    const secureView = await request(`http://127.0.0.1:${hub.server.address().port}`, dashboardRoute(route), { headers: { authorization: "Bearer test-token" } });
+    const localView = await request(`http://127.0.0.1:${hub.setupServer.address().port}`, dashboardRoute(route), { headers: { authorization: "Bearer test-token" } });
+    assert.equal(secureView.response.status, 200, `secure dashboard ${route} should be available`);
+    assert.equal(localView.response.status, 200, `local setup listener must route read-only adapter inventory ${route} to the same dashboard API`);
+    assert.deepEqual(localView.body, secureView.body);
+  }
+  const localZigbee = await request(`http://127.0.0.1:${hub.setupServer.address().port}`, dashboardRoute("/api/integrations/zigbee/adapters"), { headers: { authorization: "Bearer test-token" } });
+  assert.deepEqual(localZigbee.body.adapters.map((entry) => entry.path), [adapter.path]);
+});
+
 test("Native dashboard controls a virtual device without accepting retained legacy automation rules", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-http-"));
   const hub = createHub({
@@ -124,7 +147,7 @@ test("Native dashboard controls a virtual device without accepting retained lega
     assert.equal(status.body.devices, 2);
   } finally {
     await hub.stop();
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 25 });
   }
 });
 

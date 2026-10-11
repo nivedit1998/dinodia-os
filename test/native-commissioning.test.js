@@ -297,7 +297,7 @@ test("assigned permanent-installation scope uses the same radio engine but regis
   const f = fixture(); t.after(f.close);
   const staff = { principalType: "operator", scope: ["os:permanent-installation"], sub: uuid(), sid: uuid(), jti: uuid(),
     handoffId: uuid(), homeId: f.homeId, workflow: uuid(), requestId: uuid(), employeeSessionId: uuid(), workRevision: 4,
-    hubId: "DIN-HUB-1", hubInstallId: f.hubInstallId, areaIds: [f.areaId], areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
+    hubId: "DIN-HUB-1", verifiedHubInstallationId: f.hubInstallId, areaIds: [f.areaId], areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
   const session = await f.service.start(staff, { protocol: "zigbee" }, "assigned-install-commission-001");
   assert.equal(session.status, "searching");
   const created = f.platformRequests.find((row) => row.action === "create");
@@ -331,7 +331,7 @@ test("assigned staff can review and register one already-paired unregistered pro
   const f = fixture(); t.after(f.close);
   const staff = { principalType: "operator", scope: ["os:permanent-installation"], sub: uuid(), sid: uuid(), jti: uuid(),
     handoffId: uuid(), homeId: f.homeId, workflow: uuid(), requestId: uuid(), employeeSessionId: uuid(), workRevision: 4,
-    hubId: "DIN-HUB-1", hubInstallId: f.hubInstallId, areaIds: [f.areaId], areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
+    hubId: "DIN-HUB-1", verifiedHubInstallationId: f.hubInstallId, areaIds: [f.areaId], areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
   const existing = { id: "zigbee:existing-radiator", protocol: "zigbee", available: true, interviewStatus: "successful",
     originalName: "Radiator", name: "Radiator", areaId: "os-area-1", protocolIdentity: { ieeeAddress: "0x00124b0000000201" },
     setup: { status: "ready" }, entities: { climate: { id: "climate-radiator", name: "Heating", domain: "climate", state: "heat",
@@ -407,7 +407,7 @@ test("assigned adoption validates against the live identity broker generation, n
   f.service.pairing.getPublicIdentity = async () => ({ generation: 7, serial: "DIN-HUB-1" });
   const staff = { principalType: "operator", scope: ["os:permanent-installation"], sub: uuid(), sid: uuid(), jti: uuid(),
     handoffId: uuid(), homeId: f.homeId, workflow: uuid(), requestId: uuid(), employeeSessionId: uuid(), workRevision: 4,
-    hubId: "DIN-HUB-1", hubInstallId: f.hubInstallId, areaIds: [f.areaId], areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
+    hubId: "DIN-HUB-1", verifiedHubInstallationId: f.hubInstallId, areaIds: [f.areaId], areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
   const existing = { id: "zigbee:broker-generation-radiator", protocol: "zigbee", available: true, interviewStatus: "successful",
     originalName: "Living room radiator", areaId: "os-area-1", protocolIdentity: { ieeeAddress: "0x00124b0000000201" },
     setup: { status: "ready" }, entities: { climate: { name: "Heating", capability: { category: "control", readable: true, writable: true } } },
@@ -468,7 +468,7 @@ test("installer commissioning rejects missing scoped-work claims before the firs
   const f = fixture(); t.after(f.close);
   const staff = { principalType: "operator", scope: ["os:permanent-installation"], sub: uuid(), sid: uuid(), jti: uuid(),
     handoffId: uuid(), homeId: f.homeId, workflow: uuid(), requestId: uuid(), employeeSessionId: uuid(), workRevision: 4,
-    hubId: "DIN-HUB-1", hubInstallId: f.hubInstallId, areaIds: [f.areaId], areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
+    hubId: "DIN-HUB-1", verifiedHubInstallationId: f.hubInstallId, areaIds: [f.areaId], areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
   await assert.rejects(f.service.start({ ...staff, requestId: undefined }, { protocol: "zigbee" }, "assigned-install-denied-001"), { code: "commissioning_authority_denied" });
   await assert.rejects(f.service.start({ ...staff, areaIds: [uuid()], areaOptions: [{ id: uuid(), name: "Wrong Area" }] }, { protocol: "zigbee" }, "assigned-install-denied-002"), { code: "commissioning_authority_denied" });
   assert.equal(f.platformRequests.length, 0);
@@ -482,7 +482,7 @@ test("assigned-authority mismatch diagnostics are reason-coded and never log ide
   f.service.pairing.getPublicIdentity = async () => ({ serial: "DIN-HUB-1", generation: 8 });
   const staff = { principalType: "operator", scope: ["os:permanent-installation"], sub: uuid(), sid: uuid(), jti: uuid(),
     handoffId: uuid(), homeId: f.homeId, workflow: uuid(), requestId: uuid(), employeeSessionId: uuid(), workRevision: 4,
-    hubId: "DIN-HUB-1", hubInstallId: f.hubInstallId, areaIds: [f.areaId], areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
+    hubId: "DIN-HUB-1", verifiedHubInstallationId: f.hubInstallId, areaIds: [f.areaId], areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
   await assert.rejects(f.service.principal(staff), { code: "commissioning_authority_denied" });
   assert.equal(entries.length, 1);
   assert.match(entries[0], /identity_generation_mismatch/);

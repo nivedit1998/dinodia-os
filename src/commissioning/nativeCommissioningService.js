@@ -109,7 +109,8 @@ class NativeCommissioningService {
       if (!principal.sub || !principal.sid || !principal.jti || !principal.handoffId || !principal.workflow || !principal.requestId || !principal.employeeSessionId
         || !Number.isSafeInteger(Number(principal.workRevision)) || Number(principal.workRevision) < 1) denialReasons.push("required_scoped_work_claim_missing");
       if (!principal.homeId || !platform.hubInstallId || String(platform.homeId || "") !== String(principal.homeId)) denialReasons.push("home_binding_mismatch");
-      if (!platform.hubInstallId || String(platform.hubInstallId || "") !== String(principal.hubInstallId)) denialReasons.push("hub_installation_binding_mismatch");
+      if (!platform.hubInstallId || !principal.verifiedHubInstallationId
+        || String(platform.hubInstallId || "") !== String(principal.verifiedHubInstallationId)) denialReasons.push("hub_installation_binding_mismatch");
       if (!currentIdentity) denialReasons.push("current_paired_identity_unavailable");
       else {
         if (String(principal.hubId || "") !== currentIdentity.serial) denialReasons.push("hub_serial_mismatch");
@@ -120,7 +121,8 @@ class NativeCommissioningService {
       if (denialReasons.length) { try { this.logger.warn?.(`[commissioning] assigned_principal_denied reasons=${denialReasons.join(",")}`); } catch {} }
       if (!principal.sub || !principal.sid || !principal.jti || !principal.handoffId || !principal.workflow || !principal.requestId || !principal.employeeSessionId
         || !Number.isSafeInteger(Number(principal.workRevision)) || Number(principal.workRevision) < 1 || !principal.homeId || !platform.hubInstallId
-        || String(platform.homeId || "") !== String(principal.homeId) || String(principal.hubInstallId || "") !== String(platform.hubInstallId)
+        || String(platform.homeId || "") !== String(principal.homeId) || !principal.verifiedHubInstallationId
+        || String(platform.hubInstallId || "") !== String(principal.verifiedHubInstallationId)
         || !currentIdentity || String(principal.hubId || "") !== currentIdentity.serial || currentIdentity.generation !== Number(principal.identityGeneration)
         || authorizedAreas.length === 0 || authorizedAreas.length !== areaOptions.length || authorizedAreas.some((id) => !areaOptions.some((area) => area.id === id))) {
         fail(SAFE_ERROR.denied, 403, "A current assigned permanent-installation authority is required");
@@ -128,7 +130,7 @@ class NativeCommissioningService {
       return { actorType: "STAFF_INSTALLER", employeeId: String(principal.sub), employeeSessionId: String(principal.employeeSessionId), operatorHandoffId: String(principal.handoffId),
         operatorJti: String(principal.jti), workItemId: String(principal.workflow), workRevision: Number(principal.workRevision), requestId: String(principal.requestId),
         tokenId: String(principal.jti), tokenHash: digest(String(principal.jti)), membershipId: null, accountId: null, customerSessionId: null, trustedDeviceId: null,
-        accessTokenHash: null, homeId: String(principal.homeId), hubInstallationId: String(platform.hubInstallId), identityGeneration: currentIdentity.generation,
+        accessTokenHash: null, homeId: String(principal.homeId), hubInstallationId: String(principal.verifiedHubInstallationId), identityGeneration: currentIdentity.generation,
         areaIds: authorizedAreas, areaOptions };
     }
     if (!principal || principal.principalType !== "app" || principal.householdRole !== "TENANT" || !principal.scope?.includes("tenant:device-command")
