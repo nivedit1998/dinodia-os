@@ -4195,7 +4195,7 @@ function nativeDeviceView(principal, device) {
       || pathname === "/_dinodia/setup/status" && req.method === "GET"
       || ["/_dinodia/setup/operator-attempt", "/_dinodia/setup/pairing", "/_dinodia/setup/support-access", "/_dinodia/setup/operator-session"].includes(pathname)
         && (req.method === "POST" || pathname === "/_dinodia/setup/pairing" && req.method === "DELETE");
-    const staticRoute = req.method === "GET" && (["/", "/index.html", "/styles.css", "/app.js", "/permanent-installation", "/permanent-installation.js"].includes(pathname)
+    const staticRoute = req.method === "GET" && (["/", "/index.html", "/styles.css", "/app.js", "/support-access", "/permanent-installation", "/permanent-installation.js"].includes(pathname)
       || /^\/js\/[A-Za-z0-9._/-]+$/.test(pathname) && !pathname.split("/").includes(".."));
     const installerReadRoutes = new Set([
       "/api/status", "/api/devices", "/api/automations", "/api/areas", "/api/labels",

@@ -89,6 +89,37 @@ test("paired operator bootstrap can start over the private LAN before Cloudflare
   }
 });
 
+test("restricted setup listener exposes the authenticated operator handoff page", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-setup-operator-listener-"));
+  const hub = createHub({
+    config: { nodeEnv: "development", adminToken: "operator-listener-admin", haToken: "operator-listener-ha", port: 0, nativeApiPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    mqttBridge: mockIntegration(),
+    matterBridge: mockIntegration(),
+    cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
+    platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
+  });
+  await hub.start();
+  await new Promise((resolve, reject) => {
+    hub.setupServer.once("error", reject);
+    hub.setupServer.listen(0, "127.0.0.1", resolve);
+  });
+  const address = hub.setupServer.address();
+  assert.ok(address && typeof address === "object");
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const page = await fetch(`${base}/support-access`);
+    assert.equal(page.status, 200);
+    assert.match(page.headers.get("content-type") || "", /text\/html/);
+    assert.match(page.headers.getSetCookie().join("; "), /dinodia_operator_binding=/);
+    assert.match(await page.text(), /<title>Dinodia OS setup<\/title>/);
+    const script = await fetch(`${base}/setup.js`);
+    assert.equal(script.status, 200);
+    assert.match(await script.text(), /dinodia-operator-attempt/);
+  } finally {
+    await hub.stop();
+  }
+});
+
 test("secure Cloudflare setup page serves the non-secret handoff script", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-remote-setup-assets-"));
   const hub = createHub({
