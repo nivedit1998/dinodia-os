@@ -287,12 +287,17 @@ class PlatformPairing {
       const responseCode = typeof result.errorCode === "string" && /^[a-z0-9_.:-]{1,80}$/i.test(result.errorCode)
         ? result.errorCode
         : `platform_http_${response.status}`;
-      throw Object.assign(new Error(result.error || result.message || `Platform returned HTTP ${response.status}`), { statusCode: response.status, code: responseCode });
+      const currentRevision = result.currentRevision;
+      throw Object.assign(new Error(result.error || result.message || `Platform returned HTTP ${response.status}`), {
+        statusCode: response.status,
+        code: responseCode,
+        ...(Number.isSafeInteger(currentRevision) && currentRevision >= 0 ? { currentRevision } : {}),
+      });
     }
     return result;
   }
 
-  async buildLanEndpointObservation(identityGeneration) {
+  async buildLanEndpointObservation(identityGeneration, minimumRevisionExclusive = 0) {
     const selected = await this.getLanEndpoint();
     const state = selected?.state === "CURRENT" && isPrivateIPv4(selected.address) ? "CURRENT" : "UNAVAILABLE";
     // The native HTTP contract has one fixed installer port. Do not derive it
@@ -316,7 +321,9 @@ class PlatformPairing {
       && String(previous.baseUrl || "") === String(baseUrl || "")
       && String(previous.discoveryHost || "") === discoveryHost
       && String(previous.interfaceName || "") === String(selected?.interfaceName || "");
-    const revision = previous ? Number(previous.revision) + (same ? 0 : 1) : 1;
+    if (!Number.isSafeInteger(minimumRevisionExclusive) || minimumRevisionExclusive < 0) throw new Error("The authoritative LAN endpoint revision is invalid");
+    const localRevision = previous ? Number(previous.revision) + (same ? 0 : 1) : 1;
+    const revision = Math.max(localRevision, minimumRevisionExclusive + 1);
     if (!Number.isSafeInteger(revision) || revision < 1) throw new Error("The persisted LAN endpoint revision is invalid");
     const observation = { version: 1, revision, state, ...(baseUrl ? { baseUrl } : {}), discoveryHost };
     if (!validateLanEndpointObservation(observation, this.serial, setupPort)) throw new Error("The selected LAN endpoint does not match the canonical dinodia.v1 contract");
@@ -444,12 +451,23 @@ class PlatformPairing {
       return await this.withLanEndpointReport(async () => {
         const identity = await this.getPublicIdentity();
         if (!identity?.generation) throw Object.assign(new Error("A registered hub identity generation is required"), { code: "hub_identity_unavailable" });
-        const lanEndpoint = await this.buildLanEndpointObservation(identity.generation);
-        const report = await this.requestWithHubIdentity("/api/hub-agent/v2/lan-endpoint", { lanEndpoint }, { forceManufacturingIdentity: true });
-        if (Number(report?.lanEndpoint?.revision) !== lanEndpoint.revision || report?.lanEndpoint?.state !== lanEndpoint.state) {
-          throw Object.assign(new Error("Platform did not acknowledge the current recovery endpoint revision"), { code: "lan_endpoint_ack_mismatch" });
+        let minimumRevisionExclusive = 0;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const lanEndpoint = await this.buildLanEndpointObservation(identity.generation, minimumRevisionExclusive);
+          try {
+            const report = await this.requestWithHubIdentity("/api/hub-agent/v2/lan-endpoint", { lanEndpoint }, { forceManufacturingIdentity: true });
+            if (Number(report?.lanEndpoint?.revision) !== lanEndpoint.revision || report?.lanEndpoint?.state !== lanEndpoint.state) {
+              throw Object.assign(new Error("Platform did not acknowledge the current recovery endpoint revision"), { code: "lan_endpoint_ack_mismatch" });
+            }
+            return report;
+          } catch (error) {
+            const revisionError = ["lan_endpoint_revision_stale", "lan_endpoint_revision_conflict"].includes(String(error?.code || ""));
+            const currentRevision = error?.currentRevision;
+            if (!revisionError || !Number.isSafeInteger(currentRevision) || currentRevision < 0 || attempt === 2) throw error;
+            minimumRevisionExclusive = currentRevision;
+          }
         }
-        return report;
+        throw Object.assign(new Error("The current LAN endpoint revision could not be reconciled safely"), { code: "lan_endpoint_revision_reconciliation_exhausted" });
       });
     } finally {
       this.recoveryEndpointInFlight = false;

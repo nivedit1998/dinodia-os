@@ -107,6 +107,7 @@ test("an unpaired installed hub publishes only its identity-signed local recover
     let maximumActiveRequests = 0;
     let currentLanAddress = "192.168.1.76";
     let nextLanAddresses = [];
+    let staleRevisionNext = null;
     const pairing = new PlatformPairing({
       store, vault, apiUrl: "https://platform.test", serial, nativeApiPort: 8123,
       runtime: { nodeEnv: "test" },
@@ -118,6 +119,11 @@ test("an unpaired installed hub publishes only its identity-signed local recover
         try {
           await new Promise((resolve) => setTimeout(resolve, 10));
           const body = JSON.parse(options.body);
+          if (staleRevisionNext !== null) {
+            const currentRevision = staleRevisionNext;
+            staleRevisionNext = null;
+            return { ok: false, status: 409, async json() { return { ok: false, errorCode: "lan_endpoint_revision_stale", currentRevision }; } };
+          }
           return { ok: true, status: 200, async json() { return { ok: true, lanEndpoint: { revision: body.lanEndpoint.revision, state: body.lanEndpoint.state } }; } };
         } finally { activeRequests -= 1; }
       },
@@ -145,6 +151,18 @@ test("an unpaired installed hub publishes only its identity-signed local recover
     assert.deepEqual(serializedReports.map((report) => report.revision), [2, 3], "racing recovery and heartbeat reports receive distinct monotonic revisions");
     assert.deepEqual(serializedReports.map((report) => report.baseUrl), ["http://192.168.1.77:8123", "http://192.168.1.78:8123"]);
     assert.equal(maximumActiveRequests, 1, "endpoint-bearing Platform requests are serialized through the shared report boundary");
+    currentLanAddress = "192.168.1.79";
+    staleRevisionNext = 7;
+    const outboxBeforeReconciliation = store.getSyncOutbox();
+    const reconciliationStart = calls.length;
+    const reconciled = await pairing.publishRecoveryLanEndpoint();
+    const reconciliationReports = calls.slice(reconciliationStart).map(({ options }) => JSON.parse(options.body).lanEndpoint);
+    assert.deepEqual(reconciliationReports.map((report) => report.revision), [4, 8], "an authenticated authoritative stale-revision receipt is reconciled once above the server revision");
+    assert.equal(reconciled.lanEndpoint.revision, 8);
+    assert.equal(store.getPlatform().lanEndpointObservation.revision, 8, "the reconciled revision is durably persisted before a subsequent retry");
+    assert.equal(store.getPlatform().paired, false, "revision reconciliation does not manufacture machine pairing");
+    assert.deepEqual(store.getSyncOutbox(), outboxBeforeReconciliation, "LAN recovery does not acknowledge or mutate household sync events");
+    assert.equal(maximumActiveRequests, 1, "revision reconciliation remains serialized with endpoint reports");
     pairing.stop();
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });
