@@ -105,6 +105,19 @@ class NativeCommissioningService {
     if (staff) {
       const areaOptions = Array.isArray(principal.areaOptions) ? principal.areaOptions.filter((row) => row && typeof row === "object" && /^[0-9a-f-]{36}$/i.test(String(row.id || "")) && typeof row.name === "string" && row.name.trim().length > 0 && row.name.length <= 120).slice(0, 64) : [];
       const authorizedAreas = [...new Set((principal.areaIds || []).map(String))].filter(Boolean).sort();
+      const denialReasons = [];
+      if (!principal.sub || !principal.sid || !principal.jti || !principal.handoffId || !principal.workflow || !principal.requestId || !principal.employeeSessionId
+        || !Number.isSafeInteger(Number(principal.workRevision)) || Number(principal.workRevision) < 1) denialReasons.push("required_scoped_work_claim_missing");
+      if (!principal.homeId || !platform.hubInstallId || String(platform.homeId || "") !== String(principal.homeId)) denialReasons.push("home_binding_mismatch");
+      if (!platform.hubInstallId || String(platform.hubInstallId || "") !== String(principal.hubInstallId)) denialReasons.push("hub_installation_binding_mismatch");
+      if (!currentIdentity) denialReasons.push("current_paired_identity_unavailable");
+      else {
+        if (String(principal.hubId || "") !== currentIdentity.serial) denialReasons.push("hub_serial_mismatch");
+        if (currentIdentity.generation !== Number(principal.identityGeneration)) denialReasons.push("identity_generation_mismatch");
+      }
+      if (authorizedAreas.length === 0 || authorizedAreas.length !== areaOptions.length || authorizedAreas.some((id) => !areaOptions.some((area) => area.id === id))) denialReasons.push("authorized_area_claim_mismatch");
+      // Log only fixed reason codes; never include Home, device, employee, or credential identifiers.
+      if (denialReasons.length) { try { this.logger.warn?.(`[commissioning] assigned_principal_denied reasons=${denialReasons.join(",")}`); } catch {} }
       if (!principal.sub || !principal.sid || !principal.jti || !principal.handoffId || !principal.workflow || !principal.requestId || !principal.employeeSessionId
         || !Number.isSafeInteger(Number(principal.workRevision)) || Number(principal.workRevision) < 1 || !principal.homeId || !platform.hubInstallId
         || String(platform.homeId || "") !== String(principal.homeId) || String(principal.hubInstallId || "") !== String(platform.hubInstallId)

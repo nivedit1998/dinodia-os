@@ -475,6 +475,24 @@ test("installer commissioning rejects missing scoped-work claims before the firs
   assert.equal(f.service.sessions().length || Object.keys(f.service.sessions()).length, 0);
 });
 
+test("assigned-authority mismatch diagnostics are reason-coded and never log identifiers", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const entries = [];
+  f.service.logger = { warn: (message) => entries.push(String(message)) };
+  f.service.pairing.getPublicIdentity = async () => ({ serial: "DIN-HUB-1", generation: 8 });
+  const staff = { principalType: "operator", scope: ["os:permanent-installation"], sub: uuid(), sid: uuid(), jti: uuid(),
+    handoffId: uuid(), homeId: f.homeId, workflow: uuid(), requestId: uuid(), employeeSessionId: uuid(), workRevision: 4,
+    hubId: "DIN-HUB-1", hubInstallId: f.hubInstallId, areaIds: [f.areaId], areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
+  await assert.rejects(f.service.principal(staff), { code: "commissioning_authority_denied" });
+  assert.equal(entries.length, 1);
+  assert.match(entries[0], /identity_generation_mismatch/);
+  for (const secret of [staff.sub, staff.sid, staff.jti, staff.handoffId, staff.homeId, staff.hubInstallId, f.areaId]) {
+    assert.equal(entries[0].includes(secret), false, "diagnostic log must not reveal protected identifiers");
+  }
+  assert.equal(f.platformRequests.length, 0);
+  assert.equal(f.radioEffects.zigbeeStart, 0);
+});
+
 test("the hub permits only one active radio commissioning session across tenant memberships", async (t) => {
   const f = fixture(); t.after(f.close);
   await f.service.start(f.principal, { protocol: "zigbee" }, "commission-key-0003");

@@ -1,20 +1,20 @@
 (() => {
   "use strict";
   const $ = (id) => document.getElementById(id);
-  const state = { context: null, session: null, selected: null, existingDevices: [], completedDevices: [], busy: false, poll: null };
+  const state = { context: null, session: null, selected: null, existingDevices: [], completedDevices: [], authorityVerified: false, busy: false, poll: null };
   const key = (suffix) => `dinodia-installation:${state.context?.requestId || "unknown"}:${suffix}`;
   const post = async (path, body, idempotencyKey = null) => {
     const headers = { "content-type": "application/json", "x-dinodia-setup-csrf": cookie("dinodia_setup_csrf") };
     if (idempotencyKey) headers["idempotency-key"] = idempotencyKey;
     const response = await fetch(path, { method: "POST", credentials: "same-origin", cache: "no-store", headers, body: JSON.stringify(body) });
     const value = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(value?.error?.message || value?.error || "The hub rejected this installation action");
+    if (!response.ok) { const error = new Error(value?.error?.message || value?.error || "The hub rejected this installation action"); error.statusCode = response.status; if ([401, 403].includes(response.status)) clearProtectedScope(error); throw error; }
     return value;
   };
   const get = async (path) => {
     const response = await fetch(path, { credentials: "same-origin", cache: "no-store" });
     const value = await response.json().catch(() => ({}));
-    if (!response.ok) { const error = new Error(value?.error?.message || value?.error || "The assigned installation session is no longer available"); error.statusCode = response.status; throw error; }
+    if (!response.ok) { const error = new Error(value?.error?.message || value?.error || "The assigned installation session is no longer available"); error.statusCode = response.status; if ([401, 403].includes(response.status)) clearProtectedScope(error); throw error; }
     return value;
   };
   function cookie(name) {
@@ -23,13 +23,39 @@
   function showError(error) { $("error").textContent = error instanceof Error ? error.message : "The action could not be completed"; $("error").hidden = false; }
   function clearError() { $("error").hidden = true; $("error").textContent = ""; }
   const terminal = new Set(["completed", "cancelled", "expired", "failed"]);
+  function clearProtectedScope(error) {
+    const prefix = "dinodia-installation:";
+    for (let index = sessionStorage.length - 1; index >= 0; index -= 1) {
+      const savedKey = sessionStorage.key(index);
+      if (savedKey?.startsWith(prefix)) sessionStorage.removeItem(savedKey);
+    }
+    if (state.poll) clearInterval(state.poll);
+    state.poll = null; state.context = null; state.session = null; state.selected = null;
+    state.existingDevices = []; state.completedDevices = []; state.authorityVerified = false; state.busy = false;
+    $("summary").textContent = "This assigned installation authority is no longer current. Close this window and reopen the work from Company Portal.";
+    $("area").replaceChildren(new Option("No current Area access", ""));
+    $("device-result").hidden = true; $("candidates").hidden = true; $("existing-devices").hidden = true; $("completed-devices").hidden = true;
+    $("matter-entry").hidden = true; $("matter-entry-row").hidden = true;
+    $("candidate-list").replaceChildren(); $("existing-device-list").replaceChildren(); $("completed-device-list").replaceChildren();
+    for (const id of ["label", "name", "matter-payload", "selected-controls"]) if ($(id)) $(id).value = "";
+    $("status").textContent = "No protected installation scope is retained in this window.";
+    $("zigbee-readiness").textContent = "Assigned installation authority must be refreshed before any action.";
+    $("matter-readiness").textContent = "Assigned installation authority must be refreshed before any action.";
+    if (error) showError(error);
+    updateButtons();
+  }
   function setBusy(value) { state.busy = value; for (const id of ["start-zigbee", "start-matter", "refresh", "refresh-existing", "cancel", "submit-matter", "select", "install", "view-only", "retain-unsupported", "remove", "add-next", "finish-installation"]) if ($(id)) $(id).disabled = value; }
-  function canStart(protocol) { const entry = state.context?.protocols?.[protocol]; return state.context?.protocols?.registrationEnabled === true && entry?.enabled === true && entry?.adapterReady === true && (!state.session || terminal.has(state.session.status)); }
+  function canStart(protocol) { const entry = state.context?.protocols?.[protocol]; return state.authorityVerified && state.context?.protocols?.registrationEnabled === true && entry?.enabled === true && entry?.adapterReady === true && (!state.session || terminal.has(state.session.status)); }
   function updateButtons() {
+    const authorized = state.authorityVerified && Boolean(state.context);
     $("start-zigbee").disabled = state.busy || !canStart("zigbee");
     $("start-matter").disabled = state.busy || !canStart("matter");
     $("refresh").disabled = state.busy;
-    $("cancel").disabled = state.busy || !state.session || ["completed", "cancelled", "expired", "failed"].includes(state.session.status);
+    $("refresh-existing").disabled = state.busy || !authorized;
+    $("cancel").disabled = state.busy || !authorized || !state.session || ["completed", "cancelled", "expired", "failed"].includes(state.session.status);
+    for (const id of ["submit-matter", "select", "install", "view-only", "retain-unsupported", "remove", "add-next", "finish-installation", "end-session"]) if ($(id)) $(id).disabled = state.busy || !authorized;
+    $("area").disabled = !authorized;
+    for (const id of ["label", "name"]) if ($(id)) $(id).disabled = !authorized;
     const selected = state.session?.status === "selected";
     $("select").hidden = !state.selected || selected;
     $("install").hidden = !selected || state.session?.catalogueStatus !== "ready";
@@ -96,12 +122,14 @@
     }
   }
   async function refreshExistingDevices() {
-    if (!state.context?.protocols?.registrationEnabled) { state.existingDevices = []; state.completedDevices = []; renderExistingDevices(); renderCompleted(); return; }
+    if (!state.context?.protocols?.registrationEnabled) { state.existingDevices = []; state.completedDevices = []; state.authorityVerified = true; renderExistingDevices(); renderCompleted(); updateButtons(); return; }
     const result = await get("/_dinodia/installer/commissioning/devices");
     state.existingDevices = Array.isArray(result.devices) ? result.devices : [];
     state.completedDevices = Array.isArray(result.completedDevices) ? result.completedDevices : [];
+    state.authorityVerified = true;
     renderExistingDevices();
     renderCompleted();
+    updateButtons();
   }
   function renderExistingDevices() {
     const section = $("existing-devices"); const list = $("existing-device-list"); const held = state.context?.protocols?.registrationEnabled !== true;
@@ -132,7 +160,7 @@
     finally { setBusy(false); updateButtons(); }
   }
   async function startExisting(device) {
-    if (state.busy || !state.context?.protocols?.registrationEnabled || state.session && !terminal.has(state.session.status)) return;
+    if (state.busy || !state.authorityVerified || !state.context?.protocols?.registrationEnabled || state.session && !terminal.has(state.session.status)) return;
     setBusy(true); clearError(); state.selected = device;
     try {
       const session = await post("/_dinodia/installer/commissioning/sessions", { schemaVersion: "dinodia.v1", operationKind: "REGISTER_EXISTING", protocol: device.protocol, candidateRef: device.candidateRef }, `install-adopt-${crypto.randomUUID()}`);
@@ -162,19 +190,8 @@
     finally { setBusy(false); updateButtons(); }
   }
   async function refreshContext() {
-    try { state.context = await get("/_dinodia/installer/commissioning"); }
-    catch (error) {
-      if ([401, 403].includes(error?.statusCode)) {
-        sessionStorage.removeItem(key("session"));
-        if (state.poll) clearInterval(state.poll);
-        state.poll = null; state.context = null; state.session = null; state.selected = null;
-        $("summary").textContent = "This assigned installation authority is no longer current. Close this window and reopen the work from Company Portal.";
-        $("area").replaceChildren(new Option("No current Area access", ""));
-        $("device-result").hidden = true; $("candidates").hidden = true;
-        $("status").textContent = "No protected installation scope is retained in this window.";
-      }
-      throw error;
-    }
+    state.authorityVerified = false; updateButtons();
+    state.context = await get("/_dinodia/installer/commissioning");
     $("summary").textContent = `Assigned installation work · ${state.context.areas.length} permitted original Area${state.context.areas.length === 1 ? "" : "s"}`;
     const select = $("area"); const previous = select.value; select.replaceChildren(new Option("Choose an Area", ""));
     for (const area of state.context.areas) select.add(new Option(area.name, area.id));
@@ -188,12 +205,11 @@
           : protocol === "matter" ? (entry.readinessMessage || `${title} is connected.`)
             : `${title} is ready for a user-started device search/setup.`;
       $(`${protocol}-readiness`).textContent = reason;
-      $(`start-${protocol}`).disabled = state.busy || !entry?.enabled || !entry?.adapterReady || Boolean(state.session && !terminal.has(state.session.status));
     }
     if (!state.session) $("status").textContent = "No active commissioning session. Start a search only when the relevant radio is ready.";
   }
   async function chooseCandidate() {
-    if (!state.session || !state.selected) return;
+    if (!state.authorityVerified || !state.session || !state.selected) return;
     const areaId = $("area").value; const customerLabel = $("label").value.trim(); const name = $("name").value.trim();
     if (!areaId || !customerLabel || !name) { showError(new Error("Choose an active original Area and enter a device name and customer label.")); return; }
     setBusy(true); clearError();
@@ -205,7 +221,7 @@
     finally { setBusy(false); updateButtons(); }
   }
   async function complete(disposition) {
-    if (!state.session) return;
+    if (!state.authorityVerified || !state.session) return;
     setBusy(true); clearError();
     try {
       const candidate = state.selected || (state.session.candidates || []).find((row) => row.candidateRef === state.session.selectedCandidateRef) || (state.session.candidates || [])[0];
@@ -217,7 +233,7 @@
     finally { setBusy(false); updateButtons(); }
   }
   async function cancel() {
-    if (!state.session || !window.confirm("Cancel this commissioning attempt? The hub will close joining and reconcile any partially added device.")) return;
+    if (!state.authorityVerified || !state.session || !window.confirm("Cancel this commissioning attempt? The hub will close joining and reconcile any partially added device.")) return;
     setBusy(true); clearError();
     try { render(await post(`/_dinodia/installer/commissioning/sessions/${encodeURIComponent(state.session.sessionId)}/cancel`, { schemaVersion: "dinodia.v1" })); }
     catch (error) { showError(error); }
@@ -250,7 +266,7 @@
   });
   $("submit-matter").addEventListener("click", async () => {
     if (location.protocol !== "https:") { showError(new Error("Matter setup codes are accepted only through the verified secure Dinodia OS address. Reopen this assigned work using secure access.")); return; }
-    if (!state.session) return;
+    if (!state.authorityVerified || !state.session) return;
     setBusy(true); clearError();
     try {
       const session = await post(`/_dinodia/installer/commissioning/sessions/${encodeURIComponent(state.session.sessionId)}/matter-payload`, { schemaVersion: "dinodia.v1", setupPayload: $("matter-payload").value });
@@ -271,7 +287,7 @@
       if (saved && /^[0-9a-f-]{36}$/i.test(saved)) { state.session = { sessionId: saved }; await refresh(); }
       updateButtons();
     renderCompleted();
-    } catch (error) { $("summary").textContent = "This assigned work is unavailable."; showError(error); }
+    } catch (error) { if (![401, 403].includes(error?.statusCode)) $("summary").textContent = state.context ? "Authority or hub status could not be refreshed; actions remain disabled until it is revalidated." : "This assigned work is unavailable."; showError(error); updateButtons(); }
   }
   void init();
 })();

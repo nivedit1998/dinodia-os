@@ -3641,10 +3641,15 @@ function nativeDeviceView(principal, device) {
     const principal = await currentPermanentInstallationPrincipal(req);
     if (!principal) return nativeContractError(res, 401, "AUTH_REQUIRED", "The assigned work or Company Portal session expired. Close this window and reopen the work from Company Portal.");
     try {
+      if (!nativeCommissioningService) return nativeContractError(res, 503, "HUB_UNAVAILABLE", "The hub commissioning service is unavailable", true);
       if (req.method === "GET" && isDeviceListPath) {
         return json(res, 200, await nativeCommissioningService.listAdoptableDevices(principal), { "Cache-Control": "no-store" });
       }
       if (req.method === "GET" && isRootPath) {
+        // Do not disclose Area names or radio readiness from the operator token
+        // until the same Home/hub/identity/Area binding used by commissioning
+        // mutations has been validated against current local and broker state.
+        const actor = await nativeCommissioningService.principal(principal);
         const zigbeeSettings = hubStore.getZigbee?.() || {};
         const zigbeeRuntimeState = await zigbeeRuntime.status();
         const zigbeeBroker = mqtt.status();
@@ -3658,8 +3663,8 @@ function nativeDeviceView(principal, device) {
         const threadNetwork = await fetchOtbr(threadUrl ? `${threadUrl.replace(/\/$/, "")}/node` : "");
         const threadReady = Boolean(threadSettings.configured && threadRuntimeState.running === true
           && threadNetwork.reachable === true && ["leader", "router", "child", "detached"].includes(String(threadNetwork.state)));
-        return json(res, 200, { schemaVersion: "dinodia.v1", requestId: principal.requestId, workflowId: principal.workflow,
-          areas: (Array.isArray(principal.areaOptions) ? principal.areaOptions : []).map((area) => ({ id: area.id, name: area.name })),
+        return json(res, 200, { schemaVersion: "dinodia.v1", requestId: actor.requestId, workflowId: actor.workItemId,
+          areas: actor.areaOptions.map((area) => ({ id: area.id, name: area.name })),
           protocols: {
             registrationEnabled: runtimeConfig.nativeCommissioningCapabilities.nativeStaffDeviceRegistrationV1 === true,
             zigbee: { enabled: runtimeConfig.nativeCommissioningCapabilities.nativeStaffZigbeeCommissioningV1 === true, adapterReady: zigbeeAdapterReady,
@@ -3672,7 +3677,6 @@ function nativeDeviceView(principal, device) {
               readinessMessage: matterStatus.connected === true ? `Matter Server is connected.${threadReady ? " The Thread network is ready for compatible Matter-over-Thread devices." : " Matter-over-Thread devices additionally need a current Thread border-router network; the Matter controller connection is reported separately."}` : "Matter Server is not connected. No Matter setup payload will be accepted." },
           } }, { "Cache-Control": "no-store" });
       }
-      if (!nativeCommissioningService) return nativeContractError(res, 503, "HUB_UNAVAILABLE", "The hub commissioning service is unavailable", true);
       if (req.method === "POST" && isRootPath) {
         const body = await readBody(req, 4096);
         const operationKind = body.operationKind || "PAIR_NEW";
