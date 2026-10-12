@@ -212,6 +212,35 @@ test("discovery candidate review stays enabled after the initial busy refresh co
   assert.equal(page.elements.get("name").value, "SONOFF TRVZB");
 });
 
+test("candidate review remains open across session refreshes without losing the operator's draft", async () => {
+  const sessionId = "55555555-5555-4555-8555-555555555555";
+  const session = { sessionId, protocol: "zigbee", operationKind: "PAIR_NEW", status: "searching", revision: 2,
+    updatedAt: new Date().toISOString(), candidates: [{ candidateRef: "66666666-6666-4666-8666-666666666666",
+      name: "SONOFF TRVZB", manufacturer: "SONOFF", model: "TRVZB", stage: "needs_setup", interviewStatus: "successful" }] };
+  const requestId = "22222222-2222-4222-8222-222222222222";
+  const page = harness({ context: validContext(), session, seededStorage: {
+    [`dinodia-installation:${requestId}:session`]: sessionId,
+  } });
+  await page.flush();
+
+  const candidate = page.elements.get("candidate-list").children[0];
+  assert.equal(candidate.children[0].textContent, "SONOFF TRVZB");
+  assert.match(candidate.children[1].textContent, /SONOFF.*TRVZB.*Interview complete/);
+  candidate.children[2].listeners.get("click")();
+  page.elements.get("area").value = areaId;
+  page.elements.get("label").value = "Radiator";
+  page.elements.get("name").value = "Room 1 Radiator";
+  assert.equal(page.elements.get("device-result").hidden, false);
+
+  page.documentListeners.get("visibilitychange")();
+  await page.flush();
+  assert.equal(page.elements.get("device-result").hidden, false,
+    "an ordinary protected status poll must not hide the selected review form");
+  assert.equal(page.elements.get("area").value, areaId);
+  assert.equal(page.elements.get("label").value, "Radiator");
+  assert.equal(page.elements.get("name").value, "Room 1 Radiator");
+});
+
 test("cancelled Matter session hides the setup-code controls in the rendered production page", async () => {
   const sessionId = "77777777-7777-4777-8777-777777777777";
   const requestId = "22222222-2222-4222-8222-222222222222";

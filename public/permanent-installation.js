@@ -109,12 +109,19 @@
   }
   function render(session) {
     state.session = session;
+    if (session.selectedCandidateRef) {
+      state.selected = (session.candidates || []).find((candidate) => candidate.candidateRef === session.selectedCandidateRef) || state.selected;
+    } else if (terminal.has(session.status)) state.selected = null;
+    else if (state.selected?.candidateRef) state.selected = (session.candidates || []).find((candidate) => candidate.candidateRef === state.selected.candidateRef) || state.selected;
     if (session.operationKind === "REGISTER_EXISTING" && !state.selected) state.selected = (session.candidates || [])[0] || null;
     sessionStorage.setItem(key("session"), session.sessionId);
     $("status").textContent = `${session.protocol.toUpperCase()} · ${session.status.replaceAll("_", " ")} · updated ${new Date(session.updatedAt).toLocaleTimeString()}`;
     $("matter-entry").hidden = session.protocol !== "matter" || !["awaiting_payload", "interrupted"].includes(session.status);
     $("matter-entry-row").hidden = $("matter-entry").hidden;
-    $("device-result").hidden = !session.selectedCandidateRef;
+    // Preserve an in-progress review of a newly discovered candidate across
+    // status polls. The selection is only a local review draft until the
+    // separate server-side "Review this device" action succeeds.
+    $("device-result").hidden = !session.selectedCandidateRef && !state.selected;
     const controls = Array.isArray(session.selectedControls) ? session.selectedControls : [];
     $("selected-controls").textContent = controls.length ? `Detected controls: ${controls.map((control) => `${control.name}${control.readable ? " · reading" : ""}${control.writable ? " · control" : ""}`).join("; ")}`
       : session.selectedCandidateRef ? `Control/readings status: ${session.catalogueStatus === "unsupported" ? "not understood yet; no controls are being invented" : session.catalogueStatus === "no_safe_controls" ? "no safe control was detected" : "no current control descriptor is available"}` : "";
@@ -142,7 +149,10 @@
     for (const candidate of rows) {
       const item = document.createElement("div"); item.className = "candidate";
       const title = document.createElement("strong"); title.textContent = candidate.name || "Unidentified device";
-      const detail = document.createElement("p"); detail.className = "muted"; detail.textContent = [candidate.manufacturer, candidate.model, candidate.stage].filter(Boolean).join(" · ") || "The hub is interviewing this device";
+      const detail = document.createElement("p"); detail.className = "muted";
+      const setup = candidate.stage === "needs_setup" ? "Area and label needed" : candidate.stage;
+      const interview = candidate.interviewStatus === "successful" ? "Interview complete" : candidate.interviewStatus;
+      detail.textContent = [candidate.manufacturer, candidate.model, interview, setup].filter(Boolean).join(" · ") || "The hub is interviewing this device";
       const choose = document.createElement("button"); choose.type = "button"; choose.dataset.reviewCandidate = "true"; choose.textContent = state.session?.operationKind === "REGISTER_EXISTING" ? "Review existing device" : "Review candidate"; choose.disabled = state.busy || !state.authorityVerified;
       choose.addEventListener("click", () => { state.selected = candidate; $("device-result").hidden = false; $("label").value = candidate.name || "New device"; $("name").value = candidate.name || "New device"; clearError(); updateButtons(); });
       item.append(title, detail, choose); list.append(item);

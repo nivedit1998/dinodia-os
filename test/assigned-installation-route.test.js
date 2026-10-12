@@ -57,6 +57,7 @@ test("assigned commissioning route serves a current grant and denies stale ident
     logger: { log() {}, warn() {}, error() {} },
   });
   t.after(async () => { await hub.stop().catch(() => {}); global.fetch = originalFetch; await fs.rm(directory, { recursive: true, force: true }); });
+  await hub.store.saveArea({ name: privateAreaName }, "os-area-1");
   await hub.store.savePlatform({ homeId, hubInstallId, paired: true, areaBindings: [{ areaId, hubAreaId: "os-area-1" }] });
   await hub.store.saveZigbee({ adapterPath: "/dev/ttyUSB-test-zigbee" });
   const existingDeviceId = "zigbee:assigned-route-radiator";

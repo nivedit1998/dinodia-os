@@ -34,7 +34,7 @@ function fixedSession(session, afterCandidateRef = null) {
     status: statuses.has(String(session.status)) || String(session.status).endsWith("_cleanup_pending") ? session.status : "failed",
     createdAt: String(session.createdAt), updatedAt: String(session.updatedAt || session.createdAt), expiresAt: String(session.expiresAt),
     revision: Number(session.revision) || 1,
-    candidates: page.map(({ candidateRef, name, manufacturer, model, stage, observedAt }) => ({ candidateRef, name, manufacturer, model, stage, observedAt })),
+    candidates: page.map(({ candidateRef, name, manufacturer, model, stage, interviewStatus, observedAt }) => ({ candidateRef, name, manufacturer, model, stage, interviewStatus, observedAt })),
     nextCandidateCursor: start + page.length < candidates.length ? page.at(-1)?.candidateRef || null : null,
     selectedCandidateRef: session.selectedCandidateRef || null, selectedAreaId: session.selectedAreaId || null,
     selectedName: session.selectedName || null, selectedCustomerLabel: session.selectedCustomerLabel || null,
@@ -134,11 +134,27 @@ class NativeCommissioningService {
         || authorizedAreas.length === 0 || authorizedAreas.length !== areaOptions.length || authorizedAreas.some((id) => !areaOptions.some((area) => area.id === id))) {
         fail(SAFE_ERROR.denied, 403, "A current assigned permanent-installation authority is required");
       }
+      // The signed staff grant can contain Areas which are active in Platform
+      // but no longer exist on this hub (for example after an interrupted
+      // migration). Keep the grant's authority check above exact, then reduce
+      // usable scope to one-to-one mappings onto current, same-named hub Areas.
+      const bindings = Array.isArray(platform.areaBindings) ? platform.areaBindings : [];
+      const localAreas = new Map((this.store.listAreas?.() || []).map((area) => [String(area.id || ""), area]));
+      const usableAreaOptions = areaOptions.filter((option) => {
+        const matches = bindings.filter((binding) => String(binding.areaId || "") === option.id);
+        if (matches.length !== 1 || !matches[0].hubAreaId) return false;
+        const localArea = localAreas.get(String(matches[0].hubAreaId));
+        if (!localArea) return false;
+        const canonicalName = String(option.name || "").normalize("NFC").trim();
+        const hubName = String(localArea.name || "").normalize("NFC").trim();
+        return canonicalName.length > 0 && canonicalName === hubName;
+      });
+      if (!usableAreaOptions.length) fail(SAFE_ERROR.denied, 403, "No active original Area is currently mapped to a matching Area on this hub");
       return { actorType: "STAFF_INSTALLER", employeeId: String(principal.sub), employeeSessionId: String(principal.employeeSessionId), operatorHandoffId: String(principal.handoffId),
         operatorJti: String(principal.jti), workItemId: String(principal.workflow), workRevision: Number(principal.workRevision), requestId: String(principal.requestId),
         tokenId: String(principal.jti), tokenHash: digest(String(principal.jti)), membershipId: null, accountId: null, customerSessionId: null, trustedDeviceId: null,
         accessTokenHash: null, homeId: String(principal.homeId), hubInstallationId: String(principal.verifiedHubInstallationId), identityGeneration: currentIdentity.generation,
-        areaIds: authorizedAreas, areaOptions };
+        areaIds: usableAreaOptions.map((area) => area.id), areaOptions: usableAreaOptions };
     }
     if (!principal || principal.principalType !== "app" || principal.householdRole !== "TENANT" || !principal.scope?.includes("tenant:device-command")
       || !principal.sub || !principal.sid || !principal.jti || !principal.trustedDeviceId || !principal.membershipId || !principal.homeId || !principal.hubInstallId || !/^[a-f0-9]{64}$/i.test(String(principal.accessTokenHash || ""))) fail(SAFE_ERROR.denied, 403, "A current selected tenant session is required");
@@ -500,9 +516,23 @@ class NativeCommissioningService {
       : this.store.listDevices().filter((device) => device.protocol === "matter" && !this.isBaselineDevice(session, device));
     let changed = false;
     for (const device of devices) {
+      if (this.isBaselineDevice(session, device)) continue;
+      const existing = session.candidates.find((item) => item.deviceId === String(device.id));
+      const current = {
+        name: String(device.originalName || device.name || "New device").slice(0, 80),
+        manufacturer: String(device.metadata?.manufacturer || device.metadata?.manufacturer_name || "").slice(0, 80),
+        model: String(device.metadata?.model || device.metadata?.model_id || "").slice(0, 80),
+        stage: String(device.setup?.status || "interviewing").slice(0, 40),
+        interviewStatus: String(device.interviewStatus || "").slice(0, 40),
+      };
+      if (existing) {
+        for (const [key, value] of Object.entries(current)) {
+          if (existing[key] !== value) { existing[key] = value; changed = true; }
+        }
+        continue;
+      }
       if (session.candidates.length >= MAX_TOTAL_CANDIDATES) break;
-      if (this.isBaselineDevice(session, device) || session.candidates.some((item) => item.deviceId === String(device.id))) continue;
-      session.candidates.push({ candidateRef: crypto.randomUUID(), deviceId: String(device.id), identityHash: digest(String(device.protocolIdentity?.ieeeAddress || device.protocolIdentity?.nodeId || device.metadata?.ieee_address || device.id)), name: String(device.originalName || device.name || "New device").slice(0, 80), manufacturer: String(device.metadata?.manufacturer || device.metadata?.manufacturer_name || "").slice(0, 80), model: String(device.metadata?.model || device.metadata?.model_id || "").slice(0, 80), stage: String(device.setup?.status || "interviewing").slice(0, 40), observedAt: new Date(this.clock()).toISOString() });
+      session.candidates.push({ candidateRef: crypto.randomUUID(), deviceId: String(device.id), identityHash: digest(String(device.protocolIdentity?.ieeeAddress || device.protocolIdentity?.nodeId || device.metadata?.ieee_address || device.id)), ...current, observedAt: new Date(this.clock()).toISOString() });
       changed = true;
     }
     if (changed) {
@@ -536,6 +566,13 @@ class NativeCommissioningService {
     if (!actor.areaIds.includes(requested)) fail(SAFE_ERROR.denied, 403, "Choose an Area currently granted to this tenant");
     const matches = (this.store.getPlatform?.()?.areaBindings || []).filter((row) => String(row.areaId || "") === requested);
     if (matches.length !== 1 || !matches[0].hubAreaId) fail(SAFE_ERROR.denied, 403, "The selected Area is not mapped to this enrolled hub");
+    if (actor.actorType === "STAFF_INSTALLER") {
+      const localArea = (this.store.listAreas?.() || []).find((area) => String(area.id || "") === String(matches[0].hubAreaId));
+      const canonicalAreaName = actor.areaOptions?.find((area) => String(area.id) === requested)?.name;
+      if (!localArea || !canonicalAreaName || String(localArea.name || "").normalize("NFC").trim() !== String(canonicalAreaName).normalize("NFC").trim()) {
+        fail(SAFE_ERROR.denied, 403, "The selected original Area is not mapped to a matching current Area on this hub");
+      }
+    }
     return { areaId: requested, hubAreaId: String(matches[0].hubAreaId) };
   }
 

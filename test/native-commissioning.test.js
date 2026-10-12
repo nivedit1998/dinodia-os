@@ -636,6 +636,47 @@ test("installer commissioning rejects missing scoped-work claims before the firs
   assert.equal(f.service.sessions().length || Object.keys(f.service.sessions()).length, 0);
 });
 
+test("assigned staff Area choices exclude duplicate cloud Areas with no current matching hub Area", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const staleAreaId = uuid();
+  f.store.getPlatform().areaBindings.push({ areaId: staleAreaId, hubAreaId: "removed-hub-area" });
+  const staff = { principalType: "operator", scope: ["os:permanent-installation"], sub: uuid(), sid: uuid(), jti: uuid(),
+    handoffId: uuid(), homeId: f.homeId, workflow: uuid(), requestId: uuid(), employeeSessionId: uuid(), workRevision: 1,
+    hubId: "DIN-HUB-1", verifiedHubInstallationId: f.hubInstallId, areaIds: [f.areaId, staleAreaId],
+    areaOptions: [{ id: f.areaId, name: "Living Room" }, { id: staleAreaId, name: "Living Room" }], identityGeneration: 7 };
+
+  const actor = await f.service.principal(staff);
+
+  assert.deepEqual(actor.areaOptions, [{ id: f.areaId, name: "Living Room" }]);
+  assert.deepEqual(actor.areaIds, [f.areaId]);
+  assert.equal(f.service.canonicalArea(actor, f.areaId).hubAreaId, "os-area-1");
+  assert.throws(() => f.service.canonicalArea({ ...actor, areaIds: [f.areaId, staleAreaId],
+    areaOptions: [...actor.areaOptions, { id: staleAreaId, name: "Living Room" }] }, staleAreaId),
+  { code: "commissioning_authority_denied" });
+});
+
+test("a new Zigbee candidate refreshes its model and completed interview after the initial join event", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const deviceId = "zigbee:new-sonoff-trvzb";
+  await f.store.upsertDevice({ id: deviceId, protocol: "zigbee", available: true, name: "SONOFF TRVZB",
+    interviewStatus: "successful", setup: { status: "needs_setup" }, protocolIdentity: { ieeeAddress: "0x00124b0000000abc" },
+    metadata: { manufacturer: "SONOFF", model: "TRVZB" }, entities: { climate: { capability: { category: "control" } } } });
+  f.mqtt.pairingStatus = () => ({ active: true, found: [deviceId] });
+  const session = { sessionId: uuid(), protocol: "zigbee", operationKind: "PAIR_NEW", status: "searching", revision: 1,
+    candidates: [{ candidateRef: uuid(), deviceId, name: "Zigbee device", manufacturer: "", model: "", stage: "needs_setup" }],
+    baselineDeviceIds: [], baselineIdentityHashes: [], events: [] };
+
+  await f.service.refreshCandidates(session);
+
+  const candidate = fixedSession(session).candidates[0];
+  assert.equal(candidate.name, "SONOFF TRVZB");
+  assert.equal(candidate.manufacturer, "SONOFF");
+  assert.equal(candidate.model, "TRVZB");
+  assert.equal(candidate.stage, "needs_setup", "Area/name setup remains distinct from the radio interview state");
+  assert.equal(candidate.interviewStatus, "successful");
+  assert.equal(JSON.stringify(candidate).includes("0x00124b0000000abc"), false, "radio identity remains private");
+});
+
 test("assigned-authority mismatch diagnostics are reason-coded and never log identifiers", async (t) => {
   const f = fixture(); t.after(f.close);
   const entries = [];
