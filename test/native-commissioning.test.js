@@ -180,6 +180,112 @@ test("a fresh complete inventory confirms an exact pending Zigbee candidate is a
   assert.equal(next.status, "searching");
 });
 
+test("natural expiry preserves an interviewed assigned Zigbee candidate for explicit permanent registration", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const staff = { principalType: "operator", scope: ["os:permanent-installation"], sub: uuid(), sid: uuid(), jti: uuid(),
+    handoffId: uuid(), homeId: f.homeId, workflow: uuid(), requestId: uuid(), employeeSessionId: uuid(), workRevision: 4,
+    hubId: "DIN-HUB-1", verifiedHubInstallationId: f.hubInstallId, areaIds: [f.areaId],
+    areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
+  const pairing = await f.service.start(staff, { protocol: "zigbee" }, "assigned-expiry-review-0001");
+  const device = { id: "zigbee:expired-sonoff-trvzb", protocol: "zigbee", available: true, interviewStatus: "successful",
+    originalName: "SONOFF TRVZB", name: "SONOFF TRVZB", areaId: "os-area-1",
+    protocolIdentity: { ieeeAddress: "0x00124b000000e001" }, setup: { status: "needs_setup" },
+    entities: { climate: { id: "climate-expired-trvzb", name: "Heating", domain: "climate", state: "heat",
+      capability: { category: "control", semanticRole: "target_temperature", readable: true, writable: true, kind: "number", bindings: [{ serviceId: "climate.set_temperature" }] } } },
+    metadata: { manufacturer: "SONOFF", model: "TRVZB", deviceType: "radiator" } };
+  await f.store.upsertDevice(device);
+  f.mqtt.pairingStatus = () => ({ active: true, found: [device.id] });
+  await f.service.status(pairing.sessionId, staff);
+  const expired = f.service.sessions()[pairing.sessionId];
+  expired.expiresAt = new Date(Date.now() - 1).toISOString();
+  await f.service.save(expired);
+  f.mqtt.pairingStatus = () => ({ active: false, found: [] });
+
+  await f.service.reconcileExpired();
+
+  assert.ok(f.store.getDevice(device.id), "natural timeout must retain the exact interviewed local candidate");
+  assert.equal(f.service.sessions()[pairing.sessionId].cleanup.state, "PRESERVED_FOR_REVIEW");
+  assert.equal(f.radioEffects.zigbeeRemove, 0, "expiry is not permission to remove a device that already joined");
+  const previousService = f.service;
+  await previousService.close();
+  const restartedService = new NativeCommissioningService({ store: f.store, mqtt: f.mqtt, matter: f.matter, pairing: previousService.pairing,
+    vault: previousService.vault, commissioningCapabilities: previousService.commissioningCapabilities, clock: () => Date.now(), logger: { warn() {} } });
+  t.after(() => restartedService.close());
+  await restartedService.recover();
+  f.service = restartedService;
+  const listed = await f.service.listAdoptableDevices(staff);
+  assert.equal(listed.devices.length, 1, "a fresh current assigned handoff can recover the expired candidate");
+  assert.equal(listed.devices[0].model, "TRVZB");
+  await f.store.upsertDevice({ ...device, protocolIdentity: { ieeeAddress: "0x00124b000000ffff" } });
+  await assert.rejects(f.service.start(staff, { protocol: "zigbee", operationKind: "REGISTER_EXISTING", candidateRef: listed.devices[0].candidateRef }, "assigned-expiry-register-0001"),
+    { code: "commissioning_revision_conflict" }, "a changed protocol identity cannot consume stale recovery provenance");
+  await f.store.upsertDevice(device);
+  const refreshed = await f.service.listAdoptableDevices(staff);
+  const registration = await f.service.start(staff, { protocol: "zigbee", operationKind: "REGISTER_EXISTING", candidateRef: refreshed.devices[0].candidateRef }, "assigned-expiry-register-0002");
+  assert.equal(registration.status, "reviewing_existing");
+  const selected = await f.service.select(registration.sessionId, staff, { schemaVersion: "dinodia.v1", expectedRevision: registration.revision,
+    candidateRef: refreshed.devices[0].candidateRef, areaId: f.areaId, name: "Room 1 Radiator", customerLabel: "Radiator" });
+  assert.equal(selected.status, "selected");
+  const completed = await f.service.complete(registration.sessionId, staff, "install");
+  assert.equal(completed.status, "completed");
+  assert.equal(f.store.getDevice(device.id).protocolIdentity.ieeeAddress, "0x00124b000000e001");
+  assert.equal(f.store.getPlatform().devicePolicies[device.id].managementClass, "PROPERTY_DEVICE");
+  assert.equal(f.store.getPlatform().devicePolicies[device.id].installationRequestId, staff.requestId);
+  assert.equal(f.radioEffects.zigbeeStart, 1, "recovery uses registration only and never opens a second join");
+  assert.equal(f.radioEffects.zigbeeRemove, 0);
+});
+
+test("explicit cancellation of a new Zigbee pairing still removes its exact unregistered candidate", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const pairing = await f.service.start(f.principal, { protocol: "zigbee" }, "commission-explicit-cancel-01");
+  const device = { id: "zigbee:explicit-cancel-candidate", protocol: "zigbee", available: true, interviewStatus: "successful",
+    protocolIdentity: { ieeeAddress: "0x00124b000000e002" }, setup: { status: "needs_setup" }, entities: {}, metadata: { model: "TRVZB" } };
+  await f.store.upsertDevice(device);
+  f.mqtt.pairingStatus = () => ({ active: true, found: [device.id] });
+  await f.service.status(pairing.sessionId, f.principal);
+
+  await f.service.cancel(pairing.sessionId, f.principal);
+
+  assert.equal(f.store.getDevice(device.id), null, "explicit cancellation retains the established cleanup behavior");
+  assert.equal(f.radioEffects.zigbeeRemove, 1);
+});
+
+test("natural expiry keeps the radio lock and does not offer registration until the Zigbee join is confirmed closed", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const staff = { principalType: "operator", scope: ["os:permanent-installation"], sub: uuid(), sid: uuid(), jti: uuid(),
+    handoffId: uuid(), homeId: f.homeId, workflow: uuid(), requestId: uuid(), employeeSessionId: uuid(), workRevision: 4,
+    hubId: "DIN-HUB-1", verifiedHubInstallationId: f.hubInstallId, areaIds: [f.areaId],
+    areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
+  const pairing = await f.service.start(staff, { protocol: "zigbee" }, "assigned-expiry-radio-hold-01");
+  const device = { id: "zigbee:expiry-radio-hold", protocol: "zigbee", available: true, interviewStatus: "successful",
+    originalName: "SONOFF TRVZB", protocolIdentity: { ieeeAddress: "0x00124b000000e003" }, setup: { status: "needs_setup" },
+    entities: { climate: { capability: { category: "control", readable: true, writable: true } } }, metadata: { manufacturer: "SONOFF", model: "TRVZB" } };
+  await f.store.upsertDevice(device);
+  f.mqtt.pairingStatus = () => ({ active: true, found: [device.id] });
+  await f.service.status(pairing.sessionId, staff);
+  const expired = f.service.sessions()[pairing.sessionId];
+  expired.expiresAt = new Date(Date.now() - 1).toISOString();
+  await f.service.save(expired);
+  f.mqtt.stopPairing = async () => { f.radioEffects.zigbeeStop += 1; return { active: true }; };
+
+  await f.service.reconcileExpired();
+
+  assert.equal(f.service.sessions()[pairing.sessionId].expiryReviewPending, true);
+  assert.equal(f.service.sessions()[pairing.sessionId].cleanup.state, "AWAITING_RADIO_SETTLEMENT");
+  assert.equal(f.store.getDevice(device.id)?.protocol, "zigbee");
+  assert.equal(f.radioEffects.zigbeeRemove, 0);
+  assert.equal((await f.service.listAdoptableDevices(staff)).devices.length, 0, "do not expose it as registerable while the join window may still be open");
+  await assert.rejects(f.service.start(staff, { protocol: "matter" }, "assigned-expiry-radio-lock-02"), { code: "commissioning_radio_busy" });
+
+  f.mqtt.pairingStatus = () => ({ active: false, found: [] });
+  await f.service.reconcileExpired();
+
+  assert.equal(f.service.sessions()[pairing.sessionId].expiryReviewPending, false);
+  assert.equal(f.service.sessions()[pairing.sessionId].cleanup.state, "PRESERVED_FOR_REVIEW");
+  assert.equal(f.store.getDevice(device.id)?.protocol, "zigbee");
+  assert.equal(f.radioEffects.zigbeeRemove, 0);
+});
+
 test("a restart-interrupted empty Zigbee session does not block a new assigned Matter setup", async (t) => {
   const f = fixture(); t.after(f.close);
   const staff = { principalType: "operator", scope: ["os:permanent-installation"], sub: uuid(), sid: uuid(), jti: uuid(),

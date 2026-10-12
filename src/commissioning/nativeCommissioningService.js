@@ -4,6 +4,8 @@ const { buildPublicCommissioningCatalogue } = require("./publicDeviceCatalogue")
 const digest = (value) => crypto.createHash("sha256").update(String(value), "utf8").digest("hex");
 
 const SESSION_MS = 15 * 60 * 1000;
+const RECOVERABLE_PAIRING_MS = 30 * 24 * 60 * 60 * 1000;
+const MAX_RECOVERABLE_PAIRING_SESSIONS = 32;
 const MAX_CANDIDATES = 32;
 const MAX_TOTAL_CANDIDATES = 256;
 const TERMINAL = new Set(["completed", "completed_cleanup_pending", "cancelled", "expired", "failed", "cancelled_cleanup_pending", "expired_cleanup_pending", "failed_cleanup_pending"]);
@@ -79,7 +81,13 @@ class NativeCommissioningService {
     const active = Object.values(rows).filter((row) => !TERMINAL.has(row.status));
     if (active.length > 4) fail(SAFE_ERROR.busy, 409, "The hub already has the maximum active commissioning sessions");
     const completed = Object.entries(rows).filter(([, row]) => TERMINAL.has(row.status)).sort((a, b) => Date.parse(b[1].updatedAt) - Date.parse(a[1].updatedAt)).slice(0, 24);
-    const keep = Object.fromEntries([...Object.entries(rows).filter(([, row]) => !TERMINAL.has(row.status)), ...completed]);
+    const recoverable = Object.entries(rows).filter(([, row]) => TERMINAL.has(row.status)
+      && (row.candidates || []).some((candidate) => candidate.registrationProvenance?.kind === "expired_staff_pairing_v1"
+        && Date.parse(candidate.registrationProvenance.expiresAt) > this.clock()))
+      .sort((a, b) => Date.parse(b[1].updatedAt || b[1].createdAt) - Date.parse(a[1].updatedAt || a[1].createdAt))
+      .slice(0, MAX_RECOVERABLE_PAIRING_SESSIONS);
+    const retained = new Map([...completed, ...recoverable]);
+    const keep = Object.fromEntries([...Object.entries(rows).filter(([, row]) => !TERMINAL.has(row.status)), ...retained]);
     await this.store.saveSecurity({ nativeCommissioningSessions: keep });
     this.eventBus?.emit?.("dinodia_dashboard_updated", { kind: "commissioning", sessionId: session.sessionId, at: new Date(this.clock()).toISOString() });
     return session;
@@ -189,6 +197,11 @@ class NativeCommissioningService {
     return null;
   }
 
+  candidateIdentityHash(device) {
+    return digest(String(device?.protocolIdentity?.ieeeAddress || device?.protocolIdentity?.nodeId
+      || device?.metadata?.ieee_address || device?.id || ""));
+  }
+
   adoptionProvenance(actor, device) {
     if (actor.actorType !== "STAFF_INSTALLER" || !device || device.infrastructure === true) return null;
     const protocol = String(device.protocol || "").toLowerCase();
@@ -203,18 +216,91 @@ class NativeCommissioningService {
       && event.type === "tenant_device_commissioned" && String(event.deviceId || "") === String(device.id));
     if (priorTenantRegistration) return null;
     const protocolIdentity = this.protocolIdentity(device);
-    if (!protocolIdentity || device.interviewStatus !== "successful" || !Object.keys(device.entities || {}).length
-      || !["ready", "complete"].includes(String(device.setup?.status || "").toLowerCase())) return null;
+    if (!protocolIdentity || device.interviewStatus !== "successful") return null;
     const bindings = this.store.getPlatform?.()?.areaBindings || [];
     const areaBinding = bindings.find((row) => String(row.hubAreaId || "") === String(device.areaId || "") && actor.areaIds.includes(String(row.areaId || "")));
-    if (!areaBinding) return null;
     const events = this.store.listEvents?.(500) || [];
     const setupEvent = events.find((event) => event && event.type === "device_setup_completed"
       && String(event.deviceId || "") === String(device.id) && String(event.areaId || "") === String(device.areaId || ""));
     // A mutable setup.status is not ownership evidence. Require the retained
     // full-dashboard setup event plus live protocol identity/interview.
-    if (!setupEvent) return null;
-    return { protocolIdentityHash: protocolIdentity.hash, areaId: String(areaBinding.areaId), hubAreaId: String(areaBinding.hubAreaId), setupEventAt: String(setupEvent.timestamp || "") };
+    if (setupEvent && areaBinding && Object.keys(device.entities || {}).length
+      && ["ready", "complete"].includes(String(device.setup?.status || "").toLowerCase())) {
+      return { protocolIdentityHash: protocolIdentity.hash, areaId: String(areaBinding.areaId), hubAreaId: String(areaBinding.hubAreaId), setupEventAt: String(setupEvent.timestamp || "") };
+    }
+
+    // A natural timeout of a tracked staff PAIR_NEW operation is not an
+    // operator cancellation. Only the exact new-to-session candidate may be
+    // recovered, and only after the join window was confirmed closed and its
+    // durable local record still matches the identity captured at discovery.
+    const recoverable = Object.values(this.sessions()).some((session) => {
+      if (session.operationKind !== "PAIR_NEW" || session.actorType !== "STAFF_INSTALLER"
+        || String(session.protocol || "").toLowerCase() !== protocol || session.expiryReviewPending === true
+        || !["expired", "expired_cleanup_pending"].includes(String(session.status || ""))
+        || String(session.homeId || "") !== String(actor.homeId || "")
+        || String(session.hubInstallationId || "") !== String(actor.hubInstallationId || "")
+        || Number(session.identityGeneration) !== Number(actor.identityGeneration)) return false;
+      return (session.candidates || []).some((candidate) => String(candidate.deviceId || "") === String(device.id || "")
+        && candidate.registrationProvenance?.kind === "expired_staff_pairing_v1"
+        && Number(candidate.registrationProvenance.identityGeneration) === Number(actor.identityGeneration)
+        && Date.parse(candidate.registrationProvenance.expiresAt) > this.clock()
+        && String(candidate.identityHash || "") === this.candidateIdentityHash(device)
+        && !this.isBaselineDevice(session, device));
+    });
+    if (!recoverable || (device.areaId && !areaBinding)) return null;
+    return { protocolIdentityHash: protocolIdentity.hash, areaId: String(areaBinding?.areaId || ""), hubAreaId: String(areaBinding?.hubAreaId || ""), setupEventAt: "" };
+  }
+
+  canRetainExpiredStaffCandidate(session, candidate, device) {
+    if (session.operationKind !== "PAIR_NEW" || session.actorType !== "STAFF_INSTALLER"
+      || String(session.protocol || "").toLowerCase() !== "zigbee" || !candidate || !device
+      || String(candidate.deviceId || "") !== String(device.id || "")
+      || String(device.protocol || "").toLowerCase() !== "zigbee" || device.available === false
+      || device.interviewStatus !== "successful" || !this.protocolIdentity(device)
+      || this.candidateIdentityHash(device) !== String(candidate.identityHash || "")
+      || this.isBaselineDevice(session, device)) return false;
+    const policy = this.store.getPlatform?.()?.devicePolicies?.[String(device.id || "")];
+    const ownerMembershipId = String(device.tenantOwnerMembershipId || device.metadata?.tenantOwnerMembershipId || "");
+    const managementClass = String(policy?.managementClass || device.managementClass || device.metadata?.managementClass || "").trim().toUpperCase();
+    if (policy || ownerMembershipId || managementClass || device.metadata?.cloudDeviceId) return false;
+    if ((this.store.listEvents?.(500) || []).some((event) => event?.type === "tenant_device_commissioned" && String(event.deviceId || "") === String(device.id))) return false;
+    return true;
+  }
+
+  async finishExpiredStaffZigbeeReview(session) {
+    if (session.expiryReviewPending !== true || session.radioOperationInFlight || session.radioOperationUncertain) return this.publicStatus(session);
+    if (this.mqtt?.pairingStatus?.().active === true) {
+      await this.mqtt.stopPairing?.().catch(() => {});
+      if (this.mqtt?.pairingStatus?.().active === true) return this.publicStatus(session);
+    }
+    const pending = new Set(session.cleanup?.pendingIds || []);
+    let retainedCount = 0;
+    for (const candidate of session.candidates || []) {
+      const device = this.store.getDevice(candidate.deviceId);
+      if (this.canRetainExpiredStaffCandidate(session, candidate, device)) {
+        candidate.registrationProvenance = { kind: "expired_staff_pairing_v1", identityHash: String(candidate.identityHash),
+          identityGeneration: Number(session.identityGeneration), expiresAt: new Date(this.clock() + RECOVERABLE_PAIRING_MS).toISOString() };
+        pending.delete(String(candidate.deviceId));
+        retainedCount += 1;
+      } else {
+        pending.add(String(candidate.deviceId));
+      }
+    }
+    session.expiryReviewPending = false;
+    session.cleanup = { state: pending.size ? "PENDING" : retainedCount ? "PRESERVED_FOR_REVIEW" : "COMPLETE",
+      pendingIds: [...pending], attempts: Number(session.cleanup?.attempts || 0) };
+    session.status = pending.size ? "expired_cleanup_pending" : "expired";
+    this.append(session, retainedCount ? "expired_candidate_retained_for_registration" : "expired_candidate_cleanup_reconciled",
+      { count: retainedCount, cleanupState: session.cleanup.state });
+    await this.save(session);
+    if (pending.size) {
+      const inventoryResult = await this.reconcileMissingZigbeeCleanupFromInventory(session);
+      if (inventoryResult === "continue_cleanup" || inventoryResult === "not_applicable") {
+        session.cleanup.attempts = Number(session.cleanup.attempts || 0) + 1;
+        await this.reconcileCleanupCandidates(session);
+      }
+    }
+    return this.publicStatus(session);
   }
 
   pruneAdoptionCandidates() {
@@ -241,7 +327,7 @@ class NativeCommissioningService {
         devices.push({ candidateRef, protocol: String(device.protocol).toLowerCase(), name: String(device.originalName || device.name || "Unidentified device").slice(0, 100),
           manufacturer: String(device.metadata?.manufacturer || device.metadata?.manufacturer_name || "").slice(0, 80),
           model: String(device.metadata?.model || device.metadata?.model_id || "").slice(0, 80),
-          status: "not_registered", interviewStatus: "verified", originalAreaId: provenance.areaId, originalAreaName: String(area?.name || "Current authorized Area"),
+          status: "not_registered", interviewStatus: "verified", originalAreaId: provenance.areaId, originalAreaName: String(area?.name || (provenance.areaId ? "Current authorized Area" : "Not assigned on this hub")),
           availableAreas: actor.areaOptions.map(({ id, name }) => ({ id, name })) });
       }
       return { schemaVersion: "dinodia.v1", operationKind: "REGISTER_EXISTING", devices: devices.slice(0, 100),
@@ -532,7 +618,7 @@ class NativeCommissioningService {
         continue;
       }
       if (session.candidates.length >= MAX_TOTAL_CANDIDATES) break;
-      session.candidates.push({ candidateRef: crypto.randomUUID(), deviceId: String(device.id), identityHash: digest(String(device.protocolIdentity?.ieeeAddress || device.protocolIdentity?.nodeId || device.metadata?.ieee_address || device.id)), ...current, observedAt: new Date(this.clock()).toISOString() });
+      session.candidates.push({ candidateRef: crypto.randomUUID(), deviceId: String(device.id), identityHash: this.candidateIdentityHash(device), ...current, observedAt: new Date(this.clock()).toISOString() });
       changed = true;
     }
     if (changed) {
@@ -547,8 +633,11 @@ class NativeCommissioningService {
     const policy = this.store.getPlatform?.()?.devicePolicies?.[id] || null;
     return Object.values(this.sessions()).some((session) => {
       if (session.operationKind === "REGISTER_EXISTING") return false;
-      const isExactCandidate = (session.candidates || []).some((candidate) => String(candidate.deviceId) === id);
+      const exactCandidate = (session.candidates || []).find((candidate) => String(candidate.deviceId) === id);
+      const isExactCandidate = Boolean(exactCandidate);
       const isPending = (session.cleanup?.pendingIds || []).some((pendingId) => String(pendingId) === id);
+      if (exactCandidate?.registrationProvenance?.kind === "expired_staff_pairing_v1"
+        && Date.parse(exactCandidate.registrationProvenance.expiresAt) > this.clock()) return !hasCurrentCanonicalDevicePolicy(policy);
       if (session.cleanup?.state === "PRESERVED_FOR_REVIEW" && isExactCandidate) return !hasCurrentCanonicalDevicePolicy(policy);
       return session.status !== "completed" && (isExactCandidate || isPending
         || (device && String(device.protocol || "").toLowerCase() === session.protocol && !this.isBaselineDevice(session, device)));
@@ -557,7 +646,7 @@ class NativeCommissioningService {
 
   isBaselineDevice(session, device) {
     const id = String(device?.id || "");
-    const identityHash = digest(String(device?.protocolIdentity?.ieeeAddress || device?.protocolIdentity?.nodeId || device?.metadata?.ieee_address || id));
+    const identityHash = this.candidateIdentityHash(device);
     return (session.baselineDeviceIds || []).map(String).includes(id) || (session.baselineIdentityHashes || []).includes(identityHash);
   }
 
@@ -809,7 +898,7 @@ class NativeCommissioningService {
 
   blocksRadioOperation(session) {
     const cleanupState = String(session?.cleanup?.state || "");
-    if (session?.radioOperationInFlight || session?.radioOperationUncertain
+    if (session?.expiryReviewPending || session?.radioOperationInFlight || session?.radioOperationUncertain
       || (Array.isArray(session?.cleanup?.pendingIds) && session.cleanup.pendingIds.length > 0)
       || ["AWAITING_RADIO_SETTLEMENT", "REQUIRES_RADIO_RECONCILIATION"].includes(cleanupState)) return true;
     // Hub recovery stops the old join window and marks its session interrupted.
@@ -829,6 +918,24 @@ class NativeCommissioningService {
   }
 
   async closeSession(session, terminal) {
+    const preserveAssignedZigbeeExpiry = terminal === "expired" && session.operationKind !== "REGISTER_EXISTING"
+      && session.actorType === "STAFF_INSTALLER" && String(session.protocol || "").toLowerCase() === "zigbee";
+    if (preserveAssignedZigbeeExpiry) {
+      await this.mqtt.stopPairing?.().catch(() => {});
+      const pending = new Set(session.cleanup?.pendingIds || []);
+      for (const candidate of session.candidates || []) pending.add(String(candidate.deviceId));
+      const waitingForRadio = session.radioOperationInFlight || session.radioOperationUncertain || this.mqtt?.pairingStatus?.().active === true;
+      session.expiryReviewPending = true;
+      session.status = "expired_cleanup_pending";
+      session.cleanup = { state: waitingForRadio ? "AWAITING_RADIO_SETTLEMENT" : pending.size ? "PENDING" : "COMPLETE",
+        pendingIds: [...pending], attempts: Number(session.cleanup?.attempts || 0) };
+      this.append(session, "session_expiry_waiting_for_radio_settlement", { cleanupState: session.cleanup.state });
+      await this.save(session);
+      if (!waitingForRadio) await this.finishExpiredStaffZigbeeReview(session);
+      await this.vault.delete(`commissioning.matter.${session.sessionId}`).catch(() => {});
+      await this.platform("transition", session, { status: "EXPIRED" }).catch(() => {});
+      return this.publicStatus(session);
+    }
     const pending = new Set(session.cleanup?.pendingIds || []);
     if (session.operationKind !== "REGISTER_EXISTING") for (const candidate of session.candidates || []) pending.add(String(candidate.deviceId));
     if (session.operationKind !== "REGISTER_EXISTING" && session.protocol === "zigbee") await this.mqtt.stopPairing?.().catch(() => {});
@@ -880,7 +987,9 @@ class NativeCommissioningService {
         try { this.logger.warn?.(`[commissioning] cleanup_retry_pending protocol=${session.protocol} reason=${reason}`); } catch {}
       }
     }
-    session.cleanup = { state: pending.size ? "PENDING" : preservedCanonical ? "PRESERVED_FOR_REVIEW" : session.radioOperationUncertain ? "REQUIRES_RADIO_RECONCILIATION" : "COMPLETE", pendingIds: [...pending], attempts: Number(session.cleanup?.attempts || 0) };
+    const retainedForRegistration = (session.candidates || []).some((candidate) => candidate.registrationProvenance?.kind === "expired_staff_pairing_v1"
+      && Date.parse(candidate.registrationProvenance.expiresAt) > this.clock());
+    session.cleanup = { state: pending.size ? "PENDING" : preservedCanonical || retainedForRegistration ? "PRESERVED_FOR_REVIEW" : session.radioOperationUncertain ? "REQUIRES_RADIO_RECONCILIATION" : "COMPLETE", pendingIds: [...pending], attempts: Number(session.cleanup?.attempts || 0) };
     if (!pending.size && !session.radioOperationInFlight && !session.radioOperationUncertain && session.status.endsWith("_cleanup_pending")) session.status = session.status.replace("_cleanup_pending", "");
     await this.save(session);
     return this.publicStatus(session);
@@ -897,7 +1006,8 @@ class NativeCommissioningService {
     }
 
     const pending = new Set(pendingIds);
-    let preservedForReview = false;
+    let preservedForReview = (session.candidates || []).some((candidate) => candidate.registrationProvenance?.kind === "expired_staff_pairing_v1"
+      && Date.parse(candidate.registrationProvenance.expiresAt) > this.clock() && Boolean(this.store.getDevice(candidate.deviceId)));
     let confirmedAbsent = 0;
     let unresolvedMissing = false;
     for (const id of pendingIds) {
@@ -985,6 +1095,7 @@ class NativeCommissioningService {
     if (this.stopped) return;
     await this.exclusive(async () => {
       for (const session of Object.values(this.sessions())) {
+        if (session.expiryReviewPending === true) { await this.finishExpiredStaffZigbeeReview(session); continue; }
         if (!TERMINAL.has(session.status) && Date.parse(session.expiresAt) <= this.clock()) { await this.expire(session); continue; }
         if (session.radioOperationInFlight) continue;
         if (session.radioOperationUncertain && session.protocol === "matter" && this.matter?.status?.().connected) {
@@ -1013,6 +1124,7 @@ class NativeCommissioningService {
         && session.protocol === "zigbee" && !TERMINAL.has(session.status));
       if (hasRecoverableZigbeePairing) await this.mqtt.stopPairing?.().catch(() => {});
       for (const session of sessions) {
+        if (session.expiryReviewPending === true) { await this.finishExpiredStaffZigbeeReview(session); continue; }
         if (TERMINAL.has(session.status)) {
           if (session.radioOperationInFlight && session.protocol === "matter") {
             session.radioOperationInFlight = false; session.radioOperationUncertain = true;
