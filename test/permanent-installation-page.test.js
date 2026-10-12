@@ -20,7 +20,7 @@ class Element {
   add(child) { this.children.push(child); }
 }
 
-function harness({ context, devicesStatus = 200, devices = [], session = null, holdDeviceList = false, seededStorage = {} } = {}) {
+function harness({ context, devicesStatus = 200, devices = [], session = null, holdDeviceList = false, seededStorage = {}, secureContext = true } = {}) {
   let currentDevicesStatus = devicesStatus;
   const elements = new Map([...markup.matchAll(/\bid="([^"]+)"/g)].map(([, id]) => [id, new Element(id)]));
   const storage = new Map();
@@ -33,6 +33,7 @@ function harness({ context, devicesStatus = 200, devices = [], session = null, h
     get length() { return storage.size; },
   };
   const calls = [];
+  const requests = [];
   let releaseDeviceList;
   const deviceListGate = holdDeviceList ? new Promise((resolve) => { releaseDeviceList = resolve; }) : null;
   const documentListeners = new Map();
@@ -54,13 +55,19 @@ function harness({ context, devicesStatus = 200, devices = [], session = null, h
     visibilityState: "visible",
   };
   class Option extends Element { constructor(text, value) { super(); this.textContent = text; this.value = value; } }
-  const fetch = async (url) => {
+  const fetch = async (url, options = {}) => {
     calls.push(String(url));
+    requests.push({ url: String(url), options });
     if (url === "/_dinodia/installer/commissioning") return response(200, context);
     if (url === "/_dinodia/installer/commissioning/devices") {
       if (deviceListGate) await deviceListGate;
       return response(currentDevicesStatus, currentDevicesStatus === 200 ? { devices, completedDevices: [] }
         : { error: { code: currentDevicesStatus === 503 ? "AUTHORITY_UNAVAILABLE" : "COMMISSIONING_AUTHORITY_DENIED", message: currentDevicesStatus === 503 ? "Authority is temporarily unavailable" : "A current assigned permanent-installation authority is required" } });
+    }
+    if (url === "/_dinodia/installer/commissioning/sessions" && options.method === "POST") {
+      const body = JSON.parse(options.body);
+      return response(201, { sessionId: "77777777-7777-4777-8777-777777777777", protocol: body.protocol,
+        operationKind: body.operationKind, status: "searching", revision: 1, updatedAt: new Date().toISOString(), candidates: [] });
     }
     if (session && String(url).startsWith(`/_dinodia/installer/commissioning/sessions/${session.sessionId}`)) return response(200, session);
     return response(404, { error: "not_found" });
@@ -68,8 +75,9 @@ function harness({ context, devicesStatus = 200, devices = [], session = null, h
   const timers = new Set();
   let monotonicNow = 100;
   const performance = { now: () => monotonicNow };
+  const browserCrypto = secureContext ? crypto.webcrypto : { getRandomValues: (bytes) => crypto.webcrypto.getRandomValues(bytes) };
   const sandbox = {
-    document, sessionStorage, fetch, Option, crypto: crypto.webcrypto,
+    document, sessionStorage, fetch, Option, crypto: browserCrypto,
     performance,
     setInterval: (fn, delay) => { const timer = { fn, delay }; timers.add(timer); return timer; },
     clearInterval: (timer) => timers.delete(timer),
@@ -80,7 +88,7 @@ function harness({ context, devicesStatus = 200, devices = [], session = null, h
     URL, Date, Set, Map, Error, console,
   };
   vm.runInNewContext(script, sandbox, { filename: "permanent-installation.js" });
-  return { elements, calls, storage, timers, documentListeners, setMonotonicNow: (value) => { monotonicNow = value; }, setDevicesStatus: (value) => { currentDevicesStatus = value; }, releaseDeviceList, flush: async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve)); } };
+  return { elements, calls, requests, storage, timers, documentListeners, setMonotonicNow: (value) => { monotonicNow = value; }, setDevicesStatus: (value) => { currentDevicesStatus = value; }, releaseDeviceList, flush: async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve)); } };
 }
 
 function response(status, value) {
@@ -97,6 +105,21 @@ const validContext = (registrationEnabled = true) => ({
     zigbee: { enabled: true, adapterReady: true, readinessMessage: "Zigbee is ready" },
     matter: { enabled: false, adapterReady: false, readinessMessage: "Matter is offline" },
   },
+});
+
+test("assigned Zigbee start creates a secure idempotency key on private HTTP without crypto.randomUUID", async () => {
+  const page = harness({ context: validContext(), secureContext: false });
+  await page.flush();
+
+  await page.elements.get("start-zigbee").listeners.get("click")();
+
+  const request = page.requests.find((entry) => entry.url === "/_dinodia/installer/commissioning/sessions" && entry.options.method === "POST");
+  assert.ok(request, "a ready assigned local page should send exactly the requested start operation");
+  assert.equal(JSON.parse(request.options.body).operationKind, "PAIR_NEW");
+  assert.equal(JSON.parse(request.options.body).protocol, "zigbee");
+  assert.match(request.options.headers["idempotency-key"], /^install-start-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  assert.match(page.elements.get("status").textContent, /ZIGBEE · searching/);
+  assert.doesNotMatch(page.elements.get("error").textContent, /randomUUID/i);
 });
 
 test("temporary verifier outage keeps the same assigned window, shows the last verification time, and disables mutations", async () => {

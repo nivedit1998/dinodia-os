@@ -37,6 +37,17 @@
   function cookie(name) {
     return document.cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1) || "";
   }
+  function operationId() {
+    if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+    // randomUUID is secure-context-only; getRandomValues remains available on
+    // the authenticated private-LAN HTTP page. Keep idempotency keys random.
+    if (typeof crypto.getRandomValues !== "function") throw new Error("This browser cannot securely create an installation request key. Reopen the hub using its secure address.");
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
   function showError(error) { $("error").textContent = error instanceof Error ? error.message : "The action could not be completed"; $("error").hidden = false; }
   function clearError() { $("error").hidden = true; $("error").textContent = ""; }
   const terminal = new Set(["completed", "cancelled", "expired", "failed"]);
@@ -203,7 +214,7 @@
     if (!canStart(protocol)) return;
     setBusy(true); clearError();
     try {
-      const session = await post("/_dinodia/installer/commissioning/sessions", { schemaVersion: "dinodia.v1", operationKind: "PAIR_NEW", protocol }, `install-start-${crypto.randomUUID()}`);
+      const session = await post("/_dinodia/installer/commissioning/sessions", { schemaVersion: "dinodia.v1", operationKind: "PAIR_NEW", protocol }, `install-start-${operationId()}`);
       render(session); renderCandidates();
       if (state.poll) clearInterval(state.poll);
       scheduleSessionRefresh(3000);
@@ -214,7 +225,7 @@
     if (state.busy || !state.authorityVerified || !state.context?.protocols?.registrationEnabled || state.session && !terminal.has(state.session.status)) return;
     setBusy(true); clearError(); state.selected = device;
     try {
-      const session = await post("/_dinodia/installer/commissioning/sessions", { schemaVersion: "dinodia.v1", operationKind: "REGISTER_EXISTING", protocol: device.protocol, candidateRef: device.candidateRef }, `install-adopt-${crypto.randomUUID()}`);
+      const session = await post("/_dinodia/installer/commissioning/sessions", { schemaVersion: "dinodia.v1", operationKind: "REGISTER_EXISTING", protocol: device.protocol, candidateRef: device.candidateRef }, `install-adopt-${operationId()}`);
       render(session); renderCandidates();
       $("device-result").hidden = false;
       $("review-heading").textContent = "Review already-paired device";
