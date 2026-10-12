@@ -4,6 +4,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const { spawnSync } = require("node:child_process");
+const { dashboardDevice } = require("../src/dashboard/deviceProjection");
+const deviceProjection = fs.readFileSync(path.join(__dirname, "../src/dashboard/deviceProjection.js"), "utf8");
 
 const html = fs.readFileSync(path.join(__dirname, "../public/index.html"), "utf8");
 const app = fs.readFileSync(path.join(__dirname, "../public/app.js"), "utf8");
@@ -71,8 +73,26 @@ test("full Home dashboard edits optional analytics category only for signed perm
   assert.match(server, /currentAssignedDashboardPrincipal\(req\)/);
   assert.match(server, /updateAnalyticsCategory\(assignedPrincipal/);
   assert.match(server, /managementClass === "PROPERTY_DEVICE"/);
-  assert.match(server, /analyticsManagementRevision = Number\(platform\.revision \|\| 0\)/);
-  assert.match(server, /analyticsInventoryRevision = Number\(policy\.inventoryRevision\)/);
+  assert.match(server, /requested === "index\.html" \|\| requested\.endsWith\("\.js"\)/);
+  assert.match(html, /app\.js\?v=0\.18\.0/);
+  assert.match(deviceProjection, /analyticsInventoryRevision = Number\(policy\.inventoryRevision\)/);
+});
+
+test("dashboard category projection uses the signed cloud/Home management revision and excludes tenant devices", () => {
+  const device = { id: "zigbee:radiator", protocol: "zigbee", analyticsCategory: "STALE", analyticsManagementRevision: 99 };
+  const permanentPolicy = { managementClass: "PROPERTY_DEVICE", ownerMembershipId: null, lifecycle: "INSTALLED", analyticsCategory: "NONE", inventoryRevision: 4 };
+  const projected = dashboardDevice(device, { cloudRevision: 13, devicePolicies: { [device.id]: permanentPolicy } });
+  assert.equal(projected.analyticsCategory, "NONE");
+  assert.equal(projected.analyticsManagementRevision, 13);
+  assert.equal(projected.analyticsInventoryRevision, 4);
+  assert.equal(device.analyticsManagementRevision, 99, "projection must not mutate the local device object");
+
+  const tenantProjection = dashboardDevice(device, { cloudRevision: 13, devicePolicies: { [device.id]: { ...permanentPolicy, ownerMembershipId: "tenant-membership" } } });
+  assert.equal(Object.hasOwn(tenantProjection, "analyticsCategory"), false);
+  assert.equal(Object.hasOwn(tenantProjection, "analyticsManagementRevision"), false);
+
+  const notYetSynced = dashboardDevice(device, { cloudRevision: 0, devicePolicies: { [device.id]: permanentPolicy } });
+  assert.equal(Object.hasOwn(notYetSynced, "analyticsCategory"), false, "category editing requires a usable signed Home revision");
 });
 
 test("pairing status renders friendly Zigbee and Matter device identities", () => {

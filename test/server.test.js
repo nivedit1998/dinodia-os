@@ -38,6 +38,27 @@ async function request(base, route, options = {}) {
 }
 function dashboardRoute(route) { return `/_dinodia/admin${route}`; }
 
+test("dashboard shell refreshes script assets instead of reusing an old cached application bundle", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-dashboard-cache-"));
+  const hub = createHub({
+    config: { nodeEnv: "development", adminToken: "cache-test-token", dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    mqttBridge: mockIntegration(), matterBridge: mockIntegration(), cloudflareTunnel: mockCloudflare(),
+    platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
+  });
+  t.after(async () => { await hub.stop().catch(() => {}); await fs.rm(directory, { recursive: true, force: true }); });
+  await new Promise((resolve) => hub.server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${hub.server.address().port}`;
+  const headers = { authorization: "Bearer cache-test-token" };
+  const page = await fetch(`${base}/`, { headers });
+  assert.equal(page.status, 200);
+  assert.equal(page.headers.get("cache-control"), "no-cache");
+  assert.match(await page.text(), /app\.js\?v=0\.18\.0/);
+  const script = await fetch(`${base}/app.js?v=0.18.0`, { headers });
+  assert.equal(script.status, 200);
+  assert.equal(script.headers.get("cache-control"), "no-cache");
+  assert.match(await script.text(), /Analytics category \(optional\)/);
+});
+
 test("default native MQTT composition does not depend on the retired Home Assistant remote handler", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-default-mqtt-composition-"));
   const script = `

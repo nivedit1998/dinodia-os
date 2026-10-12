@@ -43,6 +43,7 @@ const { AutomationExecutor } = require("./automations/executor");
 const { AutomationScheduler } = require("./automations/scheduler");
 const { compileTarget, findControl, resolveExecutionRoute } = require("./automations/controlCatalog");
 const { verifyOperatorSessionToken } = require("./auth/operatorSession");
+const { dashboardDevice } = require("./dashboard/deviceProjection");
 const { parsePublicKeys, verifyAppAccessToken } = require("./auth/appTokenVerifier");
 const { verifyAlexaCommandToken, verifyAlexaStateToken } = require("./auth/alexaCommandTokenVerifier");
 const { ProvisioningPairingService } = require("./auth/provisioningPairing");
@@ -259,32 +260,6 @@ function maskHiveEmail(value) {
   const raw = String(value || "").trim();
   const at = raw.indexOf("@");
   return at > 0 ? `${raw[0]}***${raw.slice(at)}` : raw ? "***" : "";
-}
-
-function dashboardDevice(device, platform = null) {
-  if (!device || typeof device !== "object") return device;
-  const result = JSON.parse(JSON.stringify(device));
-  const policy = platform?.devicePolicies?.[String(result.id || "")];
-  if (policy?.managementClass === "PROPERTY_DEVICE" && policy.ownerMembershipId == null
-    && ["INSTALLED", "VIEW_ONLY"].includes(String(policy.lifecycle || ""))
-    && ["NONE", "LIGHT", "BOILER", "RADIATOR"].includes(String(policy.analyticsCategory || ""))) {
-    result.analyticsCategory = String(policy.analyticsCategory);
-    result.analyticsManagementRevision = Number(platform.revision || 0);
-    if (Number.isSafeInteger(Number(policy.inventoryRevision)) && Number(policy.inventoryRevision) > 0) result.analyticsInventoryRevision = Number(policy.inventoryRevision);
-    else delete result.analyticsInventoryRevision;
-  } else {
-    delete result.analyticsCategory;
-    delete result.analyticsManagementRevision;
-    delete result.analyticsInventoryRevision;
-  }
-  if (String(result.protocol || "").toLowerCase() === "google_nest") {
-    result.protocolIdentity = {};
-    if (result.metadata && typeof result.metadata === "object") {
-      delete result.metadata.resource_name;
-      delete result.metadata.account_fingerprint;
-    }
-  }
-  return result;
 }
 
 function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, googleNestBridge, googleNestFetchImpl, googleNestNow, googleNestUpdateSource, platformSync, cloudflareTunnel, zigbeeService, threadService, identityBroker: providedIdentityBroker = null, lanTlsIdentityForTest = null, setupDiscoveryForTest = null, serialAdapterLister = listSerialAdapters, serialAdapterProbe = probeSerialAdapter, logger = console, clock = Date.now } = {}) {
@@ -3358,7 +3333,7 @@ function nativeDeviceView(principal, device) {
     try {
       const stat = await fs.promises.stat(filePath);
       if (!stat.isFile()) throw new Error("not a file");
-      res.writeHead(200, { "content-type": contentType(filePath), "cache-control": requested === "index.html" ? "no-cache" : "public, max-age=3600" });
+      res.writeHead(200, { "content-type": contentType(filePath), "cache-control": requested === "index.html" || requested.endsWith(".js") ? "no-cache" : "public, max-age=3600" });
       fs.createReadStream(filePath).pipe(res);
     } catch {
       return text(res, 404, "Not found");
