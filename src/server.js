@@ -14,6 +14,7 @@ const baseConfig = require("./config");
 const { Store } = require("./store");
 const { MqttBridge } = require("./mqttBridge");
 const { MatterBridge } = require("./matterBridge");
+const { resolveMatterServerUrl } = require("./integrations/matter/connectionConfig");
 const { createBackup } = require("./backup");
 const { CloudflareTunnel, connectedLocalTunnelIdentity } = require("./cloudflareTunnel");
 const { listSerialAdapters, probeSerialAdapter, serialAdapterMatchesPath, sameSerialAdapter } = require("./serialAdapters");
@@ -630,9 +631,10 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     logger,
   });
   const matter = matterBridge || new MatterBridge({
-    // A stored Thread setup owns the local Matter server unless the operator
-    // explicitly supplied another Matter Server URL.
-    url: runtimeConfig.matterServerUrl || (hubStore.getThread?.().configured ? "ws://127.0.0.1:5580/ws" : ""),
+    // The local Matter Server also supports Wi-Fi devices; a selected Thread
+    // RCP enables its local controller connection without creating a Thread
+    // dataset or starting OTBR. An explicit remote URL remains authoritative.
+    url: resolveMatterServerUrl(runtimeConfig.matterServerUrl, hubStore.getThread?.(), runtimeConfig),
     store: hubStore,
     onDeviceChanged: notifyDeviceChanged,
     logger,
