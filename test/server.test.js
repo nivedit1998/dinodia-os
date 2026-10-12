@@ -95,11 +95,16 @@ test("default native MQTT composition does not depend on the retired Home Assist
 test("local full-Home dashboard exposes the same read-only dongle inventory as the secure dashboard", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-local-radio-inventory-"));
   const adapter = { path: "/dev/serial/by-id/usb-test-coordinator", target: "/dev/ttyACM0", name: "Test Zigbee coordinator", adapterType: "ember", supported: true, connected: true };
+  const configurationPath = path.join(directory, "zigbee2mqtt", "configuration.yaml");
+  const liveConfiguration = `serial:\n  port: >-\n    ${adapter.path}\n  adapter: ember\n`;
+  await fs.mkdir(path.dirname(configurationPath), { recursive: true });
+  await fs.writeFile(configurationPath, liveConfiguration);
   const hub = createHub({
-    config: { nodeEnv: "development", adminToken: "test-token", dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    config: { nodeEnv: "development", adminToken: "test-token", dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "", zigbeeAutoRestart: true },
     mqttBridge: mockIntegration(), matterBridge: mockIntegration(), cloudflareTunnel: mockCloudflare(),
     platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
     serialAdapterLister: async () => [adapter],
+    serialAdapterProbe: async () => ({ ok: true, verified: true, adapterType: adapter.adapterType }),
   });
   t.after(async () => { await hub.stop().catch(() => {}); await fs.rm(directory, { recursive: true, force: true }); });
   await new Promise((resolve) => hub.server.listen(0, "127.0.0.1", resolve));
@@ -113,6 +118,17 @@ test("local full-Home dashboard exposes the same read-only dongle inventory as t
   }
   const localZigbee = await request(`http://127.0.0.1:${hub.setupServer.address().port}`, dashboardRoute("/api/integrations/zigbee/adapters"), { headers: { authorization: "Bearer test-token" } });
   assert.deepEqual(localZigbee.body.adapters.map((entry) => entry.path), [adapter.path]);
+  const localProbe = await request(`http://127.0.0.1:${hub.setupServer.address().port}`, dashboardRoute("/api/integrations/zigbee/probe"), {
+    method: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ path: adapter.path }),
+  });
+  assert.equal(localProbe.response.status, 200, "local admin must be able to probe an inventoried Zigbee coordinator");
+  assert.equal(localProbe.body.ok, true);
+  const localSelection = await request(`http://127.0.0.1:${hub.setupServer.address().port}`, dashboardRoute("/api/integrations/zigbee/adapter"), {
+    method: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ path: adapter.path }),
+  });
+  assert.equal(localSelection.response.status, 200, "local admin must be able to select the coordinator from the full Home dashboard");
+  assert.equal(hub.store.getZigbee().adapterPath, adapter.path);
+  assert.equal(await fs.readFile(configurationPath, "utf8"), liveConfiguration, "adopting the coordinator already used by Zigbee2MQTT must preserve the network file");
 });
 
 test("selecting the already-running Zigbee2MQTT coordinator preserves its live network configuration", async (t) => {

@@ -163,6 +163,50 @@ test("physical installer listener serves a bounded authenticated dashboard and i
   }
 });
 
+test("physical full-Home radio setup is available to os:admin but remains denied to installation-only sessions", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-installer-radio-admin-"));
+  const [unifiedPort, customerPort] = await Promise.all([freePort(), freePort()]);
+  const keys = crypto.generateKeyPairSync("ed25519");
+  const hubId = "installer-radio-admin-hub";
+  const adminToken = createOperatorSessionToken({ sub: "assigned-installer", hubId, scope: ["os:admin"], recentAuthAt: Date.now() }, keys.privateKey);
+  const installationToken = createOperatorSessionToken({ sub: "assigned-installer", hubId, scope: ["os:permanent-installation"], recentAuthAt: Date.now() }, keys.privateKey);
+  const adapter = { path: "/dev/serial/by-id/usb-test-zigbee-radio", target: "/dev/ttyUSB1", name: "Test Zigbee radio", adapterType: "ember", supported: true, connected: true };
+  const configurationPath = path.join(directory, "zigbee2mqtt", "configuration.yaml");
+  const liveConfiguration = `serial:\n  port: >-\n    ${adapter.path}\n  adapter: ember\n`;
+  await fs.mkdir(path.dirname(configurationPath), { recursive: true });
+  await fs.writeFile(configurationPath, liveConfiguration);
+  const hub = createHub({
+    config: {
+      nodeEnv: "production", v2Environment: "test", loopbackLanListenerForTest: true, customerLanPortForTest: customerPort,
+      hubId, operatorPublicKey: keys.publicKey.export({ format: "pem", type: "spki" }).toString(),
+      port: 0, nativeApiPort: unifiedPort, dataDir: directory,
+      dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"),
+      staticDir: path.join(__dirname, "..", "public"), otbrUrl: "", zigbeeAutoRestart: true,
+    },
+    mqttBridge: mockIntegration(), matterBridge: mockIntegration(), cloudflareTunnel: mockCloudflare(),
+    platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
+    serialAdapterLister: async () => [adapter],
+    serialAdapterProbe: async () => ({ ok: true, verified: true, adapterType: adapter.adapterType }),
+  });
+  t.after(async () => { await hub.stop().catch(() => {}); await fs.rm(directory, { recursive: true, force: true }); });
+  await hub.start();
+  await new Promise((resolve, reject) => { hub.setupServer.once("error", reject); hub.setupServer.listen(0, "127.0.0.1", resolve); });
+  const physical = `http://127.0.0.1:${hub.setupServer.address().port}`;
+  const admin = { authorization: `Bearer ${adminToken}` };
+  const installer = { authorization: `Bearer ${installationToken}` };
+
+  const probe = await request(physical, "/_dinodia/admin/api/integrations/zigbee/probe", { method: "POST", headers: admin, body: JSON.stringify({ path: adapter.path }) });
+  assert.equal(probe.response.status, 200);
+  assert.equal(probe.body.ok, true);
+  const selected = await request(physical, "/_dinodia/admin/api/integrations/zigbee/adapter", { method: "POST", headers: admin, body: JSON.stringify({ path: adapter.path }) });
+  assert.equal(selected.response.status, 200);
+  assert.equal(hub.store.getZigbee().adapterPath, adapter.path);
+  assert.equal(await fs.readFile(configurationPath, "utf8"), liveConfiguration, "selecting the currently configured radio preserves the live Zigbee network file");
+
+  const denied = await request(physical, "/_dinodia/admin/api/integrations/zigbee/adapter", { method: "POST", headers: installer, body: JSON.stringify({ path: adapter.path }) });
+  assert.equal(denied.response.status, 403, "installation-only scope cannot use full-Home radio administration");
+});
+
 test("physical full-Home dashboard allows scoped device removal only for os:admin and prunes after adapter acknowledgement", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-installer-device-removal-"));
   const [unifiedPort, customerPort] = await Promise.all([freePort(), freePort()]);
