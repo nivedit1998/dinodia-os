@@ -86,7 +86,7 @@ function fixture({ dropFirstCreateResponse = false, matterCommission = async () 
       return { ok: true, ...record };
     }
     if (body.action === "transition") return { ok: true, sessionId: body.sessionId, revision: body.expectedRevision + 1, state: body.status };
-    if (body.action === "finalize") return { ok: true, sessionId: body.sessionId, revision: body.expectedRevision + 1, state: "COMPLETED", device: { id: uuid(), managementClass: body.actorType === "STAFF_INSTALLER" ? "PROPERTY_DEVICE" : "TENANT_DEVICE", ownerMembershipId: body.actorType === "STAFF_INSTALLER" ? null : body.membershipId, lifecycle: body.disposition === "view_only" ? "VIEW_ONLY" : "INSTALLED" } };
+    if (body.action === "finalize") return { ok: true, sessionId: body.sessionId, revision: body.expectedRevision + 1, state: "COMPLETED", device: { id: uuid(), managementClass: body.actorType === "STAFF_INSTALLER" ? "PROPERTY_DEVICE" : "TENANT_DEVICE", ownerMembershipId: body.actorType === "STAFF_INSTALLER" ? null : body.membershipId, lifecycle: body.disposition === "view_only" ? "VIEW_ONLY" : "INSTALLED", analyticsCategory: body.device?.analyticsCategory || "NONE", inventoryRevision: 2 } };
     throw new Error("unexpected Platform action");
   } };
   let pairingActive = false;
@@ -699,7 +699,7 @@ test("assigned staff can review and register one already-paired unregistered pro
 
   const current = f.service.sessions()[session.sessionId];
   const selected = await f.service.select(session.sessionId, staff, { schemaVersion: "dinodia.v1", expectedRevision: current.revision,
-    candidateRef: current.candidates[0].candidateRef, areaId: f.areaId, name: "Room 1 Radiator", customerLabel: "Radiator" });
+    candidateRef: current.candidates[0].candidateRef, areaId: f.areaId, name: "Room 1 Radiator", customerLabel: "Radiator", analyticsCategory: "RADIATOR" });
   assert.equal(selected.status, "selected");
   const result = await f.service.complete(session.sessionId, staff, "install");
   assert.equal(result.status, "completed");
@@ -710,16 +710,58 @@ test("assigned staff can review and register one already-paired unregistered pro
   assert.deepEqual(f.store.getDevice(existing.id).labels, ["radiator"], "dashboard and integrations receive the canonical label projection");
   assert.equal(f.store.getPlatform().devicePolicies[existing.id].managementClass, "PROPERTY_DEVICE");
   assert.equal(f.store.getPlatform().devicePolicies[existing.id].customerLabel, "Radiator");
+  assert.equal(f.store.getPlatform().devicePolicies[existing.id].analyticsCategory, "RADIATOR");
   assert.equal(f.store.getPlatform().devicePolicies[existing.id].installationRequestId, staff.requestId);
   assert.equal(f.store.getDevice(privateDevice.id).metadata.managementClass, "tenant_device");
   assert.equal(f.platformRequests.filter((row) => row.action === "finalize").at(-1).operationKind, "REGISTER_EXISTING");
   assert.equal(f.platformRequests.filter((row) => row.action === "finalize").at(-1).device.osDeviceId, existing.id);
+  assert.equal(f.platformRequests.filter((row) => row.action === "finalize").at(-1).device.analyticsCategory, "RADIATOR");
   assert.deepEqual(f.radioEffects, { zigbeeStart: 0, zigbeeStop: 0, zigbeeRemove: 0, matterCommission: 0, matterRemove: 0 });
   const afterRegistration = await f.service.listAdoptableDevices(staff);
   assert.equal(afterRegistration.devices.length, 0, "a canonical device is no longer shown as awaiting registration");
   assert.equal(afterRegistration.completedDevices.length, 1, "completed results are reconstructed from the current request's canonical policy after refresh");
   assert.equal(afterRegistration.completedDevices[0].areaName, "Living Room");
   assert.equal(afterRegistration.completedDevices[0].sync, "pending", "locally persisted canonical policy is not mislabeled as synced before cloud configuration confirms it");
+});
+
+test("analytics category updates require current full-Home authority bound to this signed hub and permanent policy", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const platform = f.store.getPlatform();
+  platform.revision = 12;
+  platform.devicePolicies = { "permanent-radiator": { managementClass: "PROPERTY_DEVICE", ownerMembershipId: null, lifecycle: "INSTALLED",
+    analyticsCategory: "NONE", inventoryRevision: 3, canonicalAreaIds: [f.areaId] } };
+  const requests = [];
+  f.service.pairing.requestWithHubIdentity = async (path, body) => {
+    requests.push({ path, body });
+    return { ok: true, osDeviceId: body.osDeviceId, analyticsCategory: body.analyticsCategory, managementRevision: 13, inventoryRevision: 4, configurationSync: "PENDING" };
+  };
+  const staff = { principalType: "operator", scope: ["os:admin"], sub: uuid(), sid: uuid(), jti: "J".repeat(32), handoffId: uuid(),
+    workflow: uuid(), employeeSessionId: uuid(), workRevision: 5, homeId: f.homeId, hubId: "DIN-HUB-1", identityGeneration: 7,
+    verifiedHubInstallationId: f.hubInstallId };
+  const input = { osDeviceId: "permanent-radiator", analyticsCategory: "RADIATOR", expectedAnalyticsCategory: "NONE",
+    expectedManagementRevision: 12, expectedInventoryRevision: 3, operationId: uuid() };
+  await assert.rejects(f.service.updateAnalyticsCategory({ ...staff, verifiedHubInstallationId: uuid() }, input), { code: "commissioning_authority_denied" });
+  assert.equal(requests.length, 0, "a different or stale Hub installation must not reach the Platform owner");
+  const result = await f.service.updateAnalyticsCategory(staff, input);
+  assert.deepEqual({ analyticsCategory: result.analyticsCategory, managementRevision: result.managementRevision, configurationPending: result.signedConfigurationPending },
+    { analyticsCategory: "RADIATOR", managementRevision: 13, configurationPending: true });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, "/api/hub-agent/v2/permanent-device-analytics-category");
+  assert.equal(requests[0].body.accessScope, "os:admin");
+  assert.equal(requests[0].body.expectedInventoryRevision, 3);
+  assert.equal(platform.devicePolicies["permanent-radiator"].analyticsCategory, "NONE", "the dashboard waits for a newly signed cloud configuration instead of locally pretending the change is synced");
+  platform.revision = 13;
+  platform.devicePolicies["permanent-radiator"].analyticsCategory = "RADIATOR";
+  platform.devicePolicies["permanent-radiator"].inventoryRevision = 4;
+  const exactAfterConfigRefresh = await f.service.updateAnalyticsCategory(staff, input);
+  assert.equal(exactAfterConfigRefresh.analyticsCategory, "RADIATOR", "an uncertain response can be exactly reconciled even after the new signed configuration reaches the hub");
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].body.expectedAnalyticsCategory, "NONE", "retry preserves its original baseline rather than reinterpreting the operation against the refreshed configuration");
+  assert.equal(requests[1].body.expectedInventoryRevision, 3);
+  assert.equal(requests[1].body.operationId, input.operationId);
+  platform.devicePolicies["tenant-device"] = { managementClass: "TENANT_DEVICE", ownerMembershipId: uuid(), lifecycle: "INSTALLED", analyticsCategory: "NONE", canonicalAreaIds: [f.areaId] };
+  await assert.rejects(f.service.updateAnalyticsCategory(staff, { ...input, osDeviceId: "tenant-device", operationId: uuid() }), { code: "commissioning_authority_denied" });
+  assert.equal(requests.length, 2, "tenant-device analytics policy is never sent to the property-device update route");
 });
 
 test("assigned adoption validates against the live identity broker generation, not a legacy Store generation", async (t) => {

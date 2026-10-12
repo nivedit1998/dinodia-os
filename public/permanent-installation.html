@@ -57,6 +57,10 @@
       <div class="row"><label for="area">Original Area</label><select id="area"></select></div>
       <div class="row"><label for="label">Customer label</label><input id="label" maxlength="40" autocomplete="off"></div>
       <div class="row"><label for="name">Device name</label><input id="name" maxlength="80" autocomplete="off"></div>
+      <div class="row"><label for="analytics-category">Analytics category (optional)</label><select id="analytics-category">
+        <option value="NONE">None</option><option value="LIGHT">Light</option><option value="BOILER">Boiler</option><option value="RADIATOR">Radiator</option>
+      </select></div>
+      <p class="muted">A category only classifies this permanent device. Analytics needs suitable live readings or controls; Radiator Usage is observed heating activity, not measured gas consumption or cost.</p>
       <div class="row">
         <button id="select" class="primary" type="button">Review this device</button>
         <button id="install" class="primary" type="button" hidden>Install and sync</button>

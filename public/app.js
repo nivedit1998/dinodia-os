@@ -1,5 +1,5 @@
 const FIXED_LABELS = [{ id: "light", name: "Light" }, { id: "boiler", name: "Boiler" }, { id: "radiator", name: "Radiator" }, { id: "tenant_device", name: "Tenant Device" }];
-const state = { token: "", areas: [], labels: [], devices: [], provisioning: null, status: null, alexa: null, hive: null, googleNest: null, heatingDemandController: null, heatingDemandDraft: null, hiveAuth: { sessionId: "", action: "connect" }, googleNestAuth: { sessionId: "", popup: null, timer: null }, googleNestConfigEditing: false, selectedArea: "all", expandedDevices: new Set(), expandedRadios: new Set(), radioInventory: { zigbee: null, thread: null }, activity: { records: [], nextCursor: null, hasMore: false, deviceId: "", category: "", expanded: false } };
+const state = { token: "", areas: [], labels: [], devices: [], provisioning: null, status: null, alexa: null, hive: null, googleNest: null, heatingDemandController: null, heatingDemandDraft: null, analyticsCategoryDrafts: new Map(), hiveAuth: { sessionId: "", action: "connect" }, googleNestAuth: { sessionId: "", popup: null, timer: null }, googleNestConfigEditing: false, selectedArea: "all", expandedDevices: new Set(), expandedRadios: new Set(), radioInventory: { zigbee: null, thread: null }, activity: { records: [], nextCursor: null, hasMore: false, deviceId: "", category: "", expanded: false } };
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
 
@@ -109,12 +109,49 @@ function surfaceRows(device) {
   const surfaces = window.DinodiaDevices.surfaces(device);
   return surfaces.map((surface) => `<div class="surface-row"><div class="surface-info"><strong>${escapeHtml(surface.name)}</strong><small>${escapeHtml(surface.domain || "control")} · ${escapeHtml(String(surface.state ?? "unknown"))}</small><span class="capability-pill">Shown in apps</span></div><div class="surface-controls">${entityControl(surface)}</div></div>`).join("");
 }
+const ANALYTICS_CATEGORIES = ["NONE", "LIGHT", "BOILER", "RADIATOR"];
+const ANALYTICS_CATEGORY_LABELS = { NONE: "None", LIGHT: "Light", BOILER: "Boiler", RADIATOR: "Radiator" };
+function analyticsCategoryPendingKey(deviceId) { return `dinodia.os.pending-analytics-category.v1:${deviceId}`; }
+function readAnalyticsCategoryPending(deviceId) {
+  try {
+    const value = JSON.parse(sessionStorage.getItem(analyticsCategoryPendingKey(deviceId)) || "null");
+    return value?.body && typeof value.body === "object" && /^[0-9a-f-]{36}$/i.test(value.body.operationId || "") ? value : null;
+  } catch { return null; }
+}
+function writeAnalyticsCategoryPending(deviceId, value) {
+  try { sessionStorage.setItem(analyticsCategoryPendingKey(deviceId), JSON.stringify(value)); } catch { /* Same-page retries retain the exact operation in memory below. */ }
+  memoryAnalyticsCategoryOperations.set(deviceId, value);
+}
+const memoryAnalyticsCategoryOperations = new Map();
+function pendingAnalyticsCategory(deviceId) { return readAnalyticsCategoryPending(deviceId) || memoryAnalyticsCategoryOperations.get(deviceId) || null; }
+function clearAnalyticsCategoryPending(deviceId) {
+  memoryAnalyticsCategoryOperations.delete(deviceId);
+  try { sessionStorage.removeItem(analyticsCategoryPendingKey(deviceId)); } catch { /* Nothing else to clear. */ }
+}
+function analyticsCategoryEditor(device) {
+  if (!Object.hasOwn(device, "analyticsCategory") || !Number.isSafeInteger(Number(device.analyticsManagementRevision))) return "";
+  const current = ANALYTICS_CATEGORIES.includes(device.analyticsCategory) ? device.analyticsCategory : "NONE";
+  const pending = pendingAnalyticsCategory(device.id);
+  if (pending?.managementRevision && pending.body.analyticsCategory === current && Number(device.analyticsManagementRevision) >= Number(pending.managementRevision)) {
+    clearAnalyticsCategoryPending(device.id);
+    state.analyticsCategoryDrafts.delete(device.id);
+  }
+  const activePending = pendingAnalyticsCategory(device.id);
+  const selected = ANALYTICS_CATEGORIES.includes(state.analyticsCategoryDrafts.get(device.id)) ? state.analyticsCategoryDrafts.get(device.id) : current;
+  const disabled = Boolean(activePending);
+  const status = activePending
+    ? activePending.managementRevision
+      ? "Platform accepted this category. Waiting for the hub's next signed configuration. Retry reuses the same safe operation."
+      : "This category update is awaiting confirmation. Retry reuses the same operation; do not submit a different category yet."
+    : "Optional reporting metadata only; category does not create readings. Radiator Usage represents observed heat-demand activity, not gas volume or cost.";
+  return `<section class="analytics-category-editor" data-analytics-editor="${escapeHtml(device.id)}"><label><span>Analytics category (optional)</span><select data-analytics-category="${escapeHtml(device.id)}" aria-label="Analytics category" ${disabled ? "disabled" : ""}>${ANALYTICS_CATEGORIES.map((category) => `<option value="${category}" ${selected === category ? "selected" : ""}>${ANALYTICS_CATEGORY_LABELS[category]}</option>`).join("")}</select></label><button class="secondary" data-save-analytics-category="${escapeHtml(device.id)}" type="button">${activePending ? "Retry category update" : "Save category"}</button><small data-analytics-category-status="${escapeHtml(device.id)}">${escapeHtml(status)}</small></section>`;
+}
 function setupForm(device) {
   const id = escapeHtml(device.id);
   const selectedLabel = (device.labelIds || device.labels || [])[0] || "";
   const suggestedLabel = !selectedLabel && ["hive", "google_nest"].includes(device.protocol) && device.definition?.kind === "heating" ? (device.definition?.suggestedLabelId || "boiler") : "";
   const previewCount = window.DinodiaDevices.surfaces(device).length;
-  return `<div class="device-setup-form" data-device-setup="${id}"><div class="setup-form-intro"><strong>${device.setup?.status === "ready" ? "Device assignment" : "Finish setting up this device"}</strong><span>${device.setup?.status === "ready" ? "One area and one label apply to all of this device's controls." : "Choose these once. Dinodia OS will derive the useful controls automatically."}</span></div><span class="setup-preview" data-device-preview="${id}">${previewCount ? `${previewCount} control${previewCount === 1 ? "" : "s"} will appear in the Dinodia apps.` : "Choose an area and label to preview the app-facing controls."}</span><div class="device-edit"><label><span>Name (optional)</span><input data-device-name="${id}" value="${escapeHtml(device.name)}" aria-label="Device name"></label><label><span>Area</span><select data-device-area="${id}" aria-label="Device area" required>${optionList(state.areas, device.areaId || "")}</select></label><label><span>Label</span><select data-device-labels="${id}" aria-label="Device label" required>${labelOptions(selectedLabel ? [selectedLabel] : [suggestedLabel])}</select></label><button class="primary" data-save-device="${id}" type="button">${device.setup?.status === "ready" ? "Save assignment" : "Save and show controls"}</button></div><button class="danger device-remove-button" data-remove-device="${id}" type="button">Remove paired device</button></div>`;
+  return `<div class="device-setup-form" data-device-setup="${id}"><div class="setup-form-intro"><strong>${device.setup?.status === "ready" ? "Device assignment" : "Finish setting up this device"}</strong><span>${device.setup?.status === "ready" ? "One area and one label apply to all of this device's controls." : "Choose these once. Dinodia OS will derive the useful controls automatically."}</span></div><span class="setup-preview" data-device-preview="${id}">${previewCount ? `${previewCount} control${previewCount === 1 ? "" : "s"} will appear in the Dinodia apps.` : "Choose an area and label to preview the app-facing controls."}</span><div class="device-edit"><label><span>Name (optional)</span><input data-device-name="${id}" value="${escapeHtml(device.name)}" aria-label="Device name"></label><label><span>Area</span><select data-device-area="${id}" aria-label="Device area" required>${optionList(state.areas, device.areaId || "")}</select></label><label><span>Label</span><select data-device-labels="${id}" aria-label="Device label" required>${labelOptions(selectedLabel ? [selectedLabel] : [suggestedLabel])}</select></label><button class="primary" data-save-device="${id}" type="button">${device.setup?.status === "ready" ? "Save assignment" : "Save and show controls"}</button></div>${analyticsCategoryEditor(device)}<button class="danger device-remove-button" data-remove-device="${id}" type="button">Remove paired device</button></div>`;
 }
 async function sendEntityControl(control, serviceId, entityId) {
   const row = control.closest(".surface-row");
@@ -142,6 +179,51 @@ function renderDevices() {
   document.querySelectorAll("[data-toggle-device]").forEach((button) => button.addEventListener("click", () => { const card = button.closest("[data-device-card]"); const editor = card.querySelector(".device-editor"); const expanded = !card.classList.contains("expanded"); card.classList.toggle("expanded", expanded); button.setAttribute("aria-expanded", String(expanded)); button.querySelector(".device-tile-action > span:first-child").textContent = expanded ? "Close" : "Manage"; editor.inert = !expanded; if (expanded) state.expandedDevices.add(card.dataset.deviceCard); else state.expandedDevices.delete(card.dataset.deviceCard); }));
   document.querySelectorAll("[data-collapse-device]").forEach((button) => button.addEventListener("click", () => button.closest("[data-device-card]").querySelector("[data-toggle-device]").click()));
   document.querySelectorAll("[data-save-device]").forEach((button) => button.addEventListener("click", async () => { const id = button.dataset.saveDevice; const card = button.closest(".device-card"); const name = card.querySelector(`[data-device-name="${CSS.escape(id)}"]`).value; const areaId = card.querySelector(`[data-device-area="${CSS.escape(id)}"]`).value; const labels = selectedLabelIds(card.querySelector(`[data-device-labels="${CSS.escape(id)}"]`)); if (!areaId) return showNotice("Choose an area before saving the device.", "error"); if (!labels.length) return showNotice("Choose one device label before saving the device.", "error"); button.disabled = true; try { await api(`/api/devices/${encodeURIComponent(id)}/setup`, { method: "PUT", body: JSON.stringify({ name, areaId, labelId: labels[0] }) }); await load(); showNotice("Device setup saved. Its app-facing controls are ready."); } catch (error) { button.disabled = false; showNotice(error.message, "error"); } }));
+  document.querySelectorAll("[data-analytics-category]").forEach((select) => select.addEventListener("change", () => state.analyticsCategoryDrafts.set(select.dataset.analyticsCategory, select.value)));
+  document.querySelectorAll("[data-save-analytics-category]").forEach((button) => button.addEventListener("click", async () => {
+    const id = button.dataset.saveAnalyticsCategory;
+    const device = state.devices.find((candidate) => String(candidate.id) === id);
+    const status = button.closest("[data-analytics-editor]")?.querySelector(`[data-analytics-category-status="${CSS.escape(id)}"]`);
+    let pending = pendingAnalyticsCategory(id);
+    if (!pending) {
+      const analyticsCategory = state.analyticsCategoryDrafts.get(id) || device?.analyticsCategory || "NONE";
+      if (!device || !Object.hasOwn(device, "analyticsCategory") || !Number.isSafeInteger(Number(device.analyticsManagementRevision))) {
+        if (status) status.textContent = "Only a permanent property device with a current signed policy can be changed.";
+        return;
+      }
+      if (analyticsCategory === device.analyticsCategory) {
+        if (status) status.textContent = "No category change to save.";
+        return;
+      }
+      pending = { body: { analyticsCategory, expectedAnalyticsCategory: device.analyticsCategory, expectedManagementRevision: Number(device.analyticsManagementRevision),
+        ...(Number.isSafeInteger(Number(device.analyticsInventoryRevision)) && Number(device.analyticsInventoryRevision) > 0 ? { expectedInventoryRevision: Number(device.analyticsInventoryRevision) } : {}),
+        operationId: createAreaOperationId() }, managementRevision: null };
+      writeAnalyticsCategoryPending(id, pending);
+      state.analyticsCategoryDrafts.delete(id);
+    }
+    button.disabled = true;
+    if (status) status.textContent = "Saving category to the assigned Home's canonical record…";
+    try {
+      const result = await api(`/api/devices/${encodeURIComponent(id)}/analytics-category`, { method: "PATCH", body: JSON.stringify(pending.body) });
+      pending = { ...pending, managementRevision: Number(result.managementRevision) };
+      writeAnalyticsCategoryPending(id, pending);
+      if (status) status.textContent = "Platform accepted the change. Waiting for the hub to receive and verify its next signed configuration; readings were not created.";
+      await load();
+      showNotice("Analytics category saved in the canonical Home record. Signed hub configuration sync is pending; no readings or gas usage were fabricated.");
+    } catch (error) {
+      if (error.status === 409 && String(error.code || "").toLowerCase() === "analytics_category_revision_conflict") {
+        clearAnalyticsCategoryPending(id);
+        state.analyticsCategoryDrafts.delete(id);
+        if (status) status.textContent = "The Home or this device changed since it was loaded. Refreshing its signed category; review and save your choice again.";
+        button.disabled = true;
+        try { await load(); showNotice("The Home configuration changed. Review the refreshed category and save again; the rejected update made no change.", "error"); }
+        catch { button.disabled = false; }
+        return;
+      }
+      if (status) status.textContent = `${error.message}. Retry uses the same operation ID and exact request.`;
+      button.disabled = false;
+    }
+  }));
   document.querySelectorAll("[data-remove-device]").forEach((button) => button.addEventListener("click", async () => { const id = button.dataset.removeDevice; const device = state.devices.find((candidate) => candidate.id === id); const zigbee = String(device?.protocol || "").toLowerCase() === "zigbee"; const warning = zigbee ? " The hub will forget and block this Zigbee device; if it reconnects later, Zigbee2MQTT will ask it to leave. This cannot erase network credentials stored inside a powered-off device; factory-reset it if you need those credentials erased." : " This unpairs it and deletes its household controls, history, automations, and remote bindings."; if (!confirm(`Remove ${device?.name || "this device"} completely from Dinodia OS? This deletes its local household controls, history, automations, and remote bindings.${warning}`)) return; button.disabled = true; try { await api(`/api/devices/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ force: false }) }); state.expandedDevices.delete(id); await load(); showNotice(zigbee ? "Zigbee device removed and blocked. The hub will request that it leave if it reconnects; factory reset is needed to erase credentials stored on the device." : "Device completely removed. Pair it again if you want to add it back."); } catch (error) { button.disabled = false; showNotice(error.message, "error"); } }));
   document.querySelectorAll("[data-device-setup]").forEach((form) => { const id = form.dataset.deviceSetup; const area = form.querySelector(`[data-device-area="${CSS.escape(id)}"]`); const label = form.querySelector(`[data-device-labels="${CSS.escape(id)}"]`); const preview = form.querySelector(`[data-device-preview="${CSS.escape(id)}"]`); const refreshPreview = async () => { if (!area.value || !label.value || label.value === NONE_LABEL_VALUE) { preview.textContent = "Choose an area and label to preview the app-facing controls."; return; } try { const result = await api(`/api/devices/${encodeURIComponent(id)}/setup?areaId=${encodeURIComponent(area.value)}&labelId=${encodeURIComponent(label.value)}`); const surfaces = result.surfacePreview?.surfaces || []; preview.textContent = surfaces.length ? `${surfaces.length} control${surfaces.length === 1 ? "" : "s"} will appear in the Dinodia apps.` : "No safe household controls were identified yet."; } catch { preview.textContent = "Preview unavailable until discovery is complete."; } }; area.addEventListener("change", refreshPreview); label.addEventListener("change", refreshPreview); });
   document.querySelectorAll(".entity-control[data-service]").forEach((control) => {

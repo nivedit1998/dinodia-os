@@ -261,9 +261,22 @@ function maskHiveEmail(value) {
   return at > 0 ? `${raw[0]}***${raw.slice(at)}` : raw ? "***" : "";
 }
 
-function dashboardDevice(device) {
+function dashboardDevice(device, platform = null) {
   if (!device || typeof device !== "object") return device;
   const result = JSON.parse(JSON.stringify(device));
+  const policy = platform?.devicePolicies?.[String(result.id || "")];
+  if (policy?.managementClass === "PROPERTY_DEVICE" && policy.ownerMembershipId == null
+    && ["INSTALLED", "VIEW_ONLY"].includes(String(policy.lifecycle || ""))
+    && ["NONE", "LIGHT", "BOILER", "RADIATOR"].includes(String(policy.analyticsCategory || ""))) {
+    result.analyticsCategory = String(policy.analyticsCategory);
+    result.analyticsManagementRevision = Number(platform.revision || 0);
+    if (Number.isSafeInteger(Number(policy.inventoryRevision)) && Number(policy.inventoryRevision) > 0) result.analyticsInventoryRevision = Number(policy.inventoryRevision);
+    else delete result.analyticsInventoryRevision;
+  } else {
+    delete result.analyticsCategory;
+    delete result.analyticsManagementRevision;
+    delete result.analyticsInventoryRevision;
+  }
   if (String(result.protocol || "").toLowerCase() === "google_nest") {
     result.protocolIdentity = {};
     if (result.metadata && typeof result.metadata === "object") {
@@ -1878,6 +1891,29 @@ function nativeDeviceView(principal, device) {
         throw error;
       }
     }
+    const analyticsCategoryMatch = pathname.match(/^\/api\/devices\/([^/]+)\/analytics-category$/);
+    if (analyticsCategoryMatch && req.method === "PATCH") {
+      if (!operatorPrincipal || operatorPrincipal.scope?.length !== 1 || operatorPrincipal.scope[0] !== "os:admin" || !nativeCommissioningService) {
+        return nativeContractError(res, 403, "SCOPE_DENIED", "Only assigned full-Home staff may change a permanent device analytics category");
+      }
+      let assignedPrincipal;
+      try { assignedPrincipal = await currentAssignedDashboardPrincipal(req); }
+      catch { return nativeContractError(res, 503, "AUTHORITY_UNAVAILABLE", "Current assigned Home authority cannot be verified right now. Keep this window open and retry.", true); }
+      if (!assignedPrincipal) return nativeContractError(res, 401, "AUTH_REQUIRED", "Assigned Home authority expired or changed. Reopen the dashboard from Company Portal.");
+      try {
+        const input = await readBody(req);
+        const updated = await nativeCommissioningService.updateAnalyticsCategory(assignedPrincipal, {
+          ...input, osDeviceId: decodeURIComponent(analyticsCategoryMatch[1]),
+        });
+        setImmediate(() => pairing.syncNow().catch(() => {}));
+        eventBus.emit("dinodia_dashboard_updated", { kind: "device-analytics-category", id: decodeURIComponent(analyticsCategoryMatch[1]), at: new Date().toISOString() });
+        return json(res, 200, updated, { "Cache-Control": "no-store, private" });
+      } catch (error) {
+        const status = Number(error?.statusCode) || 503;
+        return nativeContractError(res, status, String(error?.code || "ANALYTICS_CATEGORY_FAILED").toUpperCase(),
+          status >= 500 ? "Platform could not confirm the device category. Retry the same update; no analytics reading was created." : String(error?.message || "The permanent-device category update was rejected"), status >= 500);
+      }
+    }
     const scopedPrincipal = appPrincipal || offlinePrincipal || alexaPrincipal || alexaStatePrincipal;
     const nativeTenantPrincipal = Boolean(scopedPrincipal && ["app", "offline", "alexa"].includes(scopedPrincipal.principalType)
       && scopedPrincipal.householdRole === "TENANT" && scopedPrincipal.scope?.includes("tenant:device-command"));
@@ -2800,7 +2836,7 @@ function nativeDeviceView(principal, device) {
     if (resource === "devices" && req.method === "GET" && !id) {
       const devices = hubStore.listDevices()
         .filter((device) => supportOperator ? supportCanReadDevice(operatorPrincipal, device) : (!scopedPrincipal || appCanReadDevice(scopedPrincipal, device)))
-        .map(dashboardDevice);
+        .map((device) => dashboardDevice(device, operatorPrincipal?.scope?.length === 1 && operatorPrincipal.scope[0] === "os:admin" ? hubStore.getPlatform?.() : null));
       return json(res, 200, { devices });
     }
     if (resource === "devices" && req.method === "POST" && !id) {
@@ -3350,7 +3386,7 @@ function nativeDeviceView(principal, device) {
     res.setHeader("referrer-policy", "no-referrer");
     res.setHeader("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'");
     res.setHeader("access-control-allow-headers", "content-type, authorization, x-dinodia-token, x-dinodia-step-up-proof, x-dinodia-offline-challenge, x-dinodia-offline-signature, x-dinodia-offline-grant, idempotency-key, if-match");
-    res.setHeader("access-control-allow-methods", "GET,POST,PUT,DELETE,OPTIONS");
+    res.setHeader("access-control-allow-methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
   }
   function googleNestCallbackAllowed(req) {
     return isHiveCredentialTransportAllowed(req, { nodeEnv: runtimeConfig.nodeEnv, allowInsecure: runtimeConfig.nodeEnv !== "production", configuredHostname: runtimeConfig.cloudflarePublicHostname || cloudflare.status().hostname || "" });
@@ -4378,6 +4414,7 @@ function nativeDeviceView(principal, device) {
     // authenticate the selected operator session and enforce os:admin; this
     // listener allow-list must not turn the authorized DELETE into a 404.
     const operatorDeviceDeleteRoute = req.method === "DELETE" && /^\/_dinodia\/admin\/api\/devices\/[^/]+$/.test(pathname);
+    const operatorAnalyticsCategoryRoute = req.method === "PATCH" && /^\/_dinodia\/admin\/api\/devices\/[^/]+\/analytics-category$/.test(pathname);
     // The local assigned full-Home dashboard must be able to read the
     // existing tunnel's recovery state and invoke its already-authorized
     // recovery handler. handleDashboardRequest still requires os:admin;
@@ -4392,11 +4429,11 @@ function nativeDeviceView(principal, device) {
     const operatorWorkspaceRoute = req.method === "GET"
       && /^\/_dinodia\/operator\/[A-Za-z0-9_-]{24,64}(?:\/installation)?$/.test(pathname);
     const recognizedPath = setupRoute || staticRoute || operatorReadRoute || operatorAreaCreateRoute
-      || operatorDeviceDeleteRoute || operatorCloudflareStatusRoute || operatorCloudflareRecoveryRoute || operatorEndRoute || permanentInstallationRoute || operatorWorkspaceRoute;
+      || operatorDeviceDeleteRoute || operatorAnalyticsCategoryRoute || operatorCloudflareStatusRoute || operatorCloudflareRecoveryRoute || operatorEndRoute || permanentInstallationRoute || operatorWorkspaceRoute;
     if (!recognizedPath && ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(req.method)) return json(res, 404, { error: "Not found" });
     if (!recognizedPath) return text(res, 405, "Method not allowed");
     if (!setupRoute && !staticRoute && !operatorReadRoute && !operatorAreaCreateRoute
-      && !operatorDeviceDeleteRoute && !operatorCloudflareStatusRoute && !operatorCloudflareRecoveryRoute && !operatorEndRoute && !permanentInstallationRoute && !operatorWorkspaceRoute) return json(res, 404, { error: "Not found" });
+      && !operatorDeviceDeleteRoute && !operatorAnalyticsCategoryRoute && !operatorCloudflareStatusRoute && !operatorCloudflareRecoveryRoute && !operatorEndRoute && !permanentInstallationRoute && !operatorWorkspaceRoute) return json(res, 404, { error: "Not found" });
     return handleUnifiedRequest(req, res);
   });
   let httpsServer = null;

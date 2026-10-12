@@ -284,11 +284,11 @@ class PlatformPairing {
     } finally { clearTimeout(timeout); }
     const result = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const responseCode = typeof result.errorCode === "string" && /^[a-z0-9_.:-]{1,80}$/i.test(result.errorCode)
-        ? result.errorCode
-        : `platform_http_${response.status}`;
+      const envelope = result.error && typeof result.error === "object" && !Array.isArray(result.error) ? result.error : result;
+      const candidateCode = result.errorCode || envelope.code;
+      const responseCode = typeof candidateCode === "string" && /^[a-z0-9_.:-]{1,80}$/i.test(candidateCode) ? candidateCode : `platform_http_${response.status}`;
       const currentRevision = result.currentRevision;
-      throw Object.assign(new Error(result.error || result.message || `Platform returned HTTP ${response.status}`), {
+      throw Object.assign(new Error(envelope.message || (typeof result.error === "string" ? result.error : "") || result.message || `Platform returned HTTP ${response.status}`), {
         statusCode: response.status,
         code: responseCode,
         ...(Number.isSafeInteger(currentRevision) && currentRevision >= 0 ? { currentRevision } : {}),

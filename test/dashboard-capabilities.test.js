@@ -55,6 +55,26 @@ test("full Home dashboard shows the same unregistered-device status and routes c
   assert.match(server, /operator-session\/revalidate/);
 });
 
+test("full Home dashboard edits optional analytics category only for signed permanent-device policy", () => {
+  assert.match(app, /analyticsCategoryEditor\(device\)/);
+  assert.match(app, /Analytics category \(optional\)/);
+  assert.match(app, /RADIATOR: "Radiator"/);
+  assert.match(app, /observed heat-demand activity, not gas volume or cost/);
+  assert.match(app, /method: "PATCH", body: JSON\.stringify\(pending\.body\)/);
+  assert.match(app, /pending-analytics-category\.v1/);
+  assert.match(app, /expectedInventoryRevision: Number\(device\.analyticsInventoryRevision\)/);
+  assert.match(app, /Retry category update/);
+  assert.match(app, /Signed hub configuration sync is pending/i);
+  assert.match(app, /Only a permanent property device with a current signed policy can be changed/);
+  const server = fs.readFileSync(path.join(__dirname, "../src/server.js"), "utf8");
+  assert.match(server, /Only assigned full-Home staff may change a permanent device analytics category/);
+  assert.match(server, /currentAssignedDashboardPrincipal\(req\)/);
+  assert.match(server, /updateAnalyticsCategory\(assignedPrincipal/);
+  assert.match(server, /managementClass === "PROPERTY_DEVICE"/);
+  assert.match(server, /analyticsManagementRevision = Number\(platform\.revision \|\| 0\)/);
+  assert.match(server, /analyticsInventoryRevision = Number\(policy\.inventoryRevision\)/);
+});
+
 test("pairing status renders friendly Zigbee and Matter device identities", () => {
   assert.match(app, /foundDevices\.map/);
   assert.match(app, /loadMatterPairingStatus/);

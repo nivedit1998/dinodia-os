@@ -205,6 +205,11 @@ body.operator-authority-ended .sidebar .nav { pointer-events: none; opacity: .45
 .setup-form-intro span { color: var(--muted); font-size: .7rem; line-height: 1.4; }
 .device-edit label { display: grid; min-width: 0; gap: 4px; }
 .device-edit label > span { color: var(--muted); font-size: .61rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.analytics-category-editor { display: grid; grid-template-columns: minmax(130px, 1fr) auto; align-items: end; gap: 8px 12px; padding-top: 12px; border-top: 1px solid #dcebe3; }
+.analytics-category-editor label { display: grid; gap: 4px; min-width: 0; }
+.analytics-category-editor label > span { color: var(--muted); font-size: .61rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.analytics-category-editor small { grid-column: 1 / -1; color: var(--muted); font-size: .68rem; line-height: 1.45; }
+.analytics-category-editor button { min-height: 38px; }
 .surface-list { display: grid; gap: 9px; margin-bottom: 10px; }
 .surface-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); align-items: center; gap: 12px; padding: 12px; border: 1px solid #dcebe3; border-radius: 12px; background: #fbfefc; }
 .surface-info { display: grid; min-width: 0; gap: 3px; }

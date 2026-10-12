@@ -124,6 +124,9 @@
   }
   function render(session) {
     state.session = session;
+    if (session.selectedCandidateRef && ["NONE", "LIGHT", "BOILER", "RADIATOR"].includes(String(session.selectedAnalyticsCategory || "NONE"))) {
+      $("analytics-category").value = session.selectedAnalyticsCategory || "NONE";
+    }
     if (session.selectedCandidateRef) {
       state.selected = (session.candidates || []).find((candidate) => candidate.candidateRef === session.selectedCandidateRef) || state.selected;
     } else if (terminal.has(session.status)) state.selected = null;
@@ -169,7 +172,7 @@
       const interview = candidate.interviewStatus === "successful" ? "Interview complete" : candidate.interviewStatus;
       detail.textContent = [candidate.manufacturer, candidate.model, interview, setup].filter(Boolean).join(" · ") || "The hub is interviewing this device";
       const choose = document.createElement("button"); choose.type = "button"; choose.dataset.reviewCandidate = "true"; choose.textContent = state.session?.operationKind === "REGISTER_EXISTING" ? "Review existing device" : "Review candidate"; choose.disabled = state.busy || !state.authorityVerified;
-      choose.addEventListener("click", () => { state.selected = candidate; $("device-result").hidden = false; $("label").value = candidate.name || "New device"; $("name").value = candidate.name || "New device"; clearError(); updateButtons(); });
+      choose.addEventListener("click", () => { state.selected = candidate; $("device-result").hidden = false; $("label").value = candidate.name || "New device"; $("name").value = candidate.name || "New device"; $("analytics-category").value = state.session?.selectedCandidateRef === candidate.candidateRef ? (state.session.selectedAnalyticsCategory || "NONE") : "NONE"; clearError(); updateButtons(); });
       item.append(title, detail, choose); list.append(item);
     }
   }
@@ -179,7 +182,7 @@
     for (const row of rows) {
       const item = document.createElement("li");
       const sync = row.sync === "pending" ? "Home sync pending" : row.sync === "acknowledged" ? "Home sync acknowledged" : "Home sync not verified";
-      item.textContent = `${row.name}${row.model ? ` · ${row.model}` : ""} · ${row.protocol || "device"} · ${row.areaName || "Area unavailable"} · ${row.lifecycle === "VIEW_ONLY" ? "view-only" : "permanent"} · ${sync}`;
+      item.textContent = `${row.name}${row.model ? ` · ${row.model}` : ""} · ${row.protocol || "device"} · ${row.areaName || "Area unavailable"} · ${row.lifecycle === "VIEW_ONLY" ? "view-only" : "permanent"} · ${row.analyticsCategory && row.analyticsCategory !== "NONE" ? `${row.analyticsCategory} analytics · ` : ""}${sync}`;
       list.append(item);
     }
   }
@@ -289,7 +292,9 @@
     try {
       const path = `/_dinodia/installer/commissioning/sessions/${encodeURIComponent(state.session.sessionId)}`;
       const candidateRef = state.selected.candidateRef;
-      const body = { schemaVersion: "dinodia.v1", expectedRevision: state.session.revision, candidateRef, areaId, name, customerLabel };
+    const analyticsCategory = $("analytics-category").value || "NONE";
+    if (!["NONE", "LIGHT", "BOILER", "RADIATOR"].includes(analyticsCategory)) { showError(new Error("Choose a valid optional analytics category.")); return; }
+    const body = { schemaVersion: "dinodia.v1", expectedRevision: state.session.revision, candidateRef, areaId, name, customerLabel, analyticsCategory };
       let result;
       try { result = await post(`${path}/select`, body); }
       catch (error) {

@@ -127,6 +127,39 @@ test("assigned Zigbee start creates a secure idempotency key on private HTTP wit
   assert.doesNotMatch(page.elements.get("error").textContent, /randomUUID/i);
 });
 
+test("permanent-device review offers an optional analytics category and sends the selected value to the canonical owner", async () => {
+  const sessionId = "55555555-5555-4555-8555-555555555555";
+  const candidateRef = "66666666-6666-4666-8666-666666666666";
+  const session = { sessionId, protocol: "zigbee", operationKind: "REGISTER_EXISTING", status: "reviewing_existing", revision: 2,
+    updatedAt: new Date().toISOString(), candidates: [{ candidateRef, name: "SONOFF TRVZB", manufacturer: "SONOFF", model: "TRVZB",
+      stage: "existing_interview_verified", interviewStatus: "successful" }] };
+  const requestId = "22222222-2222-4222-8222-222222222222";
+  const page = harness({ context: validContext(), session, seededStorage: {
+    [`dinodia-installation:${requestId}:session`]: sessionId,
+  }, requestHandler: async (url, options) => {
+    if (options.method === "POST" && url.endsWith("/select")) return response(200, { ...session, status: "selected", revision: 3, catalogueStatus: "ready",
+      selectedCandidateRef: candidateRef, selectedAnalyticsCategory: JSON.parse(options.body).analyticsCategory,
+      selectedControls: [{ name: "Heat demand", semanticRole: "active_heat_demand", readable: true, writable: false }] });
+    return null;
+  } });
+  await page.flush();
+
+  assert.match(markup, /id="analytics-category"/);
+  assert.match(markup, /value="NONE"[^>]*>None/);
+  page.elements.get("candidate-list").children[0].children[2].listeners.get("click")();
+  page.elements.get("area").value = areaId;
+  page.elements.get("label").value = "Radiator";
+  page.elements.get("name").value = "Room 1 Radiator";
+  page.elements.get("analytics-category").value = "RADIATOR";
+  await page.elements.get("select").listeners.get("click")();
+
+  const reviewRequest = page.requests.find((entry) => entry.url.endsWith("/select") && entry.options.method === "POST");
+  assert.ok(reviewRequest, "the chosen category is sent as part of the existing reviewed registration operation");
+  assert.equal(JSON.parse(reviewRequest.options.body).analyticsCategory, "RADIATOR");
+  assert.equal(page.elements.get("install").hidden, false, "the category choice does not bypass the existing device review step");
+  assert.match(page.elements.get("selected-controls").textContent, /Heat demand/);
+});
+
 test("temporary verifier outage keeps the same assigned window, shows the last verification time, and disables mutations", async () => {
   const page = harness({ context: validContext(), devicesStatus: 503,
     seededStorage: { "dinodia.operatorSessionSelector": "A".repeat(32), "dinodia-installation:22222222-2222-4222-8222-222222222222:session": "33333333-3333-4333-8333-333333333333" } });

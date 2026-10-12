@@ -40,6 +40,7 @@ function fixedSession(session, afterCandidateRef = null) {
     nextCandidateCursor: start + page.length < candidates.length ? page.at(-1)?.candidateRef || null : null,
     selectedCandidateRef: session.selectedCandidateRef || null, selectedAreaId: session.selectedAreaId || null,
     selectedName: session.selectedName || null, selectedCustomerLabel: session.selectedCustomerLabel || null,
+    selectedAnalyticsCategory: session.selectedCandidateRef ? (session.selectedAnalyticsCategory || "NONE") : null,
     catalogueStatus: session.selectedCatalogue?.capabilityStatus || null,
     catalogueUsefulReadings: session.selectedCatalogue?.usefulReadings === true,
     selectedControls: (session.selectedCatalogue?.controls || []).slice(0, 64).map((control) => ({
@@ -395,10 +396,63 @@ class NativeCommissioningService {
       result.push({ name: String(policy.overrideName || policy.customerLabel || device.name || "Permanent device").slice(0, 80),
         model: String(device.metadata?.model || device.metadata?.model_id || "").slice(0, 80),
         protocol: String(device.protocol || "").toUpperCase(), areaName: String(area?.name || "Authorized Area"),
-        lifecycle: String(policy.lifecycle), catalogueStatus: String(policy.catalogueStatus || "unknown"), sync: syncState,
+        lifecycle: String(policy.lifecycle), catalogueStatus: String(policy.catalogueStatus || "unknown"), analyticsCategory: String(policy.analyticsCategory || "NONE"), sync: syncState,
         completedAt: String(device.updatedAt || "") });
     }
     return result.slice(0, 100);
+  }
+
+  async updateAnalyticsCategory(principal, input) {
+    const platform = this.store.getPlatform?.() || {};
+    const identity = await this.currentIdentity();
+    const osDeviceId = String(input?.osDeviceId || "");
+    const analyticsCategory = String(input?.analyticsCategory || "");
+    const expectedAnalyticsCategory = String(input?.expectedAnalyticsCategory || "");
+    const expectedManagementRevision = Number(input?.expectedManagementRevision);
+    const expectedInventoryRevision = input?.expectedInventoryRevision === undefined ? null : Number(input.expectedInventoryRevision);
+    const operationId = String(input?.operationId || "");
+    if (!principal || principal.principalType !== "operator" || principal.scope?.length !== 1 || principal.scope[0] !== "os:admin"
+      || !principal.sub || !principal.sid || !principal.jti || !principal.handoffId || !principal.workflow || !principal.employeeSessionId
+      || !Number.isSafeInteger(Number(principal.workRevision)) || Number(principal.workRevision) < 1
+      || !principal.homeId || !identity || String(principal.hubId || "") !== identity.serial
+      || Number(principal.identityGeneration) !== identity.generation || String(platform.homeId || "") !== String(principal.homeId)
+      || !platform.hubInstallId || String(principal.verifiedHubInstallationId || "") !== String(platform.hubInstallId)
+      || !/^[A-Za-z0-9:_-]{1,160}$/.test(osDeviceId)
+      || !new Set(["NONE", "LIGHT", "BOILER", "RADIATOR"]).has(analyticsCategory)
+      || !new Set(["NONE", "LIGHT", "BOILER", "RADIATOR"]).has(expectedAnalyticsCategory)
+      || !Number.isSafeInteger(expectedManagementRevision) || expectedManagementRevision < 1
+      || !Number.isSafeInteger(Number(platform.revision))
+      || ![expectedManagementRevision, expectedManagementRevision + 1].includes(Number(platform.revision))
+      || expectedInventoryRevision !== null && (!Number.isSafeInteger(expectedInventoryRevision) || expectedInventoryRevision < 1)
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(operationId)) {
+      fail(SAFE_ERROR.denied, 403, "Current assigned full-Home authority and the latest signed device policy are required");
+    }
+    const policy = platform.devicePolicies?.[osDeviceId];
+    if (policy?.managementClass !== "PROPERTY_DEVICE" || policy.ownerMembershipId != null
+      || !["INSTALLED", "VIEW_ONLY"].includes(String(policy.lifecycle || ""))
+      || !Array.isArray(policy.canonicalAreaIds) || !policy.canonicalAreaIds.length) {
+      fail(SAFE_ERROR.denied, 404, "Analytics categories can only be set for a current permanent property device");
+    }
+    const signedCategory = String(policy.analyticsCategory || "NONE");
+    const signedInventoryRevision = Number(policy.inventoryRevision);
+    const replayAfterSignedRefresh = Number(platform.revision) === expectedManagementRevision + 1 && signedCategory === analyticsCategory
+      && (expectedInventoryRevision === null || Number.isSafeInteger(signedInventoryRevision) && signedInventoryRevision === expectedInventoryRevision + 1);
+    const requestStillCurrent = Number(platform.revision) === expectedManagementRevision && signedCategory === expectedAnalyticsCategory
+      && (expectedInventoryRevision === null || Number.isSafeInteger(signedInventoryRevision) && signedInventoryRevision === expectedInventoryRevision);
+    if (!requestStillCurrent && !replayAfterSignedRefresh) fail(SAFE_ERROR.conflict, 409, "The Home or device changed. Refresh its signed policy and review the category again");
+    if (!this.pairing?.requestWithHubIdentity) fail(SAFE_ERROR.unavailable, 503, "The enrolled Platform connection is unavailable");
+    const result = await this.pairing.requestWithHubIdentity("/api/hub-agent/v2/permanent-device-analytics-category", {
+      accessScope: "os:admin", homeId: String(platform.homeId), hubInstallationId: String(platform.hubInstallId), identityGeneration: identity.generation,
+      employeeId: String(principal.sub), employeeSessionId: String(principal.employeeSessionId), operatorHandoffId: String(principal.handoffId),
+      operatorJti: String(principal.jti), workItemId: String(principal.workflow), workRevision: Number(principal.workRevision),
+      osDeviceId, expectedManagementRevision,
+      ...(expectedInventoryRevision === null ? {} : { expectedInventoryRevision }),
+      expectedAnalyticsCategory, analyticsCategory, operationId,
+    });
+    if (!result?.ok || result.analyticsCategory !== analyticsCategory || !Number.isSafeInteger(Number(result.managementRevision))) {
+      fail(SAFE_ERROR.unavailable, 503, "Platform did not confirm the requested category for this permanent property device");
+    }
+    return { ...result, signedConfigurationPending: true };
   }
 
   async platform(action, session, extra = {}) {
@@ -741,13 +795,19 @@ class NativeCommissioningService {
   async select(sessionId, principal, input) {
     return this.exclusive(async () => {
       const { session, actor } = await this.requireSession(sessionId, principal);
-      const keys = ["areaId", "candidateRef", "customerLabel", "expectedRevision", "name", "schemaVersion"].sort().join("\n");
-      if (!input || Object.keys(input).sort().join("\n") !== keys || input.schemaVersion !== "dinodia.v1" || Number(input.expectedRevision) !== Number(session.revision)) fail(SAFE_ERROR.conflict, 409, "The discovered device list changed; refresh and select again", "candidate_list_revision_changed");
+      const requiredKeys = ["areaId", "candidateRef", "customerLabel", "expectedRevision", "name", "schemaVersion"];
+      const keys = Object.keys(input || {}).sort().join("\n");
+      const legacyKeys = [...requiredKeys].sort().join("\n");
+      const categoryKeys = [...requiredKeys, "analyticsCategory"].sort().join("\n");
+      if (!input || ![legacyKeys, categoryKeys].includes(keys) || input.schemaVersion !== "dinodia.v1" || Number(input.expectedRevision) !== Number(session.revision)) fail(SAFE_ERROR.conflict, 409, "The discovered device list changed; refresh and select again", "candidate_list_revision_changed");
       const candidate = session.candidates.find((row) => row.candidateRef === input.candidateRef);
       if (!candidate) fail(SAFE_ERROR.denied, 404, "This discovered device is no longer available in this session");
       const area = this.canonicalArea(actor, input.areaId);
       const name = String(input.name || "").normalize("NFC").trim();
       const label = input.customerLabel == null || input.customerLabel === "" ? null : String(input.customerLabel).normalize("NFC").trim();
+      const analyticsCategory = input.analyticsCategory === undefined ? "NONE" : String(input.analyticsCategory);
+      if (!new Set(["NONE", "LIGHT", "BOILER", "RADIATOR"]).has(analyticsCategory)
+        || actor.actorType !== "STAFF_INSTALLER" && analyticsCategory !== "NONE") fail(SAFE_ERROR.invalid, 400, "Choose an optional analytics category for a permanent property device");
       if (!text(name, 80) || label === null || !text(label, 40) || !label) fail(SAFE_ERROR.invalid, 400, "Enter a customer label between 1 and 40 characters");
       const device = this.store.getDevice(candidate.deviceId);
       if (!this.isCompleteRadioDevice(session, device, actor)) fail(SAFE_ERROR.unavailable, 409, "The hub has not completed the device interview or ownership review yet", "candidate_interview_incomplete");
@@ -756,10 +816,12 @@ class NativeCommissioningService {
       if (!catalogue) fail(SAFE_ERROR.unavailable, 409, "The hub could not produce a safe device catalogue", "candidate_catalogue_unavailable");
       Object.assign(session, { selectedCandidateRef: candidate.candidateRef, selectedDeviceId: device.id, selectedAreaId: area.areaId,
         selectedHubAreaId: area.hubAreaId, selectedName: name, selectedCustomerLabel: label, selectedCatalogue: catalogue,
+        selectedAnalyticsCategory: actor.actorType === "STAFF_INSTALLER" ? analyticsCategory : "NONE",
         selectedDescriptorRevision: catalogue.descriptorRevision, selectedDescriptorDigest: catalogue.descriptorDigest, status: "selected" });
       this.append(session, "device_selected"); await this.save(session);
       await this.platform("transition", session, { status: "READY", selectedAreaId: area.areaId, candidateRef: candidate.candidateRef,
         osDeviceId: String(device.id), requestedName: name || null, customerLabel: label,
+        ...(actor.actorType === "STAFF_INSTALLER" ? { analyticsCategory } : {}),
         catalogueStatus: catalogue.capabilityStatus, catalogueRevision: catalogue.descriptorRevision, descriptorDigest: catalogue.descriptorDigest,
         operationKind: session.operationKind || "PAIR_NEW", targetIdentityHash: session.operationKind === "REGISTER_EXISTING" ? session.targetIdentityHash : undefined }); await this.save(session);
       return this.publicStatus(session);
@@ -834,12 +896,15 @@ class NativeCommissioningService {
         protocolIdentityHash: this.protocolIdentity(device)?.hash || null,
         descriptorRevision: catalogue.descriptorRevision, descriptorDigest: catalogue.descriptorDigest, capabilitySummary: { controls },
         catalogueStatus: catalogue.capabilityStatus, usefulReadings: catalogue.usefulReadings,
-        areaId: session.selectedAreaId, name: session.selectedName || null, customerLabel: session.selectedCustomerLabel };
+        areaId: session.selectedAreaId, name: session.selectedName || null, customerLabel: session.selectedCustomerLabel,
+        ...(actor.actorType === "STAFF_INSTALLER" ? { analyticsCategory: session.selectedAnalyticsCategory || "NONE" } : {}) };
       const platformDisposition = disposition === "retain_unsupported" ? "view_only" : disposition;
       const cloud = await this.platform("finalize", session, { candidateRef: session.selectedCandidateRef, disposition: platformDisposition, device: deviceProjection });
       const expectedLifecycle = platformDisposition === "view_only" ? "VIEW_ONLY" : "INSTALLED";
       const expectedClass = actor.actorType === "STAFF_INSTALLER" ? "PROPERTY_DEVICE" : "TENANT_DEVICE";
-      if (!cloud?.ok || !cloud.device?.id || cloud.device.managementClass !== expectedClass || (cloud.device.ownerMembershipId ?? null) !== actor.membershipId || cloud.device.lifecycle !== expectedLifecycle) fail(SAFE_ERROR.unavailable, 503, "Platform did not confirm the correctly scoped canonical device record and catalogue result");
+      const expectedAnalyticsCategory = actor.actorType === "STAFF_INSTALLER" ? (session.selectedAnalyticsCategory || "NONE") : "NONE";
+      if (!cloud?.ok || !cloud.device?.id || cloud.device.managementClass !== expectedClass || (cloud.device.ownerMembershipId ?? null) !== actor.membershipId
+        || cloud.device.lifecycle !== expectedLifecycle || cloud.device.analyticsCategory !== expectedAnalyticsCategory) fail(SAFE_ERROR.unavailable, 503, "Platform did not confirm the correctly scoped canonical device record, analytics category and catalogue result");
       if (session.operationKind === "REGISTER_EXISTING") {
         session.platformFinalization = { platformDeviceId: String(cloud.device.id), actorBinding: this.actorBinding(actor), requestId: actor.requestId,
           homeId: actor.homeId, protocolIdentityHash: this.protocolIdentity(device)?.hash || null, confirmedAt: new Date(this.clock()).toISOString() };
@@ -851,7 +916,8 @@ class NativeCommissioningService {
         managementClass: expectedClass, ownerMembershipId: actor.membershipId, lifecycle: expectedLifecycle, catalogueStatus: catalogue.capabilityStatus, usefulReadings: catalogue.usefulReadings,
         descriptorRevision: catalogue.descriptorRevision, descriptorDigest: catalogue.descriptorDigest, customerLabel: session.selectedCustomerLabel,
         canonicalAreaIds: [session.selectedAreaId], platformDeviceId: cloud.device.id, overrideName: session.selectedName || null,
-        ...(propertyDevice ? { installationRequestId: actor.requestId } : {}),
+        ...(propertyDevice ? { installationRequestId: actor.requestId, analyticsCategory: session.selectedAnalyticsCategory || "NONE",
+          ...(Number.isSafeInteger(Number(cloud.device.inventoryRevision)) && Number(cloud.device.inventoryRevision) > 0 ? { inventoryRevision: Number(cloud.device.inventoryRevision) } : {}) } : {}),
       };
       const normalizedLabel = String(session.selectedCustomerLabel || "").normalize("NFC").trim().replace(/\s+/g, " ").toLocaleLowerCase("en-GB");
       const matchedLabel = normalizedLabel && typeof this.store.listLabels === "function"
