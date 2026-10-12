@@ -378,8 +378,18 @@ test("a divergent stream reconciles one exact durable batch and retries the same
   const fixture = await pairingFixture({ serial, hubInstallId, syncStreamId: serverStreamId, syncAcceptedSequence: 18, divergent: true });
   try {
     const { directory, store, vault } = fixture;
-    await store.applySyncConfigurationSnapshot(5);
     await store.queueSyncEvent("update.status", "updater", { revision: 1, trustState: "unprovisioned" }, { critical: true });
+    const staleBatch = await store.prepareSyncBatch(hubInstallId, { kind: "dinodia_os", version: "test", capabilities: {} });
+    assert.equal(staleBatch.acknowledgedCloudRevision, 0);
+    await store.applySyncConfigurationSnapshot(5);
+    await store.commit((state) => {
+      state.syncOutbox.inFlight = {
+        ...staleBatch,
+        streamReconciliation: { version: 1, previousStreamId: serverStreamId, previousAcceptedSequence: 18 },
+      };
+    });
+    await store.markSyncFailure("hub_sync_configuration_ack_invalid");
+    assert.equal(store.getSyncOutbox().inFlight.acknowledgedCloudRevision, 0, "fixture preserves the stale pre-refresh in-flight revision");
     const seen = [];
     let remoteStreamId = serverStreamId;
     let remoteAcceptedSequence = 18;
@@ -398,6 +408,10 @@ test("a divergent stream reconciles one exact durable batch and retries the same
           seen.push(structuredClone(body));
           const configuration = refreshConfiguration(5);
           if (!remoteCommitted) {
+            if (body.acknowledgedCloudRevision !== 5) return {
+              ok: false, status: 409,
+              async json() { return { errorCode: "hub_sync_configuration_ack_invalid", error: "The hub configuration acknowledgement is stale" }; },
+            };
             assert.deepEqual(body.streamReconciliation, {
               version: 1, previousStreamId: serverStreamId, previousAcceptedSequence: 18,
             });
@@ -423,7 +437,9 @@ test("a divergent stream reconciles one exact durable batch and retries the same
       },
     });
     await pairing.syncNow();
+    assert.equal(seen[0]?.acknowledgedCloudRevision, 5, "the rejected stale envelope is repaired to the durably applied configuration revision before reconciliation");
     const afterLostResponse = store.getSyncOutbox();
+    assert.equal(afterLostResponse.inFlight?.acknowledgedCloudRevision, 5, "the corrected request revision is durable before retry");
     assert.equal(afterLostResponse.acknowledgedSequence, 0, "a lost response does not fabricate a local acknowledgement");
     assert.ok(afterLostResponse.inFlight?.streamReconciliation, "the exact recovery marker is durable before retry");
     assert.equal(afterLostResponse.events.length, 1, "the pending event remains durable until a receipt arrives");
@@ -477,6 +493,49 @@ test("a divergent stream with a known local retention gap remains held without c
     assert.equal(after.lastErrorCode, "hub_sync_stream_reconciliation_required");
     pairing.stop();
   } finally { await fs.rm(fixture.directory, { recursive: true, force: true }); }
+});
+
+test("an ambiguous marked in-flight batch is not rewritten without an explicit stale-ack rejection", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-sync-ambiguous-revision-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const store = new Store(path.join(directory, "dinodia.json"));
+  const serverStreamId = "remote-stream-accepted-18";
+  await store.queueSyncEvent("update.status", "updater", { revision: 1, trustState: "unprovisioned" }, { critical: true });
+  const original = await store.prepareSyncBatch("sync-installation", { kind: "dinodia_os", version: "test", capabilities: {} });
+  await store.applySyncConfigurationSnapshot(5);
+  await store.commit((state) => {
+    state.syncOutbox.inFlight = {
+      ...original,
+      streamReconciliation: { version: 1, previousStreamId: serverStreamId, previousAcceptedSequence: 18 },
+    };
+  });
+  const before = store.getSyncOutbox();
+
+  await assert.rejects(
+    store.prepareSyncStreamReconciliation({ previousStreamId: serverStreamId, previousAcceptedSequence: 18 }),
+    { code: "hub_sync_stream_reconciliation_required" },
+  );
+  assert.deepEqual(store.getSyncOutbox(), before, "an uncertain prior response preserves the exact signed request body");
+});
+
+test("a new stream-reconciliation marker acknowledges the durably applied configuration revision", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-sync-new-marker-revision-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const store = new Store(path.join(directory, "dinodia.json"));
+  const serverStreamId = "remote-stream-accepted-18";
+  await store.queueSyncEvent("update.status", "updater", { revision: 1, trustState: "unprovisioned" }, { critical: true });
+  const original = await store.prepareSyncBatch("sync-installation", { kind: "dinodia_os", version: "test", capabilities: {} });
+  await store.applySyncConfigurationSnapshot(5);
+
+  const reconciled = await store.prepareSyncStreamReconciliation({ previousStreamId: serverStreamId, previousAcceptedSequence: 18 });
+  assert.equal(original.acknowledgedCloudRevision, 0);
+  assert.equal(reconciled.acknowledgedCloudRevision, 5);
+  assert.deepEqual(reconciled.events, original.events, "the durable event payload remains unchanged");
+  assert.deepEqual(
+    await store.prepareSyncStreamReconciliation({ previousStreamId: serverStreamId, previousAcceptedSequence: 18 }),
+    reconciled,
+    "the exact newly prepared reconciliation request remains stable on retry",
+  );
 });
 
 test("restricted installation bootstrap never requests a full Home configuration refresh", async () => {

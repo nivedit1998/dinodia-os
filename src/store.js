@@ -1896,11 +1896,28 @@ class Store {
         || Number(batch.toSequence) !== Number(batch.events.at(-1)?.sequence)) {
         throw Object.assign(new Error("The complete durable first batch is not available for stream reconciliation"), { code: "hub_sync_stream_reconciliation_required" });
       }
+      const appliedRevision = Number(outbox.configurationAppliedRevision);
+      const batchRevision = Number(batch.acknowledgedCloudRevision ?? 0);
+      if (!Number.isSafeInteger(appliedRevision) || appliedRevision < 0 || appliedRevision !== Number(outbox.cloudRevision)
+        || !Number.isSafeInteger(batchRevision) || batchRevision < 0 || batchRevision > appliedRevision) {
+        throw Object.assign(new Error("The durable batch configuration revision cannot be reconciled with the applied snapshot"), { code: "hub_sync_configuration_ack_invalid" });
+      }
       const existing = batch.streamReconciliation;
       if (existing) {
         if (existing.version !== 1 || String(existing.previousStreamId) !== previousId
           || Number(existing.previousAcceptedSequence) !== previousSequence) {
           throw Object.assign(new Error("The exact in-flight reconciliation is bound to a different authoritative server cursor"), { code: "hub_sync_stream_reconciliation_required" });
+        }
+        if (batchRevision < appliedRevision) {
+          // Only rewrite the acknowledgement metadata after the Platform
+          // explicitly rejected the prior envelope for its stale revision.
+          // A timeout/lost response must retry byte-for-byte because the
+          // remote transition may already have committed.
+          if (outbox.lastErrorCode !== "hub_sync_configuration_ack_invalid") {
+            throw Object.assign(new Error("The marked in-flight batch has an uncertain prior result; preserving its exact request"), { code: "hub_sync_stream_reconciliation_required" });
+          }
+          batch.acknowledgedCloudRevision = appliedRevision;
+          await this.persist();
         }
         return clone(batch);
       }
@@ -1909,6 +1926,11 @@ class Store {
         previousStreamId: previousId,
         previousAcceptedSequence: previousSequence,
       };
+      // This is the first request carrying the stream-transition marker. The
+      // authenticated, durably applied configuration snapshot is the revision
+      // that this new envelope must acknowledge, even if its event batch was
+      // prepared before that snapshot arrived.
+      batch.acknowledgedCloudRevision = appliedRevision;
       await this.persist();
       return clone(batch);
     } catch (error) {
