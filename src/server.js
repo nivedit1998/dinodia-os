@@ -4381,12 +4381,14 @@ function nativeDeviceView(principal, device) {
     const operatorEndRoute = req.method === "POST" && pathname === "/_dinodia/operator-session/end";
     const permanentInstallationRoute = pathname === "/_dinodia/installer/commissioning" || pathname === "/_dinodia/installer/commissioning/devices"
       || /^\/_dinodia\/installer\/commissioning\/sessions(?:\/[^/]+(?:\/(?:matter-payload|select|complete|cancel|resume))?)?$/.test(pathname);
+    const operatorWorkspaceRoute = req.method === "GET"
+      && /^\/_dinodia\/operator\/[A-Za-z0-9_-]{24,64}(?:\/installation)?$/.test(pathname);
     const recognizedPath = setupRoute || staticRoute || operatorReadRoute || operatorAreaCreateRoute
-      || operatorCloudflareStatusRoute || operatorCloudflareRecoveryRoute || operatorEndRoute || permanentInstallationRoute;
+      || operatorCloudflareStatusRoute || operatorCloudflareRecoveryRoute || operatorEndRoute || permanentInstallationRoute || operatorWorkspaceRoute;
     if (!recognizedPath && ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(req.method)) return json(res, 404, { error: "Not found" });
     if (!recognizedPath) return text(res, 405, "Method not allowed");
     if (!setupRoute && !staticRoute && !operatorReadRoute && !operatorAreaCreateRoute
-      && !operatorCloudflareStatusRoute && !operatorCloudflareRecoveryRoute && !operatorEndRoute && !permanentInstallationRoute) return json(res, 404, { error: "Not found" });
+      && !operatorCloudflareStatusRoute && !operatorCloudflareRecoveryRoute && !operatorEndRoute && !permanentInstallationRoute && !operatorWorkspaceRoute) return json(res, 404, { error: "Not found" });
     return handleUnifiedRequest(req, res);
   });
   let httpsServer = null;

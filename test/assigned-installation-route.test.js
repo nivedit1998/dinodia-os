@@ -109,6 +109,11 @@ test("assigned commissioning route serves a current grant and denies stale ident
   assert.ok(sessionCookie.startsWith(`dinodia_os_operator_session_${establishedBody.sessionSelector}=`), "the cookie name binds this browser window to its own scoped session selector");
   const authorityCookie = `${cookieHeader}; ${sessionCookie}`;
   const operatorHeaders = { cookie: authorityCookie, "x-dinodia-operator-session": establishedBody.sessionSelector };
+  const localAssignedWorkspace = await fetch(`${setupOrigin}${establishedBody.destination}`, { headers: operatorHeaders });
+  assert.equal(localAssignedWorkspace.status, 200, "the restricted LAN listener must serve the assigned-installation workspace after its authenticated handoff");
+  assert.match(await localAssignedWorkspace.text(), /Permanent device installation/);
+  const localFullDashboard = await fetch(`${setupOrigin}/_dinodia/operator/${establishedBody.sessionSelector}`, { headers: operatorHeaders });
+  assert.equal(localFullDashboard.status, 403, "the local listener must route full-dashboard selectors to OS scope enforcement, not hide them behind a 404");
   const sessionStatus = await fetch(`${setupOrigin}/_dinodia/admin/api/operator-session`, { headers: operatorHeaders });
   const sessionStatusBody = await sessionStatus.json();
   assert.equal(sessionStatus.status, 200, JSON.stringify(sessionStatusBody));
