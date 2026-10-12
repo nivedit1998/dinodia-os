@@ -98,13 +98,16 @@ test("an explicitly rejected descriptor batch is compacted without acknowledging
     assert.deepEqual(refused, { reconciled: false, compactedEvents: 0, refreshedDevices: 0 });
     assert.equal(JSON.stringify(store.getSyncOutbox()), unchanged, "a cursor other than the exact local ACK must not rewrite the durable batch");
 
+    await store.queueSyncEvent("update.status", "updater", { revision: 1, phase: "idle" }, { critical: true });
+    assert.equal(store.getSyncOutbox().lastErrorCode, "hub_sync_descriptor_stale",
+      "new events must not erase the durable reason that the exact in-flight batch was rejected");
     const reconciled = await store.reconcileRejectedDescriptorSync({ streamId, acceptedSequence: 10, errorCode: "hub_sync_descriptor_stale" });
     assert.deepEqual(reconciled, { reconciled: true, compactedEvents: 4, refreshedDevices: 1 });
     const outbox = store.getSyncOutbox();
     assert.equal(outbox.acknowledgedSequence, 10, "reconciliation must never fabricate a cloud acknowledgement");
-    assert.deepEqual(outbox.events.map((entry) => entry.sequence), [11, 12, 13, 14, 15, 16, 17, 18]);
+    assert.deepEqual(outbox.events.map((entry) => entry.sequence), [11, 12, 13, 14, 15, 16, 17, 18, 19]);
     assert.ok(outbox.events.slice(0, 6).every((entry) => entry.type === "sync.compacted"));
-    assert.ok(outbox.events.slice(0, 6).every((entry) => entry.payload.supersededBy === 17));
+    assert.deepEqual(outbox.events.slice(0, 6).map((entry) => entry.payload.supersededBy), [17, 17, 18, 18, 18, 18]);
     assert.deepEqual(outbox.events.slice(0, 6).map((entry) => entry.critical), [false, false, true, true, true, true],
       "compaction retains the critical classification of rejected snapshots while preserving earlier markers");
     assert.deepEqual(outbox.inFlight.events.map((entry) => entry.type), ["sync.compacted", "sync.compacted", "sync.compacted", "sync.compacted"]);
@@ -112,11 +115,11 @@ test("an explicitly rejected descriptor batch is compacted without acknowledging
       "the exact rejected in-flight snapshots remain marked critical after conversion to no-payload markers");
     assert.equal(outbox.inFlight.fromSequence, 11);
     assert.equal(outbox.inFlight.toSequence, 14);
-    assert.equal(outbox.inFlight.queueDepth, 8);
+    assert.equal(outbox.inFlight.queueDepth, 9);
     assert.deepEqual(outbox.events.slice(-2).map((entry) => entry.type), ["device.upsert", "control.catalog.upsert"]);
     assert.ok(outbox.events.slice(-2).every((entry) => entry.payload.descriptorDigest === policy.descriptorDigest));
     assert.equal(outbox.events.at(-1).payload.catalogRevision, policy.descriptorRevision);
-    assert.equal(outbox.nextSequence, 19);
+    assert.equal(outbox.nextSequence, 20);
     assert.equal(store.getPlatform().devicePolicies[device.id].managementClass, "PROPERTY_DEVICE");
 
     const tombstoneState = structuredClone(registeredState);

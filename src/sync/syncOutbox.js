@@ -143,7 +143,9 @@ function enqueueSyncEventInState(state, type, aggregateId, payload, options = {}
   }
   outbox.events.push(event);
   outbox.nextSequence += 1;
-  outbox.lastErrorCode = null;
+  // Queueing another event does not recover a previously rejected in-flight
+  // batch. Keep its delivery error until a real sync/configuration receipt
+  // clears it; descriptor reconciliation depends on this durable signal.
   return JSON.parse(JSON.stringify(event));
 }
 
