@@ -1262,8 +1262,9 @@ function nativeDeviceView(principal, device) {
     };
   }
 
-  function nativeContractError(res, status, code, message, retryable = false) {
-    return json(res, status, { error: { code, message, requestId: crypto.randomUUID(), retryable } });
+  function nativeContractError(res, status, code, message, retryable = false, reason = null) {
+    return json(res, status, { error: { code, message, requestId: crypto.randomUUID(), retryable,
+      ...(typeof reason === "string" && /^[a-z0-9_]{1,64}$/i.test(reason) ? { reason } : {}) } });
   }
 
   function nativeStreamId() { return nativeStreamIdValue; }
@@ -3761,7 +3762,9 @@ function nativeDeviceView(principal, device) {
     } catch (error) {
       const status = Number(error?.statusCode) || 503;
       const code = /^[a-z0-9_]{1,64}$/i.test(String(error?.code || "")) ? String(error.code).toUpperCase() : "COMMISSIONING_UNAVAILABLE";
-      return nativeContractError(res, status, code, status >= 500 ? "The commissioning service is temporarily unavailable" : String(error.message || "The commissioning request was rejected"), status >= 500);
+      const reason = typeof error?.reason === "string" && /^[a-z0-9_]{1,64}$/i.test(error.reason) ? error.reason : null;
+      if (status === 409 && reason) logger.warn(`[commissioning] conflict action=${action || "status"} reason=${reason}`);
+      return nativeContractError(res, status, code, status >= 500 ? "The commissioning service is temporarily unavailable" : String(error.message || "The commissioning request was rejected"), status >= 500, reason);
     }
   }
 

@@ -11,8 +11,8 @@ const MAX_TOTAL_CANDIDATES = 256;
 const TERMINAL = new Set(["completed", "completed_cleanup_pending", "cancelled", "expired", "failed", "cancelled_cleanup_pending", "expired_cleanup_pending", "failed_cleanup_pending"]);
 const SAFE_ERROR = Object.freeze({ invalid: "commissioning_request_invalid", denied: "commissioning_authority_denied", busy: "commissioning_radio_busy", unavailable: "commissioning_radio_unavailable", expired: "commissioning_session_expired", conflict: "commissioning_revision_conflict" });
 
-function fail(code, statusCode = 409, message = "This commissioning operation is unavailable") {
-  throw Object.assign(new Error(message), { statusCode, code });
+function fail(code, statusCode = 409, message = "This commissioning operation is unavailable", reason = null) {
+  throw Object.assign(new Error(message), { statusCode, code, ...(typeof reason === "string" && /^[a-z0-9_]{1,64}$/i.test(reason) ? { reason } : {}) });
 }
 function hasCurrentCanonicalDevicePolicy(policy) {
   const managementClass = String(policy?.managementClass || "").toUpperCase();
@@ -28,7 +28,7 @@ function fixedSession(session, afterCandidateRef = null) {
   const statuses = new Set(["requested", "advertising", "awaiting_payload", "commissioning", "searching", "reviewing_existing", "interrupted", "selected", "completed", "completed_cleanup_pending", "cancelled", "expired", "failed", "cancelled_cleanup_pending", "expired_cleanup_pending"]);
   const candidates = Array.isArray(session.candidates) ? session.candidates : [];
   const cursorIndex = afterCandidateRef == null ? -1 : candidates.findIndex((candidate) => candidate.candidateRef === afterCandidateRef);
-  if (afterCandidateRef != null && cursorIndex < 0) fail(SAFE_ERROR.conflict, 409, "The candidate page changed; refresh the discovery list");
+  if (afterCandidateRef != null && cursorIndex < 0) fail(SAFE_ERROR.conflict, 409, "The candidate page changed; refresh the discovery list", "candidate_page_changed");
   const start = cursorIndex + 1;
   const page = candidates.slice(start, start + MAX_CANDIDATES);
   return {
@@ -79,7 +79,7 @@ class NativeCommissioningService {
   async save(session) {
     const rows = { ...this.sessions(), [session.sessionId]: session };
     const active = Object.values(rows).filter((row) => !TERMINAL.has(row.status));
-    if (active.length > 4) fail(SAFE_ERROR.busy, 409, "The hub already has the maximum active commissioning sessions");
+    if (active.length > 4) fail(SAFE_ERROR.busy, 409, "The hub already has the maximum active commissioning sessions", "active_session_limit");
     const completed = Object.entries(rows).filter(([, row]) => TERMINAL.has(row.status)).sort((a, b) => Date.parse(b[1].updatedAt) - Date.parse(a[1].updatedAt)).slice(0, 24);
     const recoverable = Object.entries(rows).filter(([, row]) => TERMINAL.has(row.status)
       && (row.candidates || []).some((candidate) => candidate.registrationProvenance?.kind === "expired_staff_pairing_v1"
@@ -448,7 +448,7 @@ class NativeCommissioningService {
       const prior = Object.values(this.sessions()).find((row) => row.idempotencyHash === keyHash);
       if (prior) {
         if (prior.requestHash !== bodyHash || prior.operationKind !== operationKind || prior.actorType !== actor.actorType || prior.requesterAccountId !== actor.accountId || prior.ownerMembershipId !== actor.membershipId
-          || prior.employeeId !== actor.employeeId || prior.operatorHandoffId !== actor.operatorHandoffId || prior.requestId !== actor.requestId) fail(SAFE_ERROR.conflict, 409, "This operation key was already used for another commissioning request");
+          || prior.employeeId !== actor.employeeId || prior.operatorHandoffId !== actor.operatorHandoffId || prior.requestId !== actor.requestId) fail(SAFE_ERROR.conflict, 409, "This operation key was already used for another commissioning request", "idempotency_key_reused");
         if (prior.status === "creating" && prior.platformCreatePending === true) await this.establishPlatformSession(prior);
         if (Date.parse(prior.expiresAt) <= this.clock() && !TERMINAL.has(prior.status)) await this.expire(prior);
         return this.publicStatus(this.sessions()[prior.sessionId] || prior);
@@ -470,22 +470,22 @@ class NativeCommissioningService {
         const device = this.store.getDevice(adoption.deviceId);
         const provenance = this.adoptionProvenance(actor, device);
         if (!provenance || provenance.protocolIdentityHash !== adoption.protocolIdentityHash || provenance.areaId !== adoption.originalAreaId) {
-          fail(SAFE_ERROR.conflict, 409, "This local device or its current ownership/interview evidence changed; refresh before continuing");
+          fail(SAFE_ERROR.conflict, 409, "This local device or its current ownership/interview evidence changed; refresh before continuing", "adoption_evidence_changed");
         }
       }
       const priorSessions = Object.values(this.sessions());
       if (priorSessions.some((row) => row.cleanup?.pendingIds?.length)) {
-        fail(SAFE_ERROR.busy, 409, "The hub is reconciling a previous radio cleanup against the current adapter inventory. No new search was started; wait briefly and retry.");
+        fail(SAFE_ERROR.busy, 409, "The hub is reconciling a previous radio cleanup against the current adapter inventory. No new search was started; wait briefly and retry.", "radio_cleanup_pending");
       }
       if (priorSessions.some((row) => this.blocksRadioOperation(row))) {
-        fail(SAFE_ERROR.busy, 409, "Another radio commissioning operation is still active on this hub");
+        fail(SAFE_ERROR.busy, 409, "Another radio commissioning operation is still active on this hub", "radio_operation_active");
       }
       if (operationKind === "PAIR_NEW" && this.mqtt?.pairingStatus?.().active === true) {
-        fail(SAFE_ERROR.busy, 409, "A Zigbee join window is still active on this hub; no second radio operation was started");
+        fail(SAFE_ERROR.busy, 409, "A Zigbee join window is still active on this hub; no second radio operation was started", "zigbee_join_window_active");
       }
       if (operationKind === "PAIR_NEW" && input.protocol === "zigbee") {
         if (!this.mqtt?.status?.().connected || !this.store.getZigbee?.().adapterPath) fail(SAFE_ERROR.unavailable, 503, "The enrolled Zigbee coordinator is not ready; no join was opened");
-        if (this.mqtt.pairingStatus?.().active) fail(SAFE_ERROR.busy, 409, "Another Zigbee pairing session is already active on this hub");
+        if (this.mqtt.pairingStatus?.().active) fail(SAFE_ERROR.busy, 409, "Another Zigbee pairing session is already active on this hub", "zigbee_join_window_active");
       } else if (operationKind === "PAIR_NEW" && !this.matter?.status?.().connected) fail(SAFE_ERROR.unavailable, 503, "The enrolled Matter commissioning controller is unavailable; no setup payload was accepted");
       const now = this.clock(); const sessionId = crypto.randomUUID();
       const existingDevice = adoption ? this.store.getDevice(adoption.deviceId) : null;
@@ -521,7 +521,7 @@ class NativeCommissioningService {
       const cloud = await this.platform("create", session, { idempotencyHash: session.idempotencyHash, requestHash: session.platformRequestHash });
       if (!/^[0-9a-f-]{36}$/i.test(String(cloud.sessionId || "")) || !Number.isFinite(Date.parse(String(cloud.expiresAt || "")))) fail(SAFE_ERROR.unavailable, 503, "Platform did not confirm the commissioning session");
       if (String(cloud.sessionId) !== String(session.sessionId)) {
-        if (Object.values(this.sessions()).some((row) => row.sessionId === String(cloud.sessionId))) fail(SAFE_ERROR.conflict, 409, "The Platform session is already bound to another local operation");
+        if (Object.values(this.sessions()).some((row) => row.sessionId === String(cloud.sessionId))) fail(SAFE_ERROR.conflict, 409, "The Platform session is already bound to another local operation", "platform_session_collision");
         const sessions = { ...this.sessions() }; delete sessions[session.sessionId];
         session.sessionId = String(cloud.sessionId);
         await this.store.saveSecurity({ nativeCommissioningSessions: { ...sessions, [session.sessionId]: session } });
@@ -594,7 +594,7 @@ class NativeCommissioningService {
     if (TERMINAL.has(session.status)) return;
     if (session.operationKind === "REGISTER_EXISTING") {
       const device = this.store.getDevice(session.targetDeviceId);
-      if (!actor || !this.isCompleteRadioDevice(session, device, actor)) fail(SAFE_ERROR.conflict, 409, "The existing device changed or is no longer eligible; return to the assigned device list");
+      if (!actor || !this.isCompleteRadioDevice(session, device, actor)) fail(SAFE_ERROR.conflict, 409, "The existing device changed or is no longer eligible; return to the assigned device list", "adoption_candidate_changed");
       return;
     }
     const devices = session.protocol === "zigbee"
@@ -668,7 +668,7 @@ class NativeCommissioningService {
   async matterPayload(sessionId, principal, encoded) {
     return this.exclusive(async () => {
       const { session } = await this.requireSession(sessionId, principal);
-      if (session.protocol !== "matter" || !["awaiting_payload", "interrupted"].includes(session.status) || session.matterPayloadSubmittedAt) fail(SAFE_ERROR.conflict, 409, "This Matter attempt already has setup material; cancel it and start a new session to recover");
+      if (session.protocol !== "matter" || !["awaiting_payload", "interrupted"].includes(session.status) || session.matterPayloadSubmittedAt) fail(SAFE_ERROR.conflict, 409, "This Matter attempt already has setup material; cancel it and start a new session to recover", "matter_payload_already_submitted");
       if (typeof encoded !== "string" || encoded.length < 20 || encoded.length > MATTER_QR_CODE_SINGLE_PAYLOAD_MAX_LENGTH || !/^MT:[0-9A-Z.*-]+$/iu.test(encoded)) fail(SAFE_ERROR.invalid, 400, "Scan a valid Matter setup QR code");
       let decoded;
       try { decoded = QrPairingCodeCodec.decode(encoded, true); } catch { fail(SAFE_ERROR.invalid, 400, "This QR code is not a valid Matter commissioning code"); }
@@ -742,7 +742,7 @@ class NativeCommissioningService {
     return this.exclusive(async () => {
       const { session, actor } = await this.requireSession(sessionId, principal);
       const keys = ["areaId", "candidateRef", "customerLabel", "expectedRevision", "name", "schemaVersion"].sort().join("\n");
-      if (!input || Object.keys(input).sort().join("\n") !== keys || input.schemaVersion !== "dinodia.v1" || Number(input.expectedRevision) !== Number(session.revision)) fail(SAFE_ERROR.conflict, 409, "The discovered device list changed; refresh and select again");
+      if (!input || Object.keys(input).sort().join("\n") !== keys || input.schemaVersion !== "dinodia.v1" || Number(input.expectedRevision) !== Number(session.revision)) fail(SAFE_ERROR.conflict, 409, "The discovered device list changed; refresh and select again", "candidate_list_revision_changed");
       const candidate = session.candidates.find((row) => row.candidateRef === input.candidateRef);
       if (!candidate) fail(SAFE_ERROR.denied, 404, "This discovered device is no longer available in this session");
       const area = this.canonicalArea(actor, input.areaId);
@@ -750,10 +750,10 @@ class NativeCommissioningService {
       const label = input.customerLabel == null || input.customerLabel === "" ? null : String(input.customerLabel).normalize("NFC").trim();
       if (!text(name, 80) || label === null || !text(label, 40) || !label) fail(SAFE_ERROR.invalid, 400, "Enter a customer label between 1 and 40 characters");
       const device = this.store.getDevice(candidate.deviceId);
-      if (!this.isCompleteRadioDevice(session, device, actor)) fail(SAFE_ERROR.unavailable, 409, "The hub has not completed the device interview or ownership review yet");
+      if (!this.isCompleteRadioDevice(session, device, actor)) fail(SAFE_ERROR.unavailable, 409, "The hub has not completed the device interview or ownership review yet", "candidate_interview_incomplete");
       const catalogue = buildPublicCommissioningCatalogue({ device, homeId: actor.homeId, membershipId: actor.membershipId, managementClass: actor.actorType === "STAFF_INSTALLER" ? "property_device" : "tenant_device", areaId: area.areaId,
         name: name || undefined, customerLabel: label, now: this.clock() });
-      if (!catalogue) fail(SAFE_ERROR.unavailable, 409, "The hub could not produce a safe device catalogue");
+      if (!catalogue) fail(SAFE_ERROR.unavailable, 409, "The hub could not produce a safe device catalogue", "candidate_catalogue_unavailable");
       Object.assign(session, { selectedCandidateRef: candidate.candidateRef, selectedDeviceId: device.id, selectedAreaId: area.areaId,
         selectedHubAreaId: area.hubAreaId, selectedName: name, selectedCustomerLabel: label, selectedCatalogue: catalogue,
         selectedDescriptorRevision: catalogue.descriptorRevision, selectedDescriptorDigest: catalogue.descriptorDigest, status: "selected" });
@@ -798,22 +798,22 @@ class NativeCommissioningService {
     return this.exclusive(async () => {
       const { session, actor } = await this.requireSession(sessionId, principal);
       if (session.status === "completed" || session.status === "completed_cleanup_pending") return this.publicStatus(session);
-      if (session.status !== "selected" || !session.selectedDeviceId || !session.selectedAreaId || !session.selectedCatalogue) fail(SAFE_ERROR.conflict, 409, "Select a discovered device and permitted Area before completing");
+      if (session.status !== "selected" || !session.selectedDeviceId || !session.selectedAreaId || !session.selectedCatalogue) fail(SAFE_ERROR.conflict, 409, "Select a discovered device and permitted Area before completing", "device_review_required");
       const device = this.store.getDevice(session.selectedDeviceId);
-      if (!this.isCompleteRadioDevice(session, device, actor)) fail(SAFE_ERROR.unavailable, 409, "The selected device is not fully discovered, currently owned, and usable yet");
+      if (!this.isCompleteRadioDevice(session, device, actor)) fail(SAFE_ERROR.unavailable, 409, "The selected device is not fully discovered, currently owned, and usable yet", "candidate_not_ready");
       const catalogue = session.selectedCatalogue;
       const currentCatalogue = buildPublicCommissioningCatalogue({ device, homeId: actor.homeId, membershipId: actor.membershipId,
         managementClass: actor.actorType === "STAFF_INSTALLER" ? "property_device" : "tenant_device", areaId: session.selectedAreaId,
         name: session.selectedName || undefined, customerLabel: session.selectedCustomerLabel, now: this.clock() });
       if (!currentCatalogue || currentCatalogue.descriptorRevision !== session.selectedDescriptorRevision
-        || currentCatalogue.descriptorDigest !== session.selectedDescriptorDigest) fail(SAFE_ERROR.conflict, 409, "The device descriptor changed after review; refresh and review it again");
+        || currentCatalogue.descriptorDigest !== session.selectedDescriptorDigest) fail(SAFE_ERROR.conflict, 409, "The device descriptor changed after review; refresh and review it again", "device_descriptor_changed_after_review");
       if (catalogue.capabilityStatus === "ready" ? disposition !== "install"
         : catalogue.capabilityStatus === "no_safe_controls"
           ? disposition !== "remove" && (disposition !== "view_only" || catalogue.usefulReadings !== true)
           : catalogue.capabilityStatus === "unsupported"
             ? !["remove", "retain_unsupported"].includes(disposition)
             : true) {
-        fail(SAFE_ERROR.conflict, 409, "Review the discovered device result and choose a permitted keep or remove action");
+        fail(SAFE_ERROR.conflict, 409, "Review the discovered device result and choose a permitted keep or remove action", "disposition_not_compatible_with_device");
       }
       if (disposition === "remove") {
         if (session.operationKind === "REGISTER_EXISTING") fail(SAFE_ERROR.denied, 403, "An already-paired local device is never removed as part of property adoption; cancel registration to leave it unchanged");
@@ -853,7 +853,14 @@ class NativeCommissioningService {
         canonicalAreaIds: [session.selectedAreaId], platformDeviceId: cloud.device.id, overrideName: session.selectedName || null,
         ...(propertyDevice ? { installationRequestId: actor.requestId } : {}),
       };
+      const normalizedLabel = String(session.selectedCustomerLabel || "").normalize("NFC").trim().replace(/\s+/g, " ").toLocaleLowerCase("en-GB");
+      const matchedLabel = normalizedLabel && typeof this.store.listLabels === "function"
+        ? this.store.listLabels().find((label) => String(label.name || "").normalize("NFC").trim().replace(/\s+/g, " ").toLocaleLowerCase("en-GB") === normalizedLabel)
+        : null;
+      const currentLabelIds = Array.isArray(device.labelIds) ? device.labelIds : Array.isArray(device.labels) ? device.labels : [];
+      const labelIds = [...new Set([...currentLabelIds.map(String), ...(matchedLabel?.id ? [String(matchedLabel.id)] : [])])];
       const updated = await this.store.upsertDevice({ ...device, name: session.selectedName || device.originalName || device.name, areaId: session.selectedHubAreaId,
+        labelIds, labels: labelIds,
         managementClass: propertyDevice ? "property_device" : "tenant_device", tenantOwnerMembershipId: propertyDevice ? undefined : actor.membershipId,
         setup: { ...(device.setup || {}), status: "ready", viewOnly: platformDisposition === "view_only", unsupported: catalogue.capabilityStatus === "unsupported", commissionedAt: new Date(this.clock()).toISOString() },
         metadata: { ...(device.metadata || {}), managementClass: propertyDevice ? "property_device" : "tenant_device", ...(propertyDevice ? { tenantOwnerMembershipId: undefined, installationRequestId: actor.requestId } : { tenantOwnerMembershipId: actor.membershipId }), cloudDeviceId: cloud.device.id } }, { devicePolicy: policy });
@@ -875,20 +882,20 @@ class NativeCommissioningService {
       const { session } = await this.requireSession(sessionId, principal);
       if (session.status !== "interrupted") return this.publicStatus(session);
       if (Object.values(this.sessions()).some((row) => row.sessionId !== session.sessionId && this.blocksRadioOperation(row))) {
-        fail(SAFE_ERROR.busy, 409, "Another radio commissioning operation is still active on this hub");
+        fail(SAFE_ERROR.busy, 409, "Another radio commissioning operation is still active on this hub", "radio_operation_active");
       }
       if (session.operationKind === "REGISTER_EXISTING") {
         const device = this.store.getDevice(session.targetDeviceId);
         const actor = await this.principal(principal);
-        if (!this.isCompleteRadioDevice(session, device, actor)) fail(SAFE_ERROR.conflict, 409, "The existing local device changed while installation was interrupted; refresh its review");
+        if (!this.isCompleteRadioDevice(session, device, actor)) fail(SAFE_ERROR.conflict, 409, "The existing local device changed while installation was interrupted; refresh its review", "adoption_candidate_changed_on_resume");
         session.status = "reviewing_existing";
         this.append(session, "existing_device_review_resumed");
         await this.save(session);
         return this.publicStatus(session);
       }
-      if (session.protocol === "matter" && session.matterPayloadSubmittedAt) fail(SAFE_ERROR.conflict, 409, "This Matter attempt was interrupted after code submission; cancel it and scan again in a new session");
+      if (session.protocol === "matter" && session.matterPayloadSubmittedAt) fail(SAFE_ERROR.conflict, 409, "This Matter attempt was interrupted after code submission; cancel it and scan again in a new session", "matter_payload_requires_new_session");
       if (session.protocol === "zigbee") {
-        if (this.mqtt?.pairingStatus?.().active === true) fail(SAFE_ERROR.busy, 409, "A Zigbee join window is still active on this hub");
+        if (this.mqtt?.pairingStatus?.().active === true) fail(SAFE_ERROR.busy, 409, "A Zigbee join window is still active on this hub", "zigbee_join_window_active");
         await this.mqtt.startPairing(254, { sessionId: session.sessionId, sessionExpiresAt: session.expiresAt });
       }
       session.status = session.protocol === "zigbee" ? "searching" : "awaiting_payload";
@@ -912,7 +919,7 @@ class NativeCommissioningService {
   async cancel(sessionId, principal) {
     return this.exclusive(async () => {
       const { session } = await this.requireSession(sessionId, principal);
-      if (session.status === "completed") fail(SAFE_ERROR.conflict, 409, "A completed device cannot be cancelled as a commissioning session");
+      if (session.status === "completed") fail(SAFE_ERROR.conflict, 409, "A completed device cannot be cancelled as a commissioning session", "session_already_completed");
       return this.closeSession(session, "cancelled");
     });
   }

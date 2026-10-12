@@ -59,8 +59,15 @@ function normalizePendingPropertyDevicePolicies(value) {
   return result;
 }
 
-function nativeSyncDeviceProjection(device) {
+function nativeSyncDeviceProjection(device, policy = null) {
   const protocol = String(device?.protocol || "unknown").toLowerCase();
+  const presentationRevision = Math.max(1, Number(device?.presentation?.descriptorRevision) || 1);
+  const policyRevision = Number(policy?.descriptorRevision);
+  const policyDigest = String(policy?.descriptorDigest || "");
+  const descriptorIsCanonical = policy?.managementClass === "PROPERTY_DEVICE"
+    && Number.isSafeInteger(policyRevision) && policyRevision > 0
+    && /^[a-f0-9]{64}$/i.test(policyDigest)
+    && presentationRevision === policyRevision;
   return {
     osDeviceId: String(device?.id || "").slice(0, 160),
     name: String(device?.name || device?.id || "Device").slice(0, 160),
@@ -68,8 +75,13 @@ function nativeSyncDeviceProjection(device) {
     protocol: ["zigbee", "matter", "thread", "hive", "google_nest"].includes(protocol) ? protocol : "unknown",
     deviceType: String(device?.deviceType || device?.metadata?.device_type || device?.protocol || "unknown").slice(0, 120),
     technicalLabel: String(device?.technicalLabel || device?.deviceType || device?.protocol || "device").slice(0, 80),
-    descriptorRevision: Math.max(1, Number(device?.presentation?.descriptorRevision) || 1),
-    descriptorDigest: crypto.createHash("sha256").update(String(device?.presentation?.sourceFingerprint || ""), "utf8").digest("hex"),
+    descriptorRevision: presentationRevision,
+    // The commissioning service records a public, reviewed descriptor digest
+    // in Platform. Reusing the internal source-fingerprint digest at the same
+    // revision creates a permanent same-revision conflict on the sync stream.
+    // A genuinely newer OS descriptor still carries its new source digest.
+    descriptorDigest: descriptorIsCanonical ? policyDigest
+      : crypto.createHash("sha256").update(String(device?.presentation?.sourceFingerprint || ""), "utf8").digest("hex"),
     available: device?.available !== false,
     observedAt: device?.lastSeenAt ? String(device.lastSeenAt) : null,
   };
@@ -95,7 +107,7 @@ function nativeSyncControlCatalogProjection(state, device) {
   return {
     osDeviceId: dto.id,
     catalogRevision: dto.descriptorRevision,
-    descriptorDigest: String(nativeSyncDeviceProjection(device).descriptorDigest),
+    descriptorDigest: String(nativeSyncDeviceProjection(device, policy).descriptorDigest),
     controls: dto.controls,
   };
 }
@@ -115,7 +127,7 @@ function enqueueNativeDeviceSync(state, previous, current, options = {}) {
   // to the hub so the tenant can control them, but their device identity and
   // activity are never projected back into owner/manager cloud sync.
   if (!id || policy?.managementClass !== "PROPERTY_DEVICE") return;
-  const currentProjection = nativeSyncDeviceProjection(current);
+  const currentProjection = nativeSyncDeviceProjection(current, policy);
   enqueueSyncEventInState(state, "device.upsert", id, currentProjection, options);
   const currentCatalog = nativeSyncControlCatalogProjection(state, current);
   if (!currentCatalog) return;
@@ -1178,8 +1190,9 @@ class Store {
       for (const key of ended.changedBuckets) queueUsageBucket(this.state, key, assignmentEndMs);
     }
     this.state.devices[id] = next;
-    const previousProjection = existing.id ? nativeSyncDeviceProjection(existing) : null;
-    const syncProjection = nativeSyncDeviceProjection(next);
+    const devicePolicy = this.state.platform?.devicePolicies?.[id];
+    const previousProjection = existing.id ? nativeSyncDeviceProjection(existing, devicePolicy) : null;
+    const syncProjection = nativeSyncDeviceProjection(next, devicePolicy);
     if (this.state.platform?.devicePolicies?.[id] && (!previousProjection || JSON.stringify(previousProjection) !== JSON.stringify(syncProjection)
       || JSON.stringify(nativeSyncControlCatalogProjection(this.state, existing)?.controls || []) !== JSON.stringify(nativeSyncControlCatalogProjection(this.state, next)?.controls || []))) {
       enqueueNativeDeviceSync(this.state, existing.id ? existing : null, next, { critical: !previousProjection });
@@ -1808,6 +1821,119 @@ class Store {
 
   getSyncOutbox() {
     return clone(this.state.syncOutbox || initialSyncOutbox());
+  }
+
+  async reconcileRejectedDescriptorSync({ streamId, acceptedSequence, errorCode } = {}) {
+    const before = this.snapshot();
+    const noChange = () => {
+      this.state = before;
+      return { reconciled: false, compactedEvents: 0, refreshedDevices: 0 };
+    };
+    try {
+      const outbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
+      const accepted = Number(acceptedSequence);
+      const batch = outbox.inFlight;
+      if (errorCode !== "hub_sync_descriptor_stale" || outbox.lastErrorCode !== errorCode
+        || String(streamId || "") !== outbox.streamId || !Number.isSafeInteger(accepted)
+        || accepted !== outbox.acknowledgedSequence || !batch || batch.streamId !== outbox.streamId
+        || outbox.gapDetected || outbox.criticalBacklog || outbox.telemetryPaused || outbox.droppedTelemetryCount !== 0
+        || Number(batch.fromSequence) !== accepted + 1 || !Number.isSafeInteger(Number(batch.toSequence))
+        || Number(batch.toSequence) < Number(batch.fromSequence) || !Array.isArray(batch.events)) {
+        return noChange();
+      }
+
+      const batchFrom = Number(batch.fromSequence);
+      const batchTo = Number(batch.toSequence);
+      const range = outbox.events.filter((event) => event.sequence >= batchFrom && event.sequence <= batchTo);
+      if (range.length !== batchTo - batchFrom + 1 || batch.events.length !== range.length
+        || range.some((event, index) => event.sequence !== batchFrom + index
+          || Number(batch.events[index]?.sequence) !== event.sequence
+          || String(batch.events[index]?.id) !== event.id)) {
+        return noChange();
+      }
+
+      const pending = outbox.events.filter((event) => event.sequence > accepted);
+      const staleDeviceIds = new Set();
+      const snapshotEventTypes = new Set(["device.upsert", "control.catalog.upsert", "control.catalog.tombstone"]);
+      for (const event of range) {
+        if (!snapshotEventTypes.has(event.type)) continue;
+        const id = String(event.payload?.osDeviceId || "");
+        const policy = this.state.platform?.devicePolicies?.[id];
+        const device = this.state.devices?.[id];
+        if (!id || event.aggregateId !== id || policy?.managementClass !== "PROPERTY_DEVICE"
+          || !device || ["REMOVAL_PENDING", "REMOVED", "RETIRED", "RECOMMISSION_REQUIRED"].includes(String(policy.lifecycle))) continue;
+        const current = nativeSyncDeviceProjection(device, policy);
+        const expectedRevision = event.type === "device.upsert" ? current.descriptorRevision : Number(device.presentation?.descriptorRevision || 1);
+        const eventRevision = Number(event.type === "device.upsert" ? event.payload?.descriptorRevision : event.payload?.catalogRevision);
+        const expectedDigest = current.descriptorDigest;
+        const eventDigest = String(event.payload?.descriptorDigest || "");
+        if (!Number.isSafeInteger(expectedRevision) || !Number.isSafeInteger(eventRevision) || eventRevision < 1
+          || !/^[a-f0-9]{64}$/i.test(expectedDigest) || !/^[a-f0-9]{64}$/i.test(eventDigest)) continue;
+        if (eventRevision > expectedRevision) {
+          return noChange();
+        }
+        if (eventRevision < expectedRevision || eventDigest !== expectedDigest) staleDeviceIds.add(id);
+      }
+      if (!staleDeviceIds.size) return noChange();
+
+      const targetEvents = new Map();
+      for (const id of staleDeviceIds) {
+        const device = this.state.devices?.[id];
+        const policy = this.state.platform?.devicePolicies?.[id];
+        const current = device && policy ? nativeSyncDeviceProjection(device, policy) : null;
+        if (!current || Number(device.presentation?.descriptorRevision || 1) !== current.descriptorRevision) {
+          return noChange();
+        }
+        const hasPendingCatalog = pending.some((event) => ["control.catalog.upsert", "control.catalog.tombstone"].includes(event.type)
+          && String(event.payload?.osDeviceId || "") === id);
+        if (hasPendingCatalog && !nativeSyncControlCatalogProjection(this.state, device)) {
+          return noChange();
+        }
+        for (const event of pending) {
+          if (!snapshotEventTypes.has(event.type)
+            || String(event.payload?.osDeviceId || "") !== id) continue;
+          if (event.aggregateId !== id) return noChange();
+          const eventRevision = Number(event.type === "device.upsert" ? event.payload?.descriptorRevision : event.payload?.catalogRevision);
+          if (!Number.isSafeInteger(eventRevision) || eventRevision < 1 || eventRevision > current.descriptorRevision) {
+            return noChange();
+          }
+          targetEvents.set(event.sequence, event);
+        }
+      }
+      if (![...targetEvents.values()].some((event) => event.sequence >= batchFrom && event.sequence <= batchTo)) {
+        return noChange();
+      }
+
+      const replacementSequence = outbox.nextSequence;
+      for (const event of targetEvents.values()) {
+        event.type = "sync.compacted";
+        event.aggregateId = "";
+        event.payload = { supersededBy: replacementSequence };
+        event.critical = false;
+      }
+      for (const id of staleDeviceIds) {
+        enqueueNativeDeviceSync(this.state, null, this.state.devices[id], { critical: true });
+      }
+
+      const reconciledOutbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
+      const refreshedRange = reconciledOutbox.events.filter((event) => event.sequence >= batchFrom && event.sequence <= batchTo);
+      const queueDepth = reconciledOutbox.events.filter((event) => event.sequence > accepted).length;
+      reconciledOutbox.inFlight = {
+        ...batch,
+        events: refreshedRange.map(clone),
+        queueDepth,
+        runtime: batch.runtime && typeof batch.runtime === "object"
+          ? { ...batch.runtime, capabilities: { ...(batch.runtime.capabilities || {}), nativeSyncOutbox: {
+            ...(batch.runtime.capabilities?.nativeSyncOutbox || {}), queueDepth,
+          } } }
+          : batch.runtime,
+      };
+      await this.persist();
+      return { reconciled: true, compactedEvents: targetEvents.size, refreshedDevices: staleDeviceIds.size };
+    } catch (error) {
+      this.state = before;
+      throw error;
+    }
   }
 
   getSyncRuntime(base = {}) {

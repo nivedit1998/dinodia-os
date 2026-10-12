@@ -371,6 +371,111 @@ test("stale configuration refresh applies policy without consuming the durable e
   } finally { await fs.rm(fixture.directory, { recursive: true, force: true }); }
 });
 
+test("an explicit stale-descriptor rejection safely replaces only superseded device snapshots before retry", async () => {
+  const serial = "DINODIA-DESCRIPTOR-RECONCILE-HUB";
+  const hubInstallId = "11111111-1111-4111-8111-111111111111";
+  const fixture = await pairingFixture({ serial, hubInstallId, configurationRevision: 5, acknowledgedCloudRevision: 5 });
+  try {
+    const { store, vault } = fixture;
+    const homeId = "home-a";
+    const area = await store.saveArea({ name: "Room 1" }, "os-room-1");
+    const canonicalAreaId = "33333333-3333-4333-8333-333333333333";
+    const descriptorDigest = "a".repeat(64);
+    const devicePolicy = {
+      managementClass: "PROPERTY_DEVICE", ownerMembershipId: null, lifecycle: "INSTALLED",
+      canonicalAreaIds: [canonicalAreaId], platformDeviceId: "44444444-4444-4444-8444-444444444444",
+      installationRequestId: "55555555-5555-4555-8555-555555555555", catalogueStatus: "ready", usefulReadings: true,
+      descriptorRevision: 1, descriptorDigest, overrideName: "Room 1 Radiator",
+    };
+    const device = await store.upsertDevice({ id: "zigbee:room-1-radiator", name: "Room 1 Radiator", protocol: "zigbee", areaId: area.id,
+      setup: { status: "ready" }, metadata: { model: "TRVZB" },
+      entities: { heat: { id: "heat", name: "Heat", domain: "climate", capability: {
+        controlId: "target-temperature", kind: "number", readable: true, writable: true,
+        bindings: [{ serviceId: "climate.set_temperature" }],
+      } } } }, { devicePolicy });
+
+    const canonicalEvents = store.getSyncOutbox().events.filter((event) => event.aggregateId === device.id);
+    const staleDigest = "b".repeat(64);
+    const makeStale = (sequence, source) => ({ ...structuredClone(source), id: `descriptor-event-${sequence}`,
+      sequence, occurredAt: new Date(1_800_000_000_000 + sequence).toISOString(),
+      payload: { ...source.payload, descriptorDigest: staleDigest } });
+    const pendingEvents = [];
+    for (let sequence = 11; sequence <= 36; sequence += 1) {
+      const source = canonicalEvents[(sequence - 11) % canonicalEvents.length];
+      pendingEvents.push(makeStale(sequence, source));
+    }
+    const outbox = store.state.syncOutbox;
+    const streamId = outbox.streamId;
+    outbox.acknowledgedSequence = 10;
+    outbox.cloudRevision = 5;
+    outbox.configurationAppliedRevision = 5;
+    outbox.nextSequence = 37;
+    outbox.snapshotCreatedAt = new Date(1_800_000_000_000).toISOString();
+    outbox.snapshotDeviceIds = [device.id];
+    outbox.events = pendingEvents;
+    outbox.lastErrorCode = "hub_sync_descriptor_stale";
+    outbox.inFlight = {
+      schemaVersion: 1, hubInstallationId: hubInstallId, streamId, fromSequence: 11, toSequence: 14,
+      events: pendingEvents.slice(0, 4), queueDepth: pendingEvents.length,
+      acknowledgedCloudRevision: 5,
+      runtime: { kind: "dinodia_os", version: "test", capabilities: { nativeSyncOutbox: {
+        queueDepth: pendingEvents.length, lastErrorCode: "hub_sync_descriptor_stale",
+      } } },
+      sentAt: new Date(1_800_000_000_000).toISOString(),
+    };
+    await store.persist();
+
+    const configuration = signedConfiguration({ revision: 5, policyRevision: 1,
+      areas: [{ id: canonicalAreaId, osAreaId: area.id, originalName: "Room 1", overrideName: null, revision: 1 }],
+      memberships: [], devicePolicies: [{ osDeviceId: device.id, managementClass: "PROPERTY_DEVICE", ownerMembershipId: null,
+        analyticsCategory: "RADIATOR", lifecycle: "INSTALLED", customerLabel: "Radiator", overrideName: "Room 1 Radiator",
+        descriptorRevision: 1, descriptorDigest, osAreaIds: [area.id] }],
+      automations: [], releasePolicy: { mode: "MANUAL", automaticInstallEnabled: false, desiredRelease: null } });
+    let remoteAcceptedSequence = 10;
+    let remoteStreamId = streamId;
+    const sentBatches = [];
+    const pairing = new PlatformPairing({
+      store, vault, apiUrl: "https://platform.test", serial, intervalMs: 60000, logger: { error() {}, warn() {} },
+      fetchImpl: async (url, options) => {
+        const body = JSON.parse(options.body);
+        if (url.endsWith("/token-state")) return { ok: true, async json() { return {
+          hubInstallId, homeId, latestVersion: 0, publishedVersion: 0, operatorCredentialStates: [], offlineAuthorisations: [],
+          areaBindings: [{ areaId: canonicalAreaId, hubAreaId: area.id }], policyRevision: 1, installationSyncMode: "ACTIVE",
+          syncStreamId: remoteStreamId, syncAcceptedSequence: remoteAcceptedSequence,
+          cloudConfigurationRevision: 5, acknowledgedCloudRevision: 5,
+        }; } };
+        if (url.endsWith("/v2/sync")) {
+          sentBatches.push(structuredClone(body));
+          assert.equal(body.streamId, remoteStreamId);
+          assert.equal(Number(body.fromSequence), remoteAcceptedSequence + 1);
+          remoteAcceptedSequence = Number(body.toSequence);
+          return { ok: true, async json() { return {
+            streamId: body.streamId, cloudRevision: 5, configurationAppliedRevision: 5,
+            acceptedThroughSequence: remoteAcceptedSequence, resnapshotRequired: false, configuration,
+          }; } };
+        }
+        if (url.endsWith("/heartbeat")) return { ok: true, async json() { return { ok: true, online: true, lanEndpoint: body.lanEndpoint, lanTlsIdentity: { acknowledgedGeneration: 0 } }; } };
+        throw new Error(`Unexpected test route: ${url}`);
+      },
+    });
+
+    await pairing.syncNow();
+    const deadline = Date.now() + 1000;
+    while (store.getSyncOutbox().acknowledgedSequence < 38 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    pairing.stop();
+    assert.ok(sentBatches.length >= 2, "the current exact range is retried, then the refreshed canonical snapshot is sent");
+    assert.deepEqual(sentBatches[0].events.slice(2).map((event) => event.type), ["sync.compacted", "sync.compacted"]);
+    assert.equal(sentBatches[0].fromSequence, 11);
+    assert.equal(sentBatches[0].toSequence, 14);
+    assert.equal(sentBatches[1].fromSequence, 15);
+    assert.equal(sentBatches[1].toSequence, 38);
+    assert.ok(sentBatches[1].events.slice(-2).every((event) => event.payload.descriptorDigest === descriptorDigest));
+    assert.deepEqual(sentBatches[1].events.slice(-2).map((event) => event.type), ["device.upsert", "control.catalog.upsert"]);
+    assert.equal(store.getSyncOutbox().acknowledgedSequence, 38);
+    assert.equal(store.getSyncOutbox().lastErrorCode, null);
+  } finally { await fs.rm(fixture.directory, { recursive: true, force: true }); }
+});
+
 test("a divergent stream reconciles one exact durable batch and retries the same request after a lost response", async () => {
   const serial = "DINODIA-CONFIG-REFRESH-DIVERGED-HUB";
   const hubInstallId = "22222222-2222-4222-8222-222222222222";

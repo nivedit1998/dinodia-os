@@ -42,9 +42,80 @@ test("permanent-device registration commits its property policy before creating 
   assert.deepEqual(events.map((event) => event.type), ["device.upsert", "control.catalog.upsert"]);
   assert.equal(events[0].payload.osDeviceId, device.id);
   assert.equal(events[0].payload.areaId, area.id);
+  assert.equal(events[0].payload.descriptorRevision, policy.descriptorRevision);
+  assert.equal(events[0].payload.descriptorDigest, policy.descriptorDigest,
+    "the device inventory projection must use the canonical commissioning descriptor digest");
+  assert.equal(events[1].payload.catalogRevision, policy.descriptorRevision);
+  assert.equal(events[1].payload.descriptorDigest, policy.descriptorDigest,
+    "the control catalogue must be bound to the same canonical descriptor digest");
   const restored = new Store(path.join(directory, "dinodia.json"));
   assert.equal(restored.getPlatform().devicePolicies[device.id].managementClass, "PROPERTY_DEVICE");
   assert.deepEqual(restored.getSyncOutbox().events.filter((event) => event.aggregateId === device.id).map((event) => event.type), ["device.upsert", "control.catalog.upsert"]);
+});
+
+test("an explicitly rejected descriptor batch is compacted without acknowledging or losing sequence continuity", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-rejected-descriptor-sync-"));
+  const store = new Store(path.join(directory, "dinodia.json"));
+  try {
+    const area = await store.saveArea({ name: "Room 1" }, "room-1");
+    const policy = {
+      managementClass: "PROPERTY_DEVICE", ownerMembershipId: null, lifecycle: "INSTALLED",
+      canonicalAreaIds: ["33333333-3333-4333-8333-333333333333"], platformDeviceId: "44444444-4444-4444-8444-444444444444",
+      installationRequestId: "55555555-5555-4555-8555-555555555555", catalogueStatus: "ready", usefulReadings: true,
+      descriptorRevision: 1, descriptorDigest: "a".repeat(64), overrideName: "Room 1 Radiator",
+    };
+    await store.savePlatform({ paired: true, homeId: "11111111-1111-4111-8111-111111111111", devicePolicies: {} });
+    const device = await store.upsertDevice({ id: "zigbee:room-1-radiator", name: "Room 1 Radiator", protocol: "zigbee", areaId: area.id,
+      setup: { status: "ready" }, metadata: { model: "TRVZB" },
+      entities: { heat: { id: "heat", name: "Heat", domain: "climate", capability: {
+        controlId: "target-temperature", kind: "number", readable: true, writable: true,
+        bindings: [{ serviceId: "climate.set_temperature" }],
+      } } } }, { devicePolicy: policy });
+
+    const canonical = store.getSyncOutbox().events.filter((event) => event.aggregateId === device.id);
+    const staleDigest = "b".repeat(64);
+    const staleEvent = (sequence, source) => ({ ...JSON.parse(JSON.stringify(source)), id: `event-${sequence}`,
+      sequence, occurredAt: new Date(1_800_000_000_000 + sequence).toISOString(),
+      payload: { ...source.payload, descriptorDigest: staleDigest } });
+    const marker = (sequence) => ({ id: `event-${sequence}`, sequence, type: "sync.compacted", aggregateId: "",
+      occurredAt: new Date(1_800_000_000_000 + sequence).toISOString(), critical: false, payload: { supersededBy: 17 } });
+    const pendingEvents = [marker(11), marker(12), staleEvent(13, canonical[0]), staleEvent(14, canonical[1]),
+      staleEvent(15, canonical[0]), staleEvent(16, canonical[1])];
+    const streamId = "descriptor-rejection-stream-1";
+    store.state.syncOutbox = {
+      ...store.state.syncOutbox, streamId, acknowledgedSequence: 10, nextSequence: 17,
+      events: pendingEvents, lastErrorCode: "hub_sync_descriptor_stale",
+      inFlight: { schemaVersion: 1, hubInstallationId: "22222222-2222-4222-8222-222222222222",
+        streamId, fromSequence: 11, toSequence: 14, events: pendingEvents.slice(0, 4), queueDepth: 6,
+        acknowledgedCloudRevision: 1, runtime: { kind: "dinodia_os", version: "test", capabilities: {
+          nativeSyncOutbox: { queueDepth: 6, lastErrorCode: "hub_sync_descriptor_stale" },
+        } }, sentAt: new Date(1_800_000_000_000).toISOString() },
+    };
+
+    const unchanged = JSON.stringify(store.getSyncOutbox());
+    const refused = await store.reconcileRejectedDescriptorSync({ streamId, acceptedSequence: 9, errorCode: "hub_sync_descriptor_stale" });
+    assert.deepEqual(refused, { reconciled: false, compactedEvents: 0, refreshedDevices: 0 });
+    assert.equal(JSON.stringify(store.getSyncOutbox()), unchanged, "a cursor other than the exact local ACK must not rewrite the durable batch");
+
+    const reconciled = await store.reconcileRejectedDescriptorSync({ streamId, acceptedSequence: 10, errorCode: "hub_sync_descriptor_stale" });
+    assert.deepEqual(reconciled, { reconciled: true, compactedEvents: 4, refreshedDevices: 1 });
+    const outbox = store.getSyncOutbox();
+    assert.equal(outbox.acknowledgedSequence, 10, "reconciliation must never fabricate a cloud acknowledgement");
+    assert.deepEqual(outbox.events.map((entry) => entry.sequence), [11, 12, 13, 14, 15, 16, 17, 18]);
+    assert.ok(outbox.events.slice(0, 6).every((entry) => entry.type === "sync.compacted"));
+    assert.ok(outbox.events.slice(0, 6).every((entry) => entry.payload.supersededBy === 17));
+    assert.deepEqual(outbox.inFlight.events.map((entry) => entry.type), ["sync.compacted", "sync.compacted", "sync.compacted", "sync.compacted"]);
+    assert.equal(outbox.inFlight.fromSequence, 11);
+    assert.equal(outbox.inFlight.toSequence, 14);
+    assert.equal(outbox.inFlight.queueDepth, 8);
+    assert.deepEqual(outbox.events.slice(-2).map((entry) => entry.type), ["device.upsert", "control.catalog.upsert"]);
+    assert.ok(outbox.events.slice(-2).every((entry) => entry.payload.descriptorDigest === policy.descriptorDigest));
+    assert.equal(outbox.events.at(-1).payload.catalogRevision, policy.descriptorRevision);
+    assert.equal(outbox.nextSequence, 19);
+    assert.equal(store.getPlatform().devicePolicies[device.id].managementClass, "PROPERTY_DEVICE");
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("sensitive capability step-up survives store normalization and restart", async () => {

@@ -1,7 +1,7 @@
 (() => {
   "use strict";
   const $ = (id) => document.getElementById(id);
-  const state = { context: null, session: null, selected: null, existingDevices: [], completedDevices: [], authorityVerified: false, busy: false, poll: null, sessionDeadlineMono: null, sessionClockTimer: null, lastAuthorityVerifiedAt: null };
+  const state = { context: null, session: null, selected: null, existingDevices: [], completedDevices: [], authorityVerified: false, busy: false, poll: null, sessionDeadlineMono: null, sessionClockTimer: null, lastAuthorityVerifiedAt: null, reviewStale: false };
   const key = (suffix) => `dinodia-installation:${state.context?.requestId || "unknown"}:${suffix}`;
   const operatorSessionHeaders = () => {
     const selector = sessionStorage.getItem("dinodia.operatorSessionSelector") || String(location.pathname || "").match(/^\/_dinodia\/operator\/([A-Za-z0-9_-]{24,64})/)?.[1] || "";
@@ -12,7 +12,7 @@
     if (idempotencyKey) headers["idempotency-key"] = idempotencyKey;
     const response = await fetch(path, { method: "POST", credentials: "same-origin", cache: "no-store", headers, body: JSON.stringify(body) });
     const value = await response.json().catch(() => ({}));
-    if (!response.ok) { const error = new Error(value?.error?.message || value?.error || "The hub rejected this installation action"); error.statusCode = response.status; if ([401, 403].includes(response.status)) clearProtectedScope(error); throw error; }
+    if (!response.ok) { const envelope = value?.error && typeof value.error === "object" ? value.error : value; const error = new Error(envelope?.message || envelope || "The hub rejected this installation action"); error.statusCode = response.status; error.code = envelope?.code || null; error.reason = envelope?.reason || null; if ([401, 403].includes(response.status)) clearProtectedScope(error); throw error; }
     return value;
   };
   const get = async (path) => {
@@ -20,7 +20,8 @@
     const response = await fetch(path, { credentials: "same-origin", cache: "no-store", headers: operatorSessionHeaders() });
     const value = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const error = new Error(value?.error?.message || value?.error || "The assigned installation session is no longer available"); error.statusCode = response.status;
+      const envelope = value?.error && typeof value.error === "object" ? value.error : value;
+      const error = new Error(envelope?.message || envelope || "The assigned installation session is no longer available"); error.statusCode = response.status; error.code = envelope?.code || null; error.reason = envelope?.reason || null;
       if ([401, 403].includes(response.status)) clearProtectedScope(error);
       else if (response.status === 503) {
         state.authorityVerified = false;
@@ -60,6 +61,7 @@
     if (state.poll) clearInterval(state.poll);
     state.poll = null; state.context = null; state.session = null; state.selected = null;
     state.existingDevices = []; state.completedDevices = []; state.authorityVerified = false; state.busy = false;
+    state.reviewStale = false;
     $("summary").textContent = "This assigned installation authority is no longer current. Close this window and reopen the work from Company Portal.";
     $("area").replaceChildren(new Option("No current Area access", ""));
     $("device-result").hidden = true; $("candidates").hidden = true; $("existing-devices").hidden = true; $("completed-devices").hidden = true;
@@ -72,7 +74,7 @@
     if (error) showError(error);
     updateButtons();
   }
-  function setBusy(value) { state.busy = value; for (const id of ["start-zigbee", "start-matter", "refresh", "refresh-existing", "cancel", "submit-matter", "select", "install", "view-only", "retain-unsupported", "remove", "add-next", "finish-installation"]) if ($(id)) $(id).disabled = value; }
+  function setBusy(value) { state.busy = value; updateButtons(); }
   function canStart(protocol) { const entry = state.context?.protocols?.[protocol]; return state.authorityVerified && state.context?.protocols?.registrationEnabled === true && entry?.enabled === true && entry?.adapterReady === true && (!state.session || terminal.has(state.session.status)); }
   function updateButtons() {
     const authorized = state.authorityVerified && Boolean(state.context);
@@ -85,18 +87,20 @@
     $("area").disabled = !authorized;
     for (const id of ["label", "name"]) if ($(id)) $(id).disabled = !authorized;
     for (const button of document.querySelectorAll("[data-review-candidate]")) button.disabled = state.busy || !authorized;
+    for (const button of document.querySelectorAll("[data-review-existing]")) button.disabled = state.busy || !authorized || Boolean(state.session && !terminal.has(state.session.status));
     const selected = state.session?.status === "selected";
-    $("select").hidden = !state.selected || selected;
-    $("install").hidden = !selected || state.session?.catalogueStatus !== "ready";
-    $("view-only").hidden = !selected || state.session?.catalogueStatus !== "no_safe_controls" || state.session?.catalogueUsefulReadings !== true;
-    $("retain-unsupported").hidden = !selected || state.session?.catalogueStatus !== "unsupported";
-    $("remove").hidden = state.session?.operationKind === "REGISTER_EXISTING" || !selected || !["unsupported", "no_safe_controls"].includes(state.session?.catalogueStatus);
+    const needsReview = selected && state.reviewStale;
+    $("select").hidden = !state.selected || selected && !needsReview;
+    $("install").hidden = !selected || needsReview || state.session?.catalogueStatus !== "ready";
+    $("view-only").hidden = !selected || needsReview || state.session?.catalogueStatus !== "no_safe_controls" || state.session?.catalogueUsefulReadings !== true;
+    $("retain-unsupported").hidden = !selected || needsReview || state.session?.catalogueStatus !== "unsupported";
+    $("remove").hidden = state.session?.operationKind === "REGISTER_EXISTING" || !selected || needsReview || !["unsupported", "no_safe_controls"].includes(state.session?.catalogueStatus);
     if (state.session?.operationKind === "REGISTER_EXISTING" && state.session?.catalogueStatus === "unsupported") $("retain-unsupported").textContent = "Register as view-only";
     else $("retain-unsupported").textContent = "Keep visible without controls";
     $("add-next").hidden = !state.session || !terminal.has(state.session.status) || (state.session.cleanup?.pendingCount || 0) > 0;
     $("finish-installation").hidden = !state.session || !terminal.has(state.session.status) || (state.session.cleanup?.pendingCount || 0) > 0;
     $("finish-installation-help").hidden = $("finish-installation").hidden;
-    $("select").textContent = state.session?.operationKind === "REGISTER_EXISTING" ? "Review device and Area" : "Review this device";
+    $("select").textContent = needsReview ? "Review updated device" : state.session?.operationKind === "REGISTER_EXISTING" ? "Review device and Area" : "Review this device";
     $("install").textContent = state.session?.operationKind === "REGISTER_EXISTING" ? "Register as permanent device" : "Install and sync";
   }
   function renderSessionDeadline(context) {
@@ -181,7 +185,7 @@
   }
   function scheduleSessionRefresh(delayMs) {
     if (state.poll) clearTimeout(state.poll);
-    state.poll = setTimeout(() => { state.poll = null; void refresh(); }, delayMs);
+    state.poll = setTimeout(() => { state.poll = null; void refresh({ background: true }); }, delayMs);
   }
   async function refreshExistingDevices() {
     if (!state.context?.protocols?.registrationEnabled) { state.existingDevices = []; state.completedDevices = []; state.authorityVerified = true; renderExistingDevices(); renderCompleted(); updateButtons(); return; }
@@ -204,7 +208,7 @@
       const detail = document.createElement("p"); detail.className = "muted";
       detail.textContent = [device.protocol?.toUpperCase(), device.manufacturer, device.model, `Currently in ${device.originalAreaName || "an authorized Area"}`].filter(Boolean).join(" · ");
       const badge = document.createElement("p"); badge.className = "muted"; badge.textContent = "Not registered to this property yet. Review its live descriptor and choose the correct property Area before registering.";
-      const choose = document.createElement("button"); choose.type = "button"; choose.textContent = "Review and register"; choose.disabled = state.busy || Boolean(state.session && !terminal.has(state.session.status));
+      const choose = document.createElement("button"); choose.type = "button"; choose.dataset.reviewExisting = "true"; choose.textContent = "Review and register"; choose.disabled = state.busy || Boolean(state.session && !terminal.has(state.session.status));
       choose.addEventListener("click", () => startExisting(device));
       item.append(title, detail, badge, choose); list.append(item);
     }
@@ -237,13 +241,13 @@
     } catch (error) { state.selected = null; showError(error); await refreshExistingDevices().catch(() => {}); }
     finally { setBusy(false); updateButtons(); }
   }
-  async function refresh() {
+  async function refresh({ background = false } = {}) {
     if (state.busy) { if (state.session) scheduleSessionRefresh(1000); return; }
     clearError();
-    setBusy(true);
+    if (!background) setBusy(true);
     let nextPollDelay = null;
     try {
-      await refreshContext();
+      await refreshContext({ preserveAuthority: background });
       await refreshExistingDevices();
       if (!state.session) return;
       const session = await get(`/_dinodia/installer/commissioning/sessions/${encodeURIComponent(state.session.sessionId)}`);
@@ -254,10 +258,11 @@
       showError(error);
       if (state.context && ![401, 403].includes(Number(error?.statusCode))) nextPollDelay = 15000;
     }
-    finally { setBusy(false); updateButtons(); if (nextPollDelay !== null) scheduleSessionRefresh(nextPollDelay); }
+    finally { if (!background) setBusy(false); updateButtons(); if (nextPollDelay !== null) scheduleSessionRefresh(nextPollDelay); }
   }
-  async function refreshContext() {
-    state.authorityVerified = false; updateButtons();
+  async function refreshContext({ preserveAuthority = false } = {}) {
+    if (!preserveAuthority) state.authorityVerified = false;
+    updateButtons();
     state.context = await get("/_dinodia/installer/commissioning");
     renderSessionDeadline(state.context);
     $("summary").textContent = `Assigned installation work · ${state.context.areas.length} permitted original Area${state.context.areas.length === 1 ? "" : "s"}`;
@@ -282,9 +287,24 @@
     if (!areaId || !customerLabel || !name) { showError(new Error("Choose an active original Area and enter a device name and customer label.")); return; }
     setBusy(true); clearError();
     try {
-      render(await post(`/_dinodia/installer/commissioning/sessions/${encodeURIComponent(state.session.sessionId)}/select`, {
-        schemaVersion: "dinodia.v1", expectedRevision: state.session.revision, candidateRef: state.selected.candidateRef, areaId, name, customerLabel,
-      }));
+      const path = `/_dinodia/installer/commissioning/sessions/${encodeURIComponent(state.session.sessionId)}`;
+      const candidateRef = state.selected.candidateRef;
+      const body = { schemaVersion: "dinodia.v1", expectedRevision: state.session.revision, candidateRef, areaId, name, customerLabel };
+      let result;
+      try { result = await post(`${path}/select`, body); }
+      catch (error) {
+        if (error.reason !== "candidate_list_revision_changed") throw error;
+        const refreshed = await get(path);
+        const sameCandidate = (refreshed.candidates || []).find((candidate) => candidate.candidateRef === candidateRef);
+        const interviewReady = refreshed.operationKind === "REGISTER_EXISTING"
+          ? sameCandidate?.stage === "existing_interview_verified"
+          : sameCandidate?.interviewStatus === "successful";
+        if (!sameCandidate || !interviewReady || !["searching", "reviewing_existing", "selected"].includes(refreshed.status)) throw error;
+        render(refreshed); renderCandidates();
+        result = await post(`${path}/select`, { ...body, expectedRevision: refreshed.revision });
+      }
+      state.reviewStale = false;
+      render(result);
     } catch (error) { showError(error); }
     finally { setBusy(false); updateButtons(); }
   }
@@ -297,7 +317,14 @@
       render(result); renderCandidates();
       $("status").textContent = result.status === "completed_cleanup_pending" ? "The device result is recorded; cleanup is still being confirmed by the hub." : result.localSyncState === "pending" ? "Registered by the hub and Platform. Home sync is still pending acknowledgement." : result.localSyncState === "acknowledged" ? "Registered by the hub and Platform; the Home sync was acknowledged." : "Registered by the hub and Platform. Home sync acknowledgement is not verified.";
       await refreshExistingDevices().catch(() => {});
-    } catch (error) { showError(error); }
+    } catch (error) {
+      if (error.reason === "device_descriptor_changed_after_review") {
+        state.reviewStale = true;
+        $("selected-controls").textContent = "The live device descriptor changed after review. Re-review the updated controls before registering; no property registration was confirmed.";
+        updateButtons();
+      }
+      showError(error);
+    }
     finally { setBusy(false); updateButtons(); }
   }
   async function cancel() {
@@ -363,6 +390,6 @@
       if (![401, 403].includes(Number(error?.statusCode))) scheduleSessionRefresh(15000);
     }
   }
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") void refresh().catch(showError); });
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") void refresh({ background: true }).catch(showError); });
   void init();
 })();

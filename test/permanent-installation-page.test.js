@@ -20,7 +20,7 @@ class Element {
   add(child) { this.children.push(child); }
 }
 
-function harness({ context, devicesStatus = 200, devices = [], session = null, holdDeviceList = false, seededStorage = {}, secureContext = true } = {}) {
+function harness({ context, devicesStatus = 200, devices = [], session = null, holdDeviceList = false, seededStorage = {}, secureContext = true, requestHandler = null } = {}) {
   let currentDevicesStatus = devicesStatus;
   const elements = new Map([...markup.matchAll(/\bid="([^"]+)"/g)].map(([, id]) => [id, new Element(id)]));
   const storage = new Map();
@@ -42,10 +42,11 @@ function harness({ context, devicesStatus = 200, devices = [], session = null, h
     getElementById: (id) => elements.get(id) || null,
     createElement: () => new Element(),
     querySelectorAll: (selector) => {
-      if (selector !== "[data-review-candidate]") return [];
+      if (!["[data-review-candidate]", "[data-review-existing]"].includes(selector)) return [];
       const matches = [];
       const visit = (element) => {
-        if (element?.dataset?.reviewCandidate === "true") matches.push(element);
+        if (selector === "[data-review-candidate]" && element?.dataset?.reviewCandidate === "true") matches.push(element);
+        if (selector === "[data-review-existing]" && element?.dataset?.reviewExisting === "true") matches.push(element);
         for (const child of element?.children || []) visit(child);
       };
       for (const element of elements.values()) visit(element);
@@ -58,6 +59,8 @@ function harness({ context, devicesStatus = 200, devices = [], session = null, h
   const fetch = async (url, options = {}) => {
     calls.push(String(url));
     requests.push({ url: String(url), options });
+    const overridden = await requestHandler?.(String(url), options);
+    if (overridden) return overridden;
     if (url === "/_dinodia/installer/commissioning") return response(200, context);
     if (url === "/_dinodia/installer/commissioning/devices") {
       if (deviceListGate) await deviceListGate;
@@ -66,8 +69,10 @@ function harness({ context, devicesStatus = 200, devices = [], session = null, h
     }
     if (url === "/_dinodia/installer/commissioning/sessions" && options.method === "POST") {
       const body = JSON.parse(options.body);
+      const existing = body.operationKind === "REGISTER_EXISTING";
       return response(201, { sessionId: "77777777-7777-4777-8777-777777777777", protocol: body.protocol,
-        operationKind: body.operationKind, status: "searching", revision: 1, updatedAt: new Date().toISOString(), candidates: [] });
+        operationKind: body.operationKind, status: existing ? "reviewing_existing" : "searching", revision: 1, updatedAt: new Date().toISOString(),
+        candidates: existing ? [{ candidateRef: body.candidateRef, name: "SONOFF TRVZB", manufacturer: "SONOFF", model: "TRVZB", stage: "existing_interview_verified" }] : [] });
     }
     if (session && String(url).startsWith(`/_dinodia/installer/commissioning/sessions/${session.sessionId}`)) return response(200, session);
     return response(404, { error: "not_found" });
@@ -216,6 +221,48 @@ test("assigned installation page renders eligible already-paired devices with an
     "the opaque review reference is used only by the registration action and is not rendered into page text");
 });
 
+test("existing-device review action is disabled immediately while its one registration session is being created", async () => {
+  const device = { candidateRef: "44444444-4444-4444-8444-444444444444", protocol: "zigbee", name: "SONOFF TRVZB",
+    manufacturer: "SONOFF", model: "TRVZB", originalAreaName: "Not assigned", originalAreaId: null, availableAreas: [{ id: areaId, name: "Room 1" }] };
+  const page = harness({ context: validContext(), devices: [device] });
+  await page.flush();
+
+  const review = page.elements.get("existing-device-list").children[0].children[3];
+  const pending = review.listeners.get("click")();
+  assert.equal(review.disabled, true, "a second click must not create a duplicate REGISTER_EXISTING request while the first is pending");
+  assert.equal(page.requests.filter((request) => request.url === "/_dinodia/installer/commissioning/sessions" && request.options.method === "POST").length, 1);
+  await pending;
+  assert.equal(page.elements.get("status").textContent.includes("reviewing existing"), true);
+});
+
+test("normal background status polls keep the reviewed Area and action controls usable", async () => {
+  const sessionId = "55555555-5555-4555-8555-555555555555";
+  const session = { sessionId, protocol: "zigbee", operationKind: "REGISTER_EXISTING", status: "reviewing_existing", revision: 2,
+    updatedAt: new Date().toISOString(), candidates: [{ candidateRef: "66666666-6666-4666-8666-666666666666",
+      name: "SONOFF TRVZB", manufacturer: "SONOFF", model: "TRVZB", stage: "existing_interview_verified" }] };
+  const requestId = "22222222-2222-4222-8222-222222222222";
+  const page = harness({ context: validContext(), session, seededStorage: {
+    [`dinodia-installation:${requestId}:session`]: sessionId,
+  } });
+  await page.flush();
+  page.elements.get("area").value = areaId;
+  page.elements.get("label").value = "Radiator";
+  page.elements.get("name").value = "Room 1 Radiator";
+
+  const poll = [...page.timers].find((timer) => timer.delay === 3000);
+  assert.ok(poll, "an active session has a bounded background status poll");
+  poll.fn();
+
+  assert.equal(page.elements.get("area").disabled, false, "a background refresh must not revoke the last verified form while it rechecks the same handoff");
+  assert.equal(page.elements.get("label").disabled, false);
+  assert.equal(page.elements.get("name").disabled, false);
+  assert.equal(page.elements.get("install").disabled, false);
+  await page.flush();
+  assert.equal(page.elements.get("area").value, areaId);
+  assert.equal(page.elements.get("label").value, "Radiator");
+  assert.equal(page.elements.get("name").value, "Room 1 Radiator");
+});
+
 test("discovery candidate review stays enabled after the initial busy refresh completes", async () => {
   const sessionId = "55555555-5555-4555-8555-555555555555";
   const session = { sessionId, protocol: "zigbee", operationKind: "PAIR_NEW", status: "searching", revision: 1,
@@ -262,6 +309,89 @@ test("candidate review remains open across session refreshes without losing the 
   assert.equal(page.elements.get("area").value, areaId);
   assert.equal(page.elements.get("label").value, "Radiator");
   assert.equal(page.elements.get("name").value, "Room 1 Radiator");
+});
+
+test("descriptor conflict returns the device to explicit re-review instead of trapping Install in a 409 loop", async () => {
+  const sessionId = "55555555-5555-4555-8555-555555555555";
+  const candidateRef = "66666666-6666-4666-8666-666666666666";
+  const session = { sessionId, protocol: "zigbee", operationKind: "PAIR_NEW", status: "selected", revision: 7,
+    updatedAt: new Date().toISOString(), candidates: [{ candidateRef, name: "SONOFF TRVZB", manufacturer: "SONOFF", model: "TRVZB", stage: "needs_setup", interviewStatus: "successful" }],
+    selectedCandidateRef: candidateRef, selectedAreaId: areaId, selectedName: "Room 1 Radiator", selectedCustomerLabel: "Radiator",
+    catalogueStatus: "ready", selectedControls: [{ name: "Target temperature", semanticRole: "target_temperature", kind: "number", readable: true, writable: true }] };
+  const requestId = "22222222-2222-4222-8222-222222222222";
+  let completeCalls = 0; let selectCalls = 0;
+  const page = harness({ context: validContext(), session, seededStorage: {
+    [`dinodia-installation:${requestId}:session`]: sessionId,
+  }, requestHandler: async (url, options) => {
+    if (options.method !== "POST") return null;
+    if (url.endsWith("/complete")) {
+      completeCalls += 1;
+      if (completeCalls === 1) return response(409, { error: { code: "COMMISSIONING_REVISION_CONFLICT", reason: "device_descriptor_changed_after_review", message: "The device descriptor changed after review; refresh and review it again" } });
+      return response(200, { ...session, status: "completed", revision: 9, finalDisposition: "install", localSyncState: "pending" });
+    }
+    if (url.endsWith("/select")) {
+      selectCalls += 1;
+      return response(200, { ...session, status: "selected", revision: 8,
+        selectedControls: [{ name: "Target temperature", semanticRole: "target_temperature", kind: "number", readable: true, writable: true },
+          { name: "Operating mode", semanticRole: "operating_mode", kind: "option", readable: true, writable: true }] });
+    }
+    return null;
+  } });
+  await page.flush();
+  page.elements.get("area").value = areaId;
+  page.elements.get("label").value = "Radiator";
+  page.elements.get("name").value = "Room 1 Radiator";
+
+  await page.elements.get("install").listeners.get("click")();
+
+  assert.equal(completeCalls, 1, "a descriptor conflict must never auto-submit registration again");
+  assert.equal(page.elements.get("install").hidden, true, "stale reviewed controls cannot be installed");
+  assert.equal(page.elements.get("select").hidden, false, "the user is given a direct re-review action");
+  assert.equal(page.elements.get("select").textContent, "Review updated device");
+  assert.match(page.elements.get("error").textContent, /changed after review/i);
+
+  await page.elements.get("select").listeners.get("click")();
+  assert.equal(selectCalls, 1);
+  assert.match(page.elements.get("selected-controls").textContent, /Operating mode/);
+  assert.equal(page.elements.get("install").hidden, false, "Install returns only after a fresh explicit review");
+  await page.elements.get("install").listeners.get("click")();
+  assert.equal(completeCalls, 2);
+  assert.match(page.elements.get("status").textContent, /Home sync is still pending acknowledgement/);
+});
+
+test("stale discovery revision is refreshed and retried once for the same reviewed Zigbee candidate", async () => {
+  const sessionId = "55555555-5555-4555-8555-555555555555";
+  const candidateRef = "66666666-6666-4666-8666-666666666666";
+  const session = { sessionId, protocol: "zigbee", operationKind: "PAIR_NEW", status: "searching", revision: 4,
+    updatedAt: new Date().toISOString(), candidates: [{ candidateRef, name: "SONOFF TRVZB", manufacturer: "SONOFF", model: "TRVZB", stage: "needs_setup", interviewStatus: "successful" }] };
+  const requestId = "22222222-2222-4222-8222-222222222222";
+  let selectCalls = 0;
+  const page = harness({ context: validContext(), session, seededStorage: {
+    [`dinodia-installation:${requestId}:session`]: sessionId,
+  }, requestHandler: async (url, options) => {
+    if (options.method !== "POST" && url.endsWith(`/${sessionId}`) && selectCalls === 1) return response(200, { ...session, revision: 5 });
+    if (options.method !== "POST" || !url.endsWith("/select")) return null;
+    selectCalls += 1;
+    if (selectCalls === 1) return response(409, { error: { code: "COMMISSIONING_REVISION_CONFLICT", reason: "candidate_list_revision_changed", message: "The discovered device list changed; refresh and select again" } });
+    const body = JSON.parse(options.body);
+    assert.equal(body.expectedRevision, 5, "the one retry must use the refreshed revision");
+    assert.equal(body.candidateRef, candidateRef, "retry must target the same candidate, never a different device");
+    return response(200, { ...session, status: "selected", revision: 6, selectedCandidateRef: candidateRef, selectedAreaId: areaId,
+      selectedName: body.name, selectedCustomerLabel: body.customerLabel, catalogueStatus: "ready",
+      selectedControls: [{ name: "Target temperature", semanticRole: "target_temperature", kind: "number", readable: true, writable: true }] });
+  } });
+  await page.flush();
+  page.elements.get("candidate-list").children[0].children[2].listeners.get("click")();
+  page.elements.get("area").value = areaId;
+  page.elements.get("label").value = "Radiator";
+  page.elements.get("name").value = "Room 1 Radiator";
+
+  await page.elements.get("select").listeners.get("click")();
+
+  assert.equal(selectCalls, 2, "only one bounded retry is permitted");
+  assert.equal(page.elements.get("error").hidden, true);
+  assert.equal(page.elements.get("install").hidden, false);
+  assert.equal(page.elements.get("status").textContent.includes("selected"), true);
 });
 
 test("cancelled Matter session hides the setup-code controls in the rendered production page", async () => {

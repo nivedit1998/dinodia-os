@@ -724,6 +724,22 @@ class PlatformPairing {
         throw Object.assign(new Error("Platform reports an accepted cursor without its stream identity"), { code: "hub_sync_stream_reconciliation_required" });
       }
       const localAcknowledgedSequence = Number(syncState.acknowledgedSequence || 0);
+      // A descriptor rejection is an explicit transaction failure. Only when
+      // the authenticated Platform cursor still exactly equals the local ACK
+      // may the Store replace superseded, coalescible device snapshots while
+      // preserving every sequence number and the in-flight range. Timeouts and
+      // lost responses never enter this path: their exact body remains intact.
+      if (!streamMismatch && serverStreamId === String(syncState.streamId)
+        && serverAcceptedSequence === localAcknowledgedSequence
+        && installationSyncMode === "ACTIVE"
+        && syncState.lastErrorCode === "hub_sync_descriptor_stale") {
+        const reconciliation = await this.store.reconcileRejectedDescriptorSync?.({
+          streamId: serverStreamId,
+          acceptedSequence: serverAcceptedSequence,
+          errorCode: syncState.lastErrorCode,
+        });
+        if (reconciliation?.reconciled) syncState = this.store.getSyncOutbox();
+      }
       if (serverStreamId === null && localAcknowledgedSequence > 0) {
         throw Object.assign(new Error("Platform has no stream identity for the locally acknowledged event cursor; preserving the queue for explicit reconciliation"), { code: "hub_sync_stream_reconciliation_required" });
       }
