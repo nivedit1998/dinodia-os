@@ -702,8 +702,23 @@ class PlatformPairing {
         await this.store.applySyncConfigurationSnapshot(Number(refreshed.cloudRevision));
         syncState = this.store.getSyncOutbox();
       }
-      if (serverStreamId !== null && serverStreamId !== String(syncState.streamId)) {
-        throw Object.assign(new Error("Platform sync stream differs from the durable local stream; preserving the queue for explicit reconciliation"), { code: "hub_sync_stream_reconciliation_required" });
+      let syncBatch = null;
+      const streamMismatch = serverStreamId !== null && serverStreamId !== String(syncState.streamId);
+      if (streamMismatch) {
+        if (installationSyncMode !== "ACTIVE" || serverAcceptedSequence < 1) {
+          throw Object.assign(new Error("Only an active Home with a current accepted server cursor can reconcile a divergent durable stream"), { code: "hub_sync_stream_reconciliation_required" });
+        }
+        if (Number(syncState.acknowledgedSequence || 0) !== 0 || syncState.gapDetected === true
+          || syncState.criticalBacklog === true || syncState.telemetryPaused === true
+          || Number(syncState.droppedTelemetryCount || 0) !== 0) {
+          throw Object.assign(new Error("A local cursor or known retention gap requires explicit recovery before stream reconciliation"), { code: "hub_sync_stream_reconciliation_required" });
+        }
+        syncBatch = await this.store.prepareSyncBatch(hubInstallId, this.runtime, this.clock());
+        if (!syncBatch) throw Object.assign(new Error("A complete durable first batch is required to reconcile the divergent stream"), { code: "hub_sync_stream_reconciliation_required" });
+        syncBatch = await this.store.prepareSyncStreamReconciliation({
+          previousStreamId: serverStreamId,
+          previousAcceptedSequence: serverAcceptedSequence,
+        });
       }
       if (serverStreamId === null && serverAcceptedSequence !== 0) {
         throw Object.assign(new Error("Platform reports an accepted cursor without its stream identity"), { code: "hub_sync_stream_reconciliation_required" });
@@ -712,10 +727,10 @@ class PlatformPairing {
       if (serverStreamId === null && localAcknowledgedSequence > 0) {
         throw Object.assign(new Error("Platform has no stream identity for the locally acknowledged event cursor; preserving the queue for explicit reconciliation"), { code: "hub_sync_stream_reconciliation_required" });
       }
-      if (serverAcceptedSequence < localAcknowledgedSequence) {
+      if (!streamMismatch && serverAcceptedSequence < localAcknowledgedSequence) {
         throw Object.assign(new Error("Platform sync cursor is behind the durable local acknowledgement; preserving the queue for explicit reconciliation"), { code: "hub_sync_stream_reconciliation_required" });
       }
-      if (serverAcceptedSequence > localAcknowledgedSequence) {
+      if (!streamMismatch && serverAcceptedSequence > localAcknowledgedSequence) {
         const inFlightEnd = Number(syncState.inFlight?.toSequence || 0);
         if (!syncState.inFlight || serverAcceptedSequence !== inFlightEnd) {
           throw Object.assign(new Error("Platform sync cursor does not match the exact durable in-flight batch; preserving the queue for explicit reconciliation"), { code: "hub_sync_stream_reconciliation_required" });
@@ -729,7 +744,7 @@ class PlatformPairing {
           serverAcceptedSequence, serverStreamId,
         }
         : {};
-      const syncBatch = await this.store.prepareSyncBatch(hubInstallId, this.runtime, this.clock(), bootstrapBatchOptions);
+      if (!syncBatch) syncBatch = await this.store.prepareSyncBatch(hubInstallId, this.runtime, this.clock(), bootstrapBatchOptions);
       let syncResult = null;
       if (syncBatch || installationSyncMode === "ACTIVE") {
         const syncEnvelope = syncBatch || {
@@ -748,6 +763,17 @@ class PlatformPairing {
         if (syncResult?.streamId !== syncEnvelope.streamId || !Number.isSafeInteger(Number(syncResult?.cloudRevision))
           || !syncResult?.configuration || syncResult.configuration.revision !== Number(syncResult.cloudRevision)) {
           throw Object.assign(new Error("Platform returned an invalid native sync acknowledgement/configuration"), { code: "sync_response_invalid" });
+        }
+        if (syncEnvelope.streamReconciliation) {
+          const exactTransitionReceipt = syncResult.streamReconciled === true
+            && syncResult.reconciledFromStreamId === syncEnvelope.streamReconciliation.previousStreamId
+            && Number(syncResult.reconciledFromSequence) === Number(syncEnvelope.streamReconciliation.previousAcceptedSequence);
+          const exactCursorReceipt = syncResult.duplicate === true
+            && Number(syncResult.acceptedThroughSequence) >= Number(syncEnvelope.toSequence);
+          if ((!exactTransitionReceipt && !exactCursorReceipt)
+            || Number(syncResult.acceptedThroughSequence) < Number(syncEnvelope.toSequence)) {
+            throw Object.assign(new Error("Platform did not return the exact durable stream-reconciliation receipt"), { code: "hub_sync_stream_reconciliation_receipt_invalid" });
+          }
         }
         await applyCloudConfiguration(this.store, syncResult.configuration);
         const pendingTenantRemovals = this.store.listPendingTenantDeviceRemovals?.() || [];

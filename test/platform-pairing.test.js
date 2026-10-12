@@ -354,7 +354,7 @@ test("stale configuration refresh applies policy without consuming the durable e
             acceptedThroughSequence: body.toSequence, resnapshotRequired: false, configuration,
           }; } };
         }
-        if (url.endsWith("/heartbeat")) return { ok: true, async json() { return { ok: true, online: true }; } };
+        if (url.endsWith("/heartbeat")) return { ok: true, async json() { return { ok: true, online: true, lanEndpoint: body.lanEndpoint, lanTlsIdentity: { acknowledgedGeneration: 0 } }; } };
         throw new Error(`Unexpected test route: ${url}`);
       },
     });
@@ -371,16 +371,88 @@ test("stale configuration refresh applies policy without consuming the durable e
   } finally { await fs.rm(fixture.directory, { recursive: true, force: true }); }
 });
 
-test("configuration refresh leaves a divergent remote stream queued and fail-closed", async () => {
+test("a divergent stream reconciles one exact durable batch and retries the same request after a lost response", async () => {
   const serial = "DINODIA-CONFIG-REFRESH-DIVERGED-HUB";
   const hubInstallId = "22222222-2222-4222-8222-222222222222";
   const serverStreamId = "remote-stream-accepted-18";
   const fixture = await pairingFixture({ serial, hubInstallId, syncStreamId: serverStreamId, syncAcceptedSequence: 18, divergent: true });
   try {
     const { directory, store, vault } = fixture;
+    await store.applySyncConfigurationSnapshot(5);
     await store.queueSyncEvent("update.status", "updater", { revision: 1, trustState: "unprovisioned" }, { critical: true });
-    const before = store.getSyncOutbox();
     const seen = [];
+    let remoteStreamId = serverStreamId;
+    let remoteAcceptedSequence = 18;
+    let remoteCommitted = false;
+    let committedEnvelope = null;
+    const pairing = new PlatformPairing({
+      store, vault, apiUrl: "https://platform.test", serial, intervalMs: 60000, logger: { error() {}, warn() {} },
+      fetchImpl: async (url, options) => {
+        const body = JSON.parse(options.body);
+        if (url.endsWith("/token-state")) return { ok: true, async json() { return {
+          hubInstallId, homeId: "home-a", latestVersion: 0, publishedVersion: 0, operatorCredentialStates: [], offlineAuthorisations: [],
+          areaBindings: [], policyRevision: 1, installationSyncMode: "ACTIVE", syncStreamId: remoteStreamId, syncAcceptedSequence: remoteAcceptedSequence,
+          cloudConfigurationRevision: 5, acknowledgedCloudRevision: 5,
+        }; } };
+        if (url.endsWith("/v2/sync")) {
+          seen.push(structuredClone(body));
+          const configuration = refreshConfiguration(5);
+          if (!remoteCommitted) {
+            assert.deepEqual(body.streamReconciliation, {
+              version: 1, previousStreamId: serverStreamId, previousAcceptedSequence: 18,
+            });
+            assert.equal(body.fromSequence, 1);
+            assert.equal(body.events.length, 1);
+            committedEnvelope = structuredClone(body);
+            remoteStreamId = body.streamId;
+            remoteAcceptedSequence = body.toSequence;
+            remoteCommitted = true;
+            throw new Error("simulated lost reconciliation response");
+          }
+          assert.deepEqual(body, committedEnvelope, "retry retains the exact signed batch and reconciliation marker");
+          return { ok: true, async json() { return {
+            streamReconciled: true, reconciledFromStreamId: serverStreamId, reconciledFromSequence: 18,
+            streamId: body.streamId, syncStreamId: remoteStreamId, syncAcceptedSequence: remoteAcceptedSequence,
+            acceptedThroughSequence: remoteAcceptedSequence, duplicate: true,
+            cloudRevision: 5, configurationAppliedRevision: body.acknowledgedCloudRevision,
+            configuration, resnapshotRequired: false,
+          }; } };
+        }
+        if (url.endsWith("/heartbeat")) return { ok: true, async json() { return { ok: true, online: true, lanEndpoint: body.lanEndpoint, lanTlsIdentity: { acknowledgedGeneration: 0 } }; } };
+        throw new Error(`Unexpected test route: ${url}`);
+      },
+    });
+    await pairing.syncNow();
+    const afterLostResponse = store.getSyncOutbox();
+    assert.equal(afterLostResponse.acknowledgedSequence, 0, "a lost response does not fabricate a local acknowledgement");
+    assert.ok(afterLostResponse.inFlight?.streamReconciliation, "the exact recovery marker is durable before retry");
+    assert.equal(afterLostResponse.events.length, 1, "the pending event remains durable until a receipt arrives");
+    pairing.nextRetryAt = 0;
+    await pairing.syncNow();
+    const after = store.getSyncOutbox();
+    assert.equal(seen.length, 2);
+    assert.deepEqual(seen[0], seen[1]);
+    assert.equal(after.acknowledgedSequence, 1, "the local cursor advances only after the exact authenticated receipt");
+    assert.deepEqual(after.events, []);
+    assert.equal(after.inFlight, null);
+    assert.equal(after.lastErrorCode, null);
+    pairing.stop();
+  } finally { await fs.rm(fixture.directory, { recursive: true, force: true }); }
+});
+
+test("a divergent stream with a known local retention gap remains held without changing the outbox", async () => {
+  const serial = "DINODIA-CONFIG-REFRESH-GAP-HUB";
+  const hubInstallId = "33333333-3333-4333-8333-333333333333";
+  const serverStreamId = "remote-stream-accepted-18-gap";
+  const fixture = await pairingFixture({ serial, hubInstallId, syncStreamId: serverStreamId, syncAcceptedSequence: 18 });
+  try {
+    const { directory, store, vault } = fixture;
+    await store.applySyncConfigurationSnapshot(5);
+    await store.queueSyncEvent("update.status", "updater", { revision: 1, trustState: "unprovisioned" }, { critical: true });
+    store.state.syncOutbox.gapDetected = true;
+    await store.persist();
+    const before = store.getSyncOutbox();
+    const syncRequests = [];
     const pairing = new PlatformPairing({
       store, vault, apiUrl: "https://platform.test", serial, intervalMs: 60000, logger: { error() {}, warn() {} },
       fetchImpl: async (url, options) => {
@@ -390,25 +462,18 @@ test("configuration refresh leaves a divergent remote stream queued and fail-clo
           areaBindings: [], policyRevision: 1, installationSyncMode: "ACTIVE", syncStreamId: serverStreamId, syncAcceptedSequence: 18,
           cloudConfigurationRevision: 5, acknowledgedCloudRevision: 5,
         }; } };
-        if (url.endsWith("/v2/sync")) {
-          seen.push(structuredClone(body));
-          const configuration = refreshConfiguration(5);
-          return { ok: true, async json() { return {
-            configurationRefreshOnly: true, streamId: body.streamId, syncStreamId: serverStreamId, syncAcceptedSequence: 18,
-            cloudRevision: 5, configurationAppliedRevision: body.acknowledgedCloudRevision,
-            configuration, resnapshotRequired: false,
-          }; } };
-        }
+        if (url.endsWith("/v2/sync")) { syncRequests.push(structuredClone(body)); throw new Error("gap-held stream must not submit events"); }
+        if (url.endsWith("/heartbeat")) return { ok: true, async json() { return { ok: true, online: true, lanEndpoint: body.lanEndpoint, lanTlsIdentity: { acknowledgedGeneration: 0 } }; } };
         throw new Error(`Unexpected test route: ${url}`);
       },
     });
     await pairing.syncNow();
     const after = store.getSyncOutbox();
-    assert.equal(seen.length, 1, "no ordinary event request is sent across a divergent server cursor");
-    assert.equal(seen[0].configurationRefreshOnly, true);
+    assert.deepEqual(syncRequests, []);
     assert.equal(after.acknowledgedSequence, before.acknowledgedSequence);
     assert.deepEqual(after.events, before.events);
     assert.deepEqual(after.inFlight, before.inFlight);
+    assert.equal(after.gapDetected, true);
     assert.equal(after.lastErrorCode, "hub_sync_stream_reconciliation_required");
     pairing.stop();
   } finally { await fs.rm(fixture.directory, { recursive: true, force: true }); }

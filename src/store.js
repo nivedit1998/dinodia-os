@@ -1878,6 +1878,45 @@ class Store {
     }
   }
 
+  async prepareSyncStreamReconciliation({ previousStreamId, previousAcceptedSequence } = {}) {
+    const before = this.snapshot();
+    try {
+      const outbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
+      const previousId = String(previousStreamId || "");
+      const previousSequence = Number(previousAcceptedSequence);
+      if (!/^[a-zA-Z0-9._:-]{16,80}$/.test(previousId) || !Number.isSafeInteger(previousSequence) || previousSequence < 1
+        || previousId === outbox.streamId) throw new Error("A current authoritative remote stream and cursor are required for reconciliation");
+      if (outbox.acknowledgedSequence !== 0 || outbox.gapDetected || outbox.criticalBacklog
+        || outbox.telemetryPaused || outbox.droppedTelemetryCount !== 0) {
+        throw Object.assign(new Error("A local cursor or known retention gap requires explicit recovery before stream reconciliation"), { code: "hub_sync_stream_reconciliation_required" });
+      }
+      const batch = outbox.inFlight;
+      if (!batch || batch.streamId !== outbox.streamId || Number(batch.fromSequence) !== 1
+        || !Array.isArray(batch.events) || batch.events.length < 1 || Number(batch.events[0]?.sequence) !== 1
+        || Number(batch.toSequence) !== Number(batch.events.at(-1)?.sequence)) {
+        throw Object.assign(new Error("The complete durable first batch is not available for stream reconciliation"), { code: "hub_sync_stream_reconciliation_required" });
+      }
+      const existing = batch.streamReconciliation;
+      if (existing) {
+        if (existing.version !== 1 || String(existing.previousStreamId) !== previousId
+          || Number(existing.previousAcceptedSequence) !== previousSequence) {
+          throw Object.assign(new Error("The exact in-flight reconciliation is bound to a different authoritative server cursor"), { code: "hub_sync_stream_reconciliation_required" });
+        }
+        return clone(batch);
+      }
+      batch.streamReconciliation = {
+        version: 1,
+        previousStreamId: previousId,
+        previousAcceptedSequence: previousSequence,
+      };
+      await this.persist();
+      return clone(batch);
+    } catch (error) {
+      this.state = before;
+      throw error;
+    }
+  }
+
   async ensureSyncSnapshot(now = Date.now()) {
     const outbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
     const before = this.snapshot();
