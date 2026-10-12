@@ -796,6 +796,29 @@ test("an atomically applied Platform automation survives OS restart, executes on
   }
 });
 
+test("signed property-device policy resolves hub Area IDs to canonical Platform Area IDs", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-property-policy-area-"));
+  const store = new Store(path.join(directory, "dinodia.json"));
+  try {
+    const osArea = await store.saveArea({ name: "Room 1" }, "os-room-1");
+    const canonicalAreaId = "33333333-3333-4333-8333-333333333333";
+    const unsigned = {
+      revision: 1, policyRevision: 1,
+      areas: [{ id: canonicalAreaId, osAreaId: osArea.id, originalName: "Room 1", overrideName: null, revision: 1 }],
+      memberships: [],
+      devicePolicies: [{ osDeviceId: "zigbee:radiator-1", managementClass: "PROPERTY_DEVICE", ownerMembershipId: null,
+        analyticsCategory: "NONE", inventoryRevision: 1, lifecycle: "INSTALLED", customerLabel: "Radiator", overrideName: "Room 1 Radiator",
+        descriptorRevision: 1, descriptorDigest: "a".repeat(64), osAreaIds: [osArea.id] }],
+      automations: [], releasePolicy: { mode: "MANUAL", automaticInstallEnabled: false, desiredRelease: null },
+    };
+    await applyCloudConfiguration(store, signedConfiguration(unsigned));
+    assert.deepEqual(store.getPlatform().devicePolicies["zigbee:radiator-1"].canonicalAreaIds, [canonicalAreaId]);
+    assert.deepEqual(store.getPlatform().devicePolicies["zigbee:radiator-1"].osAreaIds, [osArea.id], "the signed hub Area identity remains available");
+    const restored = new Store(path.join(directory, "dinodia.json"));
+    assert.deepEqual(restored.getPlatform().devicePolicies["zigbee:radiator-1"].canonicalAreaIds, [canonicalAreaId], "restart reconstruction preserves canonical Platform Areas");
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
+
 test("tenant removal policy is not acknowledged until the paired hub completes local device cleanup", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-tenant-removal-sync-"));
   const store = new Store(path.join(directory, "dinodia.json"));

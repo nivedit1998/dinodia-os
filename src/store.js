@@ -10,7 +10,7 @@ const { migrateLegacyAutomations } = require("./automations/legacyAdapter");
 const { getSurfaces } = require("./capabilities/devicePresentation");
 const { serializeDevice } = require("./contracts/dinodiaV1");
 const { compactUnregisteredPropertyDeviceEvents, enqueueSyncEventInState, initialSyncOutbox, nextSyncBatch, normalizeSyncOutbox } = require("./sync/syncOutbox");
-const { validateCloudConfiguration } = require("./sync/cloudConfiguration");
+const { validateCloudConfiguration, projectCloudDevicePolicies } = require("./sync/cloudConfiguration");
 const { activityFor, advanceUsage, endUsageAssignment, initialUsageState, observeUsage } = require("./sync/usageBuckets");
 
 function sourceTimestamp(value) {
@@ -620,7 +620,7 @@ function normalizeState(value) {
   const persistedPlatform = value.platform && typeof value.platform === "object" ? value.platform : {};
   const persistedCloudConfigurationValid = validateCloudConfiguration(persistedPlatform.cloudConfiguration, persistedPlatform);
   const persistedCloudDevicePolicies = persistedCloudConfigurationValid
-    ? Object.fromEntries(persistedPlatform.cloudConfiguration.devicePolicies.map((policy) => [String(policy.osDeviceId), clone(policy)])) : {};
+    ? projectCloudDevicePolicies(persistedPlatform.cloudConfiguration) : {};
   const pendingPropertyDevicePolicies = normalizePendingPropertyDevicePolicies(persistedPlatform.pendingPropertyDevicePolicies);
   for (const osDeviceId of Object.keys(persistedCloudDevicePolicies)) delete pendingPropertyDevicePolicies[osDeviceId];
   const persistedApiUrl = String(persistedPlatform.apiUrl || "").replace(/\/$/, "");

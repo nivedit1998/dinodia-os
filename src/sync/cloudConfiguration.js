@@ -35,6 +35,15 @@ function validAutomation(value) {
   return true;
 }
 
+function projectCloudDevicePolicies(configuration) {
+  const areaIdsByOsId = new Map((configuration?.areas || []).map((area) => [String(area.osAreaId), String(area.id)]));
+  return Object.fromEntries((configuration?.devicePolicies || []).map((policy) => [String(policy.osDeviceId), {
+    ...JSON.parse(JSON.stringify(policy)),
+    canonicalAreaIds: (Array.isArray(policy.osAreaIds) ? policy.osAreaIds : [])
+      .map((osAreaId) => areaIdsByOsId.get(String(osAreaId))).filter(Boolean),
+  }]));
+}
+
 function validateCloudConfiguration(value, current = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const keys = ["revision", "policyRevision", "areas", "memberships", "devicePolicies", "automations", "releasePolicy", "checksum"];
@@ -77,7 +86,7 @@ function validateCloudConfiguration(value, current = {}) {
 async function applyCloudConfiguration(store, value) {
   const current = store.getPlatform?.() || {};
   if (!validateCloudConfiguration(value, current)) throw Object.assign(new Error("Cloud configuration is malformed, stale, or checksum-invalid"), { code: "sync_configuration_invalid" });
-  const devicePolicies = Object.fromEntries(value.devicePolicies.map((policy) => [String(policy.osDeviceId), JSON.parse(JSON.stringify(policy))]));
+  const devicePolicies = projectCloudDevicePolicies(value);
   const platformPatch = {
     cloudRevision: Number(value.revision),
     cloudConfigurationChecksum: String(value.checksum),
@@ -141,4 +150,4 @@ async function applyCloudConfiguration(store, value) {
   return store.savePlatform(platformPatch);
 }
 
-module.exports = { applyCloudConfiguration, validateCloudConfiguration };
+module.exports = { applyCloudConfiguration, validateCloudConfiguration, projectCloudDevicePolicies };
