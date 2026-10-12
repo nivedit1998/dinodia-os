@@ -873,9 +873,9 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     store: hubStore,
     commandDevice,
     commandEntity,
-    removeProtocolDevice: async (device, force) => {
+    removeProtocolDevice: async (device, force, options = {}) => {
       if (device.protocol === "zigbee") {
-        const result = await mqtt.remove(device.id, force);
+        const result = await mqtt.remove(device.id, force, options);
         mqtt.forgetDevice?.(device.id);
         return result;
       }

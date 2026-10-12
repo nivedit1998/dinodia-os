@@ -118,10 +118,10 @@ test("MQTT bridge retains a private complete Zigbee inventory snapshot without i
   assert.equal(store.listDevices().length, 0, "an inventory snapshot must not auto-pair any device");
 });
 
-test("MQTT device removal addresses Zigbee2MQTT by friendly name and supports force removal", async () => {
+test("MQTT removal can force-forget and block an offline Zigbee device", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-mqtt-remove-"));
   const store = new Store(path.join(directory, "dinodia.json"));
-  await store.upsertDevice({ id: "zigbee:123", name: "Radiator upstairs", protocol: "zigbee", metadata: { friendly_name: "0x123", ieee_address: "0x123" } });
+  await store.upsertDevice({ id: "zigbee:123", name: "SONOFF TRVZB", protocol: "zigbee", available: false, metadata: { friendly_name: "0x123", ieee_address: "0x123" } });
   const published = [];
   const bridge = new MqttBridge({ url: "", store });
   bridge.client = {
@@ -129,16 +129,35 @@ test("MQTT device removal addresses Zigbee2MQTT by friendly name and supports fo
       published.push({ topic, payload: JSON.parse(payload), options });
       callback();
       setImmediate(() => {
-        bridge.handleMessage("zigbee2mqtt/bridge/response/device/remove", Buffer.from(JSON.stringify({ status: "ok", data: { id: "0x123" }, transaction: published[0].payload.transaction })));
+        bridge.handleMessage("zigbee2mqtt/bridge/response/device/remove", Buffer.from(JSON.stringify({ status: "ok", data: { id: "0x123", clear_cache: true, force: true, block: true }, transaction: published[0].payload.transaction })));
       });
     },
   };
   bridge.connected = true;
-  await bridge.remove("zigbee:123", true);
+  await bridge.remove("zigbee:123", true, { block: true });
   assert.equal(published[0].topic, "zigbee2mqtt/bridge/request/device/remove");
-  assert.deepEqual(published[0].payload, { id: "0x123", clear_cache: true, transaction: published[0].payload.transaction, force: true });
+  assert.deepEqual(published[0].payload, { id: "0x123", clear_cache: true, transaction: published[0].payload.transaction, force: true, block: true });
   assert.equal(published[0].options.qos, 0);
   assert.equal(published[0].options.retain, false);
+});
+
+test("MQTT removal preserves the hub record unless Zigbee2MQTT confirms the rejoin block", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-mqtt-remove-unconfirmed-block-"));
+  const store = new Store(path.join(directory, "dinodia.json"));
+  await store.upsertDevice({ id: "zigbee:offline-trv", name: "Offline TRV", protocol: "zigbee", available: false, metadata: { friendly_name: "offline-trv", ieee_address: "0xabc" } });
+  const bridge = new MqttBridge({ url: "", store });
+  bridge.client = {
+    publish: (topic, payload, options, callback) => {
+      const request = JSON.parse(payload);
+      callback();
+      setImmediate(() => bridge.handleMessage("zigbee2mqtt/bridge/response/device/remove", Buffer.from(JSON.stringify({
+        status: "ok", data: { id: request.id, clear_cache: true, force: true, block: false }, transaction: request.transaction,
+      }))));
+    },
+  };
+  bridge.connected = true;
+  await assert.rejects(bridge.remove("zigbee:offline-trv", true, { block: true }), /did not confirm the rejoin block/);
+  assert.ok(store.getDevice("zigbee:offline-trv"), "caller can retain local data when block was not acknowledged");
 });
 
 test("Matter bridge starts listening, ingests nodes/events, and sends commands", async () => {

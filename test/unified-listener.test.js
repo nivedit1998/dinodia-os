@@ -171,9 +171,10 @@ test("physical full-Home dashboard allows scoped device removal only for os:admi
   const adminToken = createOperatorSessionToken({ sub: "assigned-installer", hubId, scope: ["os:admin"], recentAuthAt: Date.now() }, keys.privateKey);
   const installationToken = createOperatorSessionToken({ sub: "assigned-installer", hubId, scope: ["os:permanent-installation"], recentAuthAt: Date.now() }, keys.privateKey);
   const adapterCalls = [];
+  let failRemoval = true;
   const mqttBridge = {
     ...mockIntegration(),
-    async remove(deviceId, force) { adapterCalls.push({ operation: "remove", deviceId, force }); return { status: "ok" }; },
+    async remove(deviceId, force, options) { adapterCalls.push({ operation: "remove", deviceId, force, options }); if (failRemoval) throw new Error("Zigbee2MQTT did not acknowledge device removal"); return { status: "ok" }; },
     forgetDevice(deviceId) { adapterCalls.push({ operation: "forget", deviceId }); },
   };
   const hub = createHub({
@@ -189,7 +190,7 @@ test("physical full-Home dashboard allows scoped device removal only for os:admi
   });
   try {
     await hub.start();
-    await hub.store.upsertDevice({ id: "zigbee:disposable-removal", name: "Disposable Zigbee device", protocol: "zigbee", metadata: { friendly_name: "disposable-removal", ieee_address: "0x1234567890abcdef" }, state: { temperature: 20 } });
+    await hub.store.upsertDevice({ id: "zigbee:disposable-removal", name: "Disposable Zigbee device", protocol: "zigbee", available: false, metadata: { friendly_name: "disposable-removal", ieee_address: "0x1234567890abcdef" }, state: { temperature: 20 } });
     await new Promise((resolve, reject) => { hub.setupServer.once("error", reject); hub.setupServer.listen(0, "127.0.0.1", resolve); });
     const physical = `http://127.0.0.1:${hub.setupServer.address().port}`;
     const route = "/_dinodia/admin/api/devices/zigbee%3Adisposable-removal";
@@ -203,12 +204,21 @@ test("physical full-Home dashboard allows scoped device removal only for os:admi
     assert.ok(hub.store.getDevice("zigbee:disposable-removal"));
     assert.deepEqual(adapterCalls, []);
 
+    const failedRemoval = await request(physical, route, { method: "DELETE", headers: { authorization: `Bearer ${adminToken}` }, body: JSON.stringify({ force: false }) });
+    assert.equal(failedRemoval.response.status, 502);
+    assert.ok(hub.store.getDevice("zigbee:disposable-removal"), "keep local records when the radio bridge does not acknowledge removal");
+    assert.deepEqual(adapterCalls, [
+      { operation: "remove", deviceId: "zigbee:disposable-removal", force: true, options: { block: true } },
+    ]);
+    failRemoval = false;
+
     const removed = await request(physical, route, { method: "DELETE", headers: { authorization: `Bearer ${adminToken}` }, body: JSON.stringify({ force: false }) });
     assert.equal(removed.response.status, 200);
     assert.equal(removed.body.ok, true);
     assert.equal(hub.store.getDevice("zigbee:disposable-removal"), null);
     assert.deepEqual(adapterCalls, [
-      { operation: "remove", deviceId: "zigbee:disposable-removal", force: false },
+      { operation: "remove", deviceId: "zigbee:disposable-removal", force: true, options: { block: true } },
+      { operation: "remove", deviceId: "zigbee:disposable-removal", force: true, options: { block: true } },
       { operation: "forget", deviceId: "zigbee:disposable-removal" },
     ]);
   } finally {

@@ -318,14 +318,20 @@ class MqttBridge {
     return { acknowledged: true };
   }
 
-  async remove(deviceId, force = false) {
+  async remove(deviceId, force = false, options = {}) {
     if (!this.client || !this.connected) throw new Error("MQTT is not connected");
     const device = this.store.getDevice(deviceId);
     if (!device) throw new Error("Zigbee device is not registered");
     const topic = `${this.baseTopic}/bridge/request/device/remove`;
     const removalId = device.metadata?.friendly_name || device.metadata?.friendlyName || device.metadata?.ieee_address || device.protocolIdentity?.ieeeAddress || deviceId;
     const transaction = crypto.randomUUID();
-    const payload = JSON.stringify({ id: String(removalId), clear_cache: true, transaction, ...(force ? { force: true } : {}) });
+    const payload = JSON.stringify({
+      id: String(removalId),
+      clear_cache: true,
+      transaction,
+      ...(force ? { force: true } : {}),
+      ...(options.block ? { block: true } : {}),
+    });
     const acknowledgement = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingRemovals.delete(transaction);
@@ -339,6 +345,19 @@ class MqttBridge {
         reject(error);
       });
     });
+    if (String(acknowledgement?.status || "").toLowerCase() !== "ok") {
+      throw new Error("Zigbee2MQTT did not confirm device removal");
+    }
+    const confirmed = acknowledgement.data || {};
+    if (String(confirmed.id || "") !== String(removalId)) {
+      throw new Error("Zigbee2MQTT acknowledged a different device removal");
+    }
+    if (force && confirmed.force !== true) {
+      throw new Error("Zigbee2MQTT did not confirm force removal; the device is still registered");
+    }
+    if (options.block && confirmed.block !== true) {
+      throw new Error("Zigbee2MQTT did not confirm the rejoin block; the device is still registered");
+    }
     await this.store.addEvent({ type: "zigbee_device_remove_requested", deviceId: String(deviceId) });
     return acknowledgement;
   }
