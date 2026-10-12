@@ -180,6 +180,58 @@ test("a fresh complete inventory confirms an exact pending Zigbee candidate is a
   assert.equal(next.status, "searching");
 });
 
+test("a restart-interrupted empty Zigbee session does not block a new assigned Matter setup", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const staff = { principalType: "operator", scope: ["os:permanent-installation"], sub: uuid(), sid: uuid(), jti: uuid(),
+    handoffId: uuid(), homeId: f.homeId, workflow: uuid(), requestId: uuid(), employeeSessionId: uuid(), workRevision: 2,
+    hubId: "DIN-HUB-1", verifiedHubInstallationId: f.hubInstallId, areaIds: [f.areaId],
+    areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
+  const interrupted = { sessionId: uuid(), protocol: "zigbee", operationKind: "PAIR_NEW", actorType: "STAFF_INSTALLER",
+    employeeId: uuid(), employeeSessionId: uuid(), operatorHandoffId: uuid(), operatorJti: uuid(), workItemId: uuid(),
+    requestId: uuid(), homeId: f.homeId, hubInstallationId: f.hubInstallId, status: "interrupted",
+    expiresAt: new Date(Date.now() + 60_000).toISOString(), radioOperationInFlight: false, radioOperationUncertain: false,
+    candidates: [], cleanup: { state: "NONE", pendingIds: [], attempts: 0 }, events: [] };
+  await f.store.saveSecurity({ nativeCommissioningSessions: { [interrupted.sessionId]: interrupted } });
+
+  const next = await f.service.start(staff, { protocol: "matter" }, "commission-after-empty-restart-01");
+
+  assert.equal(next.protocol, "matter");
+  assert.equal(next.status, "awaiting_payload");
+  assert.equal(f.radioEffects.matterCommission, 0, "starting Matter setup must not commission before setup code is submitted");
+  assert.equal(f.radioEffects.zigbeeRemove, 0, "recovery must not remove the previously paired Zigbee device");
+});
+
+test("a restart-interrupted uncertain radio write continues to block another operation", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const staff = { principalType: "operator", scope: ["os:permanent-installation"], sub: uuid(), sid: uuid(), jti: uuid(),
+    handoffId: uuid(), homeId: f.homeId, workflow: uuid(), requestId: uuid(), employeeSessionId: uuid(), workRevision: 2,
+    hubId: "DIN-HUB-1", verifiedHubInstallationId: f.hubInstallId, areaIds: [f.areaId],
+    areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
+  const interrupted = { sessionId: uuid(), protocol: "matter", operationKind: "PAIR_NEW", actorType: "STAFF_INSTALLER",
+    employeeId: uuid(), employeeSessionId: uuid(), operatorHandoffId: uuid(), operatorJti: uuid(), workItemId: uuid(),
+    requestId: uuid(), homeId: f.homeId, hubInstallationId: f.hubInstallId, status: "interrupted",
+    expiresAt: new Date(Date.now() + 60_000).toISOString(), radioOperationInFlight: false, radioOperationUncertain: true,
+    candidates: [], cleanup: { state: "REQUIRES_RADIO_RECONCILIATION", pendingIds: [], attempts: 0 }, events: [] };
+  await f.store.saveSecurity({ nativeCommissioningSessions: { [interrupted.sessionId]: interrupted } });
+
+  await assert.rejects(f.service.start(staff, { protocol: "zigbee" }, "commission-after-uncertain-restart-01"), { code: "commissioning_radio_busy" });
+  assert.equal(f.radioEffects.zigbeeStart, 0, "uncertain radio work must block a second physical join");
+  assert.equal(f.platformRequests.length, 0, "do not create a competing Platform session");
+});
+
+test("an adapter-reported live Zigbee join blocks Matter even after the saved session was interrupted", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const staff = { principalType: "operator", scope: ["os:permanent-installation"], sub: uuid(), sid: uuid(), jti: uuid(),
+    handoffId: uuid(), homeId: f.homeId, workflow: uuid(), requestId: uuid(), employeeSessionId: uuid(), workRevision: 2,
+    hubId: "DIN-HUB-1", verifiedHubInstallationId: f.hubInstallId, areaIds: [f.areaId],
+    areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
+  f.mqtt.pairingStatus = () => ({ active: true, found: [] });
+
+  await assert.rejects(f.service.start(staff, { protocol: "matter" }, "commission-live-zigbee-blocks-matter-01"), { code: "commissioning_radio_busy" });
+  assert.equal(f.radioEffects.matterCommission, 0);
+  assert.equal(f.platformRequests.length, 0, "do not create a competing Platform session");
+});
+
 test("a lost Zigbee removal acknowledgement is reconciled from current inventory without repeating a radio removal", async (t) => {
   const f = fixture(); t.after(f.close);
   const { session, candidate } = interruptedZigbeeCleanup(f);

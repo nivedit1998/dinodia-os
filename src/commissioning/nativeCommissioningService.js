@@ -375,8 +375,11 @@ class NativeCommissioningService {
       if (priorSessions.some((row) => row.cleanup?.pendingIds?.length)) {
         fail(SAFE_ERROR.busy, 409, "The hub is reconciling a previous radio cleanup against the current adapter inventory. No new search was started; wait briefly and retry.");
       }
-      if (priorSessions.some((row) => (!TERMINAL.has(row.status) && Date.parse(row.expiresAt) > this.clock()) || row.radioOperationInFlight || row.radioOperationUncertain)) {
+      if (priorSessions.some((row) => this.blocksRadioOperation(row))) {
         fail(SAFE_ERROR.busy, 409, "Another radio commissioning operation is still active on this hub");
+      }
+      if (operationKind === "PAIR_NEW" && this.mqtt?.pairingStatus?.().active === true) {
+        fail(SAFE_ERROR.busy, 409, "A Zigbee join window is still active on this hub; no second radio operation was started");
       }
       if (operationKind === "PAIR_NEW" && input.protocol === "zigbee") {
         if (!this.mqtt?.status?.().connected || !this.store.getZigbee?.().adapterPath) fail(SAFE_ERROR.unavailable, 503, "The enrolled Zigbee coordinator is not ready; no join was opened");
@@ -745,6 +748,9 @@ class NativeCommissioningService {
     return this.exclusive(async () => {
       const { session } = await this.requireSession(sessionId, principal);
       if (session.status !== "interrupted") return this.publicStatus(session);
+      if (Object.values(this.sessions()).some((row) => row.sessionId !== session.sessionId && this.blocksRadioOperation(row))) {
+        fail(SAFE_ERROR.busy, 409, "Another radio commissioning operation is still active on this hub");
+      }
       if (session.operationKind === "REGISTER_EXISTING") {
         const device = this.store.getDevice(session.targetDeviceId);
         const actor = await this.principal(principal);
@@ -755,10 +761,26 @@ class NativeCommissioningService {
         return this.publicStatus(session);
       }
       if (session.protocol === "matter" && session.matterPayloadSubmittedAt) fail(SAFE_ERROR.conflict, 409, "This Matter attempt was interrupted after code submission; cancel it and scan again in a new session");
-      if (session.protocol === "zigbee") await this.mqtt.startPairing(254, { sessionId: session.sessionId, sessionExpiresAt: session.expiresAt });
+      if (session.protocol === "zigbee") {
+        if (this.mqtt?.pairingStatus?.().active === true) fail(SAFE_ERROR.busy, 409, "A Zigbee join window is still active on this hub");
+        await this.mqtt.startPairing(254, { sessionId: session.sessionId, sessionExpiresAt: session.expiresAt });
+      }
       session.status = session.protocol === "zigbee" ? "searching" : "awaiting_payload";
       this.append(session, "commissioning_resumed"); await this.save(session); return this.publicStatus(session);
     });
+  }
+
+  blocksRadioOperation(session) {
+    const cleanupState = String(session?.cleanup?.state || "");
+    if (session?.radioOperationInFlight || session?.radioOperationUncertain
+      || (Array.isArray(session?.cleanup?.pendingIds) && session.cleanup.pendingIds.length > 0)
+      || ["AWAITING_RADIO_SETTLEMENT", "REQUIRES_RADIO_RECONCILIATION"].includes(cleanupState)) return true;
+    // Hub recovery stops the old join window and marks its session interrupted.
+    // With no pending cleanup or uncertain radio write, that persisted status
+    // is history—not an active global lock. The old session's authority still
+    // governs whether it can be resumed or reviewed.
+    if (session?.status === "interrupted") return false;
+    return !TERMINAL.has(String(session?.status || "")) && Date.parse(session?.expiresAt) > this.clock();
   }
 
   async cancel(sessionId, principal) {
