@@ -237,6 +237,63 @@ test("natural expiry preserves an interviewed assigned Zigbee candidate for expl
   assert.equal(f.radioEffects.zigbeeRemove, 0);
 });
 
+test("assigned Zigbee status expires the exact empty session when its radio join window has ended", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const staff = { principalType: "operator", scope: ["os:permanent-installation"], sub: uuid(), sid: uuid(), jti: uuid(),
+    handoffId: uuid(), homeId: f.homeId, workflow: uuid(), requestId: uuid(), employeeSessionId: uuid(), workRevision: 4,
+    hubId: "DIN-HUB-1", verifiedHubInstallationId: f.hubInstallId, areaIds: [f.areaId],
+    areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
+  const started = await f.service.start(staff, { protocol: "zigbee" }, "assigned-closed-window-empty-01");
+  let radio = { active: true, permitJoinOpen: false, permitJoinExpiresAt: new Date(Date.now() - 1).toISOString(), found: [] };
+  f.mqtt.pairingStatus = () => radio;
+  f.mqtt.stopPairing = async () => { f.radioEffects.zigbeeStop += 1; radio = { ...radio, active: false }; return radio; };
+
+  const result = await f.service.status(started.sessionId, staff);
+  assert.equal(result.status, "expired", "an empty exact assigned attempt must not keep blocking a later user-initiated scan");
+  assert.equal(result.cleanup.pendingCount, 0);
+  assert.equal(f.radioEffects.zigbeeStop, 1, "the OS confirms the join window is closed before freeing this session");
+  const next = await f.service.start(staff, { protocol: "zigbee" }, "assigned-closed-window-retry-02");
+  assert.equal(next.status, "searching");
+  assert.equal(f.radioEffects.zigbeeStart, 2);
+});
+
+test("a fresh assigned search reconciles only the same work item's closed empty Zigbee session", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const staff = { principalType: "operator", scope: ["os:permanent-installation"], sub: uuid(), sid: uuid(), jti: uuid(),
+    handoffId: uuid(), homeId: f.homeId, workflow: uuid(), requestId: uuid(), employeeSessionId: uuid(), workRevision: 4,
+    hubId: "DIN-HUB-1", verifiedHubInstallationId: f.hubInstallId, areaIds: [f.areaId],
+    areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
+  const old = await f.service.start(staff, { protocol: "zigbee" }, "assigned-old-empty-search-0001");
+  let radio = { active: true, permitJoinOpen: false, permitJoinExpiresAt: new Date(Date.now() - 1).toISOString(), found: [] };
+  f.mqtt.pairingStatus = () => radio;
+  f.mqtt.stopPairing = async () => { f.radioEffects.zigbeeStop += 1; radio = { ...radio, active: false }; return radio; };
+
+  const next = await f.service.start(staff, { protocol: "zigbee" }, "assigned-new-empty-search-0002");
+  assert.equal(f.service.sessions()[old.sessionId].status, "expired");
+  assert.equal(next.status, "searching");
+  assert.equal(f.radioEffects.zigbeeStart, 2);
+  assert.equal(f.radioEffects.zigbeeStop, 1);
+});
+
+test("assigned Zigbee status keeps a discovered candidate reviewable after the radio join window closes", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const staff = { principalType: "operator", scope: ["os:permanent-installation"], sub: uuid(), sid: uuid(), jti: uuid(),
+    handoffId: uuid(), homeId: f.homeId, workflow: uuid(), requestId: uuid(), employeeSessionId: uuid(), workRevision: 4,
+    hubId: "DIN-HUB-1", verifiedHubInstallationId: f.hubInstallId, areaIds: [f.areaId],
+    areaOptions: [{ id: f.areaId, name: "Living Room" }], identityGeneration: 7 };
+  const started = await f.service.start(staff, { protocol: "zigbee" }, "assigned-closed-window-candidate-01");
+  const device = normalizeZigbeeDevice({ friendly_name: "0x00124b000000e111", ieee_address: "0x00124b000000e111", interview_completed: true,
+    definition: { vendor: "SONOFF", model: "TRVZB", exposes: [{ type: "numeric", name: "occupied_heating_setpoint", access: 7 }] } });
+  await f.store.upsertDevice(device);
+  f.mqtt.pairingStatus = () => ({ active: true, permitJoinOpen: false, permitJoinExpiresAt: new Date(Date.now() - 1).toISOString(), found: [device.id] });
+
+  const result = await f.service.status(started.sessionId, staff);
+  assert.equal(result.status, "searching", "a discovered device stays attached to its original session for review");
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates[0].model, "TRVZB");
+  assert.equal(f.radioEffects.zigbeeStop, 0, "a candidate-bearing session is not silently expired or cleaned up");
+});
+
 test("explicit cancellation of a new Zigbee pairing still removes its exact unregistered candidate", async (t) => {
   const f = fixture(); t.after(f.close);
   const pairing = await f.service.start(f.principal, { protocol: "zigbee" }, "commission-explicit-cancel-01");
@@ -764,6 +821,30 @@ test("analytics category updates require current full-Home authority bound to th
   platform.devicePolicies["tenant-device"] = { managementClass: "TENANT_DEVICE", ownerMembershipId: uuid(), lifecycle: "INSTALLED", analyticsCategory: "NONE", canonicalAreaIds: [f.areaId] };
   await assert.rejects(f.service.updateAnalyticsCategory(staff, { ...input, osDeviceId: "tenant-device", operationId: uuid() }), { code: "commissioning_authority_denied" });
   assert.equal(requests.length, 2, "tenant-device analytics policy is never sent to the property-device update route");
+});
+
+test("an analytics-category revision conflict refreshes signed Home configuration before the dashboard rereads it", async (t) => {
+  const f = fixture(); t.after(f.close);
+  const platform = f.store.getPlatform();
+  platform.cloudRevision = 12;
+  platform.devicePolicies = { "permanent-radiator": { managementClass: "PROPERTY_DEVICE", ownerMembershipId: null, lifecycle: "INSTALLED",
+    analyticsCategory: "NONE", inventoryRevision: 3, canonicalAreaIds: [f.areaId] } };
+  const staff = { principalType: "operator", scope: ["os:admin"], sub: uuid(), sid: uuid(), jti: "J".repeat(32), handoffId: uuid(),
+    workflow: uuid(), employeeSessionId: uuid(), workRevision: 5, homeId: f.homeId, hubId: "DIN-HUB-1", identityGeneration: 7,
+    verifiedHubInstallationId: f.hubInstallId };
+  let refreshes = 0;
+  f.service.pairing.requestWithHubIdentity = async () => {
+    throw Object.assign(new Error("The Home configuration changed; refresh the dashboard before changing this category"), {
+      statusCode: 409, code: "analytics_category_revision_conflict",
+    });
+  };
+  f.service.pairing.syncNow = async () => { refreshes += 1; platform.cloudRevision = 14; };
+  await assert.rejects(f.service.updateAnalyticsCategory(staff, {
+    osDeviceId: "permanent-radiator", analyticsCategory: "RADIATOR", expectedAnalyticsCategory: "NONE",
+    expectedManagementRevision: 12, expectedInventoryRevision: 3, operationId: uuid(),
+  }), { code: "analytics_category_revision_conflict" });
+  assert.equal(refreshes, 1, "the stale signed snapshot is refreshed before the HTTP handler returns the conflict for a dashboard reload");
+  assert.equal(platform.cloudRevision, 14);
 });
 
 

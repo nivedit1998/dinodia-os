@@ -133,7 +133,10 @@
     else if (state.selected?.candidateRef) state.selected = (session.candidates || []).find((candidate) => candidate.candidateRef === state.selected.candidateRef) || state.selected;
     if (session.operationKind === "REGISTER_EXISTING" && !state.selected) state.selected = (session.candidates || [])[0] || null;
     sessionStorage.setItem(key("session"), session.sessionId);
-    $("status").textContent = `${session.protocol.toUpperCase()} · ${session.status.replaceAll("_", " ")} · updated ${new Date(session.updatedAt).toLocaleTimeString()}`;
+    const sessionState = session.protocol === "zigbee" && session.operationKind === "PAIR_NEW" && session.status === "searching" && session.joinWindowOpen === false
+      ? `join window closed · ${(session.candidates || []).length ? "review discovered device" : "checking devices already joining"}`
+      : session.status.replaceAll("_", " ");
+    $("status").textContent = `${session.protocol.toUpperCase()} · ${sessionState} · updated ${new Date(session.updatedAt).toLocaleTimeString()}`;
     $("matter-entry").hidden = session.protocol !== "matter" || !["awaiting_payload", "interrupted"].includes(session.status);
     $("matter-entry-row").hidden = $("matter-entry").hidden;
     // Preserve an in-progress review of a newly discovered candidate across

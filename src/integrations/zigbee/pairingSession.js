@@ -51,7 +51,10 @@ class ZigbeePairingSession {
 
   status() {
     if (this.state.active && this.state.expiresAt && Date.parse(this.state.expiresAt) <= Date.now()) this.stop();
-    return { ...this.state, found: [...this.state.found], foundDetails: { ...this.state.foundDetails } };
+    const permitJoinExpiresAt = this.state.permitJoinExpiresAt || null;
+    const permitJoinOpen = this.state.active && Number.isFinite(Date.parse(permitJoinExpiresAt || ""))
+      && Date.parse(permitJoinExpiresAt) > Date.now();
+    return { ...this.state, permitJoinOpen, found: [...this.state.found], foundDetails: { ...this.state.foundDetails } };
   }
 
   reset() {

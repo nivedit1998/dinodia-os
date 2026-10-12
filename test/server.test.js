@@ -131,6 +131,39 @@ test("local full-Home dashboard exposes the same read-only dongle inventory as t
   assert.equal(await fs.readFile(configurationPath, "utf8"), liveConfiguration, "adopting the coordinator already used by Zigbee2MQTT must preserve the network file");
 });
 
+test("radio inventories keep one physical dongle in one protocol role, including serial-path aliases", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-exclusive-radio-roles-"));
+  const thread = { path: "/dev/serial/by-id/usb-sonoff-1ee", target: "/dev/ttyUSB0", usbId: "sonoff-1ee", name: "SONOFF MG21 1ee", adapterType: "ember", supported: true, connected: true };
+  const zigbee = { path: "/dev/serial/by-id/usb-sonoff-38fd", target: "/dev/ttyUSB1", usbId: "sonoff-38fd", name: "SONOFF MG21 38fd", adapterType: "ember", supported: true, connected: true };
+  const hub = createHub({
+    config: { nodeEnv: "development", adminToken: "radio-role-token", dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    mqttBridge: mockIntegration(), matterBridge: mockIntegration(), cloudflareTunnel: mockCloudflare(),
+    platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
+    serialAdapterLister: async () => [thread, zigbee],
+  });
+  t.after(async () => { await hub.stop().catch(() => {}); await fs.rm(directory, { recursive: true, force: true }); });
+  await hub.store.saveZigbee({ adapterPath: zigbee.path, adapterName: zigbee.name, adapterType: "ember" });
+  await hub.store.saveThread({ configured: true, rcpDevice: thread.target, rcpName: thread.name, baudRate: 460800 });
+  await new Promise((resolve) => hub.server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${hub.server.address().port}`;
+  const headers = { authorization: "Bearer radio-role-token" };
+
+  const zigbeeInventory = await request(base, dashboardRoute("/api/integrations/zigbee/adapters"), { headers });
+  const threadInventory = await request(base, dashboardRoute("/api/integrations/thread/adapters"), { headers });
+  assert.deepEqual(zigbeeInventory.body.adapters.map((adapter) => adapter.path), [zigbee.path], "the Thread RCP is omitted from Zigbee candidates even when its configured path is a tty alias");
+  assert.equal(zigbeeInventory.body.selected.path, zigbee.path);
+  assert.deepEqual(threadInventory.body.adapters.map((adapter) => adapter.path), [thread.path], "the live Zigbee coordinator is omitted from Thread candidates");
+  assert.equal(threadInventory.body.selected.path, thread.path, "the configured tty alias resolves back to the stable USB identity");
+
+  const wrongZigbeeRole = await request(base, dashboardRoute("/api/integrations/zigbee/adapter"), {
+    method: "POST", headers, body: JSON.stringify({ path: thread.path }),
+  });
+  assert.equal(wrongZigbeeRole.response.status, 409, "the OS refuses to reassign a selected Thread RCP as Zigbee");
+  assert.equal(hub.store.getZigbee().adapterPath, zigbee.path, "the existing Zigbee coordinator remains selected");
+  assert.equal(hub.store.getThread().rcpDevice, thread.target, "the existing Thread role remains selected");
+  assert.equal(await fs.stat(path.join(directory, "zigbee2mqtt", "configuration.yaml")).then(() => true, () => false), false, "a rejected cross-role assignment does not write Zigbee2MQTT configuration");
+});
+
 test("selecting the already-running Zigbee2MQTT coordinator preserves its live network configuration", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-zigbee-adopt-live-config-"));
   const adapterPath = "/dev/serial/by-id/usb-sonoff-live-coordinator";

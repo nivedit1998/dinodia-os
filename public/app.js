@@ -253,20 +253,9 @@ function setRadioSetup(kind, result = {}) {
 }
 
 function radioEntries() {
-  const entries = [];
-  const seen = new Set();
-  const add = (adapter, kind, selectedPath) => {
-    if (!adapter?.path || seen.has(adapter.path)) return;
-    seen.add(adapter.path);
-    entries.push({ adapter, kind, selected: adapter.path === selectedPath });
-  };
   const zigbee = state.radioInventory.zigbee || {};
   const thread = state.radioInventory.thread || {};
-  (zigbee.adapters || []).forEach((adapter) => add(adapter, "zigbee", zigbee.selected?.path));
-  (thread.adapters || []).forEach((adapter) => add(adapter, "thread", thread.selected?.path));
-  if (zigbee.selected?.path) add({ ...zigbee.selected, connected: false, supported: true }, "zigbee", zigbee.selected.path);
-  if (thread.selected?.path) add({ ...thread.selected, connected: false, supported: true }, "thread", thread.selected.path);
-  return entries;
+  return window.DinodiaRadios.inventoryEntries(zigbee, thread);
 }
 
 function renderRadioTiles() {
@@ -403,10 +392,11 @@ function renderPairingStatus(pairing = {}) {
   const deviceLine = (device) => `<span>${escapeHtml(device.name || device.deviceId)}${device.manufacturer || device.model ? ` · ${escapeHtml([device.manufacturer, device.model].filter(Boolean).join(" "))}` : ""}</span>`;
   const found = summary.foundDevices.map(deviceLine).join("");
   const setup = summary.needsSetup.map(deviceLine).join("");
-  $("#pairing-badge").textContent = session ? "Pairing active" : summary.setupCount ? `${summary.setupCount} device${summary.setupCount === 1 ? "" : "s"} to set up` : "Ready when provisioned";
+  const joinWindowOpen = session ? session.permitJoinOpen !== false : false;
+  $("#pairing-badge").textContent = session ? joinWindowOpen ? "Pairing active" : "Join window closed" : summary.setupCount ? `${summary.setupCount} device${summary.setupCount === 1 ? "" : "s"} to set up` : "Ready when provisioned";
   $("#stop-pairing").classList.toggle("hidden", !session);
   $("#zigbee-pairing-progress").classList.toggle("hidden", !session && !summary.setupCount);
-  if (session || summary.setupCount) $("#zigbee-pairing-progress").innerHTML = `${session ? `<strong>Pairing is open</strong><span>Found ${(session.found || []).length} new device(s). Keep the device nearby while it joins.</span>${found ? `<div class="pairing-devices"><strong>Discovered</strong>${found}</div>` : ""}` : ""}${summary.setupCount ? `<strong>${summary.setupCount} device${summary.setupCount === 1 ? "" : "s"} ready for assignment</strong><span>Open Devices & entities below to choose one area and one label.</span>${setup ? `<div class="pairing-devices"><strong>Ready</strong>${setup}</div>` : ""}` : ""}`;
+  if (session || summary.setupCount) $("#zigbee-pairing-progress").innerHTML = `${session ? `<strong>${joinWindowOpen ? "Pairing is open" : "The Zigbee join window is closed"}</strong><span>${joinWindowOpen ? `Found ${(session.found || []).length} new device(s). Keep the device nearby while it joins.` : `Found ${(session.found || []).length} new device(s). The radio is no longer accepting new joins; any device already joining remains tracked for review.`}</span>${found ? `<div class="pairing-devices"><strong>Discovered</strong>${found}</div>` : ""}` : ""}${summary.setupCount ? `<strong>${summary.setupCount} device${summary.setupCount === 1 ? "" : "s"} ready for assignment</strong><span>Open Devices & entities below to choose one area and one label.</span>${setup ? `<div class="pairing-devices"><strong>Ready</strong>${setup}</div>` : ""}` : ""}`;
   if (session && !pairingRefreshTimer) pairingRefreshTimer = setInterval(load, 2000);
   if (!session && pairingRefreshTimer) { clearInterval(pairingRefreshTimer); pairingRefreshTimer = null; }
 }

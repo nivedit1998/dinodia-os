@@ -127,6 +127,20 @@ test("assigned Zigbee start creates a secure idempotency key on private HTTP wit
   assert.doesNotMatch(page.elements.get("error").textContent, /randomUUID/i);
 });
 
+test("assigned installation distinguishes a closed radio join window from an active discovery session", async () => {
+  const sessionId = "55555555-5555-4555-8555-555555555555";
+  const session = { sessionId, protocol: "zigbee", operationKind: "PAIR_NEW", status: "searching", joinWindowOpen: false,
+    permitJoinExpiresAt: new Date(Date.now() - 1).toISOString(), revision: 2, updatedAt: new Date().toISOString(), candidates: [] };
+  const requestId = "22222222-2222-4222-8222-222222222222";
+  const page = harness({ context: validContext(), session, seededStorage: {
+    [`dinodia-installation:${requestId}:session`]: sessionId,
+  } });
+  await page.flush();
+  assert.match(page.elements.get("status").textContent, /ZIGBEE · join window closed/i);
+  assert.match(page.elements.get("status").textContent, /checking devices already joining/i);
+  assert.equal(page.elements.get("cancel").disabled, false, "staff can explicitly close the tracked attempt if no device is joining");
+});
+
 test("permanent-device review offers an optional analytics category and sends the selected value to the canonical owner", async () => {
   const sessionId = "55555555-5555-4555-8555-555555555555";
   const candidateRef = "66666666-6666-4666-8666-666666666666";

@@ -372,6 +372,24 @@ test("radio tiles only report online when the selected dongle, MQTT, and Zigbee2
   assert.equal(context.window.DinodiaRadios.threadConnectionStatus(threadAdapter, "/dev/other", { reachable: true, state: "leader", service: { running: true } }).label, "Not selected");
 });
 
+test("full Home dashboard distinguishes an open Zigbee join window from a still-tracked operation", () => {
+  assert.match(app, /The Zigbee join window is closed/);
+  assert.match(app, /radio is no longer accepting new joins/);
+  assert.match(app, /session\.permitJoinOpen !== false/);
+});
+
+test("a physical dongle selected for Thread is never duplicated as an available Zigbee coordinator", () => {
+  const context = { window: {} };
+  vm.runInNewContext(radiosScript, context);
+  const thread = { path: "/dev/serial/by-id/usb-sonoff-1ee", target: "/dev/ttyUSB0", usbId: "sonoff-1ee", name: "SONOFF MG21 1ee", connected: true };
+  const zigbee = { path: "/dev/serial/by-id/usb-sonoff-38fd", target: "/dev/ttyUSB1", usbId: "sonoff-38fd", name: "SONOFF MG21 38fd", connected: true };
+  const entries = context.window.DinodiaRadios.inventoryEntries({ adapters: [thread, zigbee], selected: zigbee }, { adapters: [thread, zigbee], selected: thread });
+  assert.deepEqual(Array.from(entries, ({ adapter, kind, selected }) => ({ path: adapter.path, kind, selected })), [
+    { path: thread.path, kind: "thread", selected: true },
+    { path: zigbee.path, kind: "zigbee", selected: true },
+  ]);
+});
+
 test("radio tiles expose a selected-dongle removal action", () => {
   assert.match(app, /data-remove-radio/);
   assert.match(app, /method: "DELETE"/);

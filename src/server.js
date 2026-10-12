@@ -16,7 +16,7 @@ const { MqttBridge } = require("./mqttBridge");
 const { MatterBridge } = require("./matterBridge");
 const { createBackup } = require("./backup");
 const { CloudflareTunnel, connectedLocalTunnelIdentity } = require("./cloudflareTunnel");
-const { listSerialAdapters, probeSerialAdapter } = require("./serialAdapters");
+const { listSerialAdapters, probeSerialAdapter, serialAdapterMatchesPath, sameSerialAdapter } = require("./serialAdapters");
 const { HomeAssistantModel, normalizeHaState } = require("./haModel");
 const { SecretVault } = require("./secretVault");
 const { PlatformPairing } = require("./platformPairing");
@@ -3110,10 +3110,10 @@ function nativeDeviceView(principal, device) {
       // A physically connected adapter must stay visible after removal so the
       // dashboard can offer the same dongle again. The removal marker only
       // suppresses automatic selection of the legacy environment fallback.
-      const adapters = detectedAdapters.filter((adapter) => String(adapter.path || "") !== threadPath);
+      const adapters = detectedAdapters.filter((adapter) => !serialAdapterMatchesPath(adapter, threadPath));
       const removed = new Set(removedAdapterPaths);
       const selectedPath = settings.adapterPath || (runtimeConfig.zigbeeAdapterPath && !removed.has(runtimeConfig.zigbeeAdapterPath) ? runtimeConfig.zigbeeAdapterPath : "");
-      const selectedAdapter = adapters.find((adapter) => adapter.path === selectedPath);
+      const selectedAdapter = adapters.find((adapter) => serialAdapterMatchesPath(adapter, selectedPath));
       return json(res, 200, {
         adapters,
         selected: selectedAdapter || (selectedPath ? { path: selectedPath, name: settings.adapterName || "Configured adapter", connected: false } : null),
@@ -3132,6 +3132,9 @@ function nativeDeviceView(principal, device) {
       const selected = adapters.find((adapter) => adapter.path === String(body.path || ""));
       if (!selected) return json(res, 400, { error: "Choose a connected adapter from the detected list" });
       if (!selected.supported) return json(res, 400, { error: selected.reason || "This adapter is not supported" });
+      const threadSettings = hubStore.getThread ? hubStore.getThread() : {};
+      const threadPath = threadSettings.rcpDevice || runtimeConfig.threadRcpDevice || "";
+      if (serialAdapterMatchesPath(selected, threadPath)) return json(res, 409, { error: "This physical dongle is assigned to the Thread RCP and cannot also be the Zigbee coordinator" });
       const settings = await hubStore.saveZigbee({ adapterPath: selected.path, adapterName: selected.name, adapterType: selected.adapterType, recommended: selected.recommended, discoveryPrefix: runtimeConfig.zigbeeDiscoveryPrefix });
       await hubStore.saveConfigEntry({ entry_id: "ce_zigbee", domain: "zha", title: "Zigbee" });
       const activeSerial = readConfiguredZigbeeSerial(previousConfiguration);
@@ -3193,11 +3196,11 @@ function nativeDeviceView(principal, device) {
       const zigbeeSettings = hubStore.getZigbee();
       const threadSettings = hubStore.getThread ? hubStore.getThread() : {};
       const zigbeePath = zigbeeSettings.adapterPath || runtimeConfig.zigbeeAdapterPath || "";
-      const adapters = detectedAdapters.filter((adapter) => String(adapter.path || "") !== zigbeePath);
+      const adapters = detectedAdapters.filter((adapter) => !serialAdapterMatchesPath(adapter, zigbeePath));
       const selectedPath = threadSettings.rcpDevice || runtimeConfig.threadRcpDevice || "";
       return json(res, 200, {
         adapters,
-        selected: adapters.find((adapter) => adapter.path === selectedPath) || (selectedPath ? { path: selectedPath, name: threadSettings.rcpName || "Configured Thread RCP", connected: false, supported: true } : null),
+        selected: adapters.find((adapter) => serialAdapterMatchesPath(adapter, selectedPath)) || (selectedPath ? { path: selectedPath, name: threadSettings.rcpName || "Configured Thread RCP", connected: false, supported: true } : null),
         baudRate: threadSettings.baudRate || runtimeConfig.threadRcpBaudRate,
         infraIf: threadSettings.infraIf || runtimeConfig.otInfraIf,
         threadIf: threadSettings.threadIf || runtimeConfig.otThreadIf,
@@ -3212,7 +3215,8 @@ function nativeDeviceView(principal, device) {
       if (!selected) return json(res, 400, { error: "Choose a connected Thread RCP from the detected list" });
       const zigbeeSettings = hubStore.getZigbee();
       const zigbeePath = zigbeeSettings.adapterPath || runtimeConfig.zigbeeAdapterPath || "";
-      if (requestedPath === zigbeePath) return json(res, 409, { error: "The Zigbee coordinator and Thread RCP must use different dongles" });
+      const zigbeeAdapter = adapters.find((adapter) => serialAdapterMatchesPath(adapter, zigbeePath));
+      if (zigbeePath && (serialAdapterMatchesPath(selected, zigbeePath) || zigbeeAdapter && sameSerialAdapter(selected, zigbeeAdapter))) return json(res, 409, { error: "The Zigbee coordinator and Thread RCP must use different dongles" });
       const settings = await hubStore.saveThread({ configured: true, rcpDevice: requestedPath, rcpName: selected.name, baudRate: 460800, infraIf: runtimeConfig.otInfraIf, threadIf: runtimeConfig.otThreadIf });
       const service = await threadRuntime.start({ rcpDevice: settings.rcpDevice, baudRate: settings.baudRate, infraIf: settings.infraIf, threadIf: settings.threadIf });
       if (service.skipped) return json(res, 503, { error: "Docker is unavailable; the Thread RCP was saved but OTBR was not started", service });

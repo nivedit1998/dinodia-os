@@ -449,14 +449,25 @@ class NativeCommissioningService {
       fail(SAFE_ERROR.conflict, 409, "The Home or device changed. Refresh its signed policy and review the category again");
     }
     if (!this.pairing?.requestWithHubIdentity) fail(SAFE_ERROR.unavailable, 503, "The enrolled Platform connection is unavailable");
-    const result = await this.pairing.requestWithHubIdentity("/api/hub-agent/v2/permanent-device-analytics-category", {
-      accessScope: "os:admin", homeId: String(platform.homeId), hubInstallationId: String(platform.hubInstallId), identityGeneration: identity.generation,
-      employeeId: String(principal.sub), employeeSessionId: String(principal.employeeSessionId), operatorHandoffId: String(principal.handoffId),
-      operatorJti: String(principal.jti), workItemId: String(principal.workflow), workRevision: Number(principal.workRevision),
-      osDeviceId, expectedManagementRevision,
-      ...(expectedInventoryRevision === null ? {} : { expectedInventoryRevision }),
-      expectedAnalyticsCategory, analyticsCategory, operationId,
-    });
+    let result;
+    try {
+      result = await this.pairing.requestWithHubIdentity("/api/hub-agent/v2/permanent-device-analytics-category", {
+        accessScope: "os:admin", homeId: String(platform.homeId), hubInstallationId: String(platform.hubInstallId), identityGeneration: identity.generation,
+        employeeId: String(principal.sub), employeeSessionId: String(principal.employeeSessionId), operatorHandoffId: String(principal.handoffId),
+        operatorJti: String(principal.jti), workItemId: String(principal.workflow), workRevision: Number(principal.workRevision),
+        osDeviceId, expectedManagementRevision,
+        ...(expectedInventoryRevision === null ? {} : { expectedInventoryRevision }),
+        expectedAnalyticsCategory, analyticsCategory, operationId,
+      });
+    } catch (error) {
+      // A conflict means the signed Home snapshot was stale. Refresh it before
+      // the dashboard's follow-up GET, while preserving the original conflict
+      // and exact operation payload for the operator to review/retry.
+      if (error?.statusCode === 409 && error?.code === "analytics_category_revision_conflict") {
+        if (typeof this.pairing.syncNow === "function") await this.pairing.syncNow().catch(() => {});
+      }
+      throw error;
+    }
     if (!result?.ok || result.analyticsCategory !== analyticsCategory || !Number.isSafeInteger(Number(result.managementRevision))) {
       fail(SAFE_ERROR.unavailable, 503, "Platform did not confirm the requested category for this permanent property device");
     }
@@ -492,7 +503,41 @@ class NativeCommissioningService {
   }
 
   publicStatus(session, afterCandidateRef = null) {
-    return { schemaVersion: "dinodia.v1", ...fixedSession(session, afterCandidateRef) };
+    const safe = { schemaVersion: "dinodia.v1", ...fixedSession(session, afterCandidateRef) };
+    if (session.protocol === "zigbee" && session.operationKind !== "REGISTER_EXISTING") {
+      const pairing = this.mqtt?.pairingStatus?.() || {};
+      safe.joinWindowOpen = pairing.permitJoinOpen === true;
+      if (Number.isFinite(Date.parse(String(pairing.permitJoinExpiresAt || "")))) safe.permitJoinExpiresAt = String(pairing.permitJoinExpiresAt);
+    }
+    return safe;
+  }
+
+  async reconcileClosedEmptyAssignedZigbeeSessions(actor) {
+    if (actor.actorType !== "STAFF_INSTALLER") return;
+    const radio = this.mqtt?.pairingStatus?.() || {};
+    const deadlinePassed = Number.isFinite(Date.parse(String(radio.permitJoinExpiresAt || "")))
+      && Date.parse(radio.permitJoinExpiresAt) <= this.clock();
+    if (radio.permitJoinOpen !== false || !deadlinePassed) return;
+    const currentAreas = [...new Set(actor.areaIds || [])].map(String).sort();
+    for (const session of Object.values(this.sessions())) {
+      if (session.actorType !== "STAFF_INSTALLER" || session.operationKind !== "PAIR_NEW" || session.protocol !== "zigbee"
+        || !["searching", "advertising"].includes(String(session.status || ""))
+        || String(session.employeeId || "") !== String(actor.employeeId || "")
+        || String(session.workItemId || "") !== String(actor.workItemId || "")
+        || String(session.requestId || "") !== String(actor.requestId || "")
+        || Number(session.workRevision) !== Number(actor.workRevision)
+        || String(session.homeId || "") !== String(actor.homeId || "")
+        || String(session.hubInstallationId || "") !== String(actor.hubInstallationId || "")
+        || Number(session.identityGeneration) !== Number(actor.identityGeneration)
+        || JSON.stringify([...(session.allowedAreaIds || [])].map(String).sort()) !== JSON.stringify(currentAreas)
+        || session.radioOperationInFlight || session.radioOperationUncertain
+        || session.cleanup?.pendingIds?.length || ["AWAITING_RADIO_SETTLEMENT", "REQUIRES_RADIO_RECONCILIATION"].includes(String(session.cleanup?.state || ""))) continue;
+      // Pull only this work item's baseline-protected candidates into its own
+      // record before deciding whether an empty expired attempt can be closed.
+      await this.refreshCandidates(session, actor);
+      if ((session.candidates || []).length) continue;
+      await this.expire(session);
+    }
   }
 
   async start(principal, input, idempotencyKey) {
@@ -524,6 +569,7 @@ class NativeCommissioningService {
       if (operationKind === "PAIR_NEW" && this.commissioningCapabilities[capability] !== true) {
         fail(SAFE_ERROR.unavailable, 503, "This protocol is disabled for this hub by its current operational configuration");
       }
+      if (operationKind === "PAIR_NEW" && input.protocol === "zigbee") await this.reconcileClosedEmptyAssignedZigbeeSessions(actor);
       let adoption = null;
       if (operationKind === "REGISTER_EXISTING") {
         this.pruneAdoptionCandidates();
@@ -646,6 +692,18 @@ class NativeCommissioningService {
     return this.exclusive(async () => {
       const { session, actor } = await this.requireSession(sessionId, principal);
       await this.refreshCandidates(session, actor);
+      const radio = session.protocol === "zigbee" ? this.mqtt?.pairingStatus?.() || {} : {};
+      const joinDeadlinePassed = Number.isFinite(Date.parse(String(radio.permitJoinExpiresAt || "")))
+        && Date.parse(radio.permitJoinExpiresAt) <= this.clock();
+      // The radio's short join window and the tracked commissioning record
+      // have different lifetimes. Close only this exact, empty assigned
+      // operation after Zigbee2MQTT confirms joining is closed; candidates
+      // remain in their existing review session and uncertain writes block.
+      if (actor.actorType === "STAFF_INSTALLER" && session.operationKind === "PAIR_NEW" && session.protocol === "zigbee"
+        && session.status === "searching" && radio.permitJoinOpen === false && joinDeadlinePassed
+        && !(session.candidates || []).length && !session.radioOperationInFlight && !session.radioOperationUncertain) {
+        await this.expire(session);
+      }
       const safe = this.publicStatus(session, afterCandidateRef);
       safe.events = safe.events.filter((event) => Number(event.sequence) > Number(afterSequence)).slice(0, 40);
       return safe;

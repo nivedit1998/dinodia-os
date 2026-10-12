@@ -38,6 +38,23 @@ function usbDetails(value) {
   };
 }
 
+function serialAdapterIdentityValues(adapter) {
+  if (!adapter || typeof adapter !== "object") return [];
+  return [adapter.path, adapter.target, adapter.usbId]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+}
+
+function serialAdapterMatchesPath(adapter, requestedPath) {
+  const requested = String(requestedPath || "").trim();
+  return Boolean(requested && serialAdapterIdentityValues(adapter).includes(requested));
+}
+
+function sameSerialAdapter(left, right) {
+  const rightValues = new Set(serialAdapterIdentityValues(right));
+  return serialAdapterIdentityValues(left).some((value) => rightValues.has(value));
+}
+
 async function entries(directory) {
   try { return await fs.promises.readdir(directory, { withFileTypes: true }); } catch { return []; }
 }
@@ -94,4 +111,4 @@ async function probeSerialAdapter(adapter, root = "/dev") {
   };
 }
 
-module.exports = { listSerialAdapters, probeSerialAdapter, prettyName, adapterProfile, usbDetails };
+module.exports = { listSerialAdapters, probeSerialAdapter, prettyName, adapterProfile, usbDetails, serialAdapterMatchesPath, sameSerialAdapter };
