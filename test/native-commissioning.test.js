@@ -766,6 +766,7 @@ test("analytics category updates require current full-Home authority bound to th
   assert.equal(requests.length, 2, "tenant-device analytics policy is never sent to the property-device update route");
 });
 
+
 test("assigned adoption validates against the live identity broker generation, not a legacy Store generation", async (t) => {
   const f = fixture(); t.after(f.close);
   // Production keeps signing identity in dinodia-identityd. The legacy

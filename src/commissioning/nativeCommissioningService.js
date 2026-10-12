@@ -439,7 +439,15 @@ class NativeCommissioningService {
       && (expectedInventoryRevision === null || Number.isSafeInteger(signedInventoryRevision) && signedInventoryRevision === expectedInventoryRevision + 1);
     const requestStillCurrent = Number(platform.cloudRevision) === expectedManagementRevision && signedCategory === expectedAnalyticsCategory
       && (expectedInventoryRevision === null || Number.isSafeInteger(signedInventoryRevision) && signedInventoryRevision === expectedInventoryRevision);
-    if (!requestStillCurrent && !replayAfterSignedRefresh) fail(SAFE_ERROR.conflict, 409, "The Home or device changed. Refresh its signed policy and review the category again");
+    if (!requestStillCurrent && !replayAfterSignedRefresh) {
+      console.warn("[commissioning] analytics_category_revision_conflict", JSON.stringify({
+        expectedManagementRevision, currentManagementRevision: Number(platform.cloudRevision),
+        expectedAnalyticsCategory, currentAnalyticsCategory: signedCategory,
+        expectedInventoryRevision, currentInventoryRevision: Number.isSafeInteger(signedInventoryRevision) ? signedInventoryRevision : null,
+        replayAfterSignedRefresh,
+      }));
+      fail(SAFE_ERROR.conflict, 409, "The Home or device changed. Refresh its signed policy and review the category again");
+    }
     if (!this.pairing?.requestWithHubIdentity) fail(SAFE_ERROR.unavailable, 503, "The enrolled Platform connection is unavailable");
     const result = await this.pairing.requestWithHubIdentity("/api/hub-agent/v2/permanent-device-analytics-category", {
       accessScope: "os:admin", homeId: String(platform.homeId), hubInstallationId: String(platform.hubInstallId), identityGeneration: identity.generation,

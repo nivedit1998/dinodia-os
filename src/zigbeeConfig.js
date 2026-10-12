@@ -5,6 +5,40 @@ function yamlScalar(value) {
   return JSON.stringify(String(value || ""));
 }
 
+function readConfiguredSerialValue(contents, key) {
+  const lines = String(contents || "").split(/\r?\n/);
+  const sectionIndex = lines.findIndex((line) => /^serial\s*:\s*(?:#.*)?$/.test(line));
+  if (sectionIndex < 0) return "";
+  const sectionIndent = (lines[sectionIndex].match(/^\s*/) || [""])[0].length;
+  const keyPattern = new RegExp(`^\\s{${sectionIndent + 2},}${key}\\s*:\\s*(.*)$`);
+  for (let index = sectionIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/\S/.test(line) && (line.match(/^\s*/) || [""])[0].length <= sectionIndent) break;
+    const match = line.match(keyPattern);
+    if (!match) continue;
+    const inline = match[1].replace(/\s+#.*$/, "").trim();
+    if (inline === ">-" || inline === "|" || inline === ">" || inline === "|-" || inline === "|+") {
+      for (let valueIndex = index + 1; valueIndex < lines.length; valueIndex += 1) {
+        const valueLine = lines[valueIndex];
+        if (!valueLine.trim()) continue;
+        const indent = (valueLine.match(/^\s*/) || [""])[0].length;
+        if (indent <= sectionIndent + 2) break;
+        return valueLine.trim().replace(/^(["'])(.*)\1$/, "$2");
+      }
+      return "";
+    }
+    return inline.replace(/^(["'])(.*)\1$/, "$2");
+  }
+  return "";
+}
+
+function readConfiguredZigbeeSerial(contents) {
+  return {
+    adapterPath: readConfiguredSerialValue(contents, "port"),
+    adapterType: readConfiguredSerialValue(contents, "adapter"),
+  };
+}
+
 function buildZigbee2MqttConfiguration({ adapterPath, adapterType = "", mqttUrl = "mqtt://mosquitto:1883", baseTopic = "zigbee2mqtt", discoveryPrefix = "dinodia-ha" } = {}) {
   const lines = [
     `mqtt:`,
@@ -42,4 +76,4 @@ async function writeZigbee2MqttConfiguration({ dataDir, settings, mqttUrl, baseT
   return filePath;
 }
 
-module.exports = { buildZigbee2MqttConfiguration, writeZigbee2MqttConfiguration };
+module.exports = { buildZigbee2MqttConfiguration, readConfiguredZigbeeSerial, writeZigbee2MqttConfiguration };

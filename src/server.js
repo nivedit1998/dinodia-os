@@ -20,7 +20,7 @@ const { listSerialAdapters, probeSerialAdapter } = require("./serialAdapters");
 const { HomeAssistantModel, normalizeHaState } = require("./haModel");
 const { SecretVault } = require("./secretVault");
 const { PlatformPairing } = require("./platformPairing");
-const { writeZigbee2MqttConfiguration } = require("./zigbeeConfig");
+const { readConfiguredZigbeeSerial, writeZigbee2MqttConfiguration } = require("./zigbeeConfig");
 const { HeatingUsageTracker } = require("./heatingUsage");
 const { ElectricUsageTracker } = require("./electricUsage");
 const { commandForBinding: commandForZigbeeBinding } = require("./integrations/zigbee/commandAdapter");
@@ -3134,8 +3134,15 @@ function nativeDeviceView(principal, device) {
       if (!selected.supported) return json(res, 400, { error: selected.reason || "This adapter is not supported" });
       const settings = await hubStore.saveZigbee({ adapterPath: selected.path, adapterName: selected.name, adapterType: selected.adapterType, recommended: selected.recommended, discoveryPrefix: runtimeConfig.zigbeeDiscoveryPrefix });
       await hubStore.saveConfigEntry({ entry_id: "ce_zigbee", domain: "zha", title: "Zigbee" });
-      const configurationPath = await writeZigbee2MqttConfiguration({ dataDir: runtimeConfig.dataDir || path.dirname(runtimeConfig.dataFile), settings, mqttUrl: runtimeConfig.mqttUrl || "mqtt://mosquitto:1883", baseTopic: runtimeConfig.zigbeeBaseTopic, discoveryPrefix: runtimeConfig.zigbeeDiscoveryPrefix });
-      const service = runtimeConfig.zigbeeAutoRestart ? await zigbeeRuntime.applyConfiguration({ configurationPath, previousContents: previousConfiguration }) : { ok: true, skipped: true, reason: "auto_restart_disabled", restartRequired: true };
+      const activeSerial = readConfiguredZigbeeSerial(previousConfiguration);
+      const adoptingActiveConfiguration = activeSerial.adapterPath === selected.path
+        && (!activeSerial.adapterType || !selected.adapterType || activeSerial.adapterType.toLowerCase() === selected.adapterType.toLowerCase());
+      const configurationPath = adoptingActiveConfiguration
+        ? currentConfigurationPath
+        : await writeZigbee2MqttConfiguration({ dataDir: runtimeConfig.dataDir || path.dirname(runtimeConfig.dataFile), settings, mqttUrl: runtimeConfig.mqttUrl || "mqtt://mosquitto:1883", baseTopic: runtimeConfig.zigbeeBaseTopic, discoveryPrefix: runtimeConfig.zigbeeDiscoveryPrefix });
+      const service = adoptingActiveConfiguration
+        ? { ok: true, skipped: true, reason: "active_configuration_adopted", restartRequired: false }
+        : runtimeConfig.zigbeeAutoRestart ? await zigbeeRuntime.applyConfiguration({ configurationPath, previousContents: previousConfiguration }) : { ok: true, skipped: true, reason: "auto_restart_disabled", restartRequired: true };
       if (service.rolledBack) return json(res, 502, { error: "Zigbee2MQTT could not start with this coordinator; the previous configuration was restored", service });
       if (service.ok === false && !service.skipped) return json(res, 502, { error: service.error || "Zigbee2MQTT could not be restarted", service });
       await activity.record({ type: "radio_connected", detail: `${selected.name || selected.path} is assigned as the Zigbee coordinator.`, change: { radio: "zigbee", path: selected.path, model: selected.name || null } });

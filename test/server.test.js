@@ -115,6 +115,41 @@ test("local full-Home dashboard exposes the same read-only dongle inventory as t
   assert.deepEqual(localZigbee.body.adapters.map((entry) => entry.path), [adapter.path]);
 });
 
+test("selecting the already-running Zigbee2MQTT coordinator preserves its live network configuration", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-zigbee-adopt-live-config-"));
+  const adapterPath = "/dev/serial/by-id/usb-sonoff-live-coordinator";
+  const configurationPath = path.join(directory, "zigbee2mqtt", "configuration.yaml");
+  const liveConfiguration = [
+    "mqtt:", "  server: mqtt://mosquitto:1883", "  base_topic: zigbee2mqtt", "serial:",
+    "  port: >-", `    ${adapterPath}`, "  adapter: ember", "advanced:", "  network_key: [1, 2, 3, 4]", "",
+  ].join("\n");
+  await fs.mkdir(path.dirname(configurationPath), { recursive: true });
+  await fs.writeFile(configurationPath, liveConfiguration);
+  let applyCalls = 0;
+  const adapter = { path: adapterPath, target: "/dev/ttyUSB1", name: "SONOFF MG21", adapterType: "ember", supported: true, connected: true };
+  const hub = createHub({
+    config: { nodeEnv: "development", adminToken: "test-token", dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "", zigbeeAutoRestart: true },
+    mqttBridge: mockIntegration(), matterBridge: mockIntegration(), cloudflareTunnel: mockCloudflare(),
+    platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
+    serialAdapterLister: async () => [adapter],
+    zigbeeService: {
+      start() {}, close() {},
+      status() { return { configured: true, running: true, state: "running" }; },
+      async applyConfiguration() { applyCalls += 1; return { ok: true, running: true }; },
+    },
+  });
+  t.after(async () => { await hub.stop().catch(() => {}); await fs.rm(directory, { recursive: true, force: true }); });
+  await new Promise((resolve) => hub.server.listen(0, "127.0.0.1", resolve));
+  const result = await request(`http://127.0.0.1:${hub.server.address().port}`, dashboardRoute("/api/integrations/zigbee/adapter"), {
+    method: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ path: adapterPath }),
+  });
+  assert.equal(result.response.status, 200);
+  assert.equal(hub.store.getZigbee().adapterPath, adapterPath);
+  assert.equal(applyCalls, 0, "adopting the active serial port must not restart the healthy Zigbee network");
+  assert.equal(await fs.readFile(configurationPath, "utf8"), liveConfiguration, "network key and all existing Zigbee2MQTT settings remain byte-for-byte unchanged");
+  await hub.stop();
+});
+
 test("Native dashboard controls a virtual device without accepting retained legacy automation rules", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-http-"));
   const hub = createHub({

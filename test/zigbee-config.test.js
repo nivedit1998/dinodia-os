@@ -3,7 +3,13 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { buildZigbee2MqttConfiguration, writeZigbee2MqttConfiguration } = require("../src/zigbeeConfig");
+const { buildZigbee2MqttConfiguration, readConfiguredZigbeeSerial, writeZigbee2MqttConfiguration } = require("../src/zigbeeConfig");
+
+test("reads the active Zigbee2MQTT coordinator from a folded YAML serial path", () => {
+  const activePath = "/dev/serial/by-id/usb-SONOFF_SONOFF_Dongle_Lite_MG21_38fd633590a0ef1192769fa361ce3355-if00-port0";
+  const configuration = `mqtt:\n  server: mqtt://mosquitto:1883\nserial:\n  port: >-\n    ${activePath}\n  adapter: ember\n`;
+  assert.deepEqual(readConfiguredZigbeeSerial(configuration), { adapterPath: activePath, adapterType: "ember" });
+});
 
 test("Zigbee2MQTT configuration uses the selected stable coordinator path", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-z2m-"));
