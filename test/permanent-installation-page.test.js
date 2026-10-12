@@ -211,3 +211,21 @@ test("discovery candidate review stays enabled after the initial busy refresh co
   assert.equal(page.elements.get("device-result").hidden, false, "review opens the real device/Area/name form");
   assert.equal(page.elements.get("name").value, "SONOFF TRVZB");
 });
+
+test("cancelled Matter session hides the setup-code controls in the rendered production page", async () => {
+  const sessionId = "77777777-7777-4777-8777-777777777777";
+  const requestId = "22222222-2222-4222-8222-222222222222";
+  const context = validContext();
+  context.protocols.matter = { enabled: true, adapterReady: true, readinessMessage: "Matter is connected" };
+  const session = { sessionId, protocol: "matter", operationKind: "PAIR_NEW", status: "cancelled", revision: 2,
+    updatedAt: new Date().toISOString(), candidates: [] };
+  const page = harness({ context, session, seededStorage: {
+    [`dinodia-installation:${requestId}:session`]: sessionId,
+  } });
+  await page.flush();
+
+  assert.equal(page.elements.get("matter-entry").hidden, true);
+  assert.equal(page.elements.get("matter-entry-row").hidden, true);
+  assert.match(markup, /\.row\[hidden\]\s*\{\s*display:\s*none\s*;?\s*\}/,
+    "the component's flex display rule must not override the browser hidden attribute");
+});
