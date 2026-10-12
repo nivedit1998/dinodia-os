@@ -998,6 +998,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     getLanTlsIdentity: () => lanTlsIdentity?.publicReport() || null,
     acknowledgeLanTlsIdentity: (generation) => lanTlsIdentity?.acknowledge(Number(generation)) || false,
     getCloudflareStatus: () => cloudflare.status(),
+    reconcileAuthorizedPropertyInventory: () => mqtt.reconcileAuthorizedPropertyInventory?.(),
     getUpdaterStatus: async () => {
       try {
         const result = await requestUpdaterControl({ operation: "status" }, updaterSocketPath);

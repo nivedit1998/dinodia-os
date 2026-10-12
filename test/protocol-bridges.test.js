@@ -7,6 +7,16 @@ const { WebSocketServer } = require("ws");
 const { Store } = require("../src/store");
 const { MqttBridge } = require("../src/mqttBridge");
 const { MatterBridge } = require("../src/matterBridge");
+const { applyCloudConfiguration } = require("../src/sync/cloudConfiguration");
+const { buildPublicCommissioningCatalogue } = require("../src/commissioning/publicDeviceCatalogue");
+const crypto = require("node:crypto");
+
+function configChecksum(value) {
+  const canonical = (input) => Array.isArray(input) ? `[${input.map(canonical).join(",")}]`
+    : input && typeof input === "object" ? `{${Object.keys(input).sort().map((key) => `${JSON.stringify(key)}:${canonical(input[key])}`).join(",")}}`
+      : JSON.stringify(input);
+  return crypto.createHash("sha256").update(canonical(value), "utf8").digest("hex");
+}
 
 function openDisposableZigbeePairingWindow(bridge) {
   const expiresAt = new Date(Date.now() + 60_000).toISOString();
@@ -116,6 +126,69 @@ test("MQTT bridge retains a private complete Zigbee inventory snapshot without i
   assert.equal(inventory.devices[0].metadata.model, "TRVZB");
   assert.ok(inventory.devices[0].entities);
   assert.equal(store.listDevices().length, 0, "an inventory snapshot must not auto-pair any device");
+});
+
+test("MQTT inventory restores an exact live device only when the current cloud policy authorizes that permanent property device", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-mqtt-canonical-restore-"));
+  try {
+    const store = new Store(path.join(directory, "dinodia.json"));
+    await store.savePlatform({ homeId: "home-a", hubInstallId: "hub-install-a" });
+    const friendlyName = "0x00124b0000000101";
+    const canonicalAreaId = "11111111-1111-4111-8111-111111111111";
+    const hubAreaId = "22222222-2222-4222-8222-222222222222";
+    const item = {
+      friendly_name: friendlyName, ieee_address: friendlyName, type: "EndDevice", supported: true, interview_completed: true,
+      definition: { vendor: "SONOFF", model: "TRVZB", exposes: [{ type: "climate", name: "Climate", features: [
+        { type: "numeric", name: "occupied_heating_setpoint", property: "occupied_heating_setpoint", access: 7, unit: "°C", value_min: 4, value_max: 35, value_step: 0.5 },
+        { type: "numeric", name: "local_temperature", property: "local_temperature", access: 5, unit: "°C" },
+        { type: "enum", name: "system_mode", property: "system_mode", access: 7, values: ["off", "auto", "heat"] },
+      ] }] },
+    };
+    const { normalizeZigbeeDevice } = require("../src/integrations/zigbee/exposeNormalizer");
+    const discovered = normalizeZigbeeDevice(item);
+    const descriptorInput = {
+      ...discovered, protocolIdentity: { ieeeAddress: friendlyName }, originalName: discovered.name,
+      name: "Room 1 Radiator", areaId: canonicalAreaId, managementClass: "property_device",
+      metadata: { ...discovered.metadata, ...item, managementClass: "property_device" },
+      setup: { status: "ready", assignmentMode: "device_inherited_v1" },
+    };
+    const catalogue = buildPublicCommissioningCatalogue({ device: descriptorInput, homeId: "home-a", managementClass: "property_device",
+      areaId: canonicalAreaId, name: "Room 1 Radiator", customerLabel: "Radiator", now: Date.parse("2026-10-12T12:00:00.000Z") });
+    assert.ok(catalogue, "fixture must produce the same safe catalogue shape as commissioning");
+    const unsigned = {
+      revision: 1, policyRevision: 1,
+      areas: [{ id: canonicalAreaId, osAreaId: hubAreaId, originalName: "Room 1", overrideName: null, revision: 1 }],
+      memberships: [],
+      devicePolicies: [{ osDeviceId: discovered.id, managementClass: "PROPERTY_DEVICE", ownerMembershipId: null,
+        lifecycle: "INSTALLED", analyticsCategory: "NONE", customerLabel: "Radiator", overrideName: "Room 1 Radiator",
+        descriptorRevision: catalogue.descriptorRevision, descriptorDigest: catalogue.descriptorDigest, osAreaIds: [hubAreaId] }],
+      automations: [], releasePolicy: { mode: "MANUAL", automaticInstallEnabled: false, desiredRelease: null },
+    };
+    const bridge = new MqttBridge({ url: "", store });
+    bridge.connected = true;
+    bridge.connectionGeneration = 1;
+    await bridge.handleMessage("zigbee2mqtt/bridge/devices", Buffer.from(JSON.stringify([item, {
+      friendly_name: "unregistered-lamp", ieee_address: "0x999", type: "EndDevice", supported: true,
+      definition: { vendor: "Unknown", model: "Lamp", exposes: [{ type: "light", features: [{ type: "binary", name: "state", property: "state", access: 7 }] }] },
+    }])));
+    assert.equal(store.getDevice(discovered.id), null, "inventory observed before configuration must not self-authorize a device");
+    await applyCloudConfiguration(store, { ...unsigned, checksum: configChecksum(unsigned) });
+    assert.equal(await bridge.reconcileAuthorizedPropertyInventory(), true, "the current retained inventory is retried after signed policy arrives");
+
+    const restored = store.getDevice(discovered.id);
+    assert.ok(restored, "a matching online property device is restored from the authoritative radio snapshot");
+    assert.equal(restored.name, "Room 1 Radiator");
+    assert.equal(restored.areaId, hubAreaId, "local OS record uses the signed hub Area ID");
+    assert.equal(restored.setup.status, "ready");
+    assert.equal(restored.metadata.managementClass, "property_device");
+    assert.equal(restored.metadata.model, "TRVZB");
+    assert.equal(restored.presentation.descriptorRevision, catalogue.descriptorRevision);
+    assert.equal(store.listDevices().length, 1, "unregistered paired devices remain unimported");
+    assert.equal(store.getSyncOutbox().events.some((event) => event.type === "device.upsert" && event.aggregateId === discovered.id), true,
+      "canonical restoration enters the ordinary durable reconciliation stream");
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("MQTT removal can force-forget and block an offline Zigbee device", async () => {

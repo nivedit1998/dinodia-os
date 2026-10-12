@@ -33,6 +33,21 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function restoreMissingCloudAreas(localAreas, configuration, timestamp) {
+  const restored = localAreas && typeof localAreas === "object" && !Array.isArray(localAreas) ? { ...localAreas } : {};
+  const seenHubAreaIds = new Set();
+  for (const area of Array.isArray(configuration?.areas) ? configuration.areas : []) {
+    const id = String(area?.osAreaId || "");
+    if (!id || seenHubAreaIds.has(id)) continue;
+    seenHubAreaIds.add(id);
+    if (Object.hasOwn(restored, id)) continue;
+    const name = String(area.overrideName || area.originalName || "").trim();
+    if (!name) continue;
+    restored[id] = { id, name, icon: "room", updatedAt: String(timestamp || "") || new Date(0).toISOString() };
+  }
+  return restored;
+}
+
 function normalizePendingPropertyDevicePolicies(value) {
   const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   const result = {};
@@ -642,7 +657,11 @@ function normalizeState(value) {
       usedStepUpProofs: value.security?.usedStepUpProofs && typeof value.security.usedStepUpProofs === "object" ? value.security.usedStepUpProofs : {},
       revokedOperatorJtis: value.security?.revokedOperatorJtis && typeof value.security.revokedOperatorJtis === "object" ? value.security.revokedOperatorJtis : {},
     },
-    areas: value.areas && typeof value.areas === "object" ? value.areas : {},
+    // A valid, checksummed Platform snapshot is a recovery source for missing
+    // local Areas. Restore only absent IDs; never overwrite a local edit or
+    // delete local-only Areas. This also lets the LAN dashboard recover while
+    // the remote tunnel is unavailable.
+    areas: restoreMissingCloudAreas(value.areas, persistedCloudConfigurationValid ? persistedPlatform.cloudConfiguration : null, value.updatedAt),
     // Keep the four Dinodia labels available on every hub, including hubs
     // upgraded from an older data file. Any legacy/custom records are kept
     // for compatibility, but the OS UI only presents the fixed catalog.
@@ -962,9 +981,14 @@ class Store {
 
   load() {
     try {
-      return normalizeState(JSON.parse(fs.readFileSync(this.filePath, "utf8")));
-    } catch {
-      return initialState();
+      const persisted = JSON.parse(fs.readFileSync(this.filePath, "utf8"));
+      if (!persisted || typeof persisted !== "object" || Array.isArray(persisted)) {
+        throw new Error("The stored Native OS document is not an object");
+      }
+      return normalizeState(persisted);
+    } catch (error) {
+      if (error?.code === "ENOENT") return initialState();
+      throw Object.assign(new Error("Native OS store could not be read safely", { cause: error }), { code: "store_data_unavailable" });
     }
   }
 
@@ -997,6 +1021,10 @@ class Store {
 
   async applyCloudConfigurationSnapshot(platformPatch, runtimeAutomations = []) {
     return this.withAutomationPolicyLock(() => this.mutateAtomically((state) => {
+      const acceptedConfiguration = platformPatch?.cloudConfiguration
+        && validateCloudConfiguration(platformPatch.cloudConfiguration, state.platform || {})
+        ? platformPatch.cloudConfiguration : null;
+      state.areas = restoreMissingCloudAreas(state.areas, acceptedConfiguration, state.updatedAt);
       const previousPolicies = state.platform?.devicePolicies || {};
       const incomingPolicies = platformPatch.devicePolicies || {};
       const pendingRemovals = new Map((state.platform?.pendingTenantDeviceRemovals || []).map((entry) => [String(entry.osDeviceId), clone(entry)]));
@@ -1169,7 +1197,19 @@ class Store {
       updatedAt: new Date().toISOString(),
     };
     next.setup = normalizeSetup(device.setup || existing.setup, { status: "needs_setup", reason: "area_and_label_required" });
-    next.presentation = buildPresentation({ ...next, presentation: existing.presentation || null });
+    const canonicalRestoreRevision = options.canonicalPropertyRestore === true && !existing.id
+      && this.state.platform?.devicePolicies?.[id]?.managementClass === "PROPERTY_DEVICE"
+      && this.state.platform?.devicePolicies?.[id]?.ownerMembershipId == null
+      && ["INSTALLED", "VIEW_ONLY"].includes(String(this.state.platform.devicePolicies[id].lifecycle || ""))
+      && Number.isSafeInteger(Number(options.canonicalDescriptorRevision))
+      && Number(options.canonicalDescriptorRevision) === Number(this.state.platform.devicePolicies[id].descriptorRevision)
+      && /^[a-f0-9]{64}$/i.test(String(this.state.platform.devicePolicies[id].descriptorDigest || ""))
+      ? Number(options.canonicalDescriptorRevision) : null;
+    const previousPresentation = existing.presentation || (canonicalRestoreRevision ? {
+      descriptorRevision: canonicalRestoreRevision,
+      sourceFingerprint: sourceFingerprint(next),
+    } : null);
+    next.presentation = buildPresentation({ ...next, presentation: previousPresentation });
     const observationNow = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
     if (options.devicePolicy && typeof options.devicePolicy === "object" && !Array.isArray(options.devicePolicy)) {
       this.state.platform = this.state.platform || initialState().platform;

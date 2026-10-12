@@ -8,6 +8,16 @@ const { createBackup } = require("../src/backup");
 const { allProjectedSurfaces } = require("../src/capabilities/controlSurfaceProjection");
 const { serializeDevice } = require("../src/contracts/dinodiaV1");
 
+test("store refuses corrupt existing JSON instead of silently starting empty and risking overwrite", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-store-corrupt-"));
+  const file = path.join(directory, "dinodia.json");
+  const damaged = "{\"version\":10,\"areas\":";
+  await fs.writeFile(file, damaged, { mode: 0o600 });
+
+  assert.throws(() => new Store(file), (error) => error.code === "store_data_unavailable");
+  assert.equal(await fs.readFile(file, "utf8"), damaged, "failed recovery must preserve the only source file byte-for-byte");
+});
+
 test("store persists devices and automations atomically", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-store-"));
   const file = path.join(directory, "dinodia.json");

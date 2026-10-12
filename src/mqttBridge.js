@@ -6,6 +6,9 @@ const { ZigbeeEventNormalizer } = require("./integrations/zigbee/eventNormalizer
 const { ZigbeePairingSession } = require("./integrations/zigbee/pairingSession");
 const { stableDeviceId } = require("./capabilities/identity");
 const { isMachineName } = require("./deviceNaming");
+const { sourceFingerprint } = require("./capabilities/devicePresentation");
+const { buildPublicCommissioningCatalogue } = require("./commissioning/publicDeviceCatalogue");
+const { validateCloudConfiguration } = require("./sync/cloudConfiguration");
 
 function topicPart(value) {
   return String(value).replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -56,6 +59,7 @@ class MqttBridge {
     this.lastMessageAt = null;
     this.connectionGeneration = 0;
     this.deviceInventory = null;
+    this.rawDeviceInventory = null;
     this.permitJoinUntil = null;
     this.remoteEventWindow = new Map();
     this.pendingRemovals = new Map();
@@ -78,6 +82,7 @@ class MqttBridge {
       // has been observed on this MQTT connection. Never carry an old
       // inventory across a broker outage and mistake it for current state.
       this.deviceInventory = null;
+      this.rawDeviceInventory = null;
       this.lastError = null;
       this.client.subscribe(`${this.baseTopic}/#`, (error) => {
         if (error) this.setError(error);
@@ -126,6 +131,103 @@ class MqttBridge {
     };
   }
 
+  canonicalPropertyRestore(item, normalized, diagnostics = null) {
+    const skip = (reason) => {
+      if (diagnostics && typeof diagnostics === "object") diagnostics.reason = reason;
+      return null;
+    };
+    const snapshot = this.deviceInventorySnapshot();
+    if (!snapshot?.complete || snapshot.current !== true || !Array.isArray(snapshot.devices)) return skip("inventory_not_current");
+    const identity = String(item?.ieee_address || item?.ieee || normalized?.protocolIdentity?.ieeeAddress || "").trim().toLowerCase();
+    if (!identity || stableDeviceId("zigbee", { ieeeAddress: identity }) !== String(normalized?.id || "")) return skip("identity_mismatch");
+    const observed = snapshot.devices.find((device) => String(device.id || "") === String(normalized.id)
+      && String(device.protocol || "").toLowerCase() === "zigbee"
+      && String(device.protocolIdentity?.ieeeAddress || "").trim().toLowerCase() === identity
+      && device.infrastructure !== true);
+    if (!observed) return skip("identity_not_in_snapshot");
+
+    const platform = this.store.getPlatform?.() || {};
+    const configuration = platform.cloudConfiguration;
+    if (!configuration || Number(configuration.revision) !== Number(platform.cloudRevision)
+      || String(configuration.checksum || "") !== String(platform.cloudConfigurationChecksum || "")
+      || !validateCloudConfiguration(configuration, platform)) return skip("cloud_configuration_not_current");
+    const cloudPolicies = Array.isArray(configuration.devicePolicies) ? configuration.devicePolicies : [];
+    const matches = cloudPolicies.filter((policy) => String(policy.osDeviceId || "") === String(normalized.id));
+    if (matches.length !== 1) return skip("no_unique_cloud_policy");
+    const policy = matches[0];
+    if (policy.managementClass !== "PROPERTY_DEVICE" || policy.ownerMembershipId !== null
+      || !["INSTALLED", "VIEW_ONLY"].includes(String(policy.lifecycle || ""))
+      || !Number.isSafeInteger(Number(policy.descriptorRevision)) || Number(policy.descriptorRevision) < 1
+      || !/^[a-f0-9]{64}$/i.test(String(policy.descriptorDigest || ""))
+      || !Array.isArray(policy.osAreaIds) || policy.osAreaIds.length !== 1) return skip("policy_not_installable");
+    const hubAreaId = String(policy.osAreaIds[0]);
+    const canonicalAreas = configuration.areas.filter((area) => String(area.osAreaId) === hubAreaId);
+    const bindingMatches = (platform.areaBindings || []).filter((binding) => String(binding.hubAreaId) === hubAreaId
+      && canonicalAreas.some((area) => String(area.id) === String(binding.areaId)));
+    if (canonicalAreas.length !== 1 || bindingMatches.length !== 1 || !this.store.getArea?.(hubAreaId)) return skip("area_binding_unavailable");
+    const canonicalArea = canonicalAreas[0];
+    const policyForDevice = platform.devicePolicies?.[String(normalized.id)];
+    if (policyForDevice?.managementClass !== "PROPERTY_DEVICE" || policyForDevice.ownerMembershipId != null
+      || String(policyForDevice.lifecycle || "") !== String(policy.lifecycle)
+      || Number(policyForDevice.descriptorRevision) !== Number(policy.descriptorRevision)
+      || String(policyForDevice.descriptorDigest || "") !== String(policy.descriptorDigest)) return skip("policy_projection_mismatch");
+
+    const name = String(policy.overrideName || policy.customerLabel || normalized.name || "Zigbee device").slice(0, 160);
+    const metadata = { ...(normalized.metadata || {}), ...item, managementClass: "property_device" };
+    const descriptorInput = {
+      ...normalized,
+      protocolIdentity: { ieeeAddress: identity },
+      name,
+      areaId: String(canonicalArea.id),
+      managementClass: "property_device",
+      metadata,
+      setup: { ...(normalized.setup || {}), status: "ready", viewOnly: policy.lifecycle === "VIEW_ONLY" },
+    };
+    descriptorInput.presentation = {
+      descriptorRevision: Number(policy.descriptorRevision),
+      sourceFingerprint: sourceFingerprint(descriptorInput),
+    };
+    const descriptor = buildPublicCommissioningCatalogue({
+      device: descriptorInput,
+      homeId: String(platform.homeId || ""),
+      managementClass: "property_device",
+      areaId: String(canonicalArea.id),
+      name,
+      customerLabel: policy.customerLabel || "",
+    });
+    if (!descriptor || Number(descriptor.descriptorRevision) !== Number(policy.descriptorRevision)
+      || String(descriptor.descriptorDigest) !== String(policy.descriptorDigest)) {
+      return skip("descriptor_mismatch");
+    }
+
+    const normalizedLabel = String(policy.customerLabel || "").normalize("NFC").trim().replace(/\s+/g, " ").toLocaleLowerCase("en-GB");
+    const label = normalizedLabel && typeof this.store.listLabels === "function"
+      ? this.store.listLabels().find((row) => String(row.name || "").normalize("NFC").trim().replace(/\s+/g, " ").toLocaleLowerCase("en-GB") === normalizedLabel)
+      : null;
+    return {
+      policy,
+      hubAreaId,
+      name,
+      originalName: String(normalized.name || "Zigbee device").slice(0, 160),
+      labelIds: label?.id ? [String(label.id)] : [],
+      metadata,
+      viewOnly: policy.lifecycle === "VIEW_ONLY",
+    };
+  }
+
+  async reconcileAuthorizedPropertyInventory() {
+    const snapshot = this.deviceInventorySnapshot();
+    if (!snapshot?.complete || snapshot.current !== true || !Array.isArray(this.rawDeviceInventory)) return false;
+    const missingAuthorizedDevice = this.rawDeviceInventory.some((item) => {
+      const normalized = normalizeZigbeeDevice(item);
+      return !normalized.infrastructure && normalized.id && !this.store.getDevice(String(normalized.id))
+        && Boolean(this.canonicalPropertyRestore(item, normalized));
+    });
+    if (!missingAuthorizedDevice) return false;
+    await this.handleMessage(`${this.baseTopic}/bridge/devices`, Buffer.from(JSON.stringify(this.rawDeviceInventory)));
+    return true;
+  }
+
   async handleMessage(topic, payload) {
     this.lastMessageAt = new Date().toISOString();
     const text = payload.toString("utf8");
@@ -159,6 +261,7 @@ class MqttBridge {
         connectionGeneration: this.connectionGeneration,
         devices: normalizedInventory,
       };
+      this.rawDeviceInventory = value.map((item) => JSON.parse(JSON.stringify(item)));
       let stopPairingAfterSync = false;
       for (const item of value) {
         const normalized = normalizeZigbeeDevice(item);
@@ -170,22 +273,39 @@ class MqttBridge {
         const identity = String(normalized.metadata?.ieee_address || normalized.metadata?.ieee || item.ieee_address || "").toLowerCase();
         const permitJoinOpen = Boolean(this.permitJoinUntil && Date.parse(this.permitJoinUntil) > Date.now());
         const pairingActive = pairingState.active && (permitJoinOpen || this.pairingSession.isCandidate(id));
+        const canonicalRestore = !existing ? this.canonicalPropertyRestore(item, normalized) : null;
         // Zigbee2MQTT publishes its entire inventory on startup. Inventory is
         // not permission to pair a household device; only an explicit pairing
-        // session may create a new registry record.
-        if (!existing && !pairingActive) continue;
+        // session may create a new registry record. The sole exception is an
+        // exact live identity already named by the current cloud-owned
+        // permanent-property policy and matching its reviewed descriptor.
+        if (!existing && !canonicalRestore && !pairingActive) continue;
         const incoming = {
-          ...normalized,
-          name: existing?.setup?.status === "ready" || (existing?.name && !isMachineName(existing.name)) ? existing.name : normalized.name,
+          ...(canonicalRestore ? {
+            ...normalized,
+            name: canonicalRestore.name,
+            originalName: canonicalRestore.originalName,
+            areaId: canonicalRestore.hubAreaId,
+            managementClass: "property_device",
+            labelIds: canonicalRestore.labelIds,
+            labels: canonicalRestore.labelIds,
+            setup: { status: "ready", assignmentMode: "device_inherited_v1", completedAt: null, viewOnly: canonicalRestore.viewOnly },
+            metadata: canonicalRestore.metadata,
+          } : normalized),
+          name: canonicalRestore ? canonicalRestore.name
+            : existing?.setup?.status === "ready" || (existing?.name && !isMachineName(existing.name)) ? existing.name : normalized.name,
           available: item.disabled_by !== "config" && item.supported !== false,
-          metadata: { ...normalized.metadata, ...item },
+          metadata: canonicalRestore ? canonicalRestore.metadata : { ...normalized.metadata, ...item },
           protocolIdentity: { ieeeAddress: String(item.ieee_address || "") },
         };
         const updated = existing && existing.id !== id && typeof this.store.migrateDeviceIdentity === "function"
           ? await this.store.migrateDeviceIdentity(existing.id, id, incoming)
-          : await this.store.upsertDevice(incoming);
-        const newForPairing = pairingActive && this.pairingSession.isNew(updated.id, identity);
-        this.pairingSession.add(updated.id, {
+          : await this.store.upsertDevice(incoming, canonicalRestore ? {
+            canonicalPropertyRestore: true,
+            canonicalDescriptorRevision: Number(canonicalRestore.policy.descriptorRevision),
+          } : {});
+        const newForPairing = pairingActive && !canonicalRestore && this.pairingSession.isNew(updated.id, identity);
+        if (!canonicalRestore) this.pairingSession.add(updated.id, {
           identity,
           stage: "needs_setup",
           manufacturer: updated.metadata?.manufacturer || updated.metadata?.manufacturer_name || "",

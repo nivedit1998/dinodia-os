@@ -57,7 +57,7 @@ function validateLanEndpointObservation(value, serial, expectedPort = 80) {
 }
 
 class PlatformPairing {
-  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, nativeApiPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, runtime, getLanEndpoint = null, getLanTlsIdentity = null, acknowledgeLanTlsIdentity = null, getUpdaterStatus = null, getCloudflareStatus = null, reconcileTenantDeviceRemoval = null, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, clock = () => Date.now() } = {}) {
+  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, nativeApiPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, runtime, getLanEndpoint = null, getLanTlsIdentity = null, acknowledgeLanTlsIdentity = null, getUpdaterStatus = null, getCloudflareStatus = null, reconcileTenantDeviceRemoval = null, reconcileAuthorizedPropertyInventory = null, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, clock = () => Date.now() } = {}) {
     this.store = store;
     this.vault = vault;
     this.identityBroker = identityBroker;
@@ -86,6 +86,7 @@ class PlatformPairing {
     this.getUpdaterStatus = getUpdaterStatus || (async () => null);
     this.getCloudflareStatus = getCloudflareStatus || (() => null);
     this.reconcileTenantDeviceRemoval = reconcileTenantDeviceRemoval;
+    this.reconcileAuthorizedPropertyInventory = reconcileAuthorizedPropertyInventory;
     this.pendingEndpointHeartbeat = false;
     this.queuedImmediateSync = false;
     this.runtime = {
@@ -113,6 +114,18 @@ class PlatformPairing {
     this.nextRetryAt = 0;
     this.lastError = null;
     this.lastSuccess = null;
+  }
+
+  async applyConfiguration(value) {
+    const result = await applyCloudConfiguration(this.store, value);
+    if (typeof this.reconcileAuthorizedPropertyInventory === "function") {
+      try { await this.reconcileAuthorizedPropertyInventory(); }
+      catch (error) {
+        const reason = /^[A-Z0-9_]{1,48}$/.test(String(error?.code || "")) ? String(error.code) : "INVENTORY_RECONCILIATION_DEFERRED";
+        this.logger.warn?.(`[sync] authorized_property_inventory_reconciliation_deferred reason=${reason}`);
+      }
+    }
+    return result;
   }
 
   status() {
@@ -698,7 +711,7 @@ class PlatformPairing {
           || Object.hasOwn(refreshed, "acceptedThroughSequence")) {
           throw Object.assign(new Error("Platform returned an invalid or cursor-changing configuration-only refresh"), { code: "hub_sync_configuration_refresh_invalid" });
         }
-        await applyCloudConfiguration(this.store, refreshed.configuration);
+        await this.applyConfiguration(refreshed.configuration);
         await this.store.applySyncConfigurationSnapshot(Number(refreshed.cloudRevision));
         syncState = this.store.getSyncOutbox();
       }
@@ -791,7 +804,7 @@ class PlatformPairing {
             throw Object.assign(new Error("Platform did not return the exact durable stream-reconciliation receipt"), { code: "hub_sync_stream_reconciliation_receipt_invalid" });
           }
         }
-        await applyCloudConfiguration(this.store, syncResult.configuration);
+        await this.applyConfiguration(syncResult.configuration);
         const pendingTenantRemovals = this.store.listPendingTenantDeviceRemovals?.() || [];
         if (pendingTenantRemovals.length && typeof this.reconcileTenantDeviceRemoval !== "function") {
           throw Object.assign(new Error("The current hub cannot yet enforce a tenant-device removal policy"), { code: "tenant_device_removal_unavailable" });

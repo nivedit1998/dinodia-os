@@ -20,6 +20,43 @@ function temporaryStore() {
   return { directory, store: new Store(path.join(directory, "store.json")) };
 }
 
+test("a validated cloud snapshot restores only missing local Areas without echoing cloud-owned changes", async () => {
+  const { directory, store } = temporaryStore();
+  try {
+    await store.saveArea({ name: "Locally kept name", icon: "home" }, "os-area-existing");
+    const before = store.getSyncOutbox();
+    const unsigned = {
+      revision: 1, policyRevision: 1,
+      areas: [
+        { id: "area-public-existing", osAreaId: "os-area-existing", originalName: "Cloud name", overrideName: null, revision: 1 },
+        { id: "area-public-missing", osAreaId: "os-area-missing", originalName: "Room 1", overrideName: null, revision: 1 },
+      ],
+      memberships: [], devicePolicies: [], automations: [],
+      releasePolicy: { mode: "MANUAL", automaticInstallEnabled: false, desiredRelease: null },
+    };
+    await applyCloudConfiguration(store, { ...unsigned, checksum: configChecksum(unsigned) });
+
+    assert.deepEqual(store.listAreas().map(({ id, name }) => ({ id, name })), [
+      { id: "os-area-existing", name: "Locally kept name" },
+      { id: "os-area-missing", name: "Room 1" },
+    ]);
+    assert.equal(store.getSyncOutbox().nextSequence, before.nextSequence, "reconstructing authoritative cloud Areas must not echo area.upsert events");
+
+    // A later OS restart can load a valid signed configuration after its local
+    // Area map was lost. Startup normalization must restore the same IDs too.
+    const persisted = store.snapshot();
+    persisted.areas = {};
+    await fs.promises.writeFile(path.join(directory, "store.json"), JSON.stringify(persisted));
+    const restarted = new Store(path.join(directory, "store.json"));
+    assert.deepEqual(restarted.listAreas().map(({ id, name }) => ({ id, name })), [
+      { id: "os-area-existing", name: "Cloud name" },
+      { id: "os-area-missing", name: "Room 1" },
+    ]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("inventory mutations enqueue bounded safe events atomically and resume the identical in-flight batch after restart", async () => {
   const { directory, store } = temporaryStore();
   try {
