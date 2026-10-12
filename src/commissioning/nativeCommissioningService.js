@@ -421,8 +421,8 @@ class NativeCommissioningService {
       || !new Set(["NONE", "LIGHT", "BOILER", "RADIATOR"]).has(analyticsCategory)
       || !new Set(["NONE", "LIGHT", "BOILER", "RADIATOR"]).has(expectedAnalyticsCategory)
       || !Number.isSafeInteger(expectedManagementRevision) || expectedManagementRevision < 1
-      || !Number.isSafeInteger(Number(platform.revision))
-      || ![expectedManagementRevision, expectedManagementRevision + 1].includes(Number(platform.revision))
+      || !Number.isSafeInteger(Number(platform.cloudRevision))
+      || ![expectedManagementRevision, expectedManagementRevision + 1].includes(Number(platform.cloudRevision))
       || expectedInventoryRevision !== null && (!Number.isSafeInteger(expectedInventoryRevision) || expectedInventoryRevision < 1)
       || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(operationId)) {
       fail(SAFE_ERROR.denied, 403, "Current assigned full-Home authority and the latest signed device policy are required");
@@ -435,9 +435,9 @@ class NativeCommissioningService {
     }
     const signedCategory = String(policy.analyticsCategory || "NONE");
     const signedInventoryRevision = Number(policy.inventoryRevision);
-    const replayAfterSignedRefresh = Number(platform.revision) === expectedManagementRevision + 1 && signedCategory === analyticsCategory
+    const replayAfterSignedRefresh = Number(platform.cloudRevision) === expectedManagementRevision + 1 && signedCategory === analyticsCategory
       && (expectedInventoryRevision === null || Number.isSafeInteger(signedInventoryRevision) && signedInventoryRevision === expectedInventoryRevision + 1);
-    const requestStillCurrent = Number(platform.revision) === expectedManagementRevision && signedCategory === expectedAnalyticsCategory
+    const requestStillCurrent = Number(platform.cloudRevision) === expectedManagementRevision && signedCategory === expectedAnalyticsCategory
       && (expectedInventoryRevision === null || Number.isSafeInteger(signedInventoryRevision) && signedInventoryRevision === expectedInventoryRevision);
     if (!requestStillCurrent && !replayAfterSignedRefresh) fail(SAFE_ERROR.conflict, 409, "The Home or device changed. Refresh its signed policy and review the category again");
     if (!this.pairing?.requestWithHubIdentity) fail(SAFE_ERROR.unavailable, 503, "The enrolled Platform connection is unavailable");

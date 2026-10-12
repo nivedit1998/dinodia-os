@@ -727,7 +727,9 @@ test("assigned staff can review and register one already-paired unregistered pro
 test("analytics category updates require current full-Home authority bound to this signed hub and permanent policy", async (t) => {
   const f = fixture(); t.after(f.close);
   const platform = f.store.getPlatform();
-  platform.revision = 12;
+  // Production Store exposes the signed configuration revision as
+  // cloudRevision (not `revision`). Keep this fixture shaped like that owner.
+  platform.cloudRevision = 12;
   platform.devicePolicies = { "permanent-radiator": { managementClass: "PROPERTY_DEVICE", ownerMembershipId: null, lifecycle: "INSTALLED",
     analyticsCategory: "NONE", inventoryRevision: 3, canonicalAreaIds: [f.areaId] } };
   const requests = [];
@@ -750,7 +752,7 @@ test("analytics category updates require current full-Home authority bound to th
   assert.equal(requests[0].body.accessScope, "os:admin");
   assert.equal(requests[0].body.expectedInventoryRevision, 3);
   assert.equal(platform.devicePolicies["permanent-radiator"].analyticsCategory, "NONE", "the dashboard waits for a newly signed cloud configuration instead of locally pretending the change is synced");
-  platform.revision = 13;
+  platform.cloudRevision = 13;
   platform.devicePolicies["permanent-radiator"].analyticsCategory = "RADIATOR";
   platform.devicePolicies["permanent-radiator"].inventoryRevision = 4;
   const exactAfterConfigRefresh = await f.service.updateAnalyticsCategory(staff, input);
