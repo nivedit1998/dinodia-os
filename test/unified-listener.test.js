@@ -163,6 +163,60 @@ test("physical installer listener serves a bounded authenticated dashboard and i
   }
 });
 
+test("physical full-Home dashboard allows scoped device removal only for os:admin and prunes after adapter acknowledgement", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-installer-device-removal-"));
+  const [unifiedPort, customerPort] = await Promise.all([freePort(), freePort()]);
+  const keys = crypto.generateKeyPairSync("ed25519");
+  const hubId = "installer-device-removal-hub";
+  const adminToken = createOperatorSessionToken({ sub: "assigned-installer", hubId, scope: ["os:admin"], recentAuthAt: Date.now() }, keys.privateKey);
+  const installationToken = createOperatorSessionToken({ sub: "assigned-installer", hubId, scope: ["os:permanent-installation"], recentAuthAt: Date.now() }, keys.privateKey);
+  const adapterCalls = [];
+  const mqttBridge = {
+    ...mockIntegration(),
+    async remove(deviceId, force) { adapterCalls.push({ operation: "remove", deviceId, force }); return { status: "ok" }; },
+    forgetDevice(deviceId) { adapterCalls.push({ operation: "forget", deviceId }); },
+  };
+  const hub = createHub({
+    config: {
+      nodeEnv: "production", v2Environment: "test", loopbackLanListenerForTest: true, customerLanPortForTest: customerPort,
+      hubId, operatorPublicKey: keys.publicKey.export({ format: "pem", type: "spki" }).toString(),
+      port: 0, nativeApiPort: unifiedPort, dataDir: directory,
+      dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"),
+      staticDir: path.join(__dirname, "..", "public"), otbrUrl: "",
+    },
+    mqttBridge, matterBridge: mockIntegration(), cloudflareTunnel: mockCloudflare(),
+    platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
+  });
+  try {
+    await hub.start();
+    await hub.store.upsertDevice({ id: "zigbee:disposable-removal", name: "Disposable Zigbee device", protocol: "zigbee", metadata: { friendly_name: "disposable-removal", ieee_address: "0x1234567890abcdef" }, state: { temperature: 20 } });
+    await new Promise((resolve, reject) => { hub.setupServer.once("error", reject); hub.setupServer.listen(0, "127.0.0.1", resolve); });
+    const physical = `http://127.0.0.1:${hub.setupServer.address().port}`;
+    const route = "/_dinodia/admin/api/devices/zigbee%3Adisposable-removal";
+    const unauthenticated = await request(physical, route, { method: "DELETE", body: "{}" });
+    assert.equal(unauthenticated.response.status, 401);
+    assert.ok(hub.store.getDevice("zigbee:disposable-removal"));
+    assert.deepEqual(adapterCalls, []);
+
+    const installationOnly = await request(physical, route, { method: "DELETE", headers: { authorization: `Bearer ${installationToken}` }, body: "{}" });
+    assert.equal(installationOnly.response.status, 403);
+    assert.ok(hub.store.getDevice("zigbee:disposable-removal"));
+    assert.deepEqual(adapterCalls, []);
+
+    const removed = await request(physical, route, { method: "DELETE", headers: { authorization: `Bearer ${adminToken}` }, body: JSON.stringify({ force: false }) });
+    assert.equal(removed.response.status, 200);
+    assert.equal(removed.body.ok, true);
+    assert.equal(hub.store.getDevice("zigbee:disposable-removal"), null);
+    assert.deepEqual(adapterCalls, [
+      { operation: "remove", deviceId: "zigbee:disposable-removal", force: false },
+      { operation: "forget", deviceId: "zigbee:disposable-removal" },
+    ]);
+  } finally {
+    await hub.stop();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("restricted assigned Home dashboard can inspect and reconnect only the existing reserved tunnel", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-tunnel-recovery-listener-"));
   const [unifiedPort, customerPort] = await Promise.all([freePort(), freePort()]);

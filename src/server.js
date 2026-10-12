@@ -4370,6 +4370,11 @@ function nativeDeviceView(principal, device) {
     const adminApiPath = pathname.startsWith("/_dinodia/admin/") ? pathname.slice("/_dinodia/admin".length) : "";
     const operatorReadRoute = req.method === "GET" && (installerReadRoutes.has(adminApiPath) || adminApiPath === "/api/operator-session");
     const operatorAreaCreateRoute = req.method === "POST" && adminApiPath === "/api/areas";
+    // Device removal belongs to the full Home dashboard, not the restricted
+    // assigned-installation workspace. Let the shared dashboard handler
+    // authenticate the selected operator session and enforce os:admin; this
+    // listener allow-list must not turn the authorized DELETE into a 404.
+    const operatorDeviceDeleteRoute = req.method === "DELETE" && /^\/_dinodia\/admin\/api\/devices\/[^/]+$/.test(pathname);
     // The local assigned full-Home dashboard must be able to read the
     // existing tunnel's recovery state and invoke its already-authorized
     // recovery handler. handleDashboardRequest still requires os:admin;
@@ -4384,11 +4389,11 @@ function nativeDeviceView(principal, device) {
     const operatorWorkspaceRoute = req.method === "GET"
       && /^\/_dinodia\/operator\/[A-Za-z0-9_-]{24,64}(?:\/installation)?$/.test(pathname);
     const recognizedPath = setupRoute || staticRoute || operatorReadRoute || operatorAreaCreateRoute
-      || operatorCloudflareStatusRoute || operatorCloudflareRecoveryRoute || operatorEndRoute || permanentInstallationRoute || operatorWorkspaceRoute;
+      || operatorDeviceDeleteRoute || operatorCloudflareStatusRoute || operatorCloudflareRecoveryRoute || operatorEndRoute || permanentInstallationRoute || operatorWorkspaceRoute;
     if (!recognizedPath && ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(req.method)) return json(res, 404, { error: "Not found" });
     if (!recognizedPath) return text(res, 405, "Method not allowed");
     if (!setupRoute && !staticRoute && !operatorReadRoute && !operatorAreaCreateRoute
-      && !operatorCloudflareStatusRoute && !operatorCloudflareRecoveryRoute && !operatorEndRoute && !permanentInstallationRoute && !operatorWorkspaceRoute) return json(res, 404, { error: "Not found" });
+      && !operatorDeviceDeleteRoute && !operatorCloudflareStatusRoute && !operatorCloudflareRecoveryRoute && !operatorEndRoute && !permanentInstallationRoute && !operatorWorkspaceRoute) return json(res, 404, { error: "Not found" });
     return handleUnifiedRequest(req, res);
   });
   let httpsServer = null;
