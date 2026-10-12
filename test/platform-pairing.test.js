@@ -399,8 +399,9 @@ test("an explicit stale-descriptor rejection safely replaces only superseded dev
     const makeStale = (sequence, source) => ({ ...structuredClone(source), id: `descriptor-event-${sequence}`,
       sequence, occurredAt: new Date(1_800_000_000_000 + sequence).toISOString(),
       payload: { ...source.payload, descriptorDigest: staleDigest } });
-    const pendingEvents = [];
-    for (let sequence = 11; sequence <= 36; sequence += 1) {
+    const pendingEvents = [11, 12].map((sequence) => ({ id: `descriptor-event-${sequence}`, sequence, type: "sync.compacted",
+      aggregateId: "", occurredAt: new Date(1_800_000_000_000 + sequence).toISOString(), critical: false, payload: { supersededBy: 37 } }));
+    for (let sequence = 13; sequence <= 36; sequence += 1) {
       const source = canonicalEvents[(sequence - 11) % canonicalEvents.length];
       pendingEvents.push(makeStale(sequence, source));
     }
@@ -465,6 +466,8 @@ test("an explicit stale-descriptor rejection safely replaces only superseded dev
     pairing.stop();
     assert.ok(sentBatches.length >= 2, "the current exact range is retried, then the refreshed canonical snapshot is sent");
     assert.deepEqual(sentBatches[0].events.slice(2).map((event) => event.type), ["sync.compacted", "sync.compacted"]);
+    assert.deepEqual(sentBatches[0].events.map((event) => event.critical), [false, false, true, true],
+      "the stale critical snapshots keep their classification even when represented by no-payload markers");
     assert.equal(sentBatches[0].fromSequence, 11);
     assert.equal(sentBatches[0].toSequence, 14);
     assert.equal(sentBatches[1].fromSequence, 15);

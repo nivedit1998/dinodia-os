@@ -1854,7 +1854,10 @@ class Store {
 
       const pending = outbox.events.filter((event) => event.sequence > accepted);
       const staleDeviceIds = new Set();
-      const snapshotEventTypes = new Set(["device.upsert", "control.catalog.upsert", "control.catalog.tombstone"]);
+      // Only latest-state upserts are coalescible here. A catalogue tombstone
+      // is a distinct revocation event and must never be hidden behind a later
+      // snapshot by this recovery path.
+      const snapshotEventTypes = new Set(["device.upsert", "control.catalog.upsert"]);
       for (const event of range) {
         if (!snapshotEventTypes.has(event.type)) continue;
         const id = String(event.payload?.osDeviceId || "");
@@ -1890,6 +1893,9 @@ class Store {
           return noChange();
         }
         for (const event of pending) {
+          if (event.type === "control.catalog.tombstone" && String(event.payload?.osDeviceId || "") === id) {
+            return noChange();
+          }
           if (!snapshotEventTypes.has(event.type)
             || String(event.payload?.osDeviceId || "") !== id) continue;
           if (event.aggregateId !== id) return noChange();
@@ -1909,7 +1915,6 @@ class Store {
         event.type = "sync.compacted";
         event.aggregateId = "";
         event.payload = { supersededBy: replacementSequence };
-        event.critical = false;
       }
       for (const id of staleDeviceIds) {
         enqueueNativeDeviceSync(this.state, null, this.state.devices[id], { critical: true });

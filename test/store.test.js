@@ -71,6 +71,7 @@ test("an explicitly rejected descriptor batch is compacted without acknowledging
         controlId: "target-temperature", kind: "number", readable: true, writable: true,
         bindings: [{ serviceId: "climate.set_temperature" }],
       } } } }, { devicePolicy: policy });
+    const registeredState = structuredClone(store.state);
 
     const canonical = store.getSyncOutbox().events.filter((event) => event.aggregateId === device.id);
     const staleDigest = "b".repeat(64);
@@ -104,7 +105,11 @@ test("an explicitly rejected descriptor batch is compacted without acknowledging
     assert.deepEqual(outbox.events.map((entry) => entry.sequence), [11, 12, 13, 14, 15, 16, 17, 18]);
     assert.ok(outbox.events.slice(0, 6).every((entry) => entry.type === "sync.compacted"));
     assert.ok(outbox.events.slice(0, 6).every((entry) => entry.payload.supersededBy === 17));
+    assert.deepEqual(outbox.events.slice(0, 6).map((entry) => entry.critical), [false, false, true, true, true, true],
+      "compaction retains the critical classification of rejected snapshots while preserving earlier markers");
     assert.deepEqual(outbox.inFlight.events.map((entry) => entry.type), ["sync.compacted", "sync.compacted", "sync.compacted", "sync.compacted"]);
+    assert.deepEqual(outbox.inFlight.events.map((entry) => entry.critical), [false, false, true, true],
+      "the exact rejected in-flight snapshots remain marked critical after conversion to no-payload markers");
     assert.equal(outbox.inFlight.fromSequence, 11);
     assert.equal(outbox.inFlight.toSequence, 14);
     assert.equal(outbox.inFlight.queueDepth, 8);
@@ -113,6 +118,29 @@ test("an explicitly rejected descriptor batch is compacted without acknowledging
     assert.equal(outbox.events.at(-1).payload.catalogRevision, policy.descriptorRevision);
     assert.equal(outbox.nextSequence, 19);
     assert.equal(store.getPlatform().devicePolicies[device.id].managementClass, "PROPERTY_DEVICE");
+
+    const tombstoneState = structuredClone(registeredState);
+    const tombstoneOutbox = tombstoneState.syncOutbox;
+    const currentEvents = tombstoneOutbox.events.filter((event) => event.aggregateId === device.id);
+    const staleUpserts = currentEvents.map((event, index) => ({ ...event, id: `tombstone-guard-${index + 11}`,
+      sequence: index + 11, payload: { ...event.payload, descriptorDigest: staleDigest } }));
+    const pendingTombstone = { id: "tombstone-guard-13", sequence: 13, type: "control.catalog.tombstone", aggregateId: device.id,
+      occurredAt: new Date(1_800_000_000_013).toISOString(), critical: true,
+      payload: { osDeviceId: device.id, catalogRevision: policy.descriptorRevision, descriptorDigest: staleDigest, controlIds: ["target-temperature"] } };
+    tombstoneOutbox.acknowledgedSequence = 10;
+    tombstoneOutbox.nextSequence = 14;
+    tombstoneOutbox.events = [...staleUpserts, pendingTombstone];
+    tombstoneOutbox.lastErrorCode = "hub_sync_descriptor_stale";
+    tombstoneOutbox.inFlight = { schemaVersion: 1, hubInstallationId: "22222222-2222-4222-8222-222222222222",
+      streamId: tombstoneOutbox.streamId, fromSequence: 11, toSequence: 12, events: staleUpserts,
+      queueDepth: 3, acknowledgedCloudRevision: 1, runtime: {}, sentAt: new Date(1_800_000_000_014).toISOString() };
+    store.state = tombstoneState;
+    const beforeTombstoneGuard = JSON.stringify(store.getSyncOutbox());
+    const tombstoneRefused = await store.reconcileRejectedDescriptorSync({ streamId: tombstoneOutbox.streamId,
+      acceptedSequence: 10, errorCode: "hub_sync_descriptor_stale" });
+    assert.deepEqual(tombstoneRefused, { reconciled: false, compactedEvents: 0, refreshedDevices: 0 },
+      "a distinct pending catalogue tombstone must keep the rejected stream unchanged");
+    assert.equal(JSON.stringify(store.getSyncOutbox()), beforeTombstoneGuard);
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }
