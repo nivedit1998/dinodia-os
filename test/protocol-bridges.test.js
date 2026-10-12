@@ -146,11 +146,21 @@ test("MQTT inventory restores an exact live device only when the current cloud p
     };
     const { normalizeZigbeeDevice } = require("../src/integrations/zigbee/exposeNormalizer");
     const discovered = normalizeZigbeeDevice(item);
+    // Registration reviews the device after the store has assigned its
+    // canonical control IDs. Recovery must reproduce that exact projection;
+    // building from raw adapter output alone yields different IDs/digests.
+    const registrationStore = new Store(path.join(directory, "registration.json"));
+    await registrationStore.upsertDevice({
+      ...discovered,
+      protocolIdentity: { ieeeAddress: friendlyName },
+      metadata: { ...discovered.metadata, ...item },
+    });
+    const registeredDevice = registrationStore.getDevice(discovered.id);
     const descriptorInput = {
-      ...discovered, protocolIdentity: { ieeeAddress: friendlyName }, originalName: discovered.name,
+      ...registeredDevice, protocolIdentity: { ieeeAddress: friendlyName }, originalName: discovered.name,
       name: "Room 1 Radiator", areaId: canonicalAreaId, managementClass: "property_device",
       metadata: { ...discovered.metadata, ...item, managementClass: "property_device" },
-      setup: { status: "ready", assignmentMode: "device_inherited_v1" },
+      setup: { ...registeredDevice.setup, status: "ready", assignmentMode: "device_inherited_v1" },
     };
     const catalogue = buildPublicCommissioningCatalogue({ device: descriptorInput, homeId: "home-a", managementClass: "property_device",
       areaId: canonicalAreaId, name: "Room 1 Radiator", customerLabel: "Radiator", now: Date.parse("2026-10-12T12:00:00.000Z") });

@@ -3007,4 +3007,4 @@ class Store {
   }
 }
 
-module.exports = { Store, initialState, initialActivityState, isInfrastructureDevice, normalizeHeatingDemandControllerState };
+module.exports = { Store, initialState, initialActivityState, isInfrastructureDevice, nativeControlId, normalizeHeatingDemandControllerState };

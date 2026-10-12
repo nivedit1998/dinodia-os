@@ -5,6 +5,7 @@ const { parseDiscovery, reconcileDiscovery } = require("./integrations/zigbee/di
 const { ZigbeeEventNormalizer } = require("./integrations/zigbee/eventNormalizer");
 const { ZigbeePairingSession } = require("./integrations/zigbee/pairingSession");
 const { stableDeviceId } = require("./capabilities/identity");
+const { nativeControlId } = require("./store");
 const { isMachineName } = require("./deviceNaming");
 const { sourceFingerprint } = require("./capabilities/devicePresentation");
 const { buildPublicCommissioningCatalogue } = require("./commissioning/publicDeviceCatalogue");
@@ -174,8 +175,23 @@ class MqttBridge {
 
     const name = String(policy.overrideName || policy.customerLabel || normalized.name || "Zigbee device").slice(0, 160);
     const metadata = { ...(normalized.metadata || {}), ...item, managementClass: "property_device" };
+    // Discovery normalization produces adapter entities before Store's usual
+    // upsert pipeline assigns their stable native control IDs. Rebuild that
+    // exact ID projection here before comparing the reviewed public digest;
+    // otherwise a valid previously commissioned device looks like a changed
+    // catalogue after restart and is incorrectly left out of the registry.
+    const entities = Object.fromEntries(Object.entries(normalized.entities || {}).map(([entityId, entity]) => {
+      const stateKey = String(entity.stateKey || entityId.split(":").pop() || entityId);
+      const endpointId = String(entity.endpointId || "0");
+      const logicalKey = String(entity.logicalKey || stateKey);
+      const capability = { ...(entity.capability || {}) };
+      capability.controlId = nativeControlId(normalized.id, endpointId, logicalKey,
+        capability.controlId || entity.controlId || "");
+      return [entityId, { ...entity, stateKey, endpointId, logicalKey, capability }];
+    }));
     const descriptorInput = {
       ...normalized,
+      entities,
       protocolIdentity: { ieeeAddress: identity },
       name,
       areaId: String(canonicalArea.id),
