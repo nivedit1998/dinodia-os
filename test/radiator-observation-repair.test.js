@@ -13,6 +13,7 @@ const { activityFor } = require("../src/sync/usageBuckets");
 const { Store } = require("../src/store");
 const { PlatformPairing } = require("../src/platformPairing");
 const { MqttBridge } = require("../src/mqttBridge");
+const { createHub } = require("../src/server");
 const { strictUtcTimestamp, validateObservationConfiguration } = require("../src/integrations/zigbee/observationContract");
 const { applyObservationConfiguration, clearStaleTrackedState, mergeObservationConfiguration } = require("../src/integrations/zigbee/observationConfigPatch");
 
@@ -59,6 +60,56 @@ function publisherConfiguration() {
     "    filtered_cache:", "      - running_state", "      - local_temperature", "",
   ].join("\n");
 }
+
+test("hub establishes verified source generation before starting the MQTT listener", async () => {
+  const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "dinodia-radiator-startup-generation-"));
+  const store = new Store(path.join(directory, "store.json"));
+  const signing = crypto.generateKeyPairSync("ed25519");
+  const encryption = crypto.generateKeyPairSync("x25519");
+  let mqttStarted = false;
+  const integration = {
+    start() {},
+    close() {},
+    status() { return { configured: false, connected: false }; },
+    async refresh() { return []; },
+    async command() {},
+  };
+  const hub = createHub({
+    config: {
+      nodeEnv: "test", v2Environment: "test", platformApiUrl: "", nativeApiPort: 0,
+      dataDir: directory, dataFile: path.join(directory, "store.json"),
+      backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "",
+    },
+    store,
+    identityBroker: {
+      async getPublicIdentity() {
+        return {
+          serial: "DINODIA-RADIATOR-STARTUP", generation: 7,
+          signingPublicKeyPem: signing.publicKey.export({ type: "spki", format: "pem" }).toString(),
+          encryptionPublicKeyPem: encryption.publicKey.export({ type: "spki", format: "pem" }).toString(),
+        };
+      },
+    },
+    mqttBridge: {
+      ...integration,
+      start() {
+        assert.equal(store.syncSourceGeneration, 7, "signed installation identity is loaded before MQTT can deliver reports");
+        mqttStarted = true;
+      },
+    },
+    matterBridge: integration,
+    cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false }; } },
+    platformSync: { start() {}, stop() {}, status() { return { configured: false }; } },
+    logger: { log() {}, warn() {}, error() {} },
+  });
+  try {
+    await hub.start();
+    assert.equal(mqttStarted, true);
+  } finally {
+    await hub.stop().catch(() => {});
+    await fs.promises.rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("only the exact current UTC/per-device Z2M report settings establish the observation contract", () => {
   const options = { friendlyName: "room-1-radiator", ieeeAddress: "0x00124b00c09b9eff" };

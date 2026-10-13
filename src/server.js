@@ -4643,6 +4643,17 @@ function nativeDeviceView(principal, device) {
   async function start() {
     if (runtimeConfig.nodeEnv === "production" && legacyCompatibilityEnabled) throw new Error("Legacy dashboard authentication cannot be enabled in production");
     await recoverInterruptedNativeCommands();
+    // Establish the verified, installation-scoped generation before MQTT can
+    // deliver a device report. Store observation collection fails closed until
+    // this value is available, so starting the listener first can discard the
+    // first genuine report after a hub restart.
+    if (typeof identityBroker?.getPublicIdentity === "function") {
+      try {
+        await pairing.getPublicIdentity();
+      } catch (error) {
+        logger.warn(`[analytics] verified identity unavailable before MQTT startup; observations remain fail-closed (${String(error?.code || "identity_unavailable").slice(0, 48)})`);
+      }
+    }
     mqtt.start();
     matter.start();
     const threadSettings = hubStore.getThread?.();
