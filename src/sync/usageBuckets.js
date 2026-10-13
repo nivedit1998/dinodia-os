@@ -124,6 +124,7 @@ function activityFor({ category, role, value, available = true }) {
   }
   const expectedRole = category === "RADIATOR" ? "active_heat_demand" : category === "BOILER" ? "active_heat_production" : "";
   if (!expectedRole || normalizedRole !== expectedRole) return "unknown";
+  if (category === "RADIATOR" && scalar === "heat") return "on";
   if (scalar === true || ["on", "active", "heating", "producing"].includes(scalar)) return "on";
   if (scalar === false || ["off", "idle", "standby", "inactive", "satisfied"].includes(scalar)) return "off";
   return "unknown";

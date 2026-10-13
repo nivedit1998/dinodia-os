@@ -1,6 +1,8 @@
 const mqtt = require("mqtt");
 const crypto = require("node:crypto");
+const path = require("node:path");
 const { normalizeZigbeeDevice } = require("./integrations/zigbee/exposeNormalizer");
+const { TRACKED_PROPERTIES, readObservationConfiguration, strictUtcTimestamp } = require("./integrations/zigbee/observationContract");
 const { parseDiscovery, reconcileDiscovery } = require("./integrations/zigbee/discoveryRegistry");
 const { ZigbeeEventNormalizer } = require("./integrations/zigbee/eventNormalizer");
 const { ZigbeePairingSession } = require("./integrations/zigbee/pairingSession");
@@ -46,11 +48,14 @@ function exposeEntities(exposes, deviceId, output = {}, parentDomain = "") {
 }
 
 class MqttBridge {
-  constructor({ url, baseTopic = "zigbee2mqtt", discoveryPrefix = "dinodia-ha", pairingSeconds = 120, eventDedupeMs = 1500, store, onDeviceChanged, onRemoteEvent, logger = console }) {
+  constructor({ url, baseTopic = "zigbee2mqtt", discoveryPrefix = "dinodia-ha", pairingSeconds = 120, eventDedupeMs = 1500, store, onDeviceChanged, onRemoteEvent, observationConfigPath, mqttConnect = mqtt.connect, clock = Date.now, logger = console }) {
     this.url = url;
     this.baseTopic = baseTopic.replace(/\/$/, "");
     this.discoveryPrefix = String(discoveryPrefix || "dinodia-ha").replace(/\/$/, "");
     this.store = store;
+    this.observationConfigPath = String(observationConfigPath || path.join(process.env.DINODIA_DATA_DIR || path.join(process.cwd(), "data"), "zigbee2mqtt", "configuration.yaml"));
+    this.mqttConnect = mqttConnect;
+    this.clock = clock;
     this.onDeviceChanged = onDeviceChanged;
     this.onRemoteEvent = onRemoteEvent;
     this.logger = logger;
@@ -71,7 +76,7 @@ class MqttBridge {
 
   start() {
     if (!this.url) return;
-    this.client = mqtt.connect(this.url, {
+    this.client = this.mqttConnect(this.url, {
       reconnectPeriod: 5000,
       connectTimeout: 10000,
       clean: true,
@@ -100,8 +105,8 @@ class MqttBridge {
       this.connected = false;
     });
     this.client.on("error", (error) => this.setError(error));
-    this.client.on("message", (topic, payload) => {
-      this.handleMessage(topic, payload).catch((error) => this.setError(error));
+    this.client.on("message", (topic, payload, packet) => {
+      this.handleMessage(topic, payload, packet).catch((error) => this.setError(error));
     });
   }
 
@@ -244,8 +249,10 @@ class MqttBridge {
     return true;
   }
 
-  async handleMessage(topic, payload) {
-    this.lastMessageAt = new Date().toISOString();
+  async handleMessage(topic, payload, packet = null) {
+    const receivedMs = Number(this.clock());
+    const receivedAt = new Date(receivedMs).toISOString();
+    this.lastMessageAt = receivedAt;
     const text = payload.toString("utf8");
     let value = text;
     try {
@@ -384,7 +391,47 @@ class MqttBridge {
       const existing = this.store.getDevice(id);
       previous = existing;
       if (!existing && !this.pairingSession.status().active) return;
-      device = await this.store.updateDeviceState(id, value, { protocol: "zigbee", available: true, name: existing?.name || id });
+      const reportedState = { ...value };
+      for (const metadataKey of ["last_seen", "elapsed", "endpoint", "endpoint_id", "action"]) delete reportedState[metadataKey];
+      const sourceObservedAtByStateKey = {};
+      const sourceReceivedAtByStateKey = {};
+      const sourceObservedAt = packet?.retain === false
+        ? strictUtcTimestamp(value.last_seen, receivedMs)
+        : null;
+      let observationContract = { ok: false, reason: "retained_or_unspecified_mqtt_packet" };
+      if (sourceObservedAt && existing) {
+        observationContract = await readObservationConfiguration(this.observationConfigPath, {
+          friendlyName: existing.metadata?.friendly_name || existing.metadata?.friendlyName || parts[0],
+          ieeeAddress: existing.metadata?.ieee_address || existing.protocolIdentity?.ieeeAddress,
+        });
+      }
+      if (sourceObservedAt && observationContract.ok && existing) {
+        for (const property of TRACKED_PROPERTIES) {
+          if (!Object.prototype.hasOwnProperty.call(reportedState, property)) continue;
+          const matchingEntities = Object.values(existing.entities || {}).filter((entity) => String(entity.stateKey || entity.binding?.property || "") === property
+            && entity.capability?.readable === true && entity.capability?.observable === true
+            && (property !== "running_state" || entity.capability?.semanticRole === "active_heat_demand")
+            && (property !== "local_temperature" || entity.capability?.semanticRole === "ambient_temperature"));
+          const endpoint = String(value.endpoint ?? value.endpoint_id ?? "").trim();
+          const matches = matchingEntities.length === 1 ? matchingEntities
+            : endpoint ? matchingEntities.filter((entity) => String(entity.endpointId || entity.binding?.endpoint || entity.expose?.endpoint || "") === endpoint) : [];
+          if (matches.length !== 1) continue;
+          sourceObservedAtByStateKey[property] = sourceObservedAt;
+          sourceReceivedAtByStateKey[property] = receivedAt;
+        }
+      }
+      const previousLastSeenAt = strictUtcTimestamp(existing?.lastSeenAt, receivedMs);
+      const lastSeenAt = sourceObservedAt && observationContract.ok
+        && (!previousLastSeenAt || Date.parse(sourceObservedAt) > Date.parse(previousLastSeenAt))
+        ? sourceObservedAt : null;
+      device = await this.store.updateDeviceState(id, reportedState, {
+        protocol: "zigbee", available: true, name: existing?.name || id,
+        reportedStateKeys: Object.keys(reportedState),
+        nowMs: receivedMs,
+        ...(lastSeenAt ? { lastSeenAt } : {}),
+        sourceObservedAtByStateKey, sourceReceivedAtByStateKey,
+        reportedEndpointId: value.endpoint ?? value.endpoint_id,
+      });
     } else {
       return;
     }

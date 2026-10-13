@@ -893,18 +893,73 @@ function containsReference(value, references) {
   return Object.values(value).some((child) => containsReference(child, references));
 }
 
-function mergeEntities(existing, incoming, deviceId, state) {
+function containsReferenceKeyOrValue(value, references) {
+  if (typeof value === "string") return references.has(value);
+  if (Array.isArray(value)) return value.some((item) => containsReferenceKeyOrValue(item, references));
+  if (!value || typeof value !== "object") return false;
+  return Object.entries(value).some(([key, child]) => references.has(key) || containsReferenceKeyOrValue(child, references));
+}
+
+function mergeEntities(existing, incoming, deviceId, state, options = {}) {
   const entities = existing && typeof existing === "object" ? clone(existing) : {};
   const definitions = incoming && typeof incoming === "object" ? incoming : {};
   const stateObject = state && typeof state === "object" ? state : {};
+  const reportedStateKeys = Array.isArray(options.reportedStateKeys) ? new Set(options.reportedStateKeys.map(String)) : null;
+  const endpointHint = String(options.reportedEndpointId || "").trim();
+  const definitionRows = Object.entries(definitions).map(([id, raw]) => [id, raw && typeof raw === "object" ? raw : { stateKey: raw }]);
+  const entityProperties = (entity) => [...new Set([
+    String(entity?.stateKey || ""), String(entity?.binding?.property || ""), String(entity?.logicalKey || ""),
+  ].filter(Boolean))];
+  const propertyRows = new Map();
+  for (const [id, entity] of definitionRows) {
+    for (const property of entityProperties(entity)) propertyRows.set(property, [...(propertyRows.get(property) || []), [id, entity]]);
+  }
+  const reportedKeys = new Set();
+  for (const [property, rows] of propertyRows) {
+    if (!Object.prototype.hasOwnProperty.call(stateObject, property) || reportedStateKeys && !reportedStateKeys.has(property)) continue;
+    const selected = rows.length === 1 ? rows : endpointHint ? rows.filter(([, entity]) => String(entity.endpointId || entity.expose?.endpoint || entity.binding?.endpoint || "") === endpointHint) : [];
+    if (selected.length === 1) reportedKeys.add(property);
+  }
+  // Old Store versions created `deviceId:property` endpoint-0 entities for
+  // MQTT state keys even when the current converter declared that property on
+  // another endpoint. Retire only that exact generated shape, and only when
+  // no durable automation/binding reference requires operator reconciliation.
+  for (const [entityId, entity] of Object.entries(entities)) {
+    const property = String(entity?.stateKey || "");
+    const declared = propertyRows.get(property) || [];
+    const declaredEndpoints = declared.map(([, row]) => String(row.endpointId || row.expose?.endpoint || row.binding?.endpoint || "0"));
+    const exactGeneratedFallback = entityId === `${deviceId}:${property}`
+      && String(entity?.sourceId || "") === entityId
+      && String(entity?.endpointId || "0") === "0"
+      && String(entity?.logicalKey || property) === property
+      && !entity?.binding && !entity?.converter && !entity?.expose
+      && entity?.capability?.writable === false
+      && entity?.capability?.controlId === nativeControlId(deviceId, "0", property);
+    if (exactGeneratedFallback && declared.length > 0 && !declaredEndpoints.includes("0")) {
+      const controlId = String(entity?.capability?.controlId || "");
+      if (options.protectedControlIds?.has(controlId)) {
+        entities[entityId] = {
+          ...entity,
+          reconciliationAttention: {
+            reason: "generated_endpoint_fallback_has_durable_reference",
+            canonicalEntityIds: declared.map(([canonicalId]) => canonicalId),
+          },
+        };
+      } else {
+        delete entities[entityId];
+      }
+    }
+  }
   for (const [entityId, input] of Object.entries(definitions)) {
     const matchingKey = Object.keys(entities).find((key) => key === entityId || entities[key]?.sourceId === entityId || entities[key]?.entityId === entityId);
     const previous = (matchingKey && entities[matchingKey]) || {};
     if (matchingKey && matchingKey !== entityId) delete entities[matchingKey];
     const entity = input && typeof input === "object" ? input : { stateKey: input };
     const stateKey = String(entity.stateKey || previous.stateKey || entityId.split(":").pop() || entityId);
-    const hasReportedState = Object.prototype.hasOwnProperty.call(stateObject, stateKey);
-    const nextState = hasReportedState ? clone(stateObject[stateKey]) : (entity.state !== undefined ? clone(entity.state) : previous.state);
+    const inputProperties = entityProperties(entity);
+    const reportedProperty = inputProperties.find((property) => reportedKeys.has(property));
+    const hasReportedState = Boolean(reportedProperty);
+    const nextState = hasReportedState ? clone(stateObject[reportedProperty]) : (entity.state !== undefined ? clone(entity.state) : previous.state);
     const stateChanged = JSON.stringify(previous.state) !== JSON.stringify(nextState);
     const endpointId = String(entity.endpointId || previous.endpointId || "0");
     const logicalKey = String(entity.logicalKey || previous.logicalKey || stateKey);
@@ -920,6 +975,23 @@ function mergeEntities(existing, incoming, deviceId, state) {
       constraints: entity.expose,
     });
     capability.controlId = nativeControlId(deviceId, endpointId, logicalKey, capability.controlId || entity.controlId || previous.controlId);
+    const previousSourceObservedAt = sourceTimestamp(previous.sourceObservedAt || "");
+    const mappedObservationKey = reportedProperty || stateKey;
+    const candidateSourceObservedAt = sourceTimestamp(options.sourceObservedAtByStateKey?.[mappedObservationKey]
+      || (!options.requireExplicitObservation ? entity.sourceObservedAt : "") || "");
+    const candidateSourceReceivedAt = sourceTimestamp(options.sourceReceivedAtByStateKey?.[mappedObservationKey]
+      || (!options.requireExplicitObservation ? entity.sourceReceivedAt : "") || "");
+    const candidateIsNewer = candidateSourceObservedAt && (!previousSourceObservedAt
+      || Date.parse(candidateSourceObservedAt) > Date.parse(previousSourceObservedAt));
+    const candidateIsSameOrOlder = candidateSourceObservedAt && previousSourceObservedAt
+      && Date.parse(candidateSourceObservedAt) <= Date.parse(previousSourceObservedAt);
+    if (candidateSourceObservedAt && previousSourceObservedAt && candidateSourceObservedAt === previousSourceObservedAt && stateChanged) {
+      throw new Error("Conflicting device state values share one source observation timestamp");
+    }
+    const sourceObservedAt = candidateIsNewer ? candidateSourceObservedAt
+      : stateChanged && (!candidateSourceObservedAt || candidateIsSameOrOlder) ? null : previousSourceObservedAt || null;
+    const sourceReceivedAt = candidateIsNewer ? candidateSourceReceivedAt || null
+      : stateChanged ? null : previous.sourceReceivedAt || null;
     entities[entityId] = {
       ...previous,
       ...clone(entity),
@@ -935,12 +1007,14 @@ function mergeEntities(existing, incoming, deviceId, state) {
       labels: normalizeIds(entity.labels || previous.labels),
       labelIds: normalizeIds(entity.labelIds || previous.labelIds || entity.labels || previous.labels),
       state: nextState,
-      sourceObservedAt: sourceTimestamp(entity.sourceObservedAt || entity.observedAt || entity.last_changed || entity.lastChanged) || previous.sourceObservedAt || null,
+      sourceObservedAt,
+      sourceReceivedAt,
       lastChanged: stateChanged ? new Date().toISOString() : (previous.lastChanged || previous.updatedAt || new Date().toISOString()),
       updatedAt: new Date().toISOString(),
     };
   }
   for (const stateKey of Object.keys(stateObject)) {
+    if (propertyRows.has(stateKey)) continue;
     const entityId = `${deviceId}:${stateKey}`;
     const matchingKey = Object.keys(entities).find((key) => key === entityId || entities[key]?.sourceId === entityId);
     const previous = (matchingKey && entities[matchingKey]) || {};
@@ -964,6 +1038,8 @@ function mergeEntities(existing, incoming, deviceId, state) {
       labelIds: normalizeIds(previous.labelIds || previous.labels),
       state: clone(stateObject[stateKey]),
       sourceObservedAt: previous.sourceObservedAt || null,
+      sourceReceivedAt: previous.sourceReceivedAt || null,
+      autoGeneratedStateEntity: true,
       lastChanged: JSON.stringify(previous.state) !== JSON.stringify(stateObject[stateKey]) ? new Date().toISOString() : (previous.lastChanged || previous.updatedAt || new Date().toISOString()),
       updatedAt: new Date().toISOString(),
     };
@@ -1175,6 +1251,36 @@ class Store {
     const id = String(device.id);
     const before = this.snapshot();
     const existing = this.state.devices[id] || {};
+    const protectedControlIds = new Set(options.protectedControlIds || []);
+    const declaredByProperty = new Map();
+    for (const [canonicalId, raw] of Object.entries(device.entities || {})) {
+      const entity = raw && typeof raw === "object" ? raw : { stateKey: raw };
+      const property = String(entity.stateKey || entity.binding?.property || entity.logicalKey || "");
+      if (property) declaredByProperty.set(property, [...(declaredByProperty.get(property) || []), [canonicalId, entity]]);
+    }
+    const durableReferenceCollections = [
+      this.state.automations, this.state.automationTriggers, this.state.automationActions,
+      this.state.automationExecutions, this.state.automationIdempotency, this.state.legacyAutomations,
+      this.state.remoteBindings,
+    ];
+    for (const [entityId, entity] of Object.entries(existing.entities || {})) {
+      const property = String(entity?.stateKey || "");
+      const declared = declaredByProperty.get(property) || [];
+      const endpoints = declared.map(([, row]) => String(row.endpointId || row.expose?.endpoint || row.binding?.endpoint || "0"));
+      const exactGeneratedFallback = entityId === `${id}:${property}`
+        && String(entity?.sourceId || "") === entityId
+        && String(entity?.endpointId || "0") === "0"
+        && String(entity?.logicalKey || property) === property
+        && !entity?.binding && !entity?.converter && !entity?.expose
+        && entity?.capability?.writable === false
+        && entity?.capability?.controlId === nativeControlId(id, "0", property);
+      if (!exactGeneratedFallback || declared.length === 0 || endpoints.includes("0")) continue;
+      const controlId = String(entity?.capability?.controlId || "");
+      const references = new Set([controlId, entityId].filter(Boolean));
+      if (durableReferenceCollections.some((collection) => containsReferenceKeyOrValue(collection, references))) {
+        protectedControlIds.add(controlId);
+      }
+    }
     const next = {
       ...existing,
       ...clone(device),
@@ -1192,7 +1298,11 @@ class Store {
       labels: normalizeIds(device.labels === undefined ? existing.labels : device.labels),
       labelIds: normalizeIds(device.labelIds === undefined ? (existing.labelIds || existing.labels) : device.labelIds),
       areaId: device.areaId === undefined ? (existing.areaId || null) : (device.areaId ? String(device.areaId) : null),
-      entities: mergeEntities(existing.entities, device.entities, id, { ...(existing.state || {}), ...(device.state || {}) }),
+      entities: mergeEntities(existing.entities, device.entities, id, { ...(existing.state || {}), ...(device.state || {}) }, {
+        ...options,
+        protectedControlIds,
+        reportedStateKeys: options.reportedStateKeys || Object.keys(device.state || {}),
+      }),
       available: device.available === undefined ? existing.available !== false : Boolean(device.available),
       updatedAt: new Date().toISOString(),
     };
@@ -1298,20 +1408,28 @@ class Store {
   }
 
   async updateDeviceState(id, state, extra = {}) {
+    const { sourceObservedAtByStateKey, sourceReceivedAtByStateKey, reportedEndpointId, reportedStateKeys, nowMs, ...deviceExtra } = extra;
     const existing = this.state.devices[id] || {
       id,
       name: id,
-      protocol: extra.protocol || "unknown",
+      protocol: deviceExtra.protocol || "unknown",
       state: {},
       metadata: {},
       available: true,
     };
     return this.upsertDevice({
       ...existing,
-      ...extra,
+      ...deviceExtra,
       id,
       state: { ...(existing.state || {}), ...(state || {}) },
       updatedAt: new Date().toISOString(),
+    }, {
+      sourceObservedAtByStateKey,
+      sourceReceivedAtByStateKey,
+      reportedEndpointId,
+      reportedStateKeys: reportedStateKeys || Object.keys(state || {}),
+      requireExplicitObservation: true,
+      ...(Number.isSafeInteger(nowMs) ? { nowMs } : {}),
     });
   }
 

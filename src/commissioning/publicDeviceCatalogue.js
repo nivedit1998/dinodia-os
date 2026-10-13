@@ -12,7 +12,9 @@ function hasFreshReadableObservation(device, control, nowMs) {
   return Object.values(device.entities || {}).some((entity) => {
     if (String(entity?.capability?.controlId || entity?.controlId || "") !== control.controlId
       || entity.state === undefined || entity.state === null) return false;
-    const raw = entity.sourceObservedAt || entity.observedAt || entity.lastChanged || entity.last_changed;
+    // Only a source-provenance timestamp can demonstrate a current reading.
+    // Store timestamps and generic observation-looking fields are not radio evidence.
+    const raw = entity.sourceObservedAt;
     const observedAt = Date.parse(String(raw || ""));
     return Number.isFinite(observedAt) && observedAt <= nowMs
       && nowMs - observedAt <= control.maxStateValiditySeconds * 1000;

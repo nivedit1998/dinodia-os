@@ -627,6 +627,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     pairingSeconds: runtimeConfig.zigbeePairingSeconds,
     eventDedupeMs: runtimeConfig.zigbeeEventDedupeMs,
     store: hubStore,
+    observationConfigPath: path.join(runtimeConfig.dataDir || path.dirname(runtimeConfig.dataFile), "zigbee2mqtt", "configuration.yaml"),
     onDeviceChanged: notifyDeviceChanged,
     logger,
   });

@@ -1,0 +1,24 @@
+{
+  "ieee_address": "0x00124b00c09b9eff",
+  "friendly_name": "room-1-radiator",
+  "model_id": "TRVZB",
+  "supported": true,
+  "interview_completed": true,
+  "definition": {
+    "vendor": "SONOFF",
+    "model": "TRVZB",
+    "exposes": [
+      {
+        "type": "climate",
+        "endpoint": 1,
+        "features": [
+          { "type": "numeric", "property": "occupied_heating_setpoint", "access": 7, "value_min": 4, "value_max": 35, "value_step": 0.5, "unit": "°C" },
+          { "type": "numeric", "property": "local_temperature", "access": 1, "unit": "°C" },
+          { "type": "enum", "property": "system_mode", "access": 7, "values": ["off", "auto", "heat"] },
+          { "type": "enum", "property": "running_state", "access": 1, "values": ["idle", "heat"] }
+        ]
+      },
+      { "type": "numeric", "property": "battery", "access": 1, "value_min": 0, "value_max": 100, "unit": "%" }
+    ]
+  }
+}

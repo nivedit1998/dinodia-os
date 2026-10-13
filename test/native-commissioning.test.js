@@ -604,7 +604,7 @@ test("fresh readable but safely nonwritable devices can be retained view-only wi
   const observedAt = new Date().toISOString();
   const device = { id: "zigbee:read-only-device", protocol: "zigbee", available: true, interviewStatus: "successful",
     originalName: "Read-only sensor", name: "Read-only sensor", protocolIdentity: { ieeeAddress: "0x00124b0000000088" },
-    setup: { status: "ready" }, entities: { sensor: { id: "sensor-main", name: "Power state", domain: "light", state: false, observedAt,
+    setup: { status: "ready" }, entities: { sensor: { id: "sensor-main", name: "Power state", domain: "light", state: false, sourceObservedAt: observedAt,
       capability: { category: "control", controlId: "power-readonly", semanticRole: "power", primary: true, readable: true, writable: false,
         kind: "binary", maxStateValiditySeconds: 420, bindings: [] } } }, metadata: { deviceType: "light", manufacturer: "Test" } };
   await f.store.upsertDevice(device);

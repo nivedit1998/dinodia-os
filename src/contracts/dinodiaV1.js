@@ -146,7 +146,11 @@ function serializeDevice({ device, homeId, homeMembershipId, role, areaIds, surf
       seenControlIds.add(controlId);
       const nativeRole = semanticRoles.has(String(capability.semanticRole)) ? String(capability.semanticRole) : 'unknown';
       const kind = String(capability.kind || (typeof source.state === 'boolean' ? 'binary' : typeof source.state === 'number' ? 'number' : 'text'));
-      const valueType = kind === 'binary' ? 'boolean' : kind === 'number' ? 'number' : kind === 'enum' ? 'option' : kind === 'button' || kind === 'event' ? 'invoke' : 'text';
+      const protocolType = String(source.expose?.type || '').toLowerCase();
+      const valueType = protocolType === 'numeric' ? 'number' : protocolType === 'binary' ? 'boolean'
+        : protocolType === 'enum' ? 'option' : protocolType === 'button' ? 'invoke'
+          : protocolType === 'text' ? 'text'
+            : kind === 'binary' ? 'boolean' : kind === 'number' ? 'number' : kind === 'enum' ? 'option' : kind === 'button' || kind === 'event' ? 'invoke' : 'text';
       const rawConstraints = isObject(capability.constraints) ? capability.constraints : {};
       const rawOptions = Array.isArray(rawConstraints.options) ? rawConstraints.options : Array.isArray(source.expose?.values) ? source.expose.values : [];
       const options = rawOptions.map((option) => isObject(option) && Object.hasOwn(option, 'value')

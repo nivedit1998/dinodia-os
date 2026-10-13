@@ -524,7 +524,7 @@ test("platform-owned activity sync preserves source time, expires to Unknown, an
       id: "os-light", name: "Kitchen Light", protocol: "zigbee", areaId: "area-a",
       setup: { status: "ready", assignmentMode: "device_inherited_v1", completedAt: "2026-10-04T10:00:00.000Z" },
       state: { power: "on" },
-      entities: { "entity-power": { id: "entity-power", name: "Power", state: "on", observedAt: "2026-10-04T11:00:00.000Z", domain: "light", capability: { controlId: "control-power", kind: "binary", readable: true, writable: true, observable: true, primary: true, semanticRole: "power", maxStateValiditySeconds: 420, bindings: [{ serviceId: "light.turn_on" }] } } },
+      entities: { "entity-power": { id: "entity-power", name: "Power", state: "on", sourceObservedAt: "2026-10-04T11:00:00.000Z", domain: "light", capability: { controlId: "control-power", kind: "binary", readable: true, writable: true, observable: true, primary: true, semanticRole: "power", maxStateValiditySeconds: 420, bindings: [{ serviceId: "light.turn_on" }] } } },
     }, { nowMs: Date.parse("2026-10-04T11:01:00.000Z") });
 
     assert.equal(device.entities["entity-power"].sourceObservedAt, "2026-10-04T11:00:00.000Z");
@@ -577,6 +577,54 @@ test("platform-owned activity sync preserves source time, expires to Unknown, an
     } }, { nowMs: Date.parse("2026-10-04T11:15:30.000Z") });
     assert.equal(store.snapshot().syncUsage.sources[sourceKey].validUntil, originalValidity,
       "a snapshot read/update timestamp alone cannot renew a Light observation");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("TRVZB golden clock reports exact 420-second prospective heat/off/unknown coverage", async () => {
+  const { directory, store } = temporaryStore();
+  try {
+    const deviceId = "os-radiator-golden-clock";
+    await store.saveIdentity({ serial: "hub-golden-clock", instanceId: "instance-golden-clock", generation: 1 });
+    await store.saveArea({ name: "Room 1" }, "area-golden-clock");
+    const initial = await store.upsertDevice({
+      id: deviceId, name: "Disposable Room 1 Radiator", protocol: "zigbee", areaId: "area-golden-clock",
+      setup: { status: "ready", assignmentMode: "device_inherited_v1", completedAt: "2026-10-04T10:00:00.000Z" },
+      state: { running_state: "idle" },
+      entities: { "device:1:running_state": { id: "device:1:running_state", stateKey: "running_state", endpointId: "1",
+        logicalKey: "running_state", name: "Running State", domain: "climate", expose: { type: "enum", values: ["idle", "heat"] },
+        capability: { controlId: "control-radiator-demand", kind: "enum", readable: true, writable: false, observable: true,
+          semanticRole: "active_heat_demand", maxStateValiditySeconds: 420, constraints: { options: ["idle", "heat"] }, bindings: [] } } },
+    });
+    await store.savePlatform({ homeId: "home-golden-clock", devicePolicies: {
+      [deviceId]: { osDeviceId: deviceId, managementClass: "PROPERTY_DEVICE", ownerMembershipId: null,
+        analyticsCategory: "RADIATOR", lifecycle: "INSTALLED", descriptorRevision: initial.presentation.descriptorRevision,
+        descriptorDigest: "f".repeat(64), osAreaIds: ["area-golden-clock"] },
+    } });
+    const observe = async (value, observedAt, nowAt) => store.updateDeviceState(deviceId, { running_state: value }, {
+      protocol: "zigbee", reportedStateKeys: ["running_state"],
+      sourceObservedAtByStateKey: { running_state: observedAt },
+      sourceReceivedAtByStateKey: { running_state: observedAt },
+      nowMs: Date.parse(nowAt),
+    });
+    const bucket = () => store.getSyncOutbox().events.filter((event) => event.type === "usage.bucket"
+      && event.payload.osDeviceId === deviceId).at(-1)?.payload;
+
+    await observe("heat", "2026-10-04T10:05:00.000Z", "2026-10-04T10:05:00.000Z");
+    await observe("idle", "2026-10-04T10:07:00.000Z", "2026-10-04T10:07:00.000Z");
+    await store.advanceSyncUsage(Date.parse("2026-10-04T10:10:00.000Z"));
+    assert.deepEqual([bucket().onSeconds, bucket().offSeconds, bucket().unknownSeconds], [120, 180, 0]);
+    assert.equal(bucket().closedAt, null);
+    await store.advanceSyncUsage(Date.parse("2026-10-04T10:16:00.000Z"));
+    assert.deepEqual([bucket().onSeconds, bucket().offSeconds, bucket().unknownSeconds], [120, 420, 120]);
+    assert.equal(bucket().coverageEndAt, "2026-10-04T10:16:00.000Z");
+    await store.advanceSyncUsage(Date.parse("2026-10-04T11:00:00.000Z"));
+    assert.deepEqual([bucket().onSeconds, bucket().offSeconds, bucket().unknownSeconds], [120, 420, 2760]);
+    assert.equal(bucket().coverageStartAt, "2026-10-04T10:05:00.000Z");
+    assert.equal(bucket().coverageEndAt, "2026-10-04T11:00:00.000Z");
+    assert.equal(bucket().onSeconds + bucket().offSeconds + bucket().unknownSeconds, 3300);
+    assert.equal(bucket().closedAt, "2026-10-04T11:00:00.000Z");
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

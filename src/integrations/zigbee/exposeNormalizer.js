@@ -3,7 +3,7 @@ const { normalizeCapability } = require("../../capabilities/schema");
 const { zigbeeName } = require("../../deviceNaming");
 
 const STANDARD_DOMAINS = new Set(["light", "switch", "cover", "climate", "fan", "lock", "vacuum", "humidifier", "button"]);
-const CONTROL_PROPERTIES = new Set(["state", "brightness", "color_temp", "color", "position", "current_position", "temperature", "target_temperature", "hvac_mode", "system_mode", "operation_mode", "fan_mode", "preset", "lock"]);
+const CONTROL_PROPERTIES = new Set(["state", "brightness", "color_temp", "color", "position", "current_position", "temperature", "target_temperature", "hvac_mode", "system_mode", "operation_mode", "running_state", "fan_mode", "preset", "lock"]);
 const DIAGNOSTIC_PROPERTIES = new Set(["battery", "voltage", "current", "power", "energy", "linkquality", "last_seen", "device_temperature", "temperature", "humidity", "pressure", "illuminance"]);
 
 function clone(value) {
@@ -99,12 +99,16 @@ function serviceBindings(expose, domain, kind, writable) {
 
 // Derive semantics only from adapter property identifiers and protocol
 // metadata, never from presentation labels or device names.
-function semanticRoleFor(property, domain) {
+function semanticRoleFor(property, domain, expose = {}, readable = true, writable = false) {
   const key = String(property || "").trim().toLowerCase();
   if ((key === "state" || key === "power" || /^state_[a-z0-9]+$/.test(key)) && ["light", "switch"].includes(domain)) return "power";
   if (/^brightness(?:_[a-z0-9]+)?$/.test(key) && ["light", "number", "switch"].includes(domain)) return "brightness";
   if (["target_temperature", "occupied_heating_setpoint"].includes(key)) return "target_temperature";
   if (["hvac_mode", "system_mode", "operation_mode"].includes(key) && domain === "climate") return "operating_mode";
+  if (key === "running_state" && domain === "climate" && String(expose.type || "").toLowerCase() === "enum"
+    && readable && !writable && Array.isArray(expose.values)
+    && expose.values.map((value) => String(value).toLowerCase()).includes("heat")
+    && expose.values.map((value) => String(value).toLowerCase()).includes("idle")) return "active_heat_demand";
   if (["current_temperature", "local_temperature", "temperature_measurement"].includes(key)) return "ambient_temperature";
   if (["position", "current_position"].includes(key)) return "opening_percentage";
   if (["color", "color_temp", "color_temperature"].includes(key)) return "color";
@@ -136,7 +140,7 @@ function normalizeExpose(expose, context, output) {
       writable: flags.writable,
       observable: flags.readable,
       primary: ["state", "power", "position", "brightness"].includes(property.toLowerCase()) || property.toLowerCase().startsWith("state_") || property.toLowerCase().startsWith("brightness_"),
-      semanticRole: semanticRoleFor(property, domain),
+      semanticRole: semanticRoleFor(property, domain, expose, flags.readable, flags.writable),
       stateKey: property,
       unit: expose.unit,
       deviceClass: expose.device_class,
