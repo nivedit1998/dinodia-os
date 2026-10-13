@@ -186,7 +186,10 @@ function queueUsageBucket(state, bucketKey, now) {
 function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
   const deviceId = String(device?.id || "");
   const policy = state.platform?.devicePolicies?.[deviceId];
-  const generation = Number(state.identity?.generation || 0);
+  // The installation generation belongs to the signed identity broker, not
+  // the Store's local serial/instance identity record. It is supplied by the
+  // runtime caller only after that broker has verified the current identity.
+  const generation = Number(options.sourceGeneration);
   if (!policy || policy.managementClass !== "PROPERTY_DEVICE" || policy.lifecycle === "RETIRED"
     || policy.lifecycle === "REMOVED" || policy.lifecycle === "REMOVAL_PENDING"
     || !["LIGHT", "BOILER", "RADIATOR"].includes(policy.analyticsCategory)
@@ -1051,8 +1054,15 @@ class Store {
   constructor(filePath) {
     this.filePath = filePath;
     this.state = this.load();
+    this.syncSourceGeneration = null;
     this.writeQueue = Promise.resolve();
     this.automationPolicyQueue = Promise.resolve();
+  }
+
+  setSyncSourceGeneration(value) {
+    const generation = Number(value);
+    this.syncSourceGeneration = Number.isSafeInteger(generation) && generation > 0 ? generation : null;
+    return this.syncSourceGeneration;
   }
 
   load() {
@@ -1347,7 +1357,10 @@ class Store {
       || JSON.stringify(nativeSyncControlCatalogProjection(this.state, existing)?.controls || []) !== JSON.stringify(nativeSyncControlCatalogProjection(this.state, next)?.controls || []))) {
       enqueueNativeDeviceSync(this.state, existing.id ? existing : null, next, { critical: !previousProjection });
     }
-    recordDeviceSyncObservations(this.state, next, observationNow, areaChanged ? { ignoreThroughMs: observationNow } : {});
+    recordDeviceSyncObservations(this.state, next, observationNow, {
+      ...(areaChanged ? { ignoreThroughMs: observationNow } : {}),
+      sourceGeneration: this.syncSourceGeneration,
+    });
     for (const legacyId of this.state.devices[id].legacyIds) this.state.aliases[String(legacyId)] = id;
     if (device.metadata?.friendly_name && String(device.metadata.friendly_name) !== id) this.state.aliases[String(device.metadata.friendly_name)] = id;
     try {

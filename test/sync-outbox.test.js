@@ -512,7 +512,9 @@ test("manual updater status is revisioned and never implies automatic installati
 test("platform-owned activity sync preserves source time, expires to Unknown, and never fabricates observation freshness", async () => {
   const { directory, store } = temporaryStore();
   try {
-    await store.saveIdentity({ serial: "hub-a", instanceId: "instance-a", generation: 2 });
+    // In production this runtime-only value is supplied by the signed identity broker.
+    store.setSyncSourceGeneration(2);
+    await store.saveIdentity({ serial: "hub-a", instanceId: "instance-a" });
     await store.saveArea({ name: "Kitchen" }, "area-a");
     await store.savePlatform({ homeId: "home-a", devicePolicies: {
       "os-light": { osDeviceId: "os-light", managementClass: "PROPERTY_DEVICE", analyticsCategory: "LIGHT", lifecycle: "INSTALLED", ownerMembershipId: null, descriptorRevision: 1, descriptorDigest: "a".repeat(64), osAreaIds: ["area-a"] },
@@ -585,8 +587,9 @@ test("platform-owned activity sync preserves source time, expires to Unknown, an
 test("TRVZB golden clock reports exact 420-second prospective heat/off/unknown coverage", async () => {
   const { directory, store } = temporaryStore();
   try {
+    store.setSyncSourceGeneration(1);
     const deviceId = "os-radiator-golden-clock";
-    await store.saveIdentity({ serial: "hub-golden-clock", instanceId: "instance-golden-clock", generation: 1 });
+    await store.saveIdentity({ serial: "hub-golden-clock", instanceId: "instance-golden-clock" });
     await store.saveArea({ name: "Room 1" }, "area-golden-clock");
     const initial = await store.upsertDevice({
       id: deviceId, name: "Disposable Room 1 Radiator", protocol: "zigbee", areaId: "area-golden-clock",
@@ -633,11 +636,12 @@ test("TRVZB golden clock reports exact 420-second prospective heat/off/unknown c
 test("partial closed-hour coverage survives Store restart and retries the identical signed envelope", async () => {
   const { directory, store } = temporaryStore();
   try {
+    store.setSyncSourceGeneration(3);
     const storePath = path.join(directory, "store.json");
     const observedAt = "2026-10-04T10:30:00.000Z";
     const validUntil = "2026-10-04T10:32:00.000Z";
     const closeAt = "2026-10-04T11:00:00.000Z";
-    await store.saveIdentity({ serial: "hub-partial", generation: 3 });
+    await store.saveIdentity({ serial: "hub-partial" });
     await store.saveArea({ name: "Kitchen" }, "area-partial");
     await store.savePlatform({ homeId: "home-partial", devicePolicies: {
       "os-radiator-partial": { osDeviceId: "os-radiator-partial", managementClass: "PROPERTY_DEVICE", analyticsCategory: "RADIATOR",
@@ -679,10 +683,11 @@ test("partial closed-hour coverage survives Store restart and retries the identi
 test("Area movement closes old analytics coverage and never reattributes stale activity or temperature to the new Area", async () => {
   const { directory, store } = temporaryStore();
   try {
+    store.setSyncSourceGeneration(1);
     const sourceAt = "2026-10-08T10:30:00.000Z";
     const moveAt = Date.parse("2026-10-08T10:45:00.000Z");
     const deviceId = "os-radiator-area-move";
-    await store.saveIdentity({ serial: "hub-area-move", generation: 1 });
+    await store.saveIdentity({ serial: "hub-area-move" });
     await store.saveArea({ name: "Old room" }, "area-old");
     await store.saveArea({ name: "New room" }, "area-new");
     const configuration = {
@@ -734,6 +739,9 @@ test("Area movement closes old analytics coverage and never reattributes stale a
       "the old sensor timestamp cannot be reattributed to the new Area");
 
     const nextSourceAt = "2026-10-08T11:05:00.000Z";
+    // The new process must re-read the current signed broker identity before
+    // it can begin a fresh generation of analytics observations.
+    restarted.setSyncSourceGeneration(1);
     const nextDevice = {
       ...device, areaId: "area-new", state: { heatDemand: "off" },
       entities: Object.fromEntries(Object.entries(device.entities).map(([key, entity]) => [key, {
@@ -759,9 +767,10 @@ test("Area movement closes old analytics coverage and never reattributes stale a
 test("delayed signed Radiator temperature keeps source time and deadline and deduplicates after expiry", async () => {
   const { directory, store } = temporaryStore();
   try {
+    store.setSyncSourceGeneration(2);
     const sourceAt = "2026-10-04T12:00:00.000Z";
     const deliveryAt = "2026-10-04T12:31:00.000Z";
-    await store.saveIdentity({ serial: "hub-delayed-temperature", generation: 2 });
+    await store.saveIdentity({ serial: "hub-delayed-temperature" });
     await store.saveArea({ name: "Study" }, "area-temperature");
     await store.savePlatform({ homeId: "home-temperature", devicePolicies: {
       "os-radiator-delayed": { osDeviceId: "os-radiator-delayed", managementClass: "PROPERTY_DEVICE", analyticsCategory: "RADIATOR",
@@ -770,7 +779,7 @@ test("delayed signed Radiator temperature keeps source time and deadline and ded
     // Model the real adapter shape: the climate surface is anchored by its
     // writable setpoint while the independently described read-only sensor
     // remains a member of that same canonical surface/catalogue.
-    const sample = { id: "ambient", name: "Ambient temperature", state: 20.5, sourceObservedAt: sourceAt,
+    const sample = { id: "ambient", name: "Ambient temperature", state: 20.5, sourceObservedAt: sourceAt, expose: { type: "numeric", unit: "°C" },
       domain: "climate", category: "diagnostic", capability: { controlId: "ambient-temperature", kind: "sensor", category: "diagnostic", readable: true, writable: false,
         observable: true, semanticRole: "ambient_temperature", expectedReportingIntervalSeconds: 120, maxStateValiditySeconds: 1800, bindings: [] } };
     const setpoint = { id: "setpoint", name: "Target temperature", state: 21, sourceObservedAt: sourceAt,

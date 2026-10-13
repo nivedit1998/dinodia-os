@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -10,6 +11,7 @@ const { buildPresentation, getSurfaces } = require("../src/capabilities/devicePr
 const { serializeDevice } = require("../src/contracts/dinodiaV1");
 const { activityFor } = require("../src/sync/usageBuckets");
 const { Store } = require("../src/store");
+const { PlatformPairing } = require("../src/platformPairing");
 const { MqttBridge } = require("../src/mqttBridge");
 const { strictUtcTimestamp, validateObservationConfiguration } = require("../src/integrations/zigbee/observationContract");
 const { applyObservationConfiguration, clearStaleTrackedState, mergeObservationConfiguration } = require("../src/integrations/zigbee/observationConfigPatch");
@@ -185,11 +187,63 @@ test("radiator activity accepts only heat/idle on an active_heat_demand signal",
   assert.equal(activityFor({ category: "RADIATOR", role: "active_heat_demand", value: "unknown" }), "unknown");
 });
 
+test("missing broker identity generation blocks telemetry; a verified generation starts it prospectively", async () => {
+  const { store } = temporaryStore();
+  try {
+    const device = readyTrv();
+    await store.saveArea({ name: "Room 1", icon: "room" }, "os-area-room-1");
+    await store.upsertDevice(device);
+    const stored = store.getDevice(device.id);
+    await store.savePlatform({
+      homeId: "home-fixture",
+      devicePolicies: { [device.id]: {
+        osDeviceId: device.id, managementClass: "PROPERTY_DEVICE", ownerMembershipId: null,
+        analyticsCategory: "RADIATOR", lifecycle: "INSTALLED", descriptorRevision: stored.presentation.descriptorRevision,
+        descriptorDigest: "b".repeat(64), osAreaIds: ["os-area-room-1"],
+      } },
+    });
+    const update = async (observedAt) => store.updateDeviceState(device.id, {
+      running_state: "heat", local_temperature: 19.5,
+    }, {
+      sourceObservedAtByStateKey: { running_state: observedAt, local_temperature: observedAt },
+      sourceReceivedAtByStateKey: { running_state: new Date().toISOString(), local_temperature: new Date().toISOString() },
+      reportedStateKeys: ["running_state", "local_temperature"],
+      requireExplicitObservation: true,
+      nowMs: Date.now(),
+    });
+
+    await update(new Date(Date.now() - 4_000).toISOString());
+    assert.equal(store.getSyncOutbox().events.some((event) => ["usage.bucket", "temperature.sample"].includes(event.type)), false,
+      "a local Store identity record cannot stand in for the signed installation generation");
+
+    store.setSyncSourceGeneration(4);
+    const currentObservation = new Date(Date.now() - 1_000).toISOString();
+    await update(currentObservation);
+    const telemetry = store.getSyncOutbox().events.filter((event) => ["usage.bucket", "temperature.sample"].includes(event.type));
+    assert.ok(telemetry.some((event) => event.type === "usage.bucket" && event.payload.sourceGeneration === 4));
+    assert.ok(telemetry.some((event) => event.type === "temperature.sample"
+      && event.payload.sourceGeneration === 4 && event.payload.sourceObservedAt === currentObservation));
+  } finally {
+    fs.rmSync(path.dirname(store.filePath), { recursive: true, force: true });
+  }
+});
+
 test("actual MQTT state handling updates declared endpoint properties without fallback duplicates or local-time freshness", async () => {
   const { directory, store } = temporaryStore();
   try {
     const initial = readyTrv();
-    await store.saveIdentity({ serial: "fixture-hub", instanceId: "fixture-instance", generation: 1 });
+    await store.saveIdentity({ serial: "fixture-hub", instanceId: "fixture-instance" });
+    const identityKeys = crypto.generateKeyPairSync("ed25519");
+    const publicKeyPem = identityKeys.publicKey.export({ type: "spki", format: "pem" }).toString();
+    const pairing = new PlatformPairing({
+      store,
+      serial: "fixture-hub",
+      runtime: { nodeEnv: "production" },
+      identityBroker: { getPublicIdentity: async () => ({
+        serial: "fixture-hub", signingPublicKeyPem: publicKeyPem, encryptionPublicKeyPem: publicKeyPem, generation: 4,
+      }) },
+    });
+    await pairing.getPublicIdentity();
     await store.saveArea({ name: "Room 1", icon: "room" }, "os-area-room-1");
     await store.upsertDevice(initial);
     const storedInitial = store.getDevice(initial.id);
@@ -245,6 +299,9 @@ test("actual MQTT state handling updates declared endpoint properties without fa
       && event.payload.osDeviceId === initial.id && event.payload.analyticsCategory === "RADIATOR"));
     assert.ok(store.getSyncOutbox().events.some((event) => event.type === "temperature.sample"
       && event.payload.osDeviceId === initial.id && event.payload.sourceObservedAt === observedAt));
+    assert.ok(store.getSyncOutbox().events.filter((event) => ["usage.bucket", "temperature.sample"].includes(event.type)
+      && event.payload.osDeviceId === initial.id).every((event) => event.payload.sourceGeneration === 4),
+    "real MQTT observations use the generation returned by the identity broker, not Store-local identity metadata");
 
     const heatSourceTime = device.entities[`${initial.id}:1:running_state`].sourceObservedAt;
     const temperatureSourceTime = device.entities[`${initial.id}:1:local_temperature`].sourceObservedAt;

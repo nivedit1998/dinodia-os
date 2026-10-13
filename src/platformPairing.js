@@ -190,7 +190,7 @@ class PlatformPairing {
   async getPublicIdentity() {
     if (this.identityBroker) {
       const identity = await this.identityBroker.getPublicIdentity();
-      return {
+      const publicIdentity = {
         serial: String(identity.serial || this.serial),
         publicKey: crypto.createPublicKey(String(identity.signingPublicKeyPem || "")),
         encryptionPublicKey: crypto.createPublicKey(String(identity.encryptionPublicKeyPem || "")),
@@ -201,9 +201,15 @@ class PlatformPairing {
         manufacturingSignature: String(identity.manufacturingSignature || ""),
         generation: Number(identity.generation || 0),
       };
+      this.store?.setSyncSourceGeneration?.(publicIdentity.generation);
+      return publicIdentity;
     }
     const identity = this.loadManufacturingIdentity();
-    if (!identity) return null;
+    if (!identity) {
+      this.store?.setSyncSourceGeneration?.(null);
+      return null;
+    }
+    this.store?.setSyncSourceGeneration?.(identity.generation);
     return { ...identity, publicKeyPem: identity.publicKey.export({ type: "spki", format: "pem" }).toString(), encryptionPublicKeyPem: identity.encryptionPublicKey.export({ type: "spki", format: "pem" }).toString() };
   }
 
