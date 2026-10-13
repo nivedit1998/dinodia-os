@@ -471,7 +471,12 @@ class NativeCommissioningService {
     if (!result?.ok || result.analyticsCategory !== analyticsCategory || !Number.isSafeInteger(Number(result.managementRevision))) {
       fail(SAFE_ERROR.unavailable, 503, "Platform did not confirm the requested category for this permanent property device");
     }
-    return { ...result, signedConfigurationPending: true };
+    // The first successful Platform response is not enough to claim that the
+    // hub has applied the new signed device policy. On an exact retry after a
+    // fresh signed snapshot, however, replayAfterSignedRefresh proves that
+    // this operation's category and inventory revision are now in the hub's
+    // current policy; do not leave the UI stuck in a permanent pending state.
+    return { ...result, signedConfigurationPending: !replayAfterSignedRefresh };
   }
 
   async platform(action, session, extra = {}) {

@@ -814,6 +814,7 @@ test("analytics category updates require current full-Home authority bound to th
   platform.devicePolicies["permanent-radiator"].inventoryRevision = 4;
   const exactAfterConfigRefresh = await f.service.updateAnalyticsCategory(staff, input);
   assert.equal(exactAfterConfigRefresh.analyticsCategory, "RADIATOR", "an uncertain response can be exactly reconciled even after the new signed configuration reaches the hub");
+  assert.equal(exactAfterConfigRefresh.signedConfigurationPending, false, "the UI clears pending only after the exact category is confirmed in the refreshed signed policy");
   assert.equal(requests.length, 2);
   assert.equal(requests[1].body.expectedAnalyticsCategory, "NONE", "retry preserves its original baseline rather than reinterpreting the operation against the refreshed configuration");
   assert.equal(requests[1].body.expectedInventoryRevision, 3);
