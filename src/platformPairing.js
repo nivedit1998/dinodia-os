@@ -759,6 +759,22 @@ class PlatformPairing {
         });
         if (reconciliation?.reconciled) syncState = this.store.getSyncOutbox();
       }
+      // A newer Platform may explicitly reject a legacy oversized in-flight
+      // range before opening a transaction. Only the authenticated unchanged
+      // server cursor above proves no event was accepted; then the Store may
+      // preserve every event/sequence while preparing a smaller envelope.
+      if (!streamMismatch && serverStreamId === String(syncState.streamId)
+        && serverAcceptedSequence === Number(syncState.acknowledgedSequence || 0)
+        && installationSyncMode === "ACTIVE"
+        && syncState.lastErrorCode === "hub_sync_batch_too_large") {
+        const resized = await this.store.reconcileRejectedSyncBatchSize?.({
+          hubInstallationId: hubInstallId,
+          streamId: serverStreamId,
+          acceptedSequence: serverAcceptedSequence,
+          errorCode: syncState.lastErrorCode,
+        });
+        if (resized?.reconciled) syncState = this.store.getSyncOutbox();
+      }
       if (serverStreamId === null && localAcknowledgedSequence > 0) {
         throw Object.assign(new Error("Platform has no stream identity for the locally acknowledged event cursor; preserving the queue for explicit reconciliation"), { code: "hub_sync_stream_reconciliation_required" });
       }

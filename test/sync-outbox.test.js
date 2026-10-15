@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { Store } = require("../src/store");
+const { SYNC_BATCH_MAX_EVENTS } = require("../src/sync/syncOutbox");
 const { applyCloudConfiguration } = require("../src/sync/cloudConfiguration");
 const { buildControlCatalog } = require("../src/automations/controlCatalog");
 const crypto = require("node:crypto");
@@ -19,6 +20,92 @@ function temporaryStore() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "dinodia-sync-outbox-"));
   return { directory, store: new Store(path.join(directory, "store.json")) };
 }
+
+test("oversized authenticated sync rejection can only split the exact unaccepted durable range", async () => {
+  const { directory, store } = temporaryStore();
+  try {
+    const hubInstallationId = "00000000-0000-4000-8000-000000000041";
+    const runtime = { kind: "dinodia_os", version: "legacy-test", capabilities: {} };
+    const total = Math.max(SYNC_BATCH_MAX_EVENTS + 1, 50);
+    for (let index = 1; index <= total; index += 1) {
+      await store.queueSyncEvent("test.event", `aggregate-${index}`, { index });
+    }
+    const outbox = store.state.syncOutbox;
+    const streamId = outbox.streamId;
+    const events = structuredClone(outbox.events);
+    outbox.inFlight = {
+      schemaVersion: 1, hubInstallationId, streamId, fromSequence: 1, toSequence: total,
+      events, queueDepth: total, acknowledgedCloudRevision: 0, runtime,
+      sentAt: "2026-10-15T12:00:00.000Z",
+    };
+    await store.persist();
+    await store.markSyncFailure("hub_sync_batch_too_large");
+
+    const wrongHub = await store.reconcileRejectedSyncBatchSize({
+      hubInstallationId: "00000000-0000-4000-8000-000000000099",
+      streamId, acceptedSequence: 0, errorCode: "hub_sync_batch_too_large",
+    });
+    assert.equal(wrongHub.reconciled, false, "the rejection cannot release a range belonging to another enrolled hub");
+    const wrongCursor = await store.reconcileRejectedSyncBatchSize({
+      hubInstallationId, streamId, acceptedSequence: 1, errorCode: "hub_sync_batch_too_large",
+    });
+    assert.equal(wrongCursor.reconciled, false, "a non-matching authoritative cursor cannot release the in-flight range");
+    assert.deepEqual(store.getSyncOutbox().inFlight.events, events);
+
+    const originalInFlight = structuredClone(store.state.syncOutbox.inFlight);
+    store.state.syncOutbox.inFlight.events[0].payload.index = -1;
+    await store.persist();
+    const changedBody = await store.reconcileRejectedSyncBatchSize({
+      hubInstallationId, streamId, acceptedSequence: 0, errorCode: "hub_sync_batch_too_large",
+    });
+    assert.equal(changedBody.reconciled, false, "the exact rejected body must still match the queued payloads");
+    store.state.syncOutbox.inFlight = originalInFlight;
+    await store.persist();
+
+    const resized = await store.reconcileRejectedSyncBatchSize({
+      hubInstallationId, streamId, acceptedSequence: 0, errorCode: "hub_sync_batch_too_large",
+    });
+    assert.equal(resized.reconciled, true);
+    assert.equal(store.getSyncOutbox().acknowledgedSequence, 0, "an explicit size rejection is not an acknowledgement");
+    assert.equal(store.getSyncOutbox().events.length, total, "all queued source events remain intact");
+    const first = await store.prepareSyncBatch(hubInstallationId, runtime, Date.parse("2026-10-15T12:01:00.000Z"));
+    assert.equal(first.events.length, SYNC_BATCH_MAX_EVENTS);
+    assert.equal(first.fromSequence, 1);
+    assert.equal(first.toSequence, SYNC_BATCH_MAX_EVENTS);
+    assert.deepEqual(first.events.map((event) => event.id), events.slice(0, SYNC_BATCH_MAX_EVENTS).map((event) => event.id));
+    await store.acknowledgeSyncBatch({
+      streamId, acceptedThroughSequence: first.toSequence, cloudRevision: 1, configurationAppliedRevision: 1,
+    });
+    const second = await store.prepareSyncBatch(hubInstallationId, runtime, Date.parse("2026-10-15T12:02:00.000Z"));
+    assert.equal(second.fromSequence, SYNC_BATCH_MAX_EVENTS + 1);
+    assert.equal(second.events[0].id, events[SYNC_BATCH_MAX_EVENTS].id);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("new durable sync batches stay within the server processing cap and keep contiguous sequence ranges", async () => {
+  const { directory, store } = temporaryStore();
+  try {
+    const hubInstallationId = "00000000-0000-4000-8000-000000000042";
+    const runtime = { kind: "dinodia_os", version: "bounded-test", capabilities: {} };
+    for (let index = 1; index <= SYNC_BATCH_MAX_EVENTS + 3; index += 1) {
+      await store.queueSyncEvent("test.event", `aggregate-${index}`, { index });
+    }
+    const first = await store.prepareSyncBatch(hubInstallationId, runtime, Date.parse("2026-10-15T12:00:00.000Z"));
+    assert.equal(first.events.length, SYNC_BATCH_MAX_EVENTS);
+    assert.equal(first.fromSequence, 1);
+    assert.equal(first.toSequence, SYNC_BATCH_MAX_EVENTS);
+    await store.acknowledgeSyncBatch({
+      streamId: first.streamId, acceptedThroughSequence: first.toSequence, cloudRevision: 1, configurationAppliedRevision: 1,
+    });
+    const second = await store.prepareSyncBatch(hubInstallationId, runtime, Date.parse("2026-10-15T12:01:00.000Z"));
+    assert.equal(second.fromSequence, SYNC_BATCH_MAX_EVENTS + 1);
+    assert.equal(second.events.length, 3);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("a validated cloud snapshot restores only missing local Areas without echoing cloud-owned changes", async () => {
   const { directory, store } = temporaryStore();

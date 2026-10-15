@@ -3,7 +3,11 @@ const crypto = require("node:crypto");
 const SYNC_OUTBOX_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const SYNC_OUTBOX_MAX_EVENTS = 100_000;
 const SYNC_OUTBOX_MAX_BYTES = 256 * 1024 * 1024;
-const SYNC_BATCH_MAX_EVENTS = 200;
+// Keep the serializable cloud ingestion transaction comfortably below its
+// bounded execution window, even when a durable queue has accumulated a lot
+// of history while offline. A server-side explicit rejection safely narrows
+// legacy in-flight batches without acknowledging or dropping any event.
+const SYNC_BATCH_MAX_EVENTS = 40;
 const SYNC_BATCH_MAX_BYTES = 512 * 1024;
 const CRITICAL_TYPES = new Set(["area.tombstone", "device.tombstone", "control.catalog.upsert", "control.catalog.tombstone", "incident.transition", "automation.outcome", "update.status"]);
 const COALESCIBLE_TYPES = new Set(["area.upsert", "device.upsert", "control.catalog.upsert", "usage.bucket", "device.state"]);

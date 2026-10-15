@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { Store } = require("../src/store");
+const { SYNC_BATCH_MAX_EVENTS } = require("../src/sync/syncOutbox");
 const { SecretVault } = require("../src/secretVault");
 const { PlatformPairing, validateLanEndpointObservation } = require("../src/platformPairing");
 const { applyCloudConfiguration } = require("../src/sync/cloudConfiguration");
@@ -317,6 +318,69 @@ function refreshConfiguration(revision) {
   return signedConfiguration({ revision, policyRevision: 1, areas: [], memberships: [], devicePolicies: [], automations: [],
     releasePolicy: { mode: "MANUAL", automaticInstallEnabled: false, desiredRelease: null } });
 }
+
+test("an explicit oversized-range rejection is retried as a smaller exact contiguous batch", async () => {
+  const serial = "DINODIA-OVERSIZED-SYNC-RECOVERY-HUB";
+  const hubInstallId = "11111111-1111-4111-8111-111111111111";
+  const fixture = await pairingFixture({ serial, hubInstallId });
+  try {
+    const { directory, store, vault } = fixture;
+    const total = SYNC_BATCH_MAX_EVENTS + 1;
+    for (let index = 1; index <= total; index += 1) {
+      await store.queueSyncEvent("update.status", "updater", { revision: index, trustState: "unprovisioned" }, { critical: true });
+    }
+    const streamId = store.getSyncOutbox().streamId;
+    const legacyRange = store.state.syncOutbox.events;
+    store.state.syncOutbox.inFlight = {
+      schemaVersion: 1, hubInstallationId: hubInstallId, streamId, fromSequence: 1, toSequence: total,
+      events: structuredClone(legacyRange), queueDepth: total, acknowledgedCloudRevision: 0,
+      runtime: { kind: "dinodia_os", version: "pre-cap", capabilities: {} }, sentAt: new Date().toISOString(),
+    };
+    await store.persist();
+    const submitted = [];
+    let rejectionSent = false;
+    const pairing = new PlatformPairing({
+      store, vault, apiUrl: "https://platform.test", serial, intervalMs: 60000,
+      logger: { error() {}, warn() {} },
+      fetchImpl: async (url, options) => {
+        const body = JSON.parse(options.body || "{}");
+        if (url.endsWith("/token-state")) return { ok: true, async json() { return {
+          hubInstallId, homeId: "home-a", latestVersion: 0, publishedVersion: 0,
+          operatorCredentialStates: [], offlineAuthorisations: [], areaBindings: [], policyRevision: 1,
+          installationSyncMode: "ACTIVE", syncStreamId: streamId, syncAcceptedSequence: 0,
+          cloudConfigurationRevision: 0, acknowledgedCloudRevision: 0,
+        }; } };
+        if (url.endsWith("/v2/sync")) {
+          submitted.push(structuredClone(body));
+          if (!rejectionSent) {
+            rejectionSent = true;
+            return { ok: false, status: 413, async json() { return { ok: false, errorCode: "hub_sync_batch_too_large", error: "Retry this range in smaller contiguous batches" }; } };
+          }
+          return { ok: true, status: 200, async json() { return nativeSyncAck(body); } };
+        }
+        if (url.endsWith("/heartbeat")) return { ok: true, async json() { return { ok: true, online: true }; } };
+        throw new Error(`Unexpected test route: ${url}`);
+      },
+    });
+
+    assert.equal(await pairing.syncNow(), null, "the first authenticated oversized request is safely rejected");
+    assert.equal(store.getSyncOutbox().lastErrorCode, "hub_sync_batch_too_large");
+    assert.equal(store.getSyncOutbox().acknowledgedSequence, 0);
+    assert.equal(store.getSyncOutbox().inFlight.events.length, total, "a rejected request remains durable until the signed cursor is reread");
+
+    pairing.nextRetryAt = 0;
+    await pairing.syncNow();
+    pairing.stop();
+    assert.equal(submitted.length, 2);
+    assert.equal(submitted[0].events.length, total);
+    assert.equal(submitted[1].events.length, SYNC_BATCH_MAX_EVENTS);
+    assert.equal(submitted[1].fromSequence, 1);
+    assert.equal(submitted[1].toSequence, SYNC_BATCH_MAX_EVENTS);
+    assert.deepEqual(submitted[1].events.map((event) => event.id), legacyRange.slice(0, SYNC_BATCH_MAX_EVENTS).map((event) => event.id));
+    assert.equal(store.getSyncOutbox().acknowledgedSequence, SYNC_BATCH_MAX_EVENTS);
+    assert.deepEqual(store.getSyncOutbox().events.map((event) => event.sequence), [total]);
+  } finally { await fs.rm(fixture.directory, { recursive: true, force: true }); }
+});
 
 test("stale configuration refresh applies policy without consuming the durable event batch", async () => {
   const serial = "DINODIA-CONFIG-REFRESH-HUB";

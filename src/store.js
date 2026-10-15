@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { isDeepStrictEqual } = require("node:util");
 const { fixedLabelState } = require("./labelCatalog");
 const { normalizeCapability, text } = require("./capabilities/schema");
 const { buildPresentation, isConfigured, labelId, sourceFingerprint } = require("./capabilities/devicePresentation");
@@ -9,7 +10,7 @@ const { NATIVE_AUTOMATION_STORE_VERSION, LIMITS } = require("./automations/const
 const { migrateLegacyAutomations } = require("./automations/legacyAdapter");
 const { getSurfaces } = require("./capabilities/devicePresentation");
 const { serializeDevice } = require("./contracts/dinodiaV1");
-const { compactUnregisteredPropertyDeviceEvents, enqueueSyncEventInState, initialSyncOutbox, nextSyncBatch, normalizeSyncOutbox } = require("./sync/syncOutbox");
+const { SYNC_BATCH_MAX_EVENTS, compactUnregisteredPropertyDeviceEvents, enqueueSyncEventInState, initialSyncOutbox, nextSyncBatch, normalizeSyncOutbox } = require("./sync/syncOutbox");
 const { validateCloudConfiguration, projectCloudDevicePolicies } = require("./sync/cloudConfiguration");
 const { activityFor, advanceUsage, endUsageAssignment, initialUsageState, observeUsage } = require("./sync/usageBuckets");
 
@@ -1992,6 +1993,51 @@ class Store {
 
   getSyncOutbox() {
     return clone(this.state.syncOutbox || initialSyncOutbox());
+  }
+
+  async reconcileRejectedSyncBatchSize({ hubInstallationId, streamId, acceptedSequence, errorCode } = {}) {
+    const before = this.snapshot();
+    const noChange = () => {
+      this.state = before;
+      return { reconciled: false, previousEventCount: 0, nextEventCount: 0 };
+    };
+    try {
+      const outbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
+      const accepted = Number(acceptedSequence);
+      const batch = outbox.inFlight;
+      if (errorCode !== "hub_sync_batch_too_large" || outbox.lastErrorCode !== errorCode
+        || String(streamId || "") !== outbox.streamId || !Number.isSafeInteger(accepted)
+        || accepted !== outbox.acknowledgedSequence || !batch
+        || String(hubInstallationId || "") !== String(batch.hubInstallationId || "")
+        || batch.streamId !== outbox.streamId
+        || Number(batch.fromSequence) !== accepted + 1 || !Number.isSafeInteger(Number(batch.toSequence))
+        || Number(batch.toSequence) < Number(batch.fromSequence) || !Array.isArray(batch.events)
+        || batch.events.length <= SYNC_BATCH_MAX_EVENTS) {
+        return noChange();
+      }
+
+      const batchFrom = Number(batch.fromSequence);
+      const batchTo = Number(batch.toSequence);
+      const range = outbox.events.filter((event) => event.sequence >= batchFrom && event.sequence <= batchTo);
+      if (range.length !== batchTo - batchFrom + 1 || batch.events.length !== range.length
+        || range.some((event, index) => event.sequence !== batchFrom + index
+          || !isDeepStrictEqual(batch.events[index], event))) {
+        return noChange();
+      }
+
+      // The authenticated token-state cursor still equals the local ACK and
+      // Platform explicitly rejected this exact request before opening a
+      // transaction. Release only the envelope boundary; the durable events,
+      // sequence numbers, payloads, gap flags and authority tombstones remain.
+      const previousEventCount = batch.events.length;
+      outbox.inFlight = null;
+      outbox.lastErrorCode = null;
+      await this.persist();
+      return { reconciled: true, previousEventCount, nextEventCount: Math.min(previousEventCount, SYNC_BATCH_MAX_EVENTS) };
+    } catch (error) {
+      this.state = before;
+      throw error;
+    }
   }
 
   async reconcileRejectedDescriptorSync({ streamId, acceptedSequence, errorCode } = {}) {
