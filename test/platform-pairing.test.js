@@ -68,6 +68,44 @@ function nativeSyncAck(request) {
   };
 }
 
+test("signed sync uses its longer deadline through response-body parsing while other hub requests stay short", async () => {
+  let responseDelayMs = 25;
+  let bodyDelayMs = 25;
+  const waitForRequest = (ms, signal) => new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason || new DOMException("Aborted", "AbortError"));
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
+  const pairing = new PlatformPairing({
+    store: { getPlatform: () => ({}) }, vault: null, apiUrl: "https://platform.test", serial: "deadline-test",
+    requestTimeoutMs: 15, syncRequestTimeoutMs: 80,
+    fetchImpl: async (_url, { signal }) => {
+      await waitForRequest(responseDelayMs, signal);
+      return { ok: true, status: 200, async json() { await waitForRequest(bodyDelayMs, signal); return { ok: true }; } };
+    },
+  });
+  assert.equal(pairing.syncRequestTimeoutMs, 80, "sync owns a distinct bounded deadline");
+  pairing.getPublicIdentity = async () => ({ generation: 1 });
+  pairing.signPlatformRequest = async () => "test-signature";
+
+  assert.deepEqual(await pairing.requestWithHubIdentity("/api/hub-agent/v2/sync", { events: [] }), { ok: true });
+  responseDelayMs = 1;
+  bodyDelayMs = 30;
+  pairing.syncRequestTimeoutMs = 15;
+  await assert.rejects(
+    () => pairing.requestWithHubIdentity("/api/hub-agent/v2/sync", { events: [] }),
+    (error) => error.code === "hub_sync_request_timeout",
+  );
+  responseDelayMs = 25;
+  bodyDelayMs = 1;
+  await assert.rejects(() => pairing.requestWithHubIdentity("/api/hub-agent/v2/heartbeat", {}),
+    (error) => error.code === "hub_request_timeout");
+});
+
 test("retired bootstrap credentials cannot pair or synchronize a Native V2 installation", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-pairing-"));
   const store = new Store(path.join(directory, "dinodia.json"));

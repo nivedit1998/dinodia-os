@@ -2288,22 +2288,28 @@ class Store {
   }
 
   async ensureSyncSnapshot(now = Date.now()) {
-    const outbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
+    this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
     const before = this.snapshot();
     try {
       let changed = false;
-      if (!outbox.snapshotCreatedAt) {
+      if (!this.state.syncOutbox.snapshotCreatedAt) {
         for (const area of Object.values(this.state.areas || {})) {
           enqueueSyncEventInState(this.state, "area.upsert", String(area.id), { osAreaId: String(area.id).slice(0, 160), name: String(area.name || area.id).slice(0, 160), icon: String(area.icon || "room").slice(0, 40) }, { now, critical: true });
         }
-        outbox.snapshotCreatedAt = new Date(now).toISOString();
+        // enqueueSyncEventInState normalizes and replaces state.syncOutbox;
+        // always mutate the current persisted object after enqueueing.
+        this.state.syncOutbox.snapshotCreatedAt = new Date(now).toISOString();
         changed = true;
       }
       for (const device of Object.values(this.state.devices || {})) {
         const deviceId = String(device.id);
-        if (this.state.platform?.devicePolicies?.[deviceId]?.managementClass === "PROPERTY_DEVICE" && !outbox.snapshotDeviceIds.includes(deviceId)) {
+        if (this.state.platform?.devicePolicies?.[deviceId]?.managementClass === "PROPERTY_DEVICE"
+          && !this.state.syncOutbox.snapshotDeviceIds.includes(deviceId)) {
           enqueueNativeDeviceSync(this.state, null, device, { now, critical: true });
-          outbox.snapshotDeviceIds.push(deviceId);
+          // enqueueNativeDeviceSync also replaces state.syncOutbox while
+          // appending the device/catalogue events, so persist the completion
+          // marker on that new object rather than the stale local reference.
+          this.state.syncOutbox.snapshotDeviceIds.push(deviceId);
           changed = true;
         }
       }

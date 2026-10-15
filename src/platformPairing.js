@@ -57,7 +57,7 @@ function validateLanEndpointObservation(value, serial, expectedPort = 80) {
 }
 
 class PlatformPairing {
-  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, nativeApiPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, runtime, getLanEndpoint = null, getLanTlsIdentity = null, acknowledgeLanTlsIdentity = null, getUpdaterStatus = null, getCloudflareStatus = null, reconcileTenantDeviceRemoval = null, reconcileAuthorizedPropertyInventory = null, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, clock = () => Date.now() } = {}) {
+  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, nativeApiPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, requestTimeoutMs = 15000, syncRequestTimeoutMs = 70000, runtime, getLanEndpoint = null, getLanTlsIdentity = null, acknowledgeLanTlsIdentity = null, getUpdaterStatus = null, getCloudflareStatus = null, reconcileTenantDeviceRemoval = null, reconcileAuthorizedPropertyInventory = null, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, clock = () => Date.now() } = {}) {
     this.store = store;
     this.vault = vault;
     this.identityBroker = identityBroker;
@@ -70,6 +70,11 @@ class PlatformPairing {
     this.nativeApiPort = Number(nativeApiPort) || 8123;
     this.intervalMs = Math.max(15000, Number(intervalMs) || 120000);
     this.heartbeatIntervalMs = Math.max(15000, Number(heartbeatIntervalMs) || 120000);
+    this.requestTimeoutMs = Math.max(1, Number(requestTimeoutMs) || 15000);
+    // Platform's authenticated native-sync function has a 60-second maximum
+    // execution window. Leave a small response/network margin, but do not let
+    // ordinary heartbeat, pairing, or operator calls inherit that long wait.
+    this.syncRequestTimeoutMs = Math.max(this.requestTimeoutMs, Number(syncRequestTimeoutMs) || 70000);
     this.clock = clock;
     this.lastHeartbeatAt = 0;
     this.recoveryEndpointInFlight = false;
@@ -293,27 +298,46 @@ class PlatformPairing {
     const signature = machineCredential && machineVersion > 0
       ? crypto.createHmac("sha256", crypto.createHash("sha256").update(String(machineCredential), "utf8").digest("hex")).update(["POST", path, String(timestamp), nonce, bodyHash].join("\n"), "utf8").digest("base64url")
       : await this.signPlatformRequest({ method: "POST", path, timestamp, nonce, bodyHash });
+    const isSyncRequest = path === "/api/hub-agent/v2/sync";
+    const timeoutMs = isSyncRequest ? this.syncRequestTimeoutMs : this.requestTimeoutMs;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
-    let response;
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const headers = { "content-type": "application/json", accept: "application/json", "x-dinodia-hub-timestamp": String(timestamp), "x-dinodia-hub-nonce": nonce, "x-dinodia-body-sha256": bodyHash };
       if (machineCredential && machineVersion > 0) { headers["x-dinodia-machine-version"] = String(machineVersion); headers["x-dinodia-machine-signature"] = signature; } else headers["x-dinodia-hub-signature"] = signature;
-      response = await this.fetchImpl(`${this.apiUrl}${path}`, { method: "POST", headers, body: JSON.stringify(signedBody), signal: controller.signal });
-    } finally { clearTimeout(timeout); }
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const envelope = result.error && typeof result.error === "object" && !Array.isArray(result.error) ? result.error : result;
-      const candidateCode = result.errorCode || envelope.code;
-      const responseCode = typeof candidateCode === "string" && /^[a-z0-9_.:-]{1,80}$/i.test(candidateCode) ? candidateCode : `platform_http_${response.status}`;
-      const currentRevision = result.currentRevision;
-      throw Object.assign(new Error(envelope.message || (typeof result.error === "string" ? result.error : "") || result.message || `Platform returned HTTP ${response.status}`), {
-        statusCode: response.status,
-        code: responseCode,
-        ...(Number.isSafeInteger(currentRevision) && currentRevision >= 0 ? { currentRevision } : {}),
-      });
+      const response = await this.fetchImpl(`${this.apiUrl}${path}`, { method: "POST", headers, body: JSON.stringify(signedBody), signal: controller.signal });
+      // Keep the same deadline active through body consumption. Fetch may
+      // resolve headers while a slow Platform response is still streaming.
+      let result;
+      try {
+        result = await response.json();
+      } catch (error) {
+        // Preserve the old tolerant handling of malformed JSON, but never
+        // swallow our own deadline abort while the response body is in flight.
+        if (controller.signal.aborted) throw error;
+        result = {};
+      }
+      if (!response.ok) {
+        const envelope = result.error && typeof result.error === "object" && !Array.isArray(result.error) ? result.error : result;
+        const candidateCode = result.errorCode || envelope.code;
+        const responseCode = typeof candidateCode === "string" && /^[a-z0-9_.:-]{1,80}$/i.test(candidateCode) ? candidateCode : `platform_http_${response.status}`;
+        const currentRevision = result.currentRevision;
+        throw Object.assign(new Error(envelope.message || (typeof result.error === "string" ? result.error : "") || result.message || `Platform returned HTTP ${response.status}`), {
+          statusCode: response.status,
+          code: responseCode,
+          ...(Number.isSafeInteger(currentRevision) && currentRevision >= 0 ? { currentRevision } : {}),
+        });
+      }
+      return result;
+    } catch (error) {
+      if (controller.signal.aborted) {
+        const code = isSyncRequest ? "hub_sync_request_timeout" : "hub_request_timeout";
+        throw Object.assign(new Error(isSyncRequest ? "Platform sync request exceeded its bounded deadline" : "Signed hub request exceeded its bounded deadline"), { code, cause: error });
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
     }
-    return result;
   }
 
   async buildLanEndpointObservation(identityGeneration, minimumRevisionExclusive = 0) {

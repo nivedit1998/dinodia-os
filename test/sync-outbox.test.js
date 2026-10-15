@@ -21,6 +21,46 @@ function temporaryStore() {
   return { directory, store: new Store(path.join(directory, "store.json")) };
 }
 
+test("property-device snapshot completion persists across outbox replacement and restart", async () => {
+  const { directory, store } = temporaryStore();
+  try {
+    await store.saveArea({ name: "Room 1", icon: "room" }, "room-1");
+    await store.upsertDevice({
+      id: "zigbee:radiator", name: "Room 1 Radiator", protocol: "zigbee", areaId: "room-1",
+      entities: { "zigbee:radiator:running_state": {
+        id: "zigbee:radiator:running_state", name: "Heating state", domain: "climate", state: "idle",
+        capability: { controlId: "running_state", kind: "select", readable: true, writable: false, observable: true, semanticRole: "active_heat_demand", bindings: [] },
+      } },
+    });
+    await store.savePlatform({ homeId: "home-radiator", devicePolicies: {
+      "zigbee:radiator": {
+        osDeviceId: "zigbee:radiator", managementClass: "PROPERTY_DEVICE", lifecycle: "INSTALLED",
+        analyticsCategory: "RADIATOR", descriptorRevision: 1, osAreaIds: ["room-1"],
+      },
+    } });
+
+    const initial = store.getSyncOutbox();
+    const firstSnapshot = await store.ensureSyncSnapshot(Date.parse("2026-10-16T10:00:00.000Z"));
+    const afterFirst = store.getSyncOutbox();
+    assert.equal(firstSnapshot, true);
+    assert.deepEqual(afterFirst.snapshotDeviceIds, ["zigbee:radiator"]);
+    assert.ok(afterFirst.snapshotCreatedAt);
+    const snapshotEvents = afterFirst.events.filter((event) => event.sequence > initial.nextSequence - 1);
+    assert.deepEqual(snapshotEvents.map((event) => event.type), ["area.upsert", "device.upsert", "control.catalog.upsert"]);
+
+    const secondSnapshot = await store.ensureSyncSnapshot(Date.parse("2026-10-16T10:01:00.000Z"));
+    assert.equal(secondSnapshot, false);
+    assert.equal(store.getSyncOutbox().nextSequence, afterFirst.nextSequence, "a repeated sync must not append another full device/catalogue snapshot");
+
+    const restarted = new Store(path.join(directory, "store.json"));
+    assert.deepEqual(restarted.getSyncOutbox().snapshotDeviceIds, ["zigbee:radiator"]);
+    assert.equal(await restarted.ensureSyncSnapshot(Date.parse("2026-10-16T10:02:00.000Z")), false);
+    assert.equal(restarted.getSyncOutbox().nextSequence, afterFirst.nextSequence);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("oversized authenticated sync rejection can only split the exact unaccepted durable range", async () => {
   const { directory, store } = temporaryStore();
   try {
