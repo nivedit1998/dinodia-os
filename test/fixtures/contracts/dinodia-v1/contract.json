@@ -1652,6 +1652,36 @@
       },
       "additionalProperties": false
     },
+    "homePendingInvitation": {
+      "type": "object",
+      "required": ["invitationId", "targetEmail", "role", "state", "createdAt", "expiresAt", "deliveryStatus", "areas"],
+      "properties": {
+        "invitationId": { "$ref": "#/$defs/id" },
+        "targetEmail": { "type": "string", "format": "email", "maxLength": 320 },
+        "role": { "enum": ["PROPERTY_MANAGER", "TENANT"] },
+        "state": { "const": "PENDING" },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "deliveryStatus": { "enum": ["PENDING", "ACCEPTED", "NOT_SENT", "FAILED", "UNKNOWN"] },
+        "areas": { "type": "array", "maxItems": 64, "items": { "type": "object", "required": ["areaId", "name"], "properties": { "areaId": { "$ref": "#/$defs/id" }, "name": { "type": "string", "minLength": 1, "maxLength": 160 } }, "additionalProperties": false } }
+      },
+      "allOf": [
+        { "if": { "properties": { "role": { "const": "TENANT" } }, "required": ["role"] }, "then": { "properties": { "areas": { "minItems": 1 } } } },
+        { "if": { "properties": { "role": { "const": "PROPERTY_MANAGER" } }, "required": ["role"] }, "then": { "properties": { "areas": { "maxItems": 0 } } } }
+      ],
+      "additionalProperties": false
+    },
+    "homePendingInvitationsReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "homeId", "managementRevision", "generatedAt", "invitations", "nextCursor"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "homeId": { "$ref": "#/$defs/id" },
+        "managementRevision": { "type": "integer", "minimum": 0 }, "generatedAt": { "$ref": "#/$defs/timestamp" },
+        "invitations": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/homePendingInvitation" } },
+        "nextCursor": { "type": ["string", "null"], "maxLength": 256 }
+      },
+      "additionalProperties": false
+    },
     "supportAccessRequestCreateRequest": {
       "type": "object",
       "required": ["requestedScope", "areaIds", "targetIds"],

@@ -908,6 +908,23 @@ paths:
         "202": { description: The idempotent request is still being submitted to the mail provider. }
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/homes/{homeId}/invitations:
+    get:
+      summary: "List Current Home Invitations for the Inviting Membership"
+      operationId: listHomePendingInvitations
+      tags: [Home]
+      security: [{ CustomerSessionCookie: [] }, { MobileAccessBearer: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/HomeId" }
+        - { in: query, name: cursor, required: false, description: Opaque keyset cursor returned by the preceding page., schema: { type: string, maxLength: 256 } }
+      responses:
+        "200":
+          description: Current unexpired pending invitations only; owners can see both supported roles and property managers only tenant invitations. Secrets and credential hashes are never projected.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/homePendingInvitationsReceipt" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Home or an authorized owner/property-manager membership is not visible to this account. }
   /api/v2/homes/{homeId}/tenant/invitations:
     post:
       summary: "Invite a Tenant to Exact Current Areas"
