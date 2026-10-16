@@ -2638,6 +2638,19 @@ paths:
       parameters: [{ $ref: "#/components/parameters/HomeId" }, { name: tenantId, in: path, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/StepUpProof" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
       responses: { "200": { description: Exact current Area-grant replacement receipt. }, "401": { $ref: "#/components/responses/Unauthorized" }, "409": { $ref: "#/components/responses/Conflict" } }
+  /api/v2/homes/{homeId}/tenants/{tenantId}/management-operation-receipt:
+    post:
+      summary: Reconcile an exact prior tenant Area-save or removal receipt
+      operationId: reconcileHomeTenantManagementReceipt
+      tags: [Home]
+      security: [{ MobileAccessBearer: [] }, { CustomerSessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/HomeId" }, { name: tenantId, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/HomeownerManagementOperationReceiptRequest" } } } }
+      responses:
+        "200": { description: Current authorized actor's exact prior operation receipt, or an authoritative NOT_FOUND after same-key serialization. No proof is accepted or consumed., content: { application/json: { schema: { $ref: "#/components/schemas/HomeownerManagementOperationReceipt" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Current selected-home authority or target scope is unavailable. }
+        "409": { $ref: "#/components/responses/Conflict" }
 components:
   securitySchemes:
     CustomerSessionCookie:
@@ -2683,6 +2696,10 @@ components:
     StepUpProof:
       { name: X-Dinodia-Step-Up-Proof, in: header, required: false, schema: { type: string, minLength: 1, maxLength: 8192 } }
   schemas:
+    HomeownerManagementOperationReceiptRequest:
+      { $ref: "./contract.json#/$defs/homeownerManagementOperationReceiptRequest" }
+    HomeownerManagementOperationReceipt:
+      { $ref: "./contract.json#/$defs/homeownerManagementOperationReceipt" }
     CustomerMobileRefreshRequest:
       type: object
       required: [refreshToken]

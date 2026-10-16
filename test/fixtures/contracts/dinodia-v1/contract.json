@@ -2668,6 +2668,32 @@
         "hubEnforcement": { "const": "PENDING" }, "idempotentReplay": { "type": "boolean" }
       }, "additionalProperties": false
     },
+    "homeownerManagementOperationReceiptRequest": {
+      "oneOf": [
+        { "type": "object", "required": ["operationKind", "idempotencyKey", "expectedAccessRevision", "expectedManagementRevision", "areaIds"],
+          "properties": { "operationKind": { "const": "tenant_area_grants_replace" },
+            "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]+$" },
+            "expectedAccessRevision": { "type": "integer", "minimum": 0 }, "expectedManagementRevision": { "type": "integer", "minimum": 1 },
+            "areaIds": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } } }, "additionalProperties": false },
+        { "type": "object", "required": ["operationKind", "idempotencyKey", "expectedAccessRevision", "expectedManagementRevision"],
+          "properties": { "operationKind": { "const": "home_tenant_remove" },
+            "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]+$" },
+            "expectedAccessRevision": { "type": "integer", "minimum": 0 }, "expectedManagementRevision": { "type": "integer", "minimum": 1 } }, "additionalProperties": false }
+      ]
+    },
+    "homeownerManagementOperationReceipt": {
+      "oneOf": [
+        { "type": "object", "required": ["schemaVersion", "ok", "status", "operationKind"],
+          "properties": { "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "status": { "const": "NOT_FOUND" },
+            "operationKind": { "enum": ["tenant_area_grants_replace", "home_tenant_remove"] } }, "additionalProperties": false },
+        { "type": "object", "required": ["schemaVersion", "ok", "status", "operationKind", "receipt"],
+          "properties": { "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "status": { "const": "COMMITTED" },
+            "operationKind": { "const": "tenant_area_grants_replace" }, "receipt": { "$ref": "#/$defs/homeownerTenantAreaGrantsReceipt" } }, "additionalProperties": false },
+        { "type": "object", "required": ["schemaVersion", "ok", "status", "operationKind", "receipt"],
+          "properties": { "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "status": { "const": "COMMITTED" },
+            "operationKind": { "const": "home_tenant_remove" }, "receipt": { "$ref": "#/$defs/homeownerTenantRemovalReceipt" } }, "additionalProperties": false }
+      ]
+    },
     "homeownerManagerRemovalRequest": {
       "type": "object", "required": ["expectedManagementRevision", "proof", "idempotencyKey"],
       "properties": {
