@@ -56,6 +56,26 @@ test("millisecond observation and expiry boundaries keep usage counters equal to
     "every transmitted whole-second coverage interval must reconcile exactly with its activity counters");
 });
 
+test("an exact hour boundary closes an existing bucket even when the final raw fragment contributes zero seconds", () => {
+  const almost = observeUsage(initialUsageState(), observed({
+    category: "RADIATOR", controlId: "control-heat",
+    observedAt: "2026-10-16T15:00:00.000Z", validUntil: "2026-10-16T15:59:59.000Z",
+    nowMs: Date.parse("2026-10-16T15:59:59.500Z"),
+  }));
+  const [before] = Object.values(almost.state.buckets);
+  const beforeRevision = before.revision;
+  assert.deepEqual([before.onSeconds, before.offSeconds, before.unknownSeconds], [3599, 0, 1]);
+  assert.equal(before.coverageEndAt, "2026-10-16T16:00:00.000Z");
+  assert.equal(before.closedAt, null, "the hour must not be declared closed before the raw clock reaches its boundary");
+
+  const atBoundary = advanceUsage(almost.state, Date.parse("2026-10-16T16:00:00.000Z"));
+  const [after] = Object.values(atBoundary.state.buckets);
+  assert.equal(after.closedAt, "2026-10-16T16:00:00.000Z");
+  assert.equal(after.revision, beforeRevision + 1, "closure-only state changes receive their own monotonic revision");
+  assert.equal(atBoundary.changedBuckets.length, 1, "the closure-only revision must be visible to the queue owner");
+  assert.equal(after.onSeconds + after.offSeconds + after.unknownSeconds, 3600);
+});
+
 test("legacy closed partial bucket recovers its bounded covered span without padding to a full hour", () => {
   const legacy = initialUsageState({
     sources: {}, buckets: { "legacy": {

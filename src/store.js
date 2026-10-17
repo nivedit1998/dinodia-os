@@ -34,6 +34,16 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (!value || typeof value !== "object") return JSON.stringify(value);
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+}
+
+function canonicalHash(value) {
+  return crypto.createHash("sha256").update(canonicalJson(value), "utf8").digest("hex");
+}
+
 function restoreMissingCloudAreas(localAreas, configuration, timestamp) {
   const restored = localAreas && typeof localAreas === "object" && !Array.isArray(localAreas) ? { ...localAreas } : {};
   const seenHubAreaIds = new Set();
@@ -175,6 +185,11 @@ function queueUsageBucket(state, bucketKey, now) {
   const usage = state.syncUsage = initialUsageState(state.syncUsage);
   const bucket = usage.buckets[bucketKey];
   if (!bucket) return false;
+  const accountedSeconds = Number(bucket.onSeconds || 0) + Number(bucket.offSeconds || 0) + Number(bucket.unknownSeconds || 0);
+  // Platform correctly rejects a fully covered hour without its closure
+  // marker. Leave queuedRevisions untouched so the real boundary transition
+  // can enqueue the next revision after closedAt is recorded.
+  if (bucket.closedAt == null && accountedSeconds >= 3600) return false;
   usage.queuedRevisions = usage.queuedRevisions || {};
   if (Number(usage.queuedRevisions[bucketKey] || 0) >= bucket.revision) return false;
   const aggregateId = crypto.createHash("sha256").update(bucketKey, "utf8").digest("hex");
@@ -2191,6 +2206,85 @@ class Store {
     }
   }
 
+  async prepareUsageClosureRecovery({ authorization, streamId, acceptedSequence, now = Date.now() } = {}) {
+    const before = this.snapshot();
+    try {
+      const outbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
+      const witness = outbox.usageClosureRejection;
+      const batch = outbox.inFlight;
+      const grantId = String(authorization?.authorizationId || "");
+      const targetSequence = Number(witness?.targetSequence);
+      const targetIndex = Array.isArray(batch?.events) ? batch.events.findIndex((event) => Number(event.sequence) === targetSequence) : -1;
+      const rejected = targetIndex >= 0 ? batch.events[targetIndex] : null;
+      const bucketStartMs = Date.parse(String(rejected?.payload?.bucketStart || ""));
+      const bucketEndMs = bucketStartMs + 3_600_000;
+      const totalSeconds = Number(rejected?.payload?.onSeconds) + Number(rejected?.payload?.offSeconds) + Number(rejected?.payload?.unknownSeconds);
+      const grantExpiry = Date.parse(String(authorization?.expiresAt || ""));
+      if (!witness || !batch || outbox.usageClosureRecovery || outbox.lastErrorCode !== witness.code
+        || witness.status !== 409 || witness.code !== "hub_sync_usage_bucket_closure_invalid"
+        || witness.streamId !== outbox.streamId || witness.streamId !== String(streamId || "")
+        || Number(acceptedSequence) !== outbox.acknowledgedSequence
+        || Number(batch.fromSequence) !== outbox.acknowledgedSequence + 1
+        || Number(batch.fromSequence) !== witness.fromSequence || Number(batch.toSequence) !== witness.toSequence
+        || String(batch.streamId) !== witness.streamId
+        || crypto.createHash("sha256").update(JSON.stringify(batch), "utf8").digest("hex") !== witness.envelopeHash
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(grantId)
+        || authorization?.rejectedBodyHash !== witness.requestBodyHash
+        || authorization?.targetEventId !== witness.targetEventId || Number(authorization?.targetSequence) !== targetSequence
+        || authorization?.closedAt !== new Date(bucketEndMs).toISOString()
+        || !Number.isFinite(grantExpiry) || grantExpiry <= Number(now) || grantExpiry > Number(now) + 16 * 60_000
+        || !rejected || rejected.type !== "usage.bucket" || rejected.id !== witness.targetEventId
+        || canonicalHash(rejected.payload) !== witness.targetPayloadHash
+        || rejected.payload.closedAt !== null || !Number.isFinite(bucketStartMs)
+        || new Date(bucketStartMs).toISOString() !== rejected.payload.bucketStart
+        || bucketStartMs % 3_600_000 !== 0 || bucketEndMs > Number(now)
+        || ![rejected.payload.onSeconds, rejected.payload.offSeconds, rejected.payload.unknownSeconds]
+          .every((value) => Number.isSafeInteger(value) && value >= 0 && value <= 3600)
+        || totalSeconds !== 3600 || Date.parse(String(rejected.payload.coverageStartAt)) !== bucketStartMs
+        || Date.parse(String(rejected.payload.coverageEndAt)) !== bucketEndMs) {
+        throw Object.assign(new Error("The exact rejected usage event is no longer eligible for closure-only recovery"), { code: "hub_sync_usage_recovery_evidence_mismatch" });
+      }
+      const queued = outbox.events.find((event) => Number(event.sequence) === targetSequence);
+      if (!queued || !isDeepStrictEqual(queued, rejected)
+        || !Array.isArray(batch.events) || batch.events.some((event, index) => index !== targetIndex
+          && !isDeepStrictEqual(event, outbox.events.find((candidate) => Number(candidate.sequence) === Number(event.sequence))))) {
+        throw Object.assign(new Error("The queued and in-flight copies of the rejected range no longer match"), { code: "hub_sync_usage_recovery_queue_mismatch" });
+      }
+
+      const originalEvent = clone(rejected);
+      const repairedEvent = clone(rejected);
+      repairedEvent.payload.closedAt = new Date(bucketEndMs).toISOString();
+      const originalPayloadHash = canonicalHash(originalEvent.payload);
+      const correctedPayloadHash = canonicalHash(repairedEvent.payload);
+      if (Object.keys(originalEvent.payload).some((key) => !Object.hasOwn(repairedEvent.payload, key))
+        || Object.keys(repairedEvent.payload).some((key) => !Object.hasOwn(originalEvent.payload, key))
+        || Object.keys(repairedEvent.payload).some((key) => key !== "closedAt" && !isDeepStrictEqual(repairedEvent.payload[key], originalEvent.payload[key]))) {
+        throw Object.assign(new Error("The proposed recovery changes fields other than the hour closure marker"), { code: "hub_sync_usage_recovery_field_diff_invalid" });
+      }
+      const marker = {
+        version: 1, authorizationId: grantId, rejectedBodyHash: witness.requestBodyHash,
+        targetEventId: rejected.id, targetSequence,
+      };
+      const nextBatch = clone(batch);
+      nextBatch.events[targetIndex] = repairedEvent;
+      nextBatch.usageClosureRecovery = marker;
+      const outboxEventIndex = outbox.events.findIndex((event) => Number(event.sequence) === targetSequence);
+      outbox.events[outboxEventIndex] = repairedEvent;
+      outbox.inFlight = nextBatch;
+      outbox.usageClosureRecovery = {
+        version: 1, authorizationId: grantId, rejectedBodyHash: witness.requestBodyHash,
+        streamId: witness.streamId, fromSequence: witness.fromSequence, toSequence: witness.toSequence,
+        targetEventId: rejected.id, targetSequence, originalEvent,
+        originalPayloadHash, correctedPayloadHash, closedAt: repairedEvent.payload.closedAt,
+        preparedAt: new Date(Number(now)).toISOString(),
+      };
+      await this.persist();
+      return clone(nextBatch);
+    } catch (error) {
+      this.state = before;
+      throw error;
+    }
+  }
   async prepareSyncBatch(hubInstallationId, runtime, now = Date.now(), options = {}) {
     const before = this.snapshot();
     try {
@@ -2460,6 +2554,28 @@ class Store {
       if (!batch || !receipt || receipt.streamId !== outbox.streamId || Number(receipt.acceptedThroughSequence) !== batch.toSequence) {
         throw new Error("Platform sync acknowledgement does not match the durable in-flight range");
       }
+      if (batch.usageClosureRecovery && outbox.usageClosureRecovery
+        && batch.usageClosureRecovery.authorizationId === outbox.usageClosureRecovery.authorizationId) {
+        outbox.usageClosureRecoveryHistory = [...(outbox.usageClosureRecoveryHistory || []), {
+          version: 1,
+          authorizationId: outbox.usageClosureRecovery.authorizationId,
+          rejectedBodyHash: outbox.usageClosureRecovery.rejectedBodyHash,
+          acceptedBodyHash: receipt.bodyHash || null,
+          streamId: batch.streamId,
+          fromSequence: batch.fromSequence,
+          toSequence: batch.toSequence,
+          targetEventId: outbox.usageClosureRecovery.targetEventId,
+          targetSequence: outbox.usageClosureRecovery.targetSequence,
+          originalPayloadHash: outbox.usageClosureRecovery.originalPayloadHash,
+          correctedPayloadHash: outbox.usageClosureRecovery.correctedPayloadHash,
+          changedFields: ["closedAt"],
+          closedAt: outbox.usageClosureRecovery.closedAt,
+          preparedAt: outbox.usageClosureRecovery.preparedAt,
+          acceptedAt: new Date(Number(now)).toISOString(),
+        }].slice(-50);
+        outbox.usageClosureRecovery = null;
+      }
+      outbox.usageClosureRejection = null;
       outbox.acknowledgedSequence = Math.max(outbox.acknowledgedSequence, batch.toSequence);
       const acceptedIncidentEvents = new Map((batch.events || []).filter((event) => event.type === "incident.transition")
         .map((event) => [`${event.payload.incidentKey}|${Number(event.payload.revision)}`, event]));
@@ -2546,13 +2662,43 @@ class Store {
     } catch (error) { this.state = before; throw error; }
   }
 
-  async markSyncFailure(code) {
+  async markSyncFailure(code, evidence = {}) {
     const before = this.snapshot();
     try {
       const outbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
       outbox.lastErrorCode = String(code || "sync_failed").slice(0, 80);
+      const batch = outbox.inFlight;
+      const target = evidence.rejectedEvent && typeof evidence.rejectedEvent === "object" ? evidence.rejectedEvent : null;
+      const targetEvent = target && Array.isArray(batch?.events)
+        ? batch.events.find((event) => Number(event.sequence) === Number(target.sequence) && event.id === String(target.id)) : null;
+      const isProvedClosureRejection = evidence.statusCode === 409 && code === "hub_sync_usage_bucket_closure_invalid"
+        && /^[a-f0-9]{64}$/i.test(String(evidence.requestBodyHash || ""))
+        && /^[a-f0-9]{64}$/i.test(String(evidence.envelopeHash || ""))
+        && batch && crypto.createHash("sha256").update(JSON.stringify(batch), "utf8").digest("hex") === String(evidence.envelopeHash).toLowerCase()
+        && targetEvent?.type === "usage.bucket"
+        && crypto.createHash("sha256").update(canonicalJson(targetEvent.payload), "utf8").digest("hex") === String(target.payloadHash || "").toLowerCase()
+        && targetEvent.payload.closedAt === null
+        && Number(targetEvent.payload.onSeconds) + Number(targetEvent.payload.offSeconds) + Number(targetEvent.payload.unknownSeconds) === 3600;
+      if (isProvedClosureRejection) {
+        const queued = outbox.events.find((event) => Number(event.sequence) === Number(target.sequence));
+        if (queued && isDeepStrictEqual(queued, targetEvent)) {
+          outbox.usageClosureRejection = {
+            version: 1, status: 409, code: String(code),
+            requestBodyHash: String(evidence.requestBodyHash).toLowerCase(),
+            envelopeHash: String(evidence.envelopeHash).toLowerCase(),
+            streamId: String(batch.streamId), fromSequence: Number(batch.fromSequence), toSequence: Number(batch.toSequence),
+            targetSequence: Number(target.sequence), targetEventId: String(target.id),
+            targetPayloadHash: String(target.payloadHash).toLowerCase(), rejectedAt: new Date().toISOString(),
+          };
+        }
+      } else if (evidence.syncRequestAttempted === true) {
+        // A later ambiguous delivery attempt makes the earlier explicit
+        // rejection insufficient evidence for rewriting that request.
+        // Retain any already-prepared authorized recovery byte-for-byte.
+        if (!outbox.usageClosureRecovery) outbox.usageClosureRejection = null;
+      }
       await this.persist();
-    } catch (error) { this.state = before; throw error; }
+    } catch (error) { this.restoreSnapshot(before, typeof error === "undefined" ? null : error); throw error; }
   }
 
   async savePlatform(patch = {}) {

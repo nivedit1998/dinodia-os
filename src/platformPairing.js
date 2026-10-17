@@ -325,6 +325,13 @@ class PlatformPairing {
         throw Object.assign(new Error(envelope.message || (typeof result.error === "string" ? result.error : "") || result.message || `Platform returned HTTP ${response.status}`), {
           statusCode: response.status,
           code: responseCode,
+          requestBodyHash: bodyHash,
+          ...(isSyncRequest && result.rejectedEvent && typeof result.rejectedEvent === "object"
+            && /^[0-9a-f-]{36}$/i.test(String(result.rejectedEvent.eventId || ""))
+            && Number.isSafeInteger(Number(result.rejectedEvent.sequence))
+            && /^[a-f0-9]{64}$/i.test(String(result.rejectedEvent.payloadHash || ""))
+            ? { rejectedEvent: { id: String(result.rejectedEvent.eventId), sequence: Number(result.rejectedEvent.sequence), payloadHash: String(result.rejectedEvent.payloadHash).toLowerCase() } }
+            : {}),
           ...(Number.isSafeInteger(currentRevision) && currentRevision >= 0 ? { currentRevision } : {}),
         });
       }
@@ -581,6 +588,8 @@ class PlatformPairing {
     this.syncing = true;
     let heartbeatIdentity = null;
     let heartbeatAuthorityConfirmed = false;
+    let syncRequestEnvelopeHash = null;
+    let syncRequestAttempted = false;
     try {
       let platform = this.store.getPlatform();
       if (!platform.paired && platform.provisioningAttemptId) {
@@ -811,6 +820,27 @@ class PlatformPairing {
           throw Object.assign(new Error("Platform sync cursor does not match the exact durable in-flight batch; preserving the queue for explicit reconciliation"), { code: "hub_sync_stream_reconciliation_required" });
         }
       }
+      if (!syncBatch && !streamMismatch && installationSyncMode === "ACTIVE"
+        && serverStreamId === String(syncState.streamId) && serverAcceptedSequence === localAcknowledgedSequence
+        && syncState.lastErrorCode === "hub_sync_usage_bucket_closure_invalid"
+        && syncState.usageClosureRejection && syncState.inFlight) {
+        const rejection = syncState.usageClosureRejection;
+        const authorization = await this.requestWithHubIdentity("/api/hub-agent/v2/sync/usage-closure-recovery", {
+          rejectedBodyHash: rejection.requestBodyHash,
+          targetEventId: rejection.targetEventId,
+          targetSequence: rejection.targetSequence,
+          targetPayloadHash: rejection.targetPayloadHash,
+          rejectedEnvelope: syncState.inFlight,
+        });
+        syncBatch = await this.store.prepareUsageClosureRecovery?.({
+          authorization,
+          streamId: serverStreamId,
+          acceptedSequence: serverAcceptedSequence,
+          now: this.clock(),
+        });
+        if (!syncBatch) throw Object.assign(new Error("The exact rejected usage event could not be safely prepared for recovery"), { code: "hub_sync_usage_recovery_not_prepared" });
+        syncState = this.store.getSyncOutbox();
+      }
       const bootstrapBatchOptions = installationSyncMode === "INSTALLATION_BOOTSTRAP"
         ? {
           allowedTypesPrefix: ["sync.compacted", "update.status", "area.upsert", "incident.transition"],
@@ -834,6 +864,8 @@ class PlatformPairing {
           runtime: this.store.getSyncRuntime?.(this.runtime) || this.runtime,
           sentAt: new Date(this.clock()).toISOString(),
         };
+        syncRequestEnvelopeHash = crypto.createHash("sha256").update(JSON.stringify(syncEnvelope), "utf8").digest("hex");
+        syncRequestAttempted = true;
         syncResult = await this.requestWithHubIdentity("/api/hub-agent/v2/sync", syncEnvelope);
         if (syncResult?.streamId !== syncEnvelope.streamId || !Number.isSafeInteger(Number(syncResult?.cloudRevision))
           || !syncResult?.configuration || syncResult.configuration.revision !== Number(syncResult.cloudRevision)) {
@@ -849,6 +881,10 @@ class PlatformPairing {
             || Number(syncResult.acceptedThroughSequence) < Number(syncEnvelope.toSequence)) {
             throw Object.assign(new Error("Platform did not return the exact durable stream-reconciliation receipt"), { code: "hub_sync_stream_reconciliation_receipt_invalid" });
           }
+        }
+        if (syncEnvelope.usageClosureRecovery && (syncResult?.usageClosureRecoveryAccepted !== true
+          || !/^[a-f0-9]{64}$/i.test(String(syncResult?.acceptedBodyHash || "")))) {
+          throw Object.assign(new Error("Platform did not confirm the exact authorized usage-closure recovery"), { code: "hub_sync_usage_recovery_receipt_invalid" });
         }
         await this.applyConfiguration(syncResult.configuration);
         const pendingTenantRemovals = this.store.listPendingTenantDeviceRemovals?.() || [];
@@ -866,6 +902,7 @@ class PlatformPairing {
             acceptedThroughSequence: Number(syncResult.acceptedThroughSequence),
             cloudRevision: Number(syncResult.cloudRevision),
             configurationAppliedRevision: Number(syncResult.configurationAppliedRevision),
+            bodyHash: syncEnvelope.usageClosureRecovery ? String(syncResult.acceptedBodyHash || "") : undefined,
             resnapshotRequired: syncResult.resnapshotRequired === true,
           }, this.clock());
         } else {
@@ -902,7 +939,13 @@ class PlatformPairing {
       this.lastError = String(error.message || error);
       this.retryAttempt = Math.min(this.retryAttempt + 1, 8);
       const errorCode = String(error?.code || "sync_failed").slice(0, 80);
-      await this.store.markSyncFailure?.(errorCode).catch(() => {});
+      await this.store.markSyncFailure?.(errorCode, {
+        statusCode: Number(error?.statusCode || 0),
+        requestBodyHash: String(error?.requestBodyHash || ""),
+        envelopeHash: String(syncRequestEnvelopeHash || ""),
+        rejectedEvent: error?.rejectedEvent || null,
+        syncRequestAttempted,
+      }).catch(() => {});
       // Heartbeat and sync are separate facts. Once current installation
       // authority has been confirmed, report the persisted queue/error snapshot
       // even when inventory ingestion itself failed. This does not advance the

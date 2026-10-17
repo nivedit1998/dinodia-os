@@ -28,6 +28,9 @@ function initialSyncOutbox() {
     lastAttemptAt: null,
     lastSuccessfulSyncAt: null,
     lastErrorCode: null,
+    usageClosureRejection: null,
+    usageClosureRecovery: null,
+    usageClosureRecoveryHistory: [],
     gapDetected: false,
     criticalBacklog: false,
     telemetryPaused: false,
@@ -44,6 +47,40 @@ function normalizeSyncOutbox(value) {
     .map((event) => ({ ...event, id: String(event.id || crypto.randomUUID()), type: String(event.type || ""), aggregateId: String(event.aggregateId || ""), critical: event.critical === true }))
     .sort((left, right) => left.sequence - right.sequence) : [];
   const maxSequence = events.reduce((max, event) => Math.max(max, event.sequence), 0);
+  const rawRejection = input.usageClosureRejection;
+  const rejection = rawRejection && typeof rawRejection === "object" && rawRejection.version === 1
+    && rawRejection.status === 409 && rawRejection.code === "hub_sync_usage_bucket_closure_invalid"
+    && /^[a-f0-9]{64}$/i.test(String(rawRejection.requestBodyHash || ""))
+    && /^[a-f0-9]{64}$/i.test(String(rawRejection.envelopeHash || ""))
+    && /^[a-zA-Z0-9._:-]{16,80}$/.test(String(rawRejection.streamId || ""))
+    && Number.isSafeInteger(Number(rawRejection.fromSequence)) && Number(rawRejection.fromSequence) > 0
+    && Number.isSafeInteger(Number(rawRejection.toSequence)) && Number(rawRejection.toSequence) >= Number(rawRejection.fromSequence)
+    && Number.isSafeInteger(Number(rawRejection.targetSequence)) && typeof rawRejection.targetEventId === "string"
+    && /^[a-f0-9]{64}$/i.test(String(rawRejection.targetPayloadHash || "")) && typeof rawRejection.rejectedAt === "string"
+    ? {
+      version: 1, status: 409, code: "hub_sync_usage_bucket_closure_invalid",
+      requestBodyHash: String(rawRejection.requestBodyHash).toLowerCase(), envelopeHash: String(rawRejection.envelopeHash).toLowerCase(),
+      streamId: String(rawRejection.streamId), fromSequence: Number(rawRejection.fromSequence), toSequence: Number(rawRejection.toSequence),
+      targetSequence: Number(rawRejection.targetSequence), targetEventId: String(rawRejection.targetEventId),
+      targetPayloadHash: String(rawRejection.targetPayloadHash).toLowerCase(), rejectedAt: String(rawRejection.rejectedAt),
+    } : null;
+  const rawRecovery = input.usageClosureRecovery;
+  const recovery = rawRecovery && typeof rawRecovery === "object" && rawRecovery.version === 1
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(rawRecovery.authorizationId || ""))
+    && /^[a-f0-9]{64}$/i.test(String(rawRecovery.rejectedBodyHash || ""))
+    && /^[a-zA-Z0-9._:-]{16,80}$/.test(String(rawRecovery.streamId || ""))
+    && Number.isSafeInteger(Number(rawRecovery.targetSequence)) && typeof rawRecovery.targetEventId === "string"
+    && rawRecovery.originalEvent && typeof rawRecovery.originalEvent === "object"
+    && /^[a-f0-9]{64}$/i.test(String(rawRecovery.originalPayloadHash || ""))
+    && /^[a-f0-9]{64}$/i.test(String(rawRecovery.correctedPayloadHash || ""))
+    && typeof rawRecovery.closedAt === "string" && typeof rawRecovery.preparedAt === "string"
+    ? {
+      version: 1, authorizationId: String(rawRecovery.authorizationId), rejectedBodyHash: String(rawRecovery.rejectedBodyHash).toLowerCase(),
+      streamId: String(rawRecovery.streamId), fromSequence: Number(rawRecovery.fromSequence), toSequence: Number(rawRecovery.toSequence),
+      targetSequence: Number(rawRecovery.targetSequence), targetEventId: String(rawRecovery.targetEventId), originalEvent: rawRecovery.originalEvent,
+      originalPayloadHash: String(rawRecovery.originalPayloadHash).toLowerCase(), correctedPayloadHash: String(rawRecovery.correctedPayloadHash).toLowerCase(),
+      closedAt: String(rawRecovery.closedAt), preparedAt: String(rawRecovery.preparedAt),
+    } : null;
   return {
     ...base,
     ...input,
@@ -57,6 +94,13 @@ function normalizeSyncOutbox(value) {
     snapshotDeviceIds: Array.isArray(input.snapshotDeviceIds) ? [...new Set(input.snapshotDeviceIds.map(String))].slice(0, 100000) : [],
     events,
     inFlight: input.inFlight && typeof input.inFlight === "object" ? input.inFlight : null,
+    usageClosureRejection: rejection,
+    usageClosureRecovery: recovery,
+    usageClosureRecoveryHistory: Array.isArray(input.usageClosureRecoveryHistory)
+      ? input.usageClosureRecoveryHistory.filter((entry) => entry && typeof entry === "object"
+        && /^[a-f0-9]{64}$/i.test(String(entry.rejectedBodyHash || ""))
+        && /^[a-f0-9]{64}$/i.test(String(entry.originalPayloadHash || ""))
+        && /^[a-f0-9]{64}$/i.test(String(entry.correctedPayloadHash || ""))).slice(-50).map((entry) => ({ ...entry })) : [],
     gapDetected: input.gapDetected === true,
     criticalBacklog: input.criticalBacklog === true,
     telemetryPaused: input.telemetryPaused === true,

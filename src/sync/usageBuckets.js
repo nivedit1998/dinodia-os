@@ -74,9 +74,10 @@ function addInterval(state, source, startMs, endMs, activity) {
     const coveredStart = Math.ceil(cursor / 1000) * 1000;
     const coveredEnd = Math.ceil(stop / 1000) * 1000;
     const seconds = Math.max(0, (coveredEnd - coveredStart) / 1000);
+    const key = bucketKey(source, start);
+    const existingBucket = state.buckets[key];
     if (seconds > 0) {
-      const key = bucketKey(source, start);
-      const bucket = state.buckets[key] || (state.buckets[key] = {
+      const bucket = existingBucket || (state.buckets[key] = {
         osDeviceId: source.osDeviceId,
         osAreaId: source.osAreaId,
         category: source.category,
@@ -101,6 +102,22 @@ function addInterval(state, source, startMs, endMs, activity) {
       if (stop === start + 3_600_000) bucket.closedAt = new Date(stop).toISOString();
       bucket.revision += 1;
       changed.add(key);
+    } else if (existingBucket && stop === start + 3_600_000 && existingBucket.closedAt == null) {
+      // Endpoint quantization may already have accounted through the exact
+      // hour boundary even though the final raw millisecond fragment rounds
+      // to zero seconds. Finalize that existing coverage at the real boundary
+      // so it is not serialized as a full-hour/open bucket. Do not invent a
+      // bucket or close one whose counted coverage does not end here.
+      const coverageStart = validInstant(existingBucket.coverageStartAt);
+      const coverageEnd = validInstant(existingBucket.coverageEndAt);
+      const accountedSeconds = Number(existingBucket.onSeconds || 0)
+        + Number(existingBucket.offSeconds || 0) + Number(existingBucket.unknownSeconds || 0);
+      if (coverageStart !== null && coverageEnd === stop && Number.isSafeInteger(accountedSeconds)
+        && accountedSeconds === (coverageEnd - coverageStart) / 1000) {
+        existingBucket.closedAt = new Date(stop).toISOString();
+        existingBucket.revision += 1;
+        changed.add(key);
+      }
     }
     cursor = stop;
   }

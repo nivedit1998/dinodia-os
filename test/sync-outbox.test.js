@@ -760,6 +760,122 @@ test("TRVZB golden clock reports exact 420-second prospective heat/off/unknown c
   }
 });
 
+test("Store defers a quantized full-hour/open bucket and queues its durable closure after restart", async () => {
+  const { directory, store } = temporaryStore();
+  try {
+    const deviceId = "os-radiator-hour-boundary";
+    const runtime = { kind: "dinodia_os", version: "boundary-test", capabilities: { nativeSyncOutbox: true } };
+    store.setSyncSourceGeneration(1);
+    await store.saveIdentity({ serial: "hub-hour-boundary", instanceId: "instance-hour-boundary" });
+    await store.saveArea({ name: "Room 1" }, "area-hour-boundary");
+    const device = await store.upsertDevice({
+      id: deviceId, name: "Disposable boundary radiator", protocol: "zigbee", areaId: "area-hour-boundary",
+      setup: { status: "ready", assignmentMode: "device_inherited_v1", completedAt: "2026-10-16T15:00:00.000Z" },
+      state: { running_state: "heat" },
+      entities: { running: { id: "running", stateKey: "running_state", state: "heat", domain: "climate",
+        capability: { controlId: "control-boundary-demand", kind: "enum", readable: true, writable: false,
+          observable: true, semanticRole: "active_heat_demand", maxStateValiditySeconds: 1800, constraints: { options: ["heat", "idle"] }, bindings: [] } } },
+    });
+    await store.savePlatform({ homeId: "home-hour-boundary", devicePolicies: {
+      [deviceId]: { osDeviceId: deviceId, managementClass: "PROPERTY_DEVICE", lifecycle: "INSTALLED",
+        analyticsCategory: "RADIATOR", ownerMembershipId: null, descriptorRevision: device.presentation.descriptorRevision,
+        descriptorDigest: "b".repeat(64), osAreaIds: ["area-hour-boundary"] },
+    } });
+    const report = async (value, observedAt, nowAt, available = true) => store.updateDeviceState(deviceId, { running_state: value }, {
+      protocol: "zigbee", available, reportedStateKeys: ["running_state"],
+      sourceObservedAtByStateKey: { running_state: observedAt },
+      sourceReceivedAtByStateKey: { running_state: observedAt }, nowMs: Date.parse(nowAt),
+    });
+
+    await report("heat", "2026-10-16T15:00:00.000Z", "2026-10-16T15:00:00.000Z");
+    await report("heat", "2026-10-16T15:29:59.000Z", "2026-10-16T15:29:59.000Z");
+    await report("unknown", "2026-10-16T15:31:21.000Z", "2026-10-16T15:31:21.000Z", false);
+    await store.advanceSyncUsage(Date.parse("2026-10-16T15:59:59.500Z"));
+
+    const bucket = Object.values(store.snapshot().syncUsage.buckets).find((item) => item.osDeviceId === deviceId);
+    assert.deepEqual([bucket.onSeconds, bucket.offSeconds, bucket.unknownSeconds], [1881, 0, 1719]);
+    assert.equal(bucket.closedAt, null, "the producer cannot infer closure before the physical hour boundary");
+    const queuedUsage = store.getSyncOutbox().events.filter((event) => event.type === "usage.bucket" && event.payload.osDeviceId === deviceId);
+    assert.equal(queuedUsage.some((event) => event.payload.onSeconds + event.payload.offSeconds + event.payload.unknownSeconds >= 3600 && event.payload.closedAt === null), false,
+      "the signed queue must never emit the strict cloud-rejected full-hour/open shape");
+
+    const restarted = new Store(path.join(directory, "store.json"));
+    await restarted.advanceSyncUsage(Date.parse("2026-10-16T16:00:00.000Z"));
+    const outbox = restarted.getSyncOutbox();
+    const batch = await restarted.prepareSyncBatch("00000000-0000-4000-8000-000000000011", runtime, Date.parse("2026-10-16T16:00:00.000Z"));
+    const closed = batch.events.find((event) => event.type === "usage.bucket" && event.payload.osDeviceId === deviceId);
+    assert.ok(closed);
+    assert.deepEqual([closed.payload.onSeconds, closed.payload.offSeconds, closed.payload.unknownSeconds], [1881, 0, 1719]);
+    assert.equal(closed.payload.closedAt, "2026-10-16T16:00:00.000Z");
+    assert.equal(closed.payload.coverageStartAt, "2026-10-16T15:00:00.000Z");
+    assert.equal(closed.payload.coverageEndAt, "2026-10-16T16:00:00.000Z");
+    assert.equal(closed.payload.revision, bucket.revision + 1);
+    assert.equal(batch.streamId, outbox.streamId);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("only the exact authenticated 409 rejection can authorize a closure-only durable recovery", async () => {
+  const { directory, store } = temporaryStore();
+  try {
+    const hubInstallationId = "00000000-0000-4000-8000-000000000071";
+    const streamId = store.getSyncOutbox().streamId;
+    const start = Date.parse("2026-10-16T15:00:00.000Z");
+    const purge = new Date("2027-10-16T15:00:00.000Z").toISOString();
+    const payload = {
+      osDeviceId: "zigbee:recovery-radiator", osAreaId: "room-1", analyticsCategory: "RADIATOR",
+      controlId: "active-heat-demand", sourceGeneration: 7, bucketStart: new Date(start).toISOString(), revision: 274,
+      onSeconds: 1881, offSeconds: 0, unknownSeconds: 1719,
+      coverageStartAt: new Date(start).toISOString(), coverageEndAt: new Date(start + 3_600_000).toISOString(),
+      closedAt: null, purgeAt: purge,
+    };
+    const aggregateId = crypto.createHash("sha256").update([
+      payload.osDeviceId, payload.osAreaId, payload.analyticsCategory, payload.controlId,
+      String(payload.sourceGeneration), String(start),
+    ].join("|"), "utf8").digest("hex");
+    const queued = await store.queueSyncEvent("usage.bucket", aggregateId, payload, { now: start + 3_601_000 });
+    const runtime = { kind: "dinodia_os", version: "recovery-test", capabilities: {} };
+    const originalBatch = await store.prepareSyncBatch(hubInstallationId, runtime, start + 3_601_000);
+    const payloadHash = configChecksum(payload);
+    const requestBodyHash = "a".repeat(64);
+    const envelopeHash = crypto.createHash("sha256").update(JSON.stringify(originalBatch), "utf8").digest("hex");
+    await store.markSyncFailure("hub_sync_usage_bucket_closure_invalid", {
+      statusCode: 409, requestBodyHash, envelopeHash,
+      rejectedEvent: { id: queued.id, sequence: queued.sequence, payloadHash },
+    });
+    assert.equal(store.getSyncOutbox().usageClosureRejection.requestBodyHash, requestBodyHash);
+    assert.deepEqual(store.getSyncOutbox().inFlight, originalBatch);
+
+    const now = Date.parse("2026-10-17T12:00:00.000Z");
+    const authorization = {
+      authorizationId: "00000000-0000-4000-8000-000000000072",
+      rejectedBodyHash: requestBodyHash, targetEventId: queued.id, targetSequence: queued.sequence,
+      closedAt: new Date(start + 3_600_000).toISOString(), expiresAt: new Date(now + 10 * 60_000).toISOString(),
+    };
+    const recoveredBatch = await store.prepareUsageClosureRecovery({ authorization, streamId, acceptedSequence: 0, now });
+    assert.equal(recoveredBatch.events[0].payload.closedAt, "2026-10-16T16:00:00.000Z");
+    assert.deepEqual(Object.keys(recoveredBatch.usageClosureRecovery).sort(), [
+      "authorizationId", "rejectedBodyHash", "targetEventId", "targetSequence", "version",
+    ].sort());
+    assert.deepEqual([recoveredBatch.events[0].payload.onSeconds, recoveredBatch.events[0].payload.offSeconds,
+      recoveredBatch.events[0].payload.unknownSeconds], [1881, 0, 1719]);
+    assert.deepEqual(store.state.syncUsage.buckets, {}, "recovery changes only the queued event, not the newer accumulator");
+    assert.deepEqual(store.getSyncOutbox().events[0], recoveredBatch.events[0], "queued and in-flight copies stay identical");
+
+    const restarted = new Store(path.join(directory, "store.json"));
+    assert.deepEqual(restarted.getSyncOutbox().inFlight, recoveredBatch, "restart retries the exact authorized corrected envelope");
+    await restarted.acknowledgeSyncBatch({ streamId, acceptedThroughSequence: recoveredBatch.toSequence, cloudRevision: 1 }, now + 1000);
+    const completed = restarted.getSyncOutbox();
+    assert.equal(completed.usageClosureRecovery, null);
+    assert.equal(completed.usageClosureRejection, null);
+    assert.equal(completed.usageClosureRecoveryHistory.at(-1).changedFields.join(","), "closedAt");
+    assert.equal(completed.usageClosureRecoveryHistory.at(-1).originalPayloadHash, payloadHash);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("partial closed-hour coverage survives Store restart and retries the identical signed envelope", async () => {
   const { directory, store } = temporaryStore();
   try {
