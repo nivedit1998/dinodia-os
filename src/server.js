@@ -1908,6 +1908,7 @@ function nativeDeviceView(principal, device) {
       (req.method === "POST" && pathname === "/api/dinodia/v1/alexa/state" && scopedPrincipal.principalType === "alexa_state") ||
       (nativeTenantPrincipal && req.method === "POST" && /^\/api\/dinodia\/v1\/commissioning\/sessions(?:\/[^/]+(?:\/(?:matter-payload|select|complete|cancel|resume))?)?$/.test(pathname)) ||
       (nativeTenantPrincipal && req.method === "GET" && /^\/api\/dinodia\/v1\/commissioning\/sessions\/[^/]+$/.test(pathname)) ||
+      (nativeTenantPrincipal && req.method === "POST" && ["/api/dinodia/v1/tenant-device-context", "/api/dinodia/v1/tenant-automations", "/api/dinodia/v1/tenant-device-intents"].includes(pathname)) ||
       (req.method === "POST" && pathname.includes("/entities/") && pathname.endsWith("/service")) ||
       (req.method === "POST" && pathname === "/api/step-up/descriptor-challenge")
     )) {
@@ -1915,6 +1916,132 @@ function nativeDeviceView(principal, device) {
     }
     if (offlinePrincipal && !(req.method === "GET" && (pathname === "/api/dinodia/v1/snapshot" || pathname === "/api/dinodia/v1/areas" || pathname === "/api/dinodia/v1/devices" || /^\/api\/dinodia\/v1\/devices\/[^/]+$/.test(pathname) || pathname === "/api/dinodia/v1/control-catalog" || /^\/api\/dinodia\/v1\/commands\/[^/]+$/.test(pathname)) || req.method === "POST" && pathname === "/api/dinodia/v1/commands")) {
       return nativeContractError(res, 403, "SCOPE_DENIED", "Offline authority is limited to selected-home native device access");
+    }
+    if (["/api/dinodia/v1/tenant-device-context", "/api/dinodia/v1/tenant-automations", "/api/dinodia/v1/tenant-device-intents"].includes(pathname) && req.method === "POST") {
+      if (!appPrincipal || !nativeTenantPrincipal || scopedPrincipal?.householdRole !== "TENANT") {
+        return nativeContractError(res, 403, "SCOPE_DENIED", "A current online tenant phone session is required for this Hub projection");
+      }
+      let input;
+      try { input = await readBody(req, pathname.endsWith("tenant-automations") ? 48 * 1024 : 16 * 1024); }
+      catch { return nativeContractError(res, 413, "REQUEST_TOO_LARGE", "The tenant projection request is too large"); }
+      const common = ["homeId", "membershipId", "accountAccessToken"];
+      const homeId = String(input?.homeId || "");
+      const membershipId = String(input?.membershipId || "");
+      const accountAccessToken = String(input?.accountAccessToken || "");
+      if (!input || typeof input !== "object" || Array.isArray(input)
+        || input.schemaVersion !== "dinodia.v1"
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(homeId)
+        || homeId !== String(scopedPrincipal.homeId || "")
+        || membershipId !== String(scopedPrincipal.membershipId || "")
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(membershipId)
+        || !/^dno-customer-access-[A-Za-z0-9_-]{32,160}$/.test(accountAccessToken)) {
+        return nativeContractError(res, 400, "VALIDATION_FAILED", "The selected tenant projection request is invalid");
+      }
+      const platformHomeId = String(hubStore.getPlatform?.()?.homeId || "");
+      if (!platformHomeId || platformHomeId !== homeId) return nativeContractError(res, 403, "HOME_MISMATCH", "The selected tenant session is for a different Hub home");
+
+      let path;
+      let forwarded;
+      if (pathname === "/api/dinodia/v1/tenant-device-context") {
+        if (Object.keys(input).sort().join("\n") !== [...common, "schemaVersion"].sort().join("\n")) {
+          return nativeContractError(res, 400, "VALIDATION_FAILED", "The tenant device context request contains unsupported fields");
+        }
+        path = "/api/hub-agent/v2/tenant-device-context";
+        forwarded = { schemaVersion: "dinodia.v1", homeId, membershipId, accountAccessToken };
+      } else if (pathname === "/api/dinodia/v1/tenant-automations") {
+        const operation = String(input.operation || "");
+        const operationFields = {
+          list: ["operation"],
+          create: ["operation", "idempotencyKey", "definition"],
+          update: ["operation", "idempotencyKey", "automationId", "expectedRevision", "definition"],
+          enable: ["operation", "idempotencyKey", "automationId", "expectedRevision", "enabled"],
+          delete: ["operation", "idempotencyKey", "automationId", "expectedRevision"],
+        };
+        const fields = operationFields[operation];
+        if (!fields || Object.keys(input).sort().join("\n") !== [...common, "schemaVersion", ...fields].sort().join("\n")) {
+          return nativeContractError(res, 400, "VALIDATION_FAILED", "The tenant automation operation contains unsupported fields");
+        }
+        if (operation !== "list" && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(input.idempotencyKey || ""))) {
+          return nativeContractError(res, 400, "VALIDATION_FAILED", "A valid tenant automation idempotency key is required");
+        }
+        if (["update", "enable", "delete"].includes(operation)
+          && (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(input.automationId || ""))
+            || !Number.isSafeInteger(input.expectedRevision) || Number(input.expectedRevision) < 1)) {
+          return nativeContractError(res, 400, "VALIDATION_FAILED", "The tenant automation target or revision is invalid");
+        }
+        if (operation === "create" || operation === "update") {
+          if (!input.definition || typeof input.definition !== "object" || Array.isArray(input.definition)
+            || Buffer.byteLength(JSON.stringify(input.definition), "utf8") > 32 * 1024) {
+            return nativeContractError(res, 400, "VALIDATION_FAILED", "The tenant automation definition is invalid");
+          }
+        }
+        if (operation === "enable" && typeof input.enabled !== "boolean") return nativeContractError(res, 400, "VALIDATION_FAILED", "The requested automation state is invalid");
+        path = "/api/hub-agent/v2/tenant-automations";
+        forwarded = {
+          schemaVersion: "dinodia.v1", homeId, membershipId, accountAccessToken, operation,
+          ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+          ...(input.automationId ? { automationId: input.automationId } : {}),
+          ...(Object.hasOwn(input, "expectedRevision") ? { expectedRevision: input.expectedRevision } : {}),
+          ...(Object.hasOwn(input, "definition") ? { definition: input.definition } : {}),
+          ...(Object.hasOwn(input, "enabled") ? { enabled: input.enabled } : {}),
+        };
+      } else {
+        const operation = String(input.operation || "");
+        const operationFields = {
+          layout_save: ["expectedRevision", "document"],
+          presentation: ["idempotencyKey", "deviceId", "mutation"],
+          remove: ["idempotencyKey", "deviceId", "request"],
+        };
+        const fields = operationFields[operation];
+        if (!fields || Object.keys(input).sort().join("\n") !== [...common, "schemaVersion", "operation", ...fields].sort().join("\n")) {
+          return nativeContractError(res, 400, "VALIDATION_FAILED", "The tenant device intent contains unsupported fields");
+        }
+        if (operation === "layout_save" && (!Number.isSafeInteger(input.expectedRevision) || Number(input.expectedRevision) < 0
+          || !input.document || typeof input.document !== "object" || Array.isArray(input.document)
+          || Buffer.byteLength(JSON.stringify(input.document), "utf8") > 12 * 1024)) {
+          return nativeContractError(res, 400, "VALIDATION_FAILED", "The tenant layout update is invalid");
+        }
+        if (operation !== "layout_save" && (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(input.idempotencyKey || ""))
+          || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(input.deviceId || "")))) {
+          return nativeContractError(res, 400, "VALIDATION_FAILED", "The tenant device intent target or idempotency key is invalid");
+        }
+        if (operation === "presentation" && (!input.mutation || typeof input.mutation !== "object" || Array.isArray(input.mutation)
+          || Buffer.byteLength(JSON.stringify(input.mutation), "utf8") > 4096)) {
+          return nativeContractError(res, 400, "VALIDATION_FAILED", "The tenant device presentation update is invalid");
+        }
+        if (operation === "remove" && (!input.request || typeof input.request !== "object" || Array.isArray(input.request)
+          || Buffer.byteLength(JSON.stringify(input.request), "utf8") > 12 * 1024)) {
+          return nativeContractError(res, 400, "VALIDATION_FAILED", "The tenant device removal request is invalid");
+        }
+        path = "/api/hub-agent/v2/tenant-device-intents";
+        forwarded = {
+          schemaVersion: "dinodia.v1", homeId, membershipId, accountAccessToken, operation,
+          ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+          ...(input.deviceId ? { deviceId: input.deviceId } : {}),
+          ...(Object.hasOwn(input, "expectedRevision") ? { expectedRevision: input.expectedRevision } : {}),
+          ...(Object.hasOwn(input, "document") ? { document: input.document } : {}),
+          ...(Object.hasOwn(input, "mutation") ? { mutation: input.mutation } : {}),
+          ...(Object.hasOwn(input, "request") ? { request: input.request } : {}),
+        };
+      }
+      if (pathname === "/api/dinodia/v1/tenant-automations" && input.operation === "list"
+        && scopedPrincipal?.principalType === "app") {
+        const { buildTenantAutomationSnapshot } = require("./tenantAutomationProjection");
+        const snapshot = buildTenantAutomationSnapshot({ store: hubStore, principal: scopedPrincipal });
+        if (snapshot) return json(res, 200, snapshot, { "Cache-Control": "no-store, private", "Pragma": "no-cache" });
+      }
+      try {
+        const result = await pairing.requestWithHubIdentity(path, forwarded);
+        return json(res, 200, result, { "Cache-Control": "no-store, private", "Pragma": "no-cache" });
+      } catch (error) {
+        const status = Number(error?.statusCode);
+        const code = String(error?.code || "");
+        if ([400, 401, 403, 404, 409, 410, 413, 429].includes(status) && /^[a-z0-9_.:-]{1,80}$/i.test(code)) {
+          return nativeContractError(res, status, code.toUpperCase(), "Platform did not authorize or commit the selected tenant request", status === 409 || status === 429);
+        }
+        logger.warn(`[tenant-delegation] request failed (${/^[a-z0-9_.:-]{1,80}$/i.test(code) ? code : "platform_unavailable"})`);
+        return nativeContractError(res, 503, "PLATFORM_UNAVAILABLE", "The selected tenant request could not be confirmed by Platform", true);
+      }
     }
     if (pathname === "/api/dinodia/v1/maintenance/status" && req.method === "GET") {
       if (!(operatorPrincipal?.scope?.includes("os:admin") || nativeTenantPrincipal)) return nativeContractError(res, 403, "SCOPE_DENIED", "A selected tenant membership or authenticated operator is required");
@@ -3367,7 +3494,7 @@ function nativeDeviceView(principal, device) {
   function isNativeAppRoute(req, url) {
     return (req.method === "GET" && (url.pathname === "/api/dinodia/v1/snapshot" || url.pathname === "/api/dinodia/v1/areas" || url.pathname === "/api/dinodia/v1/devices" || /^\/api\/dinodia\/v1\/devices\/[^/]+$/.test(url.pathname) || url.pathname === "/api/dinodia/v1/control-catalog" || url.pathname === "/api/dinodia/v1/maintenance/status" || /^\/api\/dinodia\/v1\/commands\/[^/]+$/.test(url.pathname)))
       || (req.method === "DELETE" && /^\/api\/dinodia\/v1\/devices\/[^/]+$/.test(url.pathname))
-      || (req.method === "POST" && (url.pathname === "/api/dinodia/v1/commands" || url.pathname === "/api/dinodia/v1/alexa/commands" || url.pathname === "/api/dinodia/v1/alexa/state" || url.pathname === "/api/dinodia/v1/offline/challenges" || url.pathname === "/api/dinodia/v1/maintenance/update" || url.pathname === "/api/step-up/descriptor-challenge" || /^\/api\/dinodia\/v1\/commissioning\/sessions(?:\/[^/]+(?:\/(?:matter-payload|select|complete|cancel|resume))?)?$/.test(url.pathname)))
+      || (req.method === "POST" && (url.pathname === "/api/dinodia/v1/commands" || url.pathname === "/api/dinodia/v1/alexa/commands" || url.pathname === "/api/dinodia/v1/alexa/state" || url.pathname === "/api/dinodia/v1/offline/challenges" || url.pathname === "/api/dinodia/v1/maintenance/update" || url.pathname === "/api/dinodia/v1/tenant-device-context" || url.pathname === "/api/dinodia/v1/tenant-automations" || url.pathname === "/api/dinodia/v1/tenant-device-intents" || url.pathname === "/api/step-up/descriptor-challenge" || /^\/api\/dinodia\/v1\/commissioning\/sessions(?:\/[^/]+(?:\/(?:matter-payload|select|complete|cancel|resume))?)?$/.test(url.pathname)))
       || (req.method === "GET" && /^\/api\/dinodia\/v1\/commissioning\/sessions\/[^/]+$/.test(url.pathname));
   }
   function applyDashboardHeaders(res) {

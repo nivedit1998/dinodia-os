@@ -35,6 +35,72 @@ function validAutomation(value) {
   return true;
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+
+function validTenantAutomationProjection(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.keys(value).sort().join("\n") !== ["version", "executionEnabled", "propertyTimeZone", "automations"].sort().join("\n")
+    || value.version !== 1 || typeof value.executionEnabled !== "boolean"
+    || !(value.propertyTimeZone === null || validText(value.propertyTimeZone, 64))
+    || !Array.isArray(value.automations) || value.automations.length > 100) return false;
+  if (new Set(value.automations.map((item) => item?.id)).size !== value.automations.length) return false;
+  return value.automations.every((automation) => {
+    if (!automation || typeof automation !== "object" || Array.isArray(automation)
+      || Object.keys(automation).sort().join("\n") !== ["id", "creatorMembershipId", "name", "status", "revision", "definitionChecksum", "timeZone", "retiredAt", "createdAt", "updatedAt", "trigger", "actions", "lastOutcome"].sort().join("\n")
+      || !UUID.test(String(automation.id || ""))
+      || !(automation.creatorMembershipId === null || UUID.test(String(automation.creatorMembershipId)))
+      || !validText(automation.name, 120)
+      || !["DRAFT", "ACTIVE", "PAUSED", "NEEDS_ATTENTION", "RETIRED"].includes(automation.status)
+      || !Number.isSafeInteger(automation.revision) || automation.revision < 1
+      || !/^[a-f0-9]{64}$/i.test(String(automation.definitionChecksum || ""))
+      || !validText(automation.timeZone, 64)
+      || !(automation.retiredAt === null || UTC.test(String(automation.retiredAt)) && Number.isFinite(Date.parse(automation.retiredAt)))
+      || !UTC.test(String(automation.createdAt || "")) || !Number.isFinite(Date.parse(automation.createdAt))
+      || !UTC.test(String(automation.updatedAt || "")) || !Number.isFinite(Date.parse(automation.updatedAt))
+      || !(automation.trigger === null || automation.trigger && typeof automation.trigger === "object" && !Array.isArray(automation.trigger)
+        && Object.keys(automation.trigger).sort().join("\n") === ["id", "kind", "minuteOfDay", "weekdays", "revision"].sort().join("\n")
+        && UUID.test(String(automation.trigger.id || "")) && automation.trigger.kind === "SCHEDULE"
+        && Number.isSafeInteger(automation.trigger.minuteOfDay) && automation.trigger.minuteOfDay >= 0 && automation.trigger.minuteOfDay <= 1439
+        && Array.isArray(automation.trigger.weekdays) && automation.trigger.weekdays.length >= 1 && automation.trigger.weekdays.length <= 7
+        && automation.trigger.weekdays.every((day) => Number.isSafeInteger(day) && day >= 1 && day <= 7)
+        && new Set(automation.trigger.weekdays).size === automation.trigger.weekdays.length
+        && Number.isSafeInteger(automation.trigger.revision) && automation.trigger.revision >= 1)
+      || !Array.isArray(automation.actions) || automation.actions.length > 32
+      || !(automation.lastOutcome === null || automation.lastOutcome && typeof automation.lastOutcome === "object" && !Array.isArray(automation.lastOutcome))) return false;
+    if (new Set(automation.actions.map((action) => action?.id)).size !== automation.actions.length
+      || automation.actions.some((action) => !action || typeof action !== "object" || Array.isArray(action)
+        || Object.keys(action).sort().join("\n") !== ["id", "deviceId", "osDeviceId", "areaId", "osAreaId", "controlId", "sortOrder", "descriptorRevision", "targetValue", "needsAttention", "deviceManagementClass", "deviceOwnerMembershipId", "deviceLifecycle", "deviceName", "areaName"].sort().join("\n")
+        || !UUID.test(String(action.id || "")) || !UUID.test(String(action.deviceId || "")) || !validText(action.osDeviceId, 160)
+        || !UUID.test(String(action.areaId || "")) || !validText(action.osAreaId, 160) || !validText(action.controlId, 160)
+        || !Number.isSafeInteger(action.sortOrder) || action.sortOrder < 0
+        || !Number.isSafeInteger(action.descriptorRevision) || action.descriptorRevision < 1
+        || !action.targetValue || typeof action.targetValue !== "object" || Array.isArray(action.targetValue)
+        || Buffer.byteLength(JSON.stringify(action.targetValue), "utf8") > 2048 || typeof action.needsAttention !== "boolean"
+        || !["PROPERTY_DEVICE", "TENANT_DEVICE"].includes(action.deviceManagementClass)
+        || !(action.deviceOwnerMembershipId === null || UUID.test(String(action.deviceOwnerMembershipId)))
+        || !["DISCOVERED", "INSTALLED", "VIEW_ONLY", "RETIRED", "REMOVAL_PENDING", "REMOVED", "RECOMMISSION_REQUIRED"].includes(action.deviceLifecycle)
+        || !validText(action.deviceName, 120) || !validText(action.areaName, 120))) return false;
+    const outcome = automation.lastOutcome;
+    if (outcome !== null) {
+      const outcomeKeys = ["status", "startedAt", "completedAt", ...(Object.hasOwn(outcome, "actionCount") ? ["actionCount", "actionStatuses"] : [])];
+      if (Object.keys(outcome).sort().join("\n") !== outcomeKeys.sort().join("\n")
+        || !["queued", "running", "succeeded", "partial", "failed", "skipped", "cancelled", "uncertain"].includes(outcome.status)
+        || !UTC.test(String(outcome.startedAt || "")) || !Number.isFinite(Date.parse(outcome.startedAt))
+        || !(outcome.completedAt === null || UTC.test(String(outcome.completedAt)) && Number.isFinite(Date.parse(outcome.completedAt)))) return false;
+      if (Object.hasOwn(outcome, "actionCount")) {
+        const counts = outcome.actionStatuses;
+        if (!Number.isSafeInteger(outcome.actionCount) || outcome.actionCount < 0 || outcome.actionCount > 32
+          || !counts || typeof counts !== "object" || Array.isArray(counts)
+          || Object.keys(counts).sort().join("\n") !== ["applied", "failed", "uncertain", "skipped"].sort().join("\n")
+          || Object.values(counts).some((count) => !Number.isSafeInteger(count) || count < 0 || count > outcome.actionCount)
+          || Object.values(counts).reduce((sum, count) => sum + count, 0) > outcome.actionCount) return false;
+      }
+    }
+    return true;
+  });
+}
+
 function projectCloudDevicePolicies(configuration) {
   const areaIdsByOsId = new Map((configuration?.areas || []).map((area) => [String(area.osAreaId), String(area.id)]));
   return Object.fromEntries((configuration?.devicePolicies || []).map((policy) => [String(policy.osDeviceId), {
@@ -47,7 +113,10 @@ function projectCloudDevicePolicies(configuration) {
 function validateCloudConfiguration(value, current = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const keys = ["revision", "policyRevision", "areas", "memberships", "devicePolicies", "automations", "releasePolicy", "checksum"];
-  if (Object.keys(value).sort().join("\n") !== keys.sort().join("\n")
+  const projectionKey = Object.hasOwn(value, "tenantAutomationProjection");
+  if (!(Object.keys(value).sort().join("\n") === keys.sort().join("\n")
+      || projectionKey && Object.keys(value).sort().join("\n") === [...keys, "tenantAutomationProjection"].sort().join("\n"))
+    || projectionKey && !validTenantAutomationProjection(value.tenantAutomationProjection)
     || !Number.isSafeInteger(value.revision) || value.revision < Number(current.cloudRevision || 0)
     || !Number.isSafeInteger(value.policyRevision) || value.policyRevision < Number(current.policyRevision || 0)
     || !Array.isArray(value.areas) || value.areas.length > 1000
@@ -150,4 +219,4 @@ async function applyCloudConfiguration(store, value) {
   return store.savePlatform(platformPatch);
 }
 
-module.exports = { applyCloudConfiguration, validateCloudConfiguration, projectCloudDevicePolicies };
+module.exports = { applyCloudConfiguration, validateCloudConfiguration, projectCloudDevicePolicies, validTenantAutomationProjection };

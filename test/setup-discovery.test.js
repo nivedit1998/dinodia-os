@@ -3,6 +3,8 @@ const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
+const { spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
 const { SetupDiscovery, privateInterface, privateAddress } = require("../src/setupDiscovery");
 const { configureSetupDiscovery, avahiSetupConfigMatches } = require("../src/avahiSetupConfig");
@@ -288,8 +290,93 @@ test("Avahi daemon configuration confines alias and service publication to one s
   assert.equal(avahiSetupConfigMatches(`${configured}\n[server]\nallow-interfaces=wlan0\n`, { serial: "din-home-001", interfaceName: "eth0" }), false);
 });
 
+test("Avahi reconciliation restores exact prior configuration when restart or applied-config verification fails", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "dinodia-avahi-rollback-"));
+  const identityPath = path.join(temporary, "identity.json");
+  const environmentPath = path.join(temporary, "environment");
+  const configPath = path.join(temporary, "avahi-daemon.conf");
+  const original = "[server]\nallow-interfaces=eth0\n\n[publish]\npublish-addresses=yes\npublish-workstation=no\n";
+  const interfaces = { wlan0: [{ address: "192.168.50.14", family: "IPv4", internal: false }] };
+  try {
+    fs.writeFileSync(identityPath, JSON.stringify({ serial: "din-home-001" }));
+    fs.writeFileSync(environmentPath, "DINODIA_SETUP_INTERFACE=eth0\n");
+    fs.writeFileSync(configPath, original);
+    const { reconcileAvahiSetup } = await import(pathToFileURL(path.join(__dirname, "..", "scripts", "reconcile_setup_avahi.mjs")).href);
+
+    let restartCalls = 0;
+    assert.throws(() => reconcileAvahiSetup({
+      identityPath, environmentPath, configPath, interfaces, physicalCheck: () => true,
+      active: true, isActive: () => true,
+      replaceConfig: (file, text) => fs.writeFileSync(file, text),
+      runSystemctl(args) {
+        if (args[0] === "restart" && restartCalls++ === 0) throw new Error("simulated restart failure");
+      },
+    }), /simulated restart failure/);
+    assert.equal(fs.readFileSync(configPath, "utf8"), original, "failed daemon restart must restore the exact old config bytes");
+    assert.equal(restartCalls, 2, "rollback attempts one restart with the restored config");
+
+    assert.throws(() => reconcileAvahiSetup({
+      identityPath, environmentPath, configPath, interfaces, physicalCheck: () => true,
+      active: true, isActive: () => true,
+      runSystemctl() {},
+      replaceConfig(file, text) {
+        // Simulate an atomic writer that returned but did not apply the
+        // selected-interface configuration. The reconciler must detect it.
+        fs.writeFileSync(file, text === original ? original : `${text}\n[server]\nallow-interfaces=eth0\n`);
+      },
+    }), /did not match the selected physical interface/);
+    assert.equal(fs.readFileSync(configPath, "utf8"), original, "failed postcondition must restore the exact old config bytes");
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("root discovery CLI executes through release symlinks and imports remain side-effect free", () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "dinodia-avahi-cli-"));
+  const identityPath = path.join(temporary, "identity.json");
+  const environmentPath = path.join(temporary, "environment");
+  const configPath = path.join(temporary, "avahi-daemon.conf");
+  const symlinkPath = path.join(temporary, "reconcile-current.mjs");
+  const symlinkChainPath = path.join(temporary, "reconcile-current-chain.mjs");
+  const scriptPath = path.join(__dirname, "..", "scripts", "reconcile_setup_avahi.mjs");
+  const interfaces = {
+    wlan0: [{ address: "192.168.50.14", family: "IPv4", internal: false }],
+    docker0: [{ address: "172.17.0.1", family: "IPv4", internal: false }],
+  };
+  try {
+    fs.writeFileSync(identityPath, JSON.stringify({ serial: "din-home-001" }));
+    fs.writeFileSync(environmentPath, "DINODIA_SETUP_INTERFACE=eth0\n");
+    fs.writeFileSync(configPath, configureSetupDiscovery("", { serial: "din-home-001", interfaceName: "eth0" }));
+    fs.symlinkSync(scriptPath, symlinkPath);
+    fs.symlinkSync(symlinkPath, symlinkChainPath);
+
+    const invoke = (entry, nodeOptions = []) => spawnSync(process.execPath, [...nodeOptions, entry, "--dry-run", "--identity", identityPath,
+      "--environment", environmentPath, "--config", configPath, "--interfaces-json", JSON.stringify(interfaces)],
+    { encoding: "utf8", timeout: 5000 });
+    for (const [entry, options] of [
+      [scriptPath, []],
+      [symlinkPath, []],
+      [symlinkChainPath, ["--no-warnings"]],
+      [symlinkChainPath, ["--preserve-symlinks-main"]],
+    ]) {
+      const result = invoke(entry, options);
+      assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+      assert.equal(result.stdout, "mDNS interface plan state=AVAILABLE action=restart interface=wlan0\n");
+      assert.equal(result.stderr, "");
+    }
+
+    const beforeImport = fs.readFileSync(configPath, "utf8");
+    const imported = spawnSync(process.execPath, ["--input-type=module", "-e", `await import(${JSON.stringify(require("node:url").pathToFileURL(scriptPath).href)})`],
+      { encoding: "utf8", timeout: 5000 });
+    assert.equal(imported.status, 0, imported.stderr);
+    assert.equal(imported.stdout, "", "library import must not run or print the privileged CLI");
+    assert.equal(fs.readFileSync(configPath, "utf8"), beforeImport, "library import must not mutate Avahi configuration");
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
 test("Avahi CLI integration confirms supported publisher syntax when Linux tools are installed", { skip: !fs.existsSync("/usr/bin/avahi-publish-service") && !fs.existsSync("/usr/sbin/avahi-publish-service") }, () => {
-  const { spawnSync } = require("node:child_process");
   const addressHelp = spawnSync("avahi-publish-address", ["--help"], { encoding: "utf8" });
   const help = spawnSync("avahi-publish-service", ["--help"], { encoding: "utf8" });
   assert.equal(addressHelp.status, 0);
