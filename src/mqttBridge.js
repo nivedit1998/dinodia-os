@@ -445,9 +445,10 @@ class MqttBridge {
     } else {
       return;
     }
-    // The state snapshot and its bounded diagnostic event share the same
-    // deferred whole-Store write. Persisting the event immediately would flush
-    // the telemetry timer and make every adapter report rewrite the Store.
+    // The bounded local diagnostic event is deferred so ordinary adapter
+    // reports can coalesce. updateDeviceState still persists immediately when
+    // the report changes durable sync/analytics state; this option never
+    // delays command, usage, or outbox durability.
     await this.store.addEvent({ type: "device_state", deviceId: device.id, protocol: device.protocol }, { deferPersist: true });
     if (value && typeof value === "object" && value.action && this.onRemoteEvent) {
       const event = this.events.normalize({ deviceId: device.id, endpointId: value.endpoint || value.endpoint_id || "0", payload: value });

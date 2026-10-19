@@ -18,9 +18,9 @@ The original Stage 12 checkout had 41 changed/untracked paths (27 tracked modifi
 
 The Store's `updateDeviceState(..., { deferPersist: true })` scheduled telemetry persistence, but `MqttBridge.handleMessage()` then called `Store.addEvent()` for every state report. `addEvent()` persisted the complete Store immediately, clearing the timer. Therefore the normal MQTT path did not actually coalesce the device state and its diagnostic event into the intended write window.
 
-The repair gives `addEvent()` an opt-in `deferPersist` option and uses it only for the routine MQTT `device_state` event. State and event now share the existing 10-second persistence window. Other event callers retain immediate durability. Any normal Store mutation still flushes the scheduled write, and shutdown still calls `flushPersist()`.
+The repair gives `addEvent()` an opt-in `deferPersist` option and uses it only for the routine MQTT `device_state` event. A follow-up review found that the same deferred `updateDeviceState()` call can also mutate usage-accounting cursors and enqueue `usage.bucket` / `temperature.sample` events. Those are durable sync state—not diagnostics—and must not wait for the debounce window. The Store now distinguishes an accepted usage-source mutation from stale/duplicate observations and forces persistence immediately whenever usage state or an analytics outbox event changes. Only the local `device_state` diagnostic remains coalesced; sync, command, policy, and usage state retain immediate durability.
 
-`test/protocol-bridges.test.js` now exercises the real MQTT handler: it verifies no early disk write, one combined write at the deadline, immediate flush on a configuration mutation, no duplicate timer write, and immediate durability for a non-telemetry event. The focused protocol bridge suite passed 14/14 after this correction. This is behavioral test evidence; an independent production filesystem-write-rate measurement has not yet been made.
+`test/protocol-bridges.test.js` exercises the real MQTT handler: for an ordinary report with no durable sync mutation, it verifies no early disk write, one combined write at the deadline, immediate flush on a configuration mutation, no duplicate timer write, and immediate durability for a non-telemetry event. `test/radiator-observation-repair.test.js` also verifies that a deferred radiator report has already persisted its usage cursor and `usage.bucket` / `temperature.sample` outbox events when the update resolves. This is behavioral test evidence; an independent production filesystem-write-rate measurement has not yet been made.
 
 ## Source history and incident-tool separation
 
@@ -38,13 +38,14 @@ The published product history intentionally excludes these Pi-incident-only file
 
 ## Branch and integration target
 
-The source reconciliation was built from local Stage 12 commit `71e9093`. GitHub currently exposes only `main` (`80e9390`) and `stage-01-security` (`dc87f7f`); there is no remote Stage 12 branch. The reviewed branch is `release/native-v2-cb8fdab-sync-loop-20261019`. The intended PR base is `main`, because this branch contains the completed Stage 2–12 stack and descends from the integration branch. Targeting `stage-01-security` would send the downstream stack backwards into an early-stage branch. This is a broad PR (129 commits beyond `main` before the repair commits), not a narrow fix; push it as a review branch and do not merge without a full-stack review. No production installation is implied by this record.
+The source reconciliation was built from local Stage 12 commit `71e9093`. GitHub currently exposes `main` (`80e9390`) and `stage-01-security` (`dc87f7f`); there is no remote Stage 12 branch. The reviewed branch is `release/native-v2-cb8fdab-sync-loop-20261019`. For a focused review, the proposed base is the Stage 12 starting commit `71e9093`, immediately before `7231bb4`; that exposes only the four reconciliation/sync-loop/LAN-guard/Store-persistence commits. A remote Stage 12 base branch and PR have not been created. Integration of the broader Stage 12 stack into `main` is a separate decision. No production installation is implied by this record.
 
 ## Verification and limits
 
-- Final full Node suite: 511 tests, 507 passed, 0 failed, 4 skipped.
-- Focused protocol bridge, cadence, and generic Docker network guard tests: 23 passed, 0 failed.
+- Final full Node suite after the analytics durability correction: 512 tests, 508 passed, 0 failed, 4 skipped.
+- Focused protocol bridge, radiator observation, and usage-bucket tests: 33 passed, 0 failed in the targeted run; the final full-suite run also includes the added accepted/duplicate/stale mutation assertions.
 - Python Hive adapter tests: 4 passed. Syntax, Native V2 boundary, and Hive lock checks passed.
 - A previous packaged-source baseline passed 510 tests: 506 passed, 0 failed, 4 skipped.
-- The Pi install log reports the sync-loop fix is installed on build `native-v2-cb8fdabed761a404b0fb7f32`; Platform-call reduction still needs a representative Vercel Observability window to quantify.
+- The Pi install log reports the sync-loop fix is installed on build `native-v2-cb8fdabed761a404b0fb7f32`. The user relayed Claude's read-only Vercel Observability measurement for 21:18–22:18 UTC after installation: 52 `sync` calls, 52 `token-state` calls, 190 total function calls, compared with about 1,300 calls for each hub route and 2,800 total in the earlier comparison window. These reported figures imply roughly 96% fewer calls across those two hub routes and 93% fewer total calls; Codex has not independently queried Vercel. A longer 24-hour comparison remains useful but is not required to show the short-term reduction.
 - The original working checkout and its 41 pre-existing modified/untracked paths have not been staged, reset, or edited.
+- Repository public visibility is intentional per the owner; no visibility change was requested or made.

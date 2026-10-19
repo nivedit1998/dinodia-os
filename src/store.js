@@ -229,9 +229,10 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
   if (!policy || policy.managementClass !== "PROPERTY_DEVICE" || policy.lifecycle === "RETIRED"
     || policy.lifecycle === "REMOVED" || policy.lifecycle === "REMOVAL_PENDING"
     || !["LIGHT", "BOILER", "RADIATOR"].includes(policy.analyticsCategory)
-    || !Number.isSafeInteger(generation) || generation < 1) return;
+    || !Number.isSafeInteger(generation) || generation < 1) return false;
   const catalog = nativeSyncControlCatalogProjection(state, device);
-  if (!catalog) return;
+  if (!catalog) return false;
+  let durableSyncMutation = false;
   const entities = Object.values(device.entities || {});
   const usage = state.syncUsage = initialUsageState(state.syncUsage);
   const usageControls = catalog.controls.filter((control) => control.observable
@@ -299,6 +300,7 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
       nowMs,
     });
     state.syncUsage = result.state;
+    if (result.changed) durableSyncMutation = true;
     for (const key of result.changedBuckets) queueUsageBucket(state, key, nowMs);
   }
 
@@ -327,9 +329,13 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
         sourceGeneration: generation, sourceEventKey, temperature: Math.round(value * 100) / 100,
         sourceObservedAt: observedAt, validUntil: new Date(validUntil).toISOString(), quality: "fresh",
       }, { now: nowMs });
-      if (sample) usage.temperatureQueuedKeys = [...usage.temperatureQueuedKeys, sourceEventKey].slice(-1024);
+      if (sample) {
+        usage.temperatureQueuedKeys = [...usage.temperatureQueuedKeys, sourceEventKey].slice(-1024);
+        durableSyncMutation = true;
+      }
     }
   }
+  return durableSyncMutation;
 }
 
 function nativeIncidentSyncProjection(envelope = {}, state = null) {
@@ -1505,15 +1511,16 @@ class Store {
       enqueueNativeDeviceSync(this.state, existing.id ? existing : null, next, { critical: !previousProjection });
       syncEnqueued = true;
     }
-    recordDeviceSyncObservations(this.state, next, observationNow, {
+    const durableSyncMutation = recordDeviceSyncObservations(this.state, next, observationNow, {
       ...(areaChanged ? { ignoreThroughMs: observationNow } : {}),
       sourceGeneration: this.syncSourceGeneration,
     });
     for (const legacyId of this.state.devices[id].legacyIds) this.state.aliases[String(legacyId)] = id;
     if (device.metadata?.friendly_name && String(device.metadata.friendly_name) !== id) this.state.aliases[String(device.metadata.friendly_name)] = id;
-    // Telemetry from a bridge may defer the whole-Store write. Sync events, area
-    // changes, usage and policy changes always write immediately.
-    if (options.deferPersist === true && !syncEnqueued && !areaChanged && !options.devicePolicy) {
+    // Routine bridge state and local diagnostics may share a deferred write.
+    // Durable sync/analytics mutations, Area changes, and policy changes must
+    // be on disk before this update resolves.
+    if (options.deferPersist === true && !syncEnqueued && !areaChanged && !options.devicePolicy && !durableSyncMutation) {
       this.schedulePersist();
       return this.getDevice(id);
     }
