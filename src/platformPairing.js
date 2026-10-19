@@ -56,6 +56,12 @@ function validateLanEndpointObservation(value, serial, expectedPort = 80) {
   } catch { return false; }
 }
 
+// Event types that may wait for the next scheduled sync instead of forcing an
+// immediate follow-up round trip to Platform.
+const ROUTINE_SYNC_EVENT_TYPES = new Set(["usage.bucket", "temperature.sample"]);
+// With nothing to send, an idle hub contacts Platform at most this often.
+const IDLE_SYNC_INTERVAL_MS = 120000;
+
 class PlatformPairing {
   constructor({ store, vault, identityBroker = null, apiUrl = "", serial, nativeApiPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, requestTimeoutMs = 15000, syncRequestTimeoutMs = 70000, runtime, getLanEndpoint = null, getLanTlsIdentity = null, acknowledgeLanTlsIdentity = null, getUpdaterStatus = null, getCloudflareStatus = null, reconcileTenantDeviceRemoval = null, reconcileAuthorizedPropertyInventory = null, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, onBackupRecoveryComplete, logger = console, fetchImpl = fetch, clock = () => Date.now() } = {}) {
     this.store = store;
@@ -585,6 +591,25 @@ class PlatformPairing {
     return { ...base, capabilities };
   }
 
+  /**
+   * The policy timer still ticks every intervalMs, but an idle hub (no urgent
+   * event queued, no incident or endpoint report pending, a recent success)
+   * skips the Platform round trip until IDLE_SYNC_INTERVAL_MS has passed.
+   */
+  scheduledSync() {
+    const outbox = this.store.getSyncOutbox?.();
+    const ack = Number(outbox?.acknowledgedSequence || 0);
+    // Routine telemetry alone does not wake an idle hub; it rides on the next
+    // idle-cadence sync with its latest absolute totals.
+    const pending = (outbox?.events || []).some((event) => event.sequence > ack && !ROUTINE_SYNC_EVENT_TYPES.has(event.type));
+    const incidents = this.store.listPendingIncidentEnvelopes?.().length || 0;
+    const lastSuccessMs = Date.parse(this.lastSuccess || "");
+    const idle = !pending && !incidents && !this.pendingEndpointHeartbeat && Number.isFinite(lastSuccessMs)
+      && this.clock() - lastSuccessMs < IDLE_SYNC_INTERVAL_MS;
+    if (idle) return Promise.resolve(null);
+    return this.syncNow();
+  }
+
   async syncNow() {
     if (this.stopped) return null;
     if (this.syncing) return null;
@@ -1006,8 +1031,12 @@ class PlatformPairing {
       if (syncResult) this.lastSuccess = new Date().toISOString();
       this.lastError = null;
       const outboxAfterSync = this.store.getSyncOutbox?.();
-      const nextPending = (outboxAfterSync?.events || []).find((event) => event.sequence > Number(outboxAfterSync?.acknowledgedSequence || 0));
-      if (!this.stopped && nextPending && (installationSyncMode === "ACTIVE" || (syncResult && nextPending.type === "area.upsert"))) {
+      const pendingAfterSync = (outboxAfterSync?.events || []).filter((event) => event.sequence > Number(outboxAfterSync?.acknowledgedSequence || 0));
+      const nextPending = pendingAfterSync[0];
+      // Routine telemetry waits for the next scheduled sync; only events that
+      // change what tenants, owners or Platform can do are sent straight away.
+      const nextUrgent = pendingAfterSync.find((event) => !ROUTINE_SYNC_EVENT_TYPES.has(event.type));
+      if (!this.stopped && ((nextUrgent && installationSyncMode === "ACTIVE") || (syncResult && nextPending?.type === "area.upsert"))) {
         setImmediate(() => this.syncNow().catch(() => {}));
       }
       this.retryAttempt = 0;
@@ -1073,7 +1102,7 @@ class PlatformPairing {
     if (!this.apiUrl || !this.serial) return;
     this.stopped = false;
     this.syncNow().catch(() => {});
-    this.timer = setInterval(() => this.syncNow().catch(() => {}), this.intervalMs);
+    this.timer = setInterval(() => this.scheduledSync().catch(() => {}), this.intervalMs);
     this.timer.unref?.();
     const publishRecovery = () => {
       this.publishRecoveryLanEndpoint().catch((error) => {
