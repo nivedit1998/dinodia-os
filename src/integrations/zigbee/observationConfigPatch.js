@@ -74,7 +74,16 @@ function ensureUtcLastSeen(lines) {
   else lines.splice(start + 1, 0, "  last_seen: ISO_8601");
 }
 
+function observationProperties(identity) {
+  const extra = identity.additionalProperties || [];
+  if (!Array.isArray(extra) || extra.length > 32 || extra.some(value => typeof value !== "string" || !/^[A-Za-z0-9_]{1,100}$/.test(value))) {
+    throw new Error("Additional observation properties must be exact descriptor property names");
+  }
+  return [...new Set([...TRACKED_PROPERTIES, ...extra])];
+}
+
 function ensurePerDeviceObservationSettings(lines, identity) {
+  const properties = observationProperties(identity);
   let { start, end } = targetDeviceRange(lines, identity);
   const directFields = new Map();
   for (let index = start + 1; index < end; index += 1) {
@@ -99,7 +108,7 @@ function ensurePerDeviceObservationSettings(lines, identity) {
   if (cacheRows.length === 0) {
     let insertionIndex = end;
     while (insertionIndex > start + 1 && !splitComment(lines[insertionIndex - 1]).value.trim()) insertionIndex -= 1;
-    lines.splice(insertionIndex, 0, "    filtered_cache:", ...TRACKED_PROPERTIES.map((property) => `      - ${property}`));
+    lines.splice(insertionIndex, 0, "    filtered_cache:", ...properties.map((property) => `      - ${property}`));
     return;
   }
 
@@ -123,13 +132,13 @@ function ensurePerDeviceObservationSettings(lines, identity) {
       }
       break;
     }
-    const missing = TRACKED_PROPERTIES.filter((property) => !cachedProperties.includes(property));
+    const missing = properties.filter((property) => !cachedProperties.includes(property));
     if (missing.length) lines.splice(cursor, 0, ...missing.map((property) => `      - ${property}`));
   } else if (rawValue.startsWith("[") && rawValue.endsWith("]")) {
     cachedProperties = rawValue.slice(1, -1).split(",").map((value) => value.trim().replace(/^(['"])(.*)\1$/, "$2")).filter(Boolean);
     if (cachedProperties.some((property) => !/^[A-Za-z0-9_-]+$/.test(property))) throw new Error("Existing inline filtered_cache contains unsupported YAML values");
     const merged = [...cachedProperties];
-    for (const property of TRACKED_PROPERTIES) if (!merged.includes(property)) merged.push(property);
+    for (const property of properties) if (!merged.includes(property)) merged.push(property);
     lines[cacheIndex] = replaceScalarLine(lines[cacheIndex], "filtered_cache", `[${merged.join(", ")}]`);
   } else {
     throw new Error("Existing target filtered_cache is not a supported list");
@@ -149,7 +158,7 @@ function mergeObservationConfiguration(contents, identity) {
   return result;
 }
 
-function clearStaleTrackedState(contents, ieeeAddress) {
+function clearStaleTrackedState(contents, ieeeAddress, properties = TRACKED_PROPERTIES) {
   const state = JSON.parse(String(contents));
   if (!state || typeof state !== "object" || Array.isArray(state)) throw new Error("Zigbee2MQTT state.json must be a device-keyed object");
   const normalizeIeee = (value) => String(value || "").trim().toLowerCase().replace(/^0x/, "");
@@ -160,8 +169,8 @@ function clearStaleTrackedState(contents, ieeeAddress) {
     throw new Error("Exact target device state entry is missing or ambiguous");
   }
   const target = { ...state[matches[0]] };
-  const removed = TRACKED_PROPERTIES.filter((property) => Object.hasOwn(target, property));
-  for (const property of TRACKED_PROPERTIES) delete target[property];
+  const removed = properties.filter((property) => Object.hasOwn(target, property));
+  for (const property of properties) delete target[property];
   return { contents: `${JSON.stringify({ ...state, [matches[0]]: target }, null, 2)}\n`, removed };
 }
 
@@ -184,7 +193,8 @@ function prepareObservationConfiguration({ configPath, statePath, identity }) {
   const previousConfig = fs.readFileSync(configPath, "utf8");
   const previousState = fs.readFileSync(statePath, "utf8");
   const nextConfig = mergeObservationConfiguration(previousConfig, identity);
-  const nextState = clearStaleTrackedState(previousState, identity.ieeeAddress);
+  const properties = observationProperties(identity);
+  const nextState = clearStaleTrackedState(previousState, identity.ieeeAddress, properties);
   const nextStateObject = JSON.parse(nextState.contents);
   const targetKey = Object.keys(nextStateObject).find((key) => key.toLowerCase().replace(/^0x/, "") === identity.ieeeAddress.toLowerCase().replace(/^0x/, ""));
   const remainingTargetState = nextStateObject[targetKey] || {};
@@ -192,7 +202,7 @@ function prepareObservationConfiguration({ configPath, statePath, identity }) {
     configurationContractValid: true,
     configurationChanged: nextConfig !== previousConfig,
     targetStatePropertiesRemoved: nextState.removed,
-    targetStatePropertiesRemaining: TRACKED_PROPERTIES.filter((property) => Object.hasOwn(remainingTargetState, property)),
+    targetStatePropertiesRemaining: properties.filter((property) => Object.hasOwn(remainingTargetState, property)),
   };
   return { configPath, statePath, previousConfig, nextConfig, nextState: nextState.contents, summary };
 }
@@ -227,7 +237,8 @@ function runCli(argv = process.argv.slice(2)) {
   }
   const configPath = args.get("--config");
   const statePath = args.get("--state");
-  const identity = { friendlyName: args.get("--friendly-name"), ieeeAddress: args.get("--ieee-address") };
+  const identity = { friendlyName: args.get("--friendly-name"), ieeeAddress: args.get("--ieee-address"),
+    additionalProperties: args.has("--additional-property") ? [args.get("--additional-property")] : [] };
   if (!configPath || !statePath || !identity.friendlyName || !identity.ieeeAddress || Boolean(args.get("--apply")) === Boolean(args.get("--dry-run"))) {
     throw new Error("Usage: node scripts/radiatorObservationConfig.mjs (--apply|--dry-run) --config PATH --state PATH --friendly-name NAME --ieee-address IEEE");
   }

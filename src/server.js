@@ -1428,7 +1428,10 @@ function nativeDeviceView(principal, device) {
     } else if (control.valueType === "number") {
       value = typeof raw === "number" && Number.isFinite(raw) ? raw : raw !== null && raw !== undefined && raw !== "" && Number.isFinite(Number(raw)) ? Number(raw) : null;
     }
-    const timestamp = Date.parse(String(entity.lastChanged || entity.last_changed || entity.updatedAt || ""));
+    // A composed Zigbee cache update is not a physical acknowledgement.
+    const timestamp = Date.parse(String(device.protocol === "zigbee"
+      ? entity.sourceObservedAt || ""
+      : entity.sourceObservedAt || entity.lastChanged || entity.last_changed || entity.updatedAt || ""));
     return { entity, value, observedAtMs: timestamp, revision: Math.max(0, Number(entity.stateRevision || entity.revision || 0)) };
   }
 
@@ -2546,8 +2549,17 @@ function nativeDeviceView(principal, device) {
           }
           const dispatched = await dispatchNativeCommand(currentPrincipal, dispatchDevice, dispatchControl, command.value);
           if (!dispatched?.dispatched) throw Object.assign(new Error("The current protocol binding is unavailable"), { code: "CONTROL_BINDING_UNAVAILABLE", statusCode: 409 });
-          commandResults[idempotencyHash] = { ...commandResults[idempotencyHash], status: "accepted", adapterProtocol: dispatched.protocol };
-          await hubStore.saveSecurity({ nativeCommandResults: commandResults, nativeCommandIdIndex: commandIdIndex });
+          // Adapter dispatch can overlap receipt timers/physical reports.
+          // Never replace every receipt with the pre-dispatch snapshot or
+          // regress an already terminal result back to accepted.
+          await hubStore.mutateAtomically((state) => {
+            const current = state.security?.nativeCommandResults?.[idempotencyHash];
+            if (current?.status === "dispatching") {
+              state.security.nativeCommandResults[idempotencyHash] = {
+                ...current, status: "accepted", adapterProtocol: dispatched.protocol,
+              };
+            }
+          });
           await reconcileNativeCommandObservation(String(command.deviceId), String(command.controlId));
           const settledEntry = hubStore.getSecurity?.()?.nativeCommandResults?.[idempotencyHash];
           const settledResult = settledEntry?.result || result;

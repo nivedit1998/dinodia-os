@@ -113,10 +113,14 @@ function validateObservationConfiguration(contents, identity = {}) {
   return { ok: true, reason: null };
 }
 
-async function readObservationConfiguration(filePath, identity) {
+async function readObservationConfiguration(filePath, identity, { includeProperties = false } = {}) {
   try {
     const contents = await fs.readFile(filePath, "utf8");
-    return validateObservationConfiguration(contents, identity);
+    const validated = validateObservationConfiguration(contents, identity);
+    if (!validated.ok || !includeProperties) return validated;
+    const device = parseYamlSections(contents).devices.find(entry => matchesDevice(entry, identity));
+    return { ...validated, properties: [...new Set(device.filteredCache)]
+      .filter(property => /^[A-Za-z0-9_]+$/.test(property)) };
   } catch {
     return { ok: false, reason: "configuration_unavailable" };
   }

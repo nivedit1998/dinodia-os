@@ -403,10 +403,12 @@ class MqttBridge {
         observationContract = await readObservationConfiguration(this.observationConfigPath, {
           friendlyName: existing.metadata?.friendly_name || existing.metadata?.friendlyName || parts[0],
           ieeeAddress: existing.metadata?.ieee_address || existing.protocolIdentity?.ieeeAddress,
-        });
+        }, { includeProperties: true });
       }
       if (sourceObservedAt && observationContract.ok && existing) {
-        for (const property of TRACKED_PROPERTIES) {
+        // Only exact properties excluded from this publisher's composed cache
+        // can establish per-property physical evidence, including controls.
+        for (const property of observationContract.properties || []) {
           if (!Object.prototype.hasOwnProperty.call(reportedState, property)) continue;
           const matchingEntities = Object.values(existing.entities || {}).filter((entity) => String(entity.stateKey || entity.binding?.property || "") === property
             && entity.capability?.readable === true && entity.capability?.observable === true

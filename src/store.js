@@ -1076,6 +1076,7 @@ class Store {
   }
 
   setSyncSourceGeneration(value) {
+      stateRevision: Math.max(0, Number(previous.stateRevision) || 0) + (candidateIsNewer ? 1 : 0),
     const generation = Number(value);
     this.syncSourceGeneration = Number.isSafeInteger(generation) && generation > 0 ? generation : null;
     return this.syncSourceGeneration;
