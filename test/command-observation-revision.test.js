@@ -62,3 +62,31 @@ test('actual MQTT control evidence requires that exact control property to be ex
     assert.equal(entity().stateRevision,1,'retained replay cannot renew control evidence');
   } finally {await fs.rm(directory,{recursive:true,force:true});}
 });
+
+test('publisher null placeholders neither erase nor renew other report-only thermostat properties',async()=>{
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'dinodia-null-report-'));
+  try {
+    const store=new Store(path.join(directory,'store.json'));
+    const fixture=JSON.parse(await fs.readFile(path.join(__dirname,'fixtures/zigbee/sonoff-trvzb-observation.json'),'utf8'));
+    const device=normalizeZigbeeDevice(fixture);await store.upsertDevice(device);
+    const configPath=path.join(directory,'configuration.yaml');
+    await fs.writeFile(configPath,mergeObservationConfiguration(`advanced:\n  last_seen: ISO_8601\ndevices:\n  '${fixture.ieee_address}':\n    friendly_name: ${fixture.friendly_name}\n`,{friendlyName:fixture.friendly_name,ieeeAddress:fixture.ieee_address,additionalProperties:['occupied_heating_setpoint']}));
+    const bridge=new MqttBridge({url:'',store,observationConfigPath:configPath,logger:{log(){},error(){}}});
+    const at=new Date(Date.now()-3000).toISOString(), later=new Date(Date.now()-1000).toISOString();
+    const report=payload=>bridge.handleMessage(`zigbee2mqtt/${fixture.friendly_name}`,Buffer.from(JSON.stringify(payload)),{retain:false});
+    const entity=key=>Object.values(store.getDevice(device.id).entities).find(e=>e.stateKey===key);
+    await report({local_temperature:27.2,running_state:'heat',last_seen:at});
+    const temperature={...entity('local_temperature')}, heat={...entity('running_state')};
+    await report({occupied_heating_setpoint:28.5,local_temperature:null,running_state:null,last_seen:later});
+    assert.equal(entity('local_temperature').state,27.2);
+    assert.equal(entity('local_temperature').sourceObservedAt,temperature.sourceObservedAt);
+    assert.equal(entity('local_temperature').stateRevision,temperature.stateRevision);
+    assert.equal(entity('running_state').state,'heat');
+    assert.equal(entity('running_state').sourceObservedAt,heat.sourceObservedAt);
+    assert.equal(entity('running_state').stateRevision,heat.stateRevision);
+    assert.equal(entity('occupied_heating_setpoint').state,28.5);
+    assert.equal(entity('occupied_heating_setpoint').sourceObservedAt,later);
+    await report({local_temperature:0,last_seen:new Date(Date.now()-500).toISOString()});
+    assert.equal(entity('local_temperature').state,0,'zero is a genuine numeric measurement');
+  } finally {await fs.rm(directory,{recursive:true,force:true});}
+});

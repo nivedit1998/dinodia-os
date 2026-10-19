@@ -406,6 +406,15 @@ class MqttBridge {
         }, { includeProperties: true });
       }
       if (sourceObservedAt && observationContract.ok && existing) {
+        // Zigbee2MQTT's Home Assistant extension inserts null mock properties
+        // for absent climate fields after composing the report. For properties
+        // deliberately excluded from cache, null is not a physical reading or
+        // an availability signal. Keep the previous observation with its ORIGINAL
+        // finite validity; never clear or renew it from a publisher placeholder.
+        // Explicit availability messages still independently revoke freshness.
+        for (const property of observationContract.properties || []) {
+          if (reportedState[property] === null) delete reportedState[property];
+        }
         // Only exact properties excluded from this publisher's composed cache
         // can establish per-property physical evidence, including controls.
         for (const property of observationContract.properties || []) {
