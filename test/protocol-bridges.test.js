@@ -47,6 +47,60 @@ test("MQTT bridge ingests Zigbee2MQTT state messages", async () => {
   assert.equal(changed.length, 1);
 });
 
+test("MQTT state and diagnostic event share one deferred durable Store write", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-mqtt-deferred-store-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const file = path.join(directory, "dinodia.json");
+  const store = new Store(file);
+  await store.upsertDevice({ id: "radiator-test", name: "Radiator test", protocol: "zigbee", state: { temperature: 20 } });
+  await store.saveConfigEntry({ entry_id: "ce_zigbee", domain: "zha", title: "Zigbee" });
+
+  const originalPersist = store.persist.bind(store);
+  let persistCalls = 0;
+  let resolvePersisted;
+  const persisted = new Promise((resolve) => { resolvePersisted = resolve; });
+  store.persist = async () => {
+    persistCalls += 1;
+    const result = await originalPersist();
+    resolvePersisted();
+    return result;
+  };
+  const bridge = new MqttBridge({ url: "", store });
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  await bridge.handleMessage("zigbee2mqtt/radiator-test", Buffer.from('{"temperature":21}'));
+  assert.equal(store.getDevice("radiator-test").state.temperature, 21);
+  assert.equal(store.listEvents(1)[0].type, "device_state");
+  assert.equal(persistCalls, 0, "state and event should wait for the shared telemetry flush");
+  const beforeFlush = JSON.parse(await fs.readFile(file, "utf8"));
+  assert.equal(beforeFlush.devices["radiator-test"].state.temperature, 20);
+  assert.notEqual(beforeFlush.events[0]?.type, "device_state");
+
+  t.mock.timers.tick(9_999);
+  assert.equal(persistCalls, 0, "telemetry must not write before the configured 10-second window");
+  t.mock.timers.tick(1);
+  await persisted;
+
+  assert.equal(persistCalls, 1, "the MQTT state and its diagnostic event must commit together");
+  const afterFlush = JSON.parse(await fs.readFile(file, "utf8"));
+  assert.equal(afterFlush.devices["radiator-test"].state.temperature, 21);
+  assert.equal(afterFlush.events[0].type, "device_state");
+
+  await bridge.handleMessage("zigbee2mqtt/radiator-test", Buffer.from('{"temperature":22}'));
+  assert.equal(persistCalls, 1, "the next telemetry report starts a new deferred window");
+  await store.saveArea({ name: "Kitchen" }, "kitchen");
+  assert.equal(persistCalls, 2, "a normal configuration mutation flushes pending telemetry immediately");
+  t.mock.timers.tick(10_000);
+  assert.equal(persistCalls, 2, "a flushed timer must not cause a redundant later write");
+
+  await store.addEvent({ type: "operator_audit_test" });
+  assert.equal(persistCalls, 3, "non-telemetry events remain durable before addEvent resolves");
+  const finalStore = JSON.parse(await fs.readFile(file, "utf8"));
+  assert.equal(finalStore.devices["radiator-test"].state.temperature, 22);
+  assert.ok(finalStore.areas.kitchen);
+  assert.equal(finalStore.events[0].type, "operator_audit_test");
+});
+
 test("MQTT bridge imports Zigbee exposes as child entities", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-mqtt-devices-"));
   const store = new Store(path.join(directory, "dinodia.json"));

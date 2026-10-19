@@ -445,7 +445,10 @@ class MqttBridge {
     } else {
       return;
     }
-    await this.store.addEvent({ type: "device_state", deviceId: device.id, protocol: device.protocol });
+    // The state snapshot and its bounded diagnostic event share the same
+    // deferred whole-Store write. Persisting the event immediately would flush
+    // the telemetry timer and make every adapter report rewrite the Store.
+    await this.store.addEvent({ type: "device_state", deviceId: device.id, protocol: device.protocol }, { deferPersist: true });
     if (value && typeof value === "object" && value.action && this.onRemoteEvent) {
       const event = this.events.normalize({ deviceId: device.id, endpointId: value.endpoint || value.endpoint_id || "0", payload: value });
       if (event && !event.duplicate) await this.onRemoteEvent({ deviceId: device.id, action: event.action, payload: value, normalized: event, timestamp: event.occurredAt });

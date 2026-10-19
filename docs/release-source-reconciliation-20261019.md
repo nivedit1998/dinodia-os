@@ -38,12 +38,13 @@ The published product history intentionally excludes these Pi-incident-only file
 
 ## Branch and integration target
 
-The source reconciliation was built from local Stage 12 commit `71e9093`. GitHub currently exposes only `main` (`80e9390`) and `stage-01-security` (`dc87f7f`); there is no remote Stage 12 branch. The reviewed branch is `release/native-v2-cb8fdab-sync-loop-20261019`. The intended PR base is `main`, because this branch contains the completed Stage 2–12 stack and is an ancestor of the integration branch. Targeting `stage-01-security` would send the downstream stack backwards into an early-stage branch. This is a broad PR (129 commits beyond `main` before the repair commits), not a narrow fix; push it as a review branch and do not merge without a full-stack review. No production installation is implied by this record.
+The source reconciliation was built from local Stage 12 commit `71e9093`. GitHub currently exposes only `main` (`80e9390`) and `stage-01-security` (`dc87f7f`); there is no remote Stage 12 branch. The reviewed branch is `release/native-v2-cb8fdab-sync-loop-20261019`. The intended PR base is `main`, because this branch contains the completed Stage 2–12 stack and descends from the integration branch. Targeting `stage-01-security` would send the downstream stack backwards into an early-stage branch. This is a broad PR (129 commits beyond `main` before the repair commits), not a narrow fix; push it as a review branch and do not merge without a full-stack review. No production installation is implied by this record.
 
 ## Verification and limits
 
-- The pre-existing reconciliation branch's patched source previously passed 515 tests: 511 passed, 0 failed, 4 skipped. The final reviewed branch is being rerun after the deferred-event correction and incident-path removal.
-- The focused MQTT/protocol bridge suite after the correction: 14 passed, 0 failed.
+- Final full Node suite: 511 tests, 507 passed, 0 failed, 4 skipped.
+- Focused protocol bridge, cadence, and generic Docker network guard tests: 23 passed, 0 failed.
+- Python Hive adapter tests: 4 passed. Syntax, Native V2 boundary, and Hive lock checks passed.
 - A previous packaged-source baseline passed 510 tests: 506 passed, 0 failed, 4 skipped.
 - The Pi install log reports the sync-loop fix is installed on build `native-v2-cb8fdabed761a404b0fb7f32`; Platform-call reduction still needs a representative Vercel Observability window to quantify.
 - The original working checkout and its 41 pre-existing modified/untracked paths have not been staged, reset, or edited.

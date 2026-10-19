@@ -3539,13 +3539,17 @@ class Store {
     return Object.values(this.state.automationOccurrences || {}).filter((item) => automationId === null || item.automationId === String(automationId)).map(clone);
   }
 
-  async addEvent(event) {
+  async addEvent(event, { deferPersist = false } = {}) {
     this.state.events.unshift({
       id: crypto.randomUUID(),
       timestamp: new Date().toISOString(),
       ...clone(event),
     });
     this.state.events = this.state.events.slice(0, 500);
+    if (deferPersist) {
+      this.schedulePersist();
+      return;
+    }
     await this.persist();
   }
 
