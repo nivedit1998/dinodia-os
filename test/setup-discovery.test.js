@@ -221,8 +221,8 @@ test("Pi installer preflights candidate before installing Avahi publisher depend
   assert.match(installer, /--no-index --find-links .*--only-binary=:all: --require-hashes/);
   const offlinePipInstall = installer.indexOf("--no-index --find-links");
   const wheelhouseRemoval = installer.indexOf('rm -rf -- "$HIVE_WHEELHOUSE_STAGE"');
-  const releaseCopy = installer.indexOf('cp -a "$STAGE_DIR" "$RELEASE_DIR"');
-  assert.ok(offlinePipInstall > stageCopy && wheelhouseRemoval > offlinePipInstall && releaseCopy > wheelhouseRemoval);
+  const releasePublish = installer.indexOf('mv -T --no-clobber -- "$STAGE_DIR" "$RELEASE_DIR"');
+  assert.ok(offlinePipInstall > stageCopy && wheelhouseRemoval > offlinePipInstall && releasePublish > wheelhouseRemoval);
   const serviceUnit = fs.readFileSync(path.join(__dirname, "..", "systemd", "dinodia-setup-discovery-sync.service"), "utf8");
   const timerUnit = fs.readFileSync(path.join(__dirname, "..", "systemd", "dinodia-setup-discovery-sync.timer"), "utf8");
   assert.match(serviceUnit, /User=root/);
