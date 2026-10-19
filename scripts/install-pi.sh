@@ -297,8 +297,11 @@ if [[ -d "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then
   cp -p "$current_real/package.json" "$BACKUP_DIR/package.json" 2>/dev/null || true
 fi
 
-cp -a "$STAGE_DIR" "$RELEASE_DIR"
-rm -rf -- "$STAGE_DIR"
+# Both paths are under RELEASE_ROOT: publish by a same-filesystem rename,
+# not a second full dependency copy that can exhaust filesystem inodes.
+[[ ! -e "$RELEASE_DIR" && ! -L "$RELEASE_DIR" ]] || die "release identity appeared before publication"
+mv -T --no-clobber -- "$STAGE_DIR" "$RELEASE_DIR"
+[[ ! -e "$STAGE_DIR" && -d "$RELEASE_DIR" ]] || die "staged release publication did not complete"
 STAGE_DIR=""
 
 # Root's periodic interface reconciler must never execute source writable by
