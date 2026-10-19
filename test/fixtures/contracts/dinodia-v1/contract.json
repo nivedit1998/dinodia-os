@@ -2322,6 +2322,21 @@
       ],
       "additionalProperties": false
     },
+    "customerInvitationStatusReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "invitationId", "state", "homeId", "role", "homeMembershipId"],
+      "properties": {
+        "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true },
+        "invitationId": { "$ref": "#/$defs/id" },
+        "state": { "enum": ["PENDING", "ACCEPTED", "DECLINED", "EXPIRED", "REPLACED", "REVOKED"] },
+        "homeId": { "$ref": "#/$defs/id" }, "role": { "enum": ["OWNER", "PROPERTY_MANAGER", "TENANT"] },
+        "homeMembershipId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] }
+      },
+      "allOf": [
+        { "if": { "properties": { "state": { "enum": ["PENDING", "DECLINED", "EXPIRED", "REPLACED", "REVOKED"] } }, "required": ["state"] }, "then": { "properties": { "homeMembershipId": { "type": "null" } } } }
+      ],
+      "additionalProperties": false
+    },
     "customerRoomQrScanRequest": {
       "type": "object", "required": ["reference"],
       "properties": { "reference": { "type": "string", "pattern": "^dno_room_[A-Za-z0-9_-]{40,64}$" } }, "additionalProperties": false

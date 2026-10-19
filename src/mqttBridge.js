@@ -415,8 +415,6 @@ class MqttBridge {
         for (const property of observationContract.properties || []) {
           if (reportedState[property] === null) delete reportedState[property];
         }
-        // Only exact properties excluded from this publisher's composed cache
-        // can establish per-property physical evidence, including controls.
         for (const property of observationContract.properties || []) {
           if (!Object.prototype.hasOwnProperty.call(reportedState, property)) continue;
           const matchingEntities = Object.values(existing.entities || {}).filter((entity) => String(entity.stateKey || entity.binding?.property || "") === property
@@ -439,6 +437,7 @@ class MqttBridge {
         protocol: "zigbee", available: true, name: existing?.name || id,
         reportedStateKeys: Object.keys(reportedState),
         nowMs: receivedMs,
+        deferPersist: true,
         ...(lastSeenAt ? { lastSeenAt } : {}),
         sourceObservedAtByStateKey, sourceReceivedAtByStateKey,
         reportedEndpointId: value.endpoint ?? value.endpoint_id,
@@ -446,7 +445,11 @@ class MqttBridge {
     } else {
       return;
     }
-    await this.store.addEvent({ type: "device_state", deviceId: device.id, protocol: device.protocol });
+    // The bounded local diagnostic event is deferred so ordinary adapter
+    // reports can coalesce. updateDeviceState still persists immediately when
+    // the report changes durable sync/analytics state; this option never
+    // delays command, usage, or outbox durability.
+    await this.store.addEvent({ type: "device_state", deviceId: device.id, protocol: device.protocol }, { deferPersist: true });
     if (value && typeof value === "object" && value.action && this.onRemoteEvent) {
       const event = this.events.normalize({ deviceId: device.id, endpointId: value.endpoint || value.endpoint_id || "0", payload: value });
       if (event && !event.duplicate) await this.onRemoteEvent({ deviceId: device.id, action: event.action, payload: value, normalized: event, timestamp: event.occurredAt });

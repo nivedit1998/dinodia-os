@@ -121,7 +121,7 @@ services:
       - "${THREAD_RCP_DEVICE:-/dev/serial/by-id/REPLACE_THREAD_RCP}:/dev/ttyACM0"
       - "/dev/net/tun:/dev/net/tun"
     volumes:
-      - ./data/otbr:/data
+      - ${DINODIA_DATA_DIR:-./data}/otbr:/data
     environment:
       OT_RCP_DEVICE: ${OT_RCP_DEVICE:-spinel+hdlc+uart:///dev/ttyACM0?uart-baudrate=460800}
       OT_INFRA_IF: ${OT_INFRA_IF:-eth0}

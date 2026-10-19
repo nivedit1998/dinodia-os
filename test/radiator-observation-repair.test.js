@@ -279,6 +279,49 @@ test("missing broker identity generation blocks telemetry; a verified generation
   }
 });
 
+test("deferred MQTT radiator reports durably persist usage and temperature sync evidence immediately", async (t) => {
+  const { store } = temporaryStore();
+  t.after(() => fs.promises.rm(path.dirname(store.filePath), { recursive: true, force: true }));
+  const device = readyTrv();
+  await store.saveArea({ name: "Room 1", icon: "room" }, "os-area-room-1");
+  await store.upsertDevice(device);
+  const stored = store.getDevice(device.id);
+  await store.savePlatform({
+    homeId: "home-fixture",
+    devicePolicies: { [device.id]: {
+      osDeviceId: device.id, managementClass: "PROPERTY_DEVICE", ownerMembershipId: null,
+      analyticsCategory: "RADIATOR", lifecycle: "INSTALLED", descriptorRevision: stored.presentation.descriptorRevision,
+      descriptorDigest: "b".repeat(64), osAreaIds: ["os-area-room-1"],
+    } },
+  });
+  store.setSyncSourceGeneration(4);
+
+  const originalPersist = store.persist.bind(store);
+  let persistCalls = 0;
+  store.persist = async () => {
+    persistCalls += 1;
+    return originalPersist();
+  };
+  const observedAt = new Date(Date.now() - 5_000).toISOString();
+  await store.updateDeviceState(device.id, {
+    running_state: "heat", local_temperature: 19.5,
+  }, {
+    sourceObservedAtByStateKey: { running_state: observedAt, local_temperature: observedAt },
+    sourceReceivedAtByStateKey: { running_state: new Date().toISOString(), local_temperature: new Date().toISOString() },
+    reportedStateKeys: ["running_state", "local_temperature"],
+    nowMs: Date.now(), deferPersist: true,
+  });
+
+  assert.equal(persistCalls, 1, "analytics and durable outbox changes must bypass the deferred diagnostic-only save window");
+  const persisted = JSON.parse(await fs.promises.readFile(store.filePath, "utf8"));
+  const syncEvents = persisted.syncOutbox.events.filter((event) => ["usage.bucket", "temperature.sample"].includes(event.type));
+  assert.ok(syncEvents.some((event) => event.type === "usage.bucket" && event.payload.sourceGeneration === 4),
+    "usage coverage generated from a physical report must already be durable when updateDeviceState resolves");
+  assert.ok(syncEvents.some((event) => event.type === "temperature.sample" && event.payload.sourceObservedAt === observedAt),
+    "the source-timed radiator sample must already be durable when updateDeviceState resolves");
+  assert.ok(Object.keys(persisted.syncUsage.sources).length > 0, "the activity cursor must not be left only in memory");
+});
+
 test("actual MQTT state handling updates declared endpoint properties without fallback duplicates or local-time freshness", async () => {
   const { directory, store } = temporaryStore();
   try {

@@ -1466,6 +1466,21 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { description: Invitation is not visible to this verified account; no target or Home data is returned. }
         "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/invitations/{invitationId}/status:
+    get:
+      summary: "Read the Authenticated Recipient's Exact Invitation Outcome"
+      operationId: getCustomerInvitationDecisionStatus
+      tags: [Account]
+      security: [{ CustomerSessionCookie: [] }, { MobileAccessBearer: [] }]
+      parameters: [{ name: invitationId, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        "200":
+          description: Exact recipient-scoped invitation state; no invitation token, email, address, Area or device data is returned.
+          content:
+            application/json:
+              schema: { $ref: "./contract.json#/$defs/customerInvitationStatusReceipt" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Invitation is not visible to this verified account; missing and wrong-recipient requests are indistinguishable. }
   /api/public/areas/scan:
     post:
       summary: "Preview a Room QR without exposing protected property data"

@@ -93,11 +93,15 @@ test("legacy closed partial bucket recovers its bounded covered span without pad
 
 test("out-of-order observations cannot move source coverage backward or alter newer counters", () => {
   const first = observeUsage(initialUsageState(), observed());
+  assert.equal(first.changed, true, "a newly accepted observation mutates durable source accounting");
+  const duplicate = observeUsage(first.state, observed());
+  assert.equal(duplicate.changed, false, "an identical duplicate does not require a new durable write");
   const stale = observeUsage(first.state, observed({
     activity: "off", observedAt: "2026-10-04T10:34:00.000Z", validUntil: "2026-10-04T10:36:00.000Z",
     nowMs: Date.parse("2026-10-04T10:40:00.000Z"),
   }));
   assert.equal(stale.stale, true);
+  assert.equal(stale.changed, false, "a stale sample does not mutate the durable usage cursor");
   assert.deepEqual(stale.changedBuckets, []);
   assert.deepEqual(stale.state, first.state);
 });

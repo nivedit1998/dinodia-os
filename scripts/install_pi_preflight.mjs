@@ -32,7 +32,7 @@ function required(values, name) {
   return value;
 }
 
-function sourceFingerprint(sourceDir) {
+export function sourceFingerprint(sourceDir) {
   // Hash every file copied into a release, not a hand-maintained sample of
   // runtime entry points. An omitted security module previously allowed a
   // changed identityBroker.js to collide with the already-installed build ID.

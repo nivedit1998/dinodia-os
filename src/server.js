@@ -285,6 +285,20 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   const operatorNow = () => Number(clock());
   let operatorSessionRevalidationTimer = null;
   const hubStore = store || new Store(runtimeConfig.dataFile);
+  const backgroundStoreTasks = new Set();
+  function trackBackgroundStoreTask(task, label) {
+    let tracked;
+    tracked = Promise.resolve(task)
+      .catch((error) => logger.warn(`[shutdown] ${label} did not finish cleanly (${String(error?.code || "storage_unavailable")})`))
+      .finally(() => backgroundStoreTasks.delete(tracked));
+    backgroundStoreTasks.add(tracked);
+    return tracked;
+  }
+  let recoveryRuntimeDeferred = Boolean(hubStore.getSyncOutboxRecovery?.());
+  let operationalRuntimeStarted = false;
+  let operationalRuntimePromise = null;
+  let deferredRuntimeResumePromise = null;
+  const storeRecoveryPending = () => recoveryRuntimeDeferred || Boolean(hubStore.getSyncOutboxRecovery?.());
   const offlineLanAuthorisations = new OfflineLanAuthorisationStore({ store: hubStore, platformPublicKeys: parsePublicKeys(runtimeConfig.appPublicKeys) });
   const lanTlsIdentity = runtimeConfig.nodeEnv === "production"
     ? config.v2Environment === "test" && lanTlsIdentityForTest
@@ -306,7 +320,10 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     : runtimeConfig.nodeEnv === "production" ? new IdentityBrokerClient({ socketPath: runtimeConfig.identitySocketPath }) : null;
   const existingIdentity = hubStore.getIdentity ? hubStore.getIdentity() : {};
   const serial = existingIdentity.serial || runtimeConfig.hubId || `dinodia-${crypto.randomBytes(6).toString("hex")}`;
-  if (!existingIdentity.serial && hubStore.saveIdentity) hubStore.saveIdentity({ serial, instanceId: existingIdentity.instanceId || crypto.randomUUID(), hostname: existingIdentity.hostname || "dinodia" }).catch((error) => logger.error(`[identity] ${error.message}`));
+  if (!existingIdentity.serial && hubStore.saveIdentity) trackBackgroundStoreTask(
+    hubStore.saveIdentity({ serial, instanceId: existingIdentity.instanceId || crypto.randomUUID(), hostname: existingIdentity.hostname || "dinodia" }),
+    "initial hub identity persistence",
+  );
   const revocationCoordinator = new RevocationCoordinator();
   const provisioningPairing = new ProvisioningPairingService({ serial, ttlMs: runtimeConfig.pairingTtlMs, store: hubStore, vault, logger });
   let refreshPhysicalLanListeners = async () => {};
@@ -581,12 +598,24 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   const commissioningEventClients = new Set();
   const nativeCommandOutcomeTimers = new Map();
   let nativeEventQueue = Promise.resolve();
+  async function drainStoreTasks() {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const pending = [...backgroundStoreTasks];
+      const eventQueue = nativeEventQueue;
+      const mutationQueue = hubStore.mutationQueue;
+      const writeQueue = hubStore.writeQueue;
+      await Promise.allSettled([...pending, eventQueue, mutationQueue, writeQueue].filter(Boolean));
+      if (!backgroundStoreTasks.size && eventQueue === nativeEventQueue
+        && mutationQueue === hubStore.mutationQueue && writeQueue === hubStore.writeQueue) return;
+    }
+    throw Object.assign(new Error("Store background writes did not quiesce during shutdown"), { code: "store_shutdown_drain_timeout" });
+  }
   const persistedNativeStreamId = String(hubStore.getSecurity?.()?.nativeStreamId || "");
   const nativeStreamIdValue = /^native:[0-9a-f-]{36}$/i.test(persistedNativeStreamId)
     ? persistedNativeStreamId
     : `native:${crypto.randomUUID()}`;
   if (nativeStreamIdValue !== persistedNativeStreamId) {
-    hubStore.saveSecurity({ nativeStreamId: nativeStreamIdValue }).catch((error) => logger.warn(`[native-events] stream identity persistence failed (${String(error?.code || "storage_unavailable")})`));
+    trackBackgroundStoreTask(hubStore.saveSecurity({ nativeStreamId: nativeStreamIdValue }), "native event stream identity persistence");
   }
   const activity = new ActivityService({ store: hubStore, eventBus, logger });
   let activityIntegrationTimer = null;
@@ -617,7 +646,10 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
           ...(nativeAlexaChangeCauses.has(String(causeType || "")) ? { causeType } : {}) });
       }
     }
-    if (heatingDemandController) heatingDemandController.reconcileDeviceChange(device, previous).catch((error) => logger.error(`[heating-controller] ${error.message}`));
+    if (heatingDemandController) trackBackgroundStoreTask(
+      heatingDemandController.reconcileDeviceChange(device, previous),
+      "heating controller device reconciliation",
+    ).catch((error) => logger.error(`[heating-controller] ${error.message}`));
   }
 
   const mqtt = mqttBridge || new MqttBridge({
@@ -628,7 +660,10 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     eventDedupeMs: runtimeConfig.zigbeeEventDedupeMs,
     store: hubStore,
     observationConfigPath: path.join(runtimeConfig.dataDir || path.dirname(runtimeConfig.dataFile), "zigbee2mqtt", "configuration.yaml"),
-    onDeviceChanged: notifyDeviceChanged,
+    onDeviceChanged: (...args) => trackBackgroundStoreTask(
+      notifyDeviceChanged(...args),
+      "MQTT device projection",
+    ),
     logger,
   });
   const matter = matterBridge || new MatterBridge({
@@ -637,7 +672,10 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     // dataset or starting OTBR. An explicit remote URL remains authoritative.
     url: resolveMatterServerUrl(runtimeConfig.matterServerUrl, hubStore.getThread?.(), runtimeConfig),
     store: hubStore,
-    onDeviceChanged: notifyDeviceChanged,
+    onDeviceChanged: (...args) => trackBackgroundStoreTask(
+      notifyDeviceChanged(...args),
+      "Matter device projection",
+    ),
     logger,
   });
   async function ingestHiveSnapshot(snapshot = {}) {
@@ -754,6 +792,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   });
 
   async function commandDevice(id, protocol, command) {
+    if (storeRecoveryPending()) throw Object.assign(new Error("Device commands are disabled while the recovered Home inventory is being reconciled"), { statusCode: 503, code: "store_backup_recovery_pending" });
     const device = hubStore.getDevice(id);
     if (!device) throw Object.assign(new Error("Device not found"), { statusCode: 404 });
     const selected = protocol || device.protocol;
@@ -805,6 +844,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   }
 
   async function commandEntity(device, entity, serviceId, data = {}, fallbackCommand = {}, observationCause = null) {
+    if (storeRecoveryPending()) throw Object.assign(new Error("Device commands are disabled while the recovered Home inventory is being reconciled"), { statusCode: 503, code: "store_backup_recovery_pending" });
     if (device.protocol === "zigbee" && entity.capability?.bindings?.length) {
       return mqtt.command(device.id, commandForZigbeeBinding(entity, serviceId, data));
     }
@@ -986,6 +1026,51 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     logger,
   });
 
+  async function startOperationalRuntime() {
+    if (operationalRuntimeStarted) return true;
+    if (operationalRuntimePromise) return operationalRuntimePromise;
+    operationalRuntimePromise = (async () => {
+      mqtt.start();
+      matter.start();
+      const threadSettings = hubStore.getThread?.();
+      if (threadSettings?.configured && threadSettings.rcpDevice) {
+        threadRuntime.start({ rcpDevice: threadSettings.rcpDevice, baudRate: threadSettings.baudRate, infraIf: threadSettings.infraIf, threadIf: threadSettings.threadIf })
+          .then((result) => {
+            if (result.ok && !runtimeConfig.matterServerUrl && typeof matter.setUrl === "function") matter.setUrl("ws://127.0.0.1:5580/ws");
+            if (!result.ok) logger.error(`[thread] automatic startup failed: ${result.error || result.reason || "unknown error"}`);
+          })
+          .catch((error) => logger.error(`[thread] automatic startup failed: ${error.message}`));
+      }
+      if (runtimeConfig.nativeAutomationsMode === "enabled") await nativeAutomationScheduler.start();
+      alexaIntegration.start();
+      hive.start().catch((error) => logger.error(`[hive] automatic startup failed: ${error.message}`));
+      googleNest.start().catch((error) => logger.error(`[google-nest] automatic startup failed: ${error.message}`));
+      await electric.tick(hubStore.listDevices());
+      if (!electricTimer) {
+        electricTimer = setInterval(() => electric.tick(hubStore.listDevices()).catch((error) => logger.error(`[electric] ${error.message}`)), 5 * 60 * 1000);
+        electricTimer.unref?.();
+      }
+      await heatingDemandController.evaluate({ reason: recoveryRuntimeDeferred ? "store_recovery_completed" : "startup", execute: false });
+      await heatingDemandController.start();
+      operationalRuntimeStarted = true;
+      return true;
+    })();
+    try { return await operationalRuntimePromise; }
+    finally { operationalRuntimePromise = null; }
+  }
+
+  async function resumeRuntimeAfterStoreRecovery() {
+    if (!recoveryRuntimeDeferred) return operationalRuntimeStarted;
+    if (deferredRuntimeResumePromise) return deferredRuntimeResumePromise;
+    deferredRuntimeResumePromise = (async () => {
+      await startOperationalRuntime();
+      recoveryRuntimeDeferred = false;
+      return true;
+    })();
+    try { return await deferredRuntimeResumePromise; }
+    finally { deferredRuntimeResumePromise = null; }
+  }
+
   pairing = new PlatformPairing({
     store: hubStore,
     vault,
@@ -1002,6 +1087,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     acknowledgeLanTlsIdentity: (generation) => lanTlsIdentity?.acknowledge(Number(generation)) || false,
     getCloudflareStatus: () => cloudflare.status(),
     reconcileAuthorizedPropertyInventory: () => mqtt.reconcileAuthorizedPropertyInventory?.(),
+    onBackupRecoveryComplete: () => resumeRuntimeAfterStoreRecovery(),
     getUpdaterStatus: async () => {
       try {
         const result = await requestUpdaterControl({ operation: "status" }, updaterSocketPath);
@@ -1028,7 +1114,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       nodeEnv: runtimeConfig.nodeEnv,
       kind: "dinodia_os",
       version: VERSION,
-      capabilities: { managedAreaProvisioningV1: true, managedDevicePresentationV1: true, activityIncidentReportingV1: true, alexaNativeProjectionV1: true, alexaNativeDirectiveV1: true,
+      capabilities: { managedAreaProvisioningV1: true, managedDevicePresentationV1: true, activityIncidentReportingV1: true, alexaNativeProjectionV1: true, alexaNativeDirectiveV1: true, nativeTenantAutomationProjectionV1: true,
         ...runtimeConfig.nativeCommissioningCapabilities },
     },
     getAreaSnapshot: () => ({ schemaVersion: 1, capturedAt: new Date().toISOString(), areas: hubStore.listAreas().map((area) => ({ areaId: area.id, name: area.name })) }),
@@ -1328,7 +1414,12 @@ function nativeDeviceView(principal, device) {
         if (!control.observable || !Number.isInteger(control.maxStateValiditySeconds) || control.maxStateValiditySeconds <= 0) continue;
         const entity = nativeRawEntityForControl(source, control.controlId);
         const rawState = entity?.state && typeof entity.state === "object" && !Array.isArray(entity.state) && Object.hasOwn(entity.state, "state") ? entity.state.state : entity?.state;
-        const observedMs = Date.parse(String(entity?.lastChanged || entity?.last_changed || ""));
+        const changedMs = Date.parse(String(entity?.lastChanged || entity?.last_changed || ""));
+        const reportedMs = Date.parse(String(entity?.lastReportedAt || ""));
+        // A value re-reported unchanged by the adapter is still a current
+        // observation (a thermostat setpoint can sit unchanged for hours).
+        // Without a change timestamp there is still no observation at all.
+        const observedMs = Number.isFinite(changedMs) && Number.isFinite(reportedMs) ? Math.max(changedMs, reportedMs) : changedMs;
         const receivedMs = Date.parse(String(entity?.updatedAt || ""));
         const hasObservedAt = Number.isFinite(observedMs);
         const hasReceivedAt = Number.isFinite(receivedMs);
@@ -1428,7 +1519,6 @@ function nativeDeviceView(principal, device) {
     } else if (control.valueType === "number") {
       value = typeof raw === "number" && Number.isFinite(raw) ? raw : raw !== null && raw !== undefined && raw !== "" && Number.isFinite(Number(raw)) ? Number(raw) : null;
     }
-    // A composed Zigbee cache update is not a physical acknowledgement.
     const timestamp = Date.parse(String(device.protocol === "zigbee"
       ? entity.sourceObservedAt || ""
       : entity.sourceObservedAt || entity.lastChanged || entity.last_changed || entity.updatedAt || ""));
@@ -1642,13 +1732,13 @@ function nativeDeviceView(principal, device) {
       || modelEntity?.surface?.controlId
       || entity.capability?.controlId || entity.controlId || entity.id || "");
     if (!controlId) return;
-    reconcileNativeCommandObservation(device.id, controlId).catch(() => {});
+    trackBackgroundStoreTask(reconcileNativeCommandObservation(device.id, controlId), "native command observation reconciliation");
     queueNativeEvent({ kind: "state", deviceId: String(device.id), controlId });
     // Alexa state is synchronized only from the current identity-broker
     // generation, live descriptor and exact current owner/Area policy.
     // Tenant-owned state remains in the owner-bound Alexa route only; it is
     // never copied into the Home-wide property state projection.
-    enqueueAlexaStateObservation(device, entity, event.causeType).catch((error) => logger.warn(`[native-alexa-state] observation projection failed (${String(error?.code || "projection_unavailable")})`));
+    trackBackgroundStoreTask(enqueueAlexaStateObservation(device, entity, event.causeType), "Alexa observation projection");
   });
   eventBus.on("registry_updated", (event = {}) => {
     if (event.registry !== "device") return;
@@ -3360,7 +3450,7 @@ function nativeDeviceView(principal, device) {
       const zigbeeAdapter = adapters.find((adapter) => serialAdapterMatchesPath(adapter, zigbeePath));
       if (zigbeePath && (serialAdapterMatchesPath(selected, zigbeePath) || zigbeeAdapter && sameSerialAdapter(selected, zigbeeAdapter))) return json(res, 409, { error: "The Zigbee coordinator and Thread RCP must use different dongles" });
       const settings = await hubStore.saveThread({ configured: true, rcpDevice: requestedPath, rcpName: selected.name, baudRate: 460800, infraIf: runtimeConfig.otInfraIf, threadIf: runtimeConfig.otThreadIf });
-      const service = await threadRuntime.start({ rcpDevice: settings.rcpDevice, baudRate: settings.baudRate, infraIf: settings.infraIf, threadIf: settings.threadIf });
+      const service = await threadRuntime.start({ rcpDevice: settings.rcpDevice, baudRate: settings.baudRate, infraIf: settings.infraIf, threadIf: settings.threadIf, initializeDataset: true });
       if (service.skipped) return json(res, 503, { error: "Docker is unavailable; the Thread RCP was saved but OTBR was not started", service });
       if (service.ok === false) return json(res, 502, { error: service.error || "OpenThread Border Router could not be started", service });
       if (!runtimeConfig.matterServerUrl && typeof matter.setUrl === "function") matter.setUrl("ws://127.0.0.1:5580/ws");
@@ -4367,6 +4457,10 @@ function nativeDeviceView(principal, device) {
         uptimeSeconds: Math.round(process.uptime()),
         memory: { rssMb: Math.round(memory.rss / 1024 / 1024), heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024) },
         storeSchemaVersion: hubStore.state?.version || 0,
+        storeRecovery: {
+          pending: storeRecoveryPending(),
+          phase: hubStore.getSyncOutboxRecovery?.() ? "awaiting_current_policy_snapshot_receipt" : (recoveryRuntimeDeferred ? "resuming_runtime" : "none"),
+        },
         integrations: {
           mqtt: { configured: Boolean(mqtt.status().configured), connected: Boolean(mqtt.status().connected) },
           matter: { configured: Boolean(matter.status().configured), connected: Boolean(matter.status().connected) },
@@ -4374,6 +4468,13 @@ function nativeDeviceView(principal, device) {
           googleNest: { configured: Boolean(googleNest.status().configured), status: String(googleNest.status().status || "disabled") },
         },
       });
+    }
+    const recoverySafeRead = ["GET", "HEAD", "OPTIONS"].includes(String(req.method || "").toUpperCase())
+      && url.pathname !== runtimeConfig.googleNestCallbackPath;
+    const recoveryHealthRead = url.pathname === "/api/dinodia/v1/health" && req.method === "GET";
+    if (storeRecoveryPending() && !recoveryHealthRead && !recoverySafeRead) {
+      res.setHeader("Retry-After", "5");
+      return json(res, 503, { error: "The restored Home is read-only until its current signed inventory snapshot is accepted", errorCode: "store_backup_recovery_pending", retryable: true });
     }
     if (url.pathname === "/api/dinodia/v1/claim-resolver/challenge") {
       if (req.method !== "POST") return nativeContractError(res, 405, "METHOD_NOT_ALLOWED", "The claim resolver method is not allowed");
@@ -4583,6 +4684,10 @@ function nativeDeviceView(principal, device) {
     try { url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`); }
     catch { socket.destroy(); return; }
     const operatorEventRoute = url.pathname.match(/^\/_dinodia\/admin\/events\/([A-Za-z0-9_-]{24,64})$/);
+    if (storeRecoveryPending() && !operatorEventRoute) {
+      socket.end("HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\nConnection: close\r\n\r\n");
+      return;
+    }
     if (operatorEventRoute) {
       const transport = operatorRequestTransportAllowed(req);
       const expectedOrigin = transport ? `${transport.expectedProtocol}://${req.headers.host}` : "";
@@ -4793,24 +4898,12 @@ function nativeDeviceView(principal, device) {
         logger.warn(`[analytics] verified identity unavailable before MQTT startup; observations remain fail-closed (${String(error?.code || "identity_unavailable").slice(0, 48)})`);
       }
     }
-    mqtt.start();
-    matter.start();
-    const threadSettings = hubStore.getThread?.();
-    if (threadSettings?.configured && threadSettings.rcpDevice) {
-      threadRuntime.start({ rcpDevice: threadSettings.rcpDevice, baudRate: threadSettings.baudRate, infraIf: threadSettings.infraIf, threadIf: threadSettings.threadIf })
-        .then((result) => {
-          if (result.ok && !runtimeConfig.matterServerUrl && typeof matter.setUrl === "function") matter.setUrl("ws://127.0.0.1:5580/ws");
-          if (!result.ok) logger.error(`[thread] automatic startup failed: ${result.error || result.reason || "unknown error"}`);
-        })
-        .catch((error) => logger.error(`[thread] automatic startup failed: ${error.message}`));
-    }
     await hubStore.pruneActivity();
     activity.start();
     if (runtimeConfig.nodeEnv === "production" && !operatorSessionRevalidationTimer) {
       operatorSessionRevalidationTimer = setInterval(() => syncOperatorBrowserSessions().catch(() => {}), runtimeConfig.operatorPolicySyncIntervalMs);
       operatorSessionRevalidationTimer.unref?.();
     }
-    if (runtimeConfig.nativeAutomationsMode === "enabled") await nativeAutomationScheduler.start();
     const previousActivity = hubStore.getActivityState();
     const previousShutdownClean = previousActivity.lastShutdownClean !== false;
     await hubStore.setActivityRuntime({ lastShutdownClean: false, lastStartedAt: new Date().toISOString() });
@@ -4840,9 +4933,6 @@ function nativeDeviceView(principal, device) {
       }, 60 * 60 * 1000);
       certificateRefreshTimer.unref?.();
     }
-    await electric.tick(hubStore.listDevices());
-    electricTimer = setInterval(() => electric.tick(hubStore.listDevices()).catch((error) => logger.error(`[electric] ${error.message}`)), 5 * 60 * 1000);
-    electricTimer.unref?.();
     await cloudflare.start();
     const cloudflareSettings = hubStore.getCloudflare?.() || {};
     if (runtimeConfig.nodeEnv === "production" && cloudflareSettings.mode === "local" && cloudflareSettings.platformVerification?.state !== "PLATFORM_VERIFIED") {
@@ -4850,11 +4940,8 @@ function nativeDeviceView(principal, device) {
       retry.unref?.();
     }
     pairing.start();
-    alexaIntegration.start();
-    hive.start().catch((error) => logger.error(`[hive] automatic startup failed: ${error.message}`));
-    googleNest.start().catch((error) => logger.error(`[google-nest] automatic startup failed: ${error.message}`));
-    await heatingDemandController.evaluate({ reason: "startup", execute: false });
-    await heatingDemandController.start();
+    if (!storeRecoveryPending()) await startOperationalRuntime();
+    else logger.warn("[recovery] radio, automation, device-ingestion and command-producing integrations are deferred until the current Home inventory snapshot is accepted by Platform");
     logger.log(`[dinodia] CloudURL loopback HTTP and selected-interface Native V2 HTTPS listener active on port ${runtimeConfig.nativeApiPort}`);
     return server;
   }
@@ -4871,7 +4958,7 @@ function nativeDeviceView(principal, device) {
     await nativeCommissioningService?.close?.();
     mqtt.close();
     matter.close();
-    heatingDemandController.stop();
+    await heatingDemandController.stop();
     await hive.close();
     await googleNest.close();
     if (nativeAutomationScheduler) await nativeAutomationScheduler.stop();
@@ -4886,6 +4973,13 @@ function nativeDeviceView(principal, device) {
     activityIntegrationTimer = null;
     if (electricTimer) clearInterval(electricTimer);
     electricTimer = null;
+    // State-change listeners and delivery projections append durable data
+    // without blocking their producers. Drain them after integrations and
+    // timers stop, before the final clean-shutdown Store commit.
+    await drainStoreTasks();
+    await heating.flush();
+    await electric.flush();
+    await drainStoreTasks();
     await hubStore.setActivityRuntime({ lastShutdownClean: true, lastStoppedAt: new Date().toISOString() });
     await closeListeningServer(httpsServer);
     await closeListeningServer(setupServer);
@@ -4896,14 +4990,39 @@ function nativeDeviceView(principal, device) {
 }
 
 if (require.main === module) {
-  const hub = createHub();
-  hub.start().catch((error) => {
-    console.error(`[dinodia] startup failed: ${error.message}`);
-    process.exitCode = 1;
+  let hub = null;
+  let stopping = false;
+  const exitCodeFor = (error) => {
+    const code = String(error?.code || "");
+    return code.startsWith("store_") || code.startsWith("secret_") ? 78 : 1;
+  };
+  const shutdown = async () => {
+    if (stopping) return;
+    stopping = true;
+    try { await hub?.stop(); }
+    catch (error) { console.error(`[dinodia] shutdown persistence/cleanup failed: ${error.message}`); process.exitCode = Math.max(process.exitCode || 0, exitCodeFor(error)); }
+    try { await hub?.store?.flushPersist?.(); }
+    catch (error) { console.error(`[dinodia] shutdown Store flush failed: ${error.message}`); process.exitCode = Math.max(process.exitCode || 0, exitCodeFor(error)); }
+    process.exit(process.exitCode || 0);
+  };
+  process.on("SIGINT", () => { void shutdown(); });
+  process.on("SIGTERM", () => { void shutdown(); });
+  process.on("dinodia:store-durability-uncertain", (error) => {
+    console.error(`[dinodia] refusing further service after uncertain Store durability: ${error.message}`);
+    process.exitCode = 78;
+    process.kill(process.pid, "SIGTERM");
   });
-  const shutdown = () => hub.stop().finally(() => process.exit(0));
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  try {
+    hub = createHub();
+    hub.start().catch(async (error) => {
+      console.error(`[dinodia] startup failed: ${error.message}`);
+      process.exitCode = exitCodeFor(error);
+      await shutdown();
+    });
+  } catch (error) {
+    console.error(`[dinodia] startup failed: ${error.message}`);
+    process.exitCode = exitCodeFor(error);
+  }
 }
 
 module.exports = { createHub, safeEqual, hiveCredentialTransportAllowed: isHiveCredentialTransportAllowed, isPrivateLanRequest, isTrustedOfflineLanTransport, shouldAttemptCloudflareVerification };

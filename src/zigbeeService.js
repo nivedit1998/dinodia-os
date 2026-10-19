@@ -1,5 +1,6 @@
 const fs = require("node:fs/promises");
 const { spawn } = require("node:child_process");
+const { assertNoDockerNetworkOverlap } = require("./dockerNetworkGuard");
 
 function run(command, args, { cwd, timeoutMs = 30000, env } = {}) {
   return new Promise((resolve, reject) => {
@@ -22,19 +23,25 @@ function run(command, args, { cwd, timeoutMs = 30000, env } = {}) {
 }
 
 class ZigbeeService {
-  constructor({ composeFile = "", envFile = "", projectDirectory = "", dockerBinary = "docker", composeBinary = "/usr/libexec/docker/cli-plugins/docker-compose", logger = console } = {}) {
+  constructor({ composeFile = "", envFile = "", projectDirectory = "", dockerBinary = "docker", composeBinary = "/usr/libexec/docker/cli-plugins/docker-compose", logger = console, runCommand = run, networkGuard = assertNoDockerNetworkOverlap } = {}) {
     this.composeFile = composeFile;
     this.envFile = envFile;
     this.projectDirectory = projectDirectory;
     this.dockerBinary = dockerBinary;
     this.composeBinary = composeBinary;
     this.logger = logger;
+    this.runCommand = runCommand;
+    this.networkGuard = networkGuard;
     this.lastError = null;
     this.lastActionAt = null;
   }
 
   args(...rest) {
-    const args = ["compose"];
+    // Keep the coordinator, broker and their bridge network attached to one
+    // installation-wide Compose project across immutable release directories.
+    // Compose's default project name is otherwise derived from the current
+    // working directory and can strand old bridges on household LAN addresses.
+    const args = ["compose", "-p", "dinodia-os"];
     if (this.composeFile) args.push("-f", this.composeFile);
     if (this.envFile) args.push("--env-file", this.envFile);
     args.push(...rest);
@@ -84,6 +91,10 @@ class ZigbeeService {
     this.lastActionAt = new Date().toISOString();
     try {
       const options = { timeoutMs: 120000 };
+      // A LAN/VPN move can make an old Docker bridge claim the router's
+      // address. Check all extant bridge IPAM before Compose can create or
+      // reactivate an integration network. Never repair this by pruning.
+      await this.networkGuard({ dockerBinary: this.dockerBinary, runCommand: this.runCommand });
       try {
         await this.compose(["--profile", "zigbee", "up", "-d", "zigbee2mqtt"], { ...options, cwd: this.projectDirectory || undefined });
       } catch {

@@ -45,6 +45,7 @@ class ElectricUsageTracker {
     this.now = now;
     this.maxTrackedEntities = Math.max(1, Number(maxTrackedEntities) || 200);
     this.persistTimer = null;
+    this.persistQueue = Promise.resolve();
   }
 
   state() {
@@ -60,9 +61,24 @@ class ElectricUsageTracker {
     if (this.persistTimer) return;
     this.persistTimer = setTimeout(() => {
       this.persistTimer = null;
-      this.store.persist().catch((error) => this.logger.error(`[electric] ${error.message}`));
+      void this.persistNow();
     }, 500);
     this.persistTimer.unref?.();
+  }
+
+  persistNow() {
+    const operation = this.persistQueue.then(() => this.store.persist());
+    this.persistQueue = operation.catch((error) => this.logger.error(`[electric] ${error.message}`));
+    return this.persistQueue;
+  }
+
+  async flush() {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+      await this.persistNow();
+    }
+    await this.persistQueue;
   }
 
   descriptor(device, surface) {

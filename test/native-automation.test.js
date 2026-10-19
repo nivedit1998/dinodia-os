@@ -13,6 +13,7 @@ const { dateParts, scheduledOccurrence } = require("../src/automations/schedule"
 const { createBindingControl, publicCatalog } = require("../src/automations/controlCatalog");
 const { validateAgainstCatalogue } = require("../src/automations/validator");
 const { createBackup, decryptBackup } = require("../src/backup");
+const { SecretVault } = require("../src/secretVault");
 const execFileAsync = promisify(execFile);
 const { createHub } = require("../src/server");
 
@@ -230,6 +231,7 @@ test("encrypted backup contains native definitions and execution history", async
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-native-backup-"));
   const dataFile = path.join(directory, "dinodia.json");
   const store = new Store(dataFile);
+  new SecretVault({ dataDir: directory });
   const service = new AutomationService({ store, homeId: "home-1", now: () => new Date(NOW), getDevices: () => [], getAreas: () => [], getLabels: () => [] });
   service.internalCatalogue = () => fakeCatalogue();
   await service.create(definition());
@@ -241,7 +243,7 @@ test("encrypted backup contains native definitions and execution history", async
   assert.equal(Object.keys(snapshot.data.automationTriggers).length, 1);
   assert.equal(Object.keys(snapshot.data.automationActions).length, 1);
   await fs.writeFile(dataFile, JSON.stringify({ version: 3, devices: {} }));
-  await execFileAsync(process.execPath, [path.join(__dirname, "../scripts/restore.js"), backupPath, "--confirm"], { cwd: path.join(__dirname, ".."), env: { ...process.env, DINODIA_DATA_DIR: directory } });
+  await execFileAsync(process.execPath, [path.join(__dirname, "../scripts/restore.js"), backupPath, "--confirm"], { cwd: path.join(__dirname, ".."), env: { ...process.env, DINODIA_DATA_DIR: directory, DINODIA_TEST_MODE: "1" } });
   const restored = JSON.parse(await fs.readFile(dataFile, "utf8"));
   assert.equal(restored.version, 10);
   assert.equal(Object.keys(restored.automations).length, 1);

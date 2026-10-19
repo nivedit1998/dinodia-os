@@ -1,3 +1,4 @@
+if (process.env.DINODIA_BACKUP_DATA_DIR) process.env.DINODIA_DATA_DIR = process.env.DINODIA_BACKUP_DATA_DIR;
 const config = require("../src/config");
 const { createBackup } = require("../src/backup");
 

@@ -3,8 +3,11 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const { Store } = require("../src/store");
+const { persistStoreJson } = require("../src/durableStoreFile");
 const { createBackup } = require("../src/backup");
+const { SecretVault } = require("../src/secretVault");
 const { allProjectedSurfaces } = require("../src/capabilities/controlSurfaceProjection");
 const { serializeDevice } = require("../src/contracts/dinodiaV1");
 
@@ -18,6 +21,153 @@ test("store refuses corrupt existing JSON instead of silently starting empty and
   assert.equal(await fs.readFile(file, "utf8"), damaged, "failed recovery must preserve the only source file byte-for-byte");
 });
 
+test("an initialized Store with a missing file fails closed instead of initializing a blank Home", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-store-missing-"));
+  const file = path.join(directory, "dinodia.json");
+  const store = new Store(file);
+  await store.saveArea({ name: "Room 1" }, "room-1");
+  assert.equal(await fs.readFile(`${file}.initialized`, "utf8"), "dinodia-store-initialized-v1\n");
+
+  await fs.unlink(file);
+  assert.throws(() => new Store(file), (error) => error.code === "store_data_unavailable"
+    && error.cause?.code === "store_initialized_file_missing");
+  assert.equal(await fs.readFile(`${file}.initialized`, "utf8"), "dinodia-store-initialized-v1\n");
+});
+
+test("an interrupted Store/vault restore marker blocks Store activation", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-store-restore-pending-"));
+  const file = path.join(directory, "dinodia.json");
+  new Store(file);
+  await fs.writeFile(`${file}.restore-pending`, "dinodia-store-restore-v1\nbackup=prior.backup.json\n", { mode: 0o600 });
+  assert.throws(() => new Store(file), { code: "store_restore_pending" });
+  assert.equal(await fs.readFile(`${file}.restore-pending`, "utf8"), "dinodia-store-restore-v1\nbackup=prior.backup.json\n");
+});
+
+test("a corrupt enrolled Store exits with the systemd no-restart integrity status", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-store-startup-corrupt-"));
+  await fs.writeFile(path.join(directory, "dinodia.json"), "{corrupt", { mode: 0o600 });
+  const entrypoint = path.join(__dirname, "../src/server.js");
+  const result = spawnSync(process.execPath, [entrypoint], {
+    cwd: path.join(__dirname, ".."),
+    encoding: "utf8",
+    env: { ...process.env, DINODIA_DATA_DIR: directory, NODE_ENV: "development" },
+  });
+  assert.equal(result.status, 78, result.stderr);
+  assert.match(result.stderr, /startup failed: Native OS store could not be read safely/);
+  const unit = await fs.readFile(path.join(__dirname, "../systemd/dinodia-os.service"), "utf8");
+  assert.match(unit, /^RestartPreventExitStatus=78$/m);
+});
+
+test("durable Store writes retain one prior valid generation and refuse symlink targets", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-store-generation-"));
+  const file = path.join(directory, "dinodia.json");
+  const store = new Store(file);
+  await store.upsertDevice({ id: "lamp-one", name: "Lamp one", protocol: "virtual", state: { power: "OFF" } });
+  await store.upsertDevice({ id: "lamp-two", name: "Lamp two", protocol: "virtual", state: { power: "OFF" } });
+
+  const current = JSON.parse(await fs.readFile(file, "utf8"));
+  const previous = JSON.parse(await fs.readFile(`${file}.previous`, "utf8"));
+  assert.ok(current.devices["lamp-two"]);
+  assert.ok(current.devices["lamp-one"]);
+  assert.ok(previous.devices["lamp-one"]);
+  assert.equal(previous.devices["lamp-two"], undefined);
+  const symlinkFile = path.join(directory, "linked-store.json");
+  await fs.symlink(file, symlinkFile);
+  await assert.rejects(persistStoreJson(symlinkFile, JSON.stringify({ version: 10 })), (error) => error.code === "store_file_type_invalid");
+  assert.ok(JSON.parse(await fs.readFile(file, "utf8")).devices["lamp-two"]);
+});
+
+test("directory sync failure after atomic rename is reported as an uncertain committed write", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-store-fsync-"));
+  const file = path.join(directory, "dinodia.json");
+  const initial = JSON.stringify({ version: 10, generation: 1 });
+  const next = JSON.stringify({ version: 10, generation: 2 });
+  await persistStoreJson(file, initial);
+  let directorySyncs = 0;
+
+  await assert.rejects(persistStoreJson(file, next, {
+    beforeDirectorySync: async () => {
+      directorySyncs += 1;
+      if (directorySyncs === 2) throw new Error("simulated directory sync failure after store rename");
+    },
+  }), (error) => error.code === "store_durability_uncertain" && error.committed === true);
+  assert.deepEqual(JSON.parse(await fs.readFile(file, "utf8")), { version: 10, generation: 2 }, "the renamed document is not misrepresented as the old generation");
+  assert.deepEqual(JSON.parse(await fs.readFile(`${file}.previous`, "utf8")), { version: 10, generation: 1 }, "the prior committed generation remains available");
+});
+
+test("concurrent async Store mutations serialize across a failed commit without rolling back later state", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-store-writer-"));
+  const file = path.join(directory, "dinodia.json");
+  const store = new Store(file);
+  const persist = store.persist.bind(store);
+  let persistCalls = 0;
+  store.persist = async () => {
+    persistCalls += 1;
+    if (persistCalls === 1) throw new Error("injected pre-commit failure");
+    return persist();
+  };
+
+  let enterFirst;
+  let releaseFirst;
+  const entered = new Promise((resolve) => { enterFirst = resolve; });
+  const blocked = new Promise((resolve) => { releaseFirst = resolve; });
+  const first = store.commit(async (state) => {
+    state.identity.serial = "must-roll-back";
+    enterFirst();
+    await blocked;
+  });
+  await entered;
+  const second = store.commit((state) => { state.setup.recoveryTest = "committed-after-first-failed"; });
+  releaseFirst();
+  await assert.rejects(first, /injected pre-commit failure/);
+  await second;
+
+  const persisted = JSON.parse(await fs.readFile(file, "utf8"));
+  assert.notEqual(persisted.identity.serial, "must-roll-back");
+  assert.equal(persisted.setup.recoveryTest, "committed-after-first-failed");
+  assert.equal(store.snapshot().setup.recoveryTest, "committed-after-first-failed");
+});
+
+test("backup rollback recovery archives the exact pending outbox before opening a fresh stream", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-store-sync-recovery-"));
+  const file = path.join(directory, "dinodia.json");
+  const store = new Store(file);
+  const homeId = "11111111-1111-4111-8111-111111111111";
+  const hubInstallId = "22222222-2222-4222-8222-222222222222";
+  await store.savePlatform({ paired: true, homeId, hubInstallId });
+  const old = store.getSyncOutbox();
+  store.state.syncOutbox = {
+    ...old,
+    streamId: "verified-backup-stream-0001",
+    acknowledgedSequence: 7,
+    nextSequence: 10,
+    events: [
+      { id: "pending-8", sequence: 8, type: "usage.bucket", aggregateId: "bucket", occurredAt: new Date(1000).toISOString(), critical: false, payload: { revision: 2 } },
+      { id: "pending-9", sequence: 9, type: "device.upsert", aggregateId: "radiator", occurredAt: new Date(2000).toISOString(), critical: true, payload: { osDeviceId: "radiator" } },
+    ],
+    cloudRevision: 12,
+    configurationAppliedRevision: 12,
+  };
+  store.state.syncOutboxRecovery = {
+    version: 1, backupSha256: "a".repeat(64), previousStreamId: "verified-backup-stream-0001",
+    backupAcknowledgedSequence: 7, homeId, hubInstallId, preparedAt: new Date().toISOString(),
+  };
+  await store.persist();
+
+  const result = await store.prepareSyncBackupRecovery({ backupSha256: "a".repeat(64) });
+  const next = store.getSyncOutbox();
+  const archived = JSON.parse(await fs.readFile(result.archivedOutboxPath, "utf8"));
+  assert.equal(result.prepared, true);
+  assert.notEqual(next.streamId, "verified-backup-stream-0001");
+  assert.equal(next.acknowledgedSequence, 0);
+  assert.equal(next.nextSequence, 1);
+  assert.equal(next.events.length, 0);
+  assert.equal(next.cloudRevision, 12);
+  assert.equal(archived.outbox.events.length, 2);
+  assert.equal(archived.outbox.acknowledgedSequence, 7);
+  assert.equal(store.getSyncOutboxRecovery().backupSha256, "a".repeat(64));
+});
+
 test("store persists devices and automations atomically", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-store-"));
   const file = path.join(directory, "dinodia.json");
@@ -28,6 +178,7 @@ test("store persists devices and automations atomically", async () => {
   const restored = new Store(file);
   assert.equal(restored.getDevice("lamp").state.power, "OFF");
   assert.equal(restored.listAutomations().length, 1);
+  new SecretVault({ dataDir: directory });
   const backup = await createBackup({ dataFile: file, backupDir: path.join(directory, "backups") });
   assert.match(backup, /dinodia-.*\.json$/);
 });

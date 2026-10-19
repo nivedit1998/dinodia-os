@@ -202,23 +202,23 @@ function observeUsage(stateValue, input) {
     const accountedThrough = validInstant(prior.accountedThroughAt);
     const hasAssignmentEnd = prior.assignmentEndedAt != null;
     const priorAssignmentEnd = prior.assignmentEndedAt == null ? null : validInstant(prior.assignmentEndedAt);
-    if (hasAssignmentEnd && priorAssignmentEnd === null) return { state, changedBuckets: [], stale: true };
+    if (hasAssignmentEnd && priorAssignmentEnd === null) return { state, changedBuckets: [], stale: true, changed: false };
     if (prior.osAreaId !== String(input.osAreaId) && priorAssignmentEnd === null) {
-      return { state, changedBuckets: [], stale: true };
+      return { state, changedBuckets: [], stale: true, changed: false };
     }
     if (priorAssignmentEnd !== null) {
       if (observedAt < priorAssignmentEnd || accountedThrough !== priorAssignmentEnd) {
-        return { state, changedBuckets: [], stale: true };
+        return { state, changedBuckets: [], stale: true, changed: false };
       }
       // A source sample from the new assignment starts a distinct coverage
       // interval. Never advance the ended Area's source across the move.
     } else {
       if (priorObserved === observedAt) {
         if (prior.activity !== input.activity || prior.validUntil !== (validUntil === null ? null : new Date(validUntil).toISOString())) throw new Error("Conflicting native activity observation timestamp");
-        return { state, changedBuckets: [], stale: false };
+        return { state, changedBuckets: [], stale: false, changed: false };
       }
       if (priorObserved !== null && observedAt < priorObserved || accountedThrough !== null && observedAt < accountedThrough) {
-        return { state, changedBuckets: [], stale: true };
+        return { state, changedBuckets: [], stale: true, changed: false };
       }
       modified.push(...advanceSource(state, prior, observedAt));
     }
@@ -232,7 +232,7 @@ function observeUsage(stateValue, input) {
   };
   state.sources[key] = source;
   modified.push(...advanceSource(state, source, input.nowMs));
-  return { state, changedBuckets: [...new Set(modified)], stale: false };
+  return { state, changedBuckets: [...new Set(modified)], stale: false, changed: true };
 }
 
 function advanceUsage(stateValue, nowMs) {

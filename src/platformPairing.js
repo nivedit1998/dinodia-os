@@ -56,8 +56,14 @@ function validateLanEndpointObservation(value, serial, expectedPort = 80) {
   } catch { return false; }
 }
 
+// Event types that may wait for the next scheduled sync instead of forcing an
+// immediate follow-up round trip to Platform.
+const ROUTINE_SYNC_EVENT_TYPES = new Set(["usage.bucket", "temperature.sample"]);
+// With nothing to send, an idle hub contacts Platform at most this often.
+const IDLE_SYNC_INTERVAL_MS = 120000;
+
 class PlatformPairing {
-  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, nativeApiPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, requestTimeoutMs = 15000, syncRequestTimeoutMs = 70000, runtime, getLanEndpoint = null, getLanTlsIdentity = null, acknowledgeLanTlsIdentity = null, getUpdaterStatus = null, getCloudflareStatus = null, reconcileTenantDeviceRemoval = null, reconcileAuthorizedPropertyInventory = null, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, logger = console, fetchImpl = fetch, clock = () => Date.now() } = {}) {
+  constructor({ store, vault, identityBroker = null, apiUrl = "", serial, nativeApiPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, requestTimeoutMs = 15000, syncRequestTimeoutMs = 70000, runtime, getLanEndpoint = null, getLanTlsIdentity = null, acknowledgeLanTlsIdentity = null, getUpdaterStatus = null, getCloudflareStatus = null, reconcileTenantDeviceRemoval = null, reconcileAuthorizedPropertyInventory = null, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, onBackupRecoveryComplete, logger = console, fetchImpl = fetch, clock = () => Date.now() } = {}) {
     this.store = store;
     this.vault = vault;
     this.identityBroker = identityBroker;
@@ -92,6 +98,7 @@ class PlatformPairing {
     this.getCloudflareStatus = getCloudflareStatus || (() => null);
     this.reconcileTenantDeviceRemoval = reconcileTenantDeviceRemoval;
     this.reconcileAuthorizedPropertyInventory = reconcileAuthorizedPropertyInventory;
+    this.onBackupRecoveryComplete = onBackupRecoveryComplete || (async () => false);
     this.pendingEndpointHeartbeat = false;
     this.queuedImmediateSync = false;
     this.runtime = {
@@ -113,6 +120,7 @@ class PlatformPairing {
     this.fetchImpl = fetchImpl;
     this.timer = null;
     this.syncing = false;
+    this.stopped = false;
     this.publishAttempts = 0;
     this.retryAttempt = 0;
     this.retryTimer = null;
@@ -148,6 +156,7 @@ class PlatformPairing {
       runtime: { ...this.runtime, capabilities: { ...this.runtime.capabilities } },
       lastSuccess: this.lastSuccess || platform.lastSyncAt || null,
       lastError: this.lastError || platform.lastError || null,
+      storeBackupRecovery: this.store?.getSyncOutboxRecovery?.() ? { pending: true } : { pending: false },
       sync: {
         streamId: sync.streamId || null,
         acknowledgedSequence: Number(sync.acknowledgedSequence || 0),
@@ -582,7 +591,27 @@ class PlatformPairing {
     return { ...base, capabilities };
   }
 
+  /**
+   * The policy timer still ticks every intervalMs, but an idle hub (no urgent
+   * event queued, no incident or endpoint report pending, a recent success)
+   * skips the Platform round trip until IDLE_SYNC_INTERVAL_MS has passed.
+   */
+  scheduledSync() {
+    const outbox = this.store.getSyncOutbox?.();
+    const ack = Number(outbox?.acknowledgedSequence || 0);
+    // Routine telemetry alone does not wake an idle hub; it rides on the next
+    // idle-cadence sync with its latest absolute totals.
+    const pending = (outbox?.events || []).some((event) => event.sequence > ack && !ROUTINE_SYNC_EVENT_TYPES.has(event.type));
+    const incidents = this.store.listPendingIncidentEnvelopes?.().length || 0;
+    const lastSuccessMs = Date.parse(this.lastSuccess || "");
+    const idle = !pending && !incidents && !this.pendingEndpointHeartbeat && Number.isFinite(lastSuccessMs)
+      && this.clock() - lastSuccessMs < IDLE_SYNC_INTERVAL_MS;
+    if (idle) return Promise.resolve(null);
+    return this.syncNow();
+  }
+
   async syncNow() {
+    if (this.stopped) return null;
     if (this.syncing) return null;
     if (this.nextRetryAt && Date.now() < this.nextRetryAt) return null;
     this.syncing = true;
@@ -619,9 +648,12 @@ class PlatformPairing {
         }
       }
       if (!platform.paired) return null;
-      await this.store.ensureSyncSnapshot?.(this.clock());
-      await this.store.ensureSyncIncidentEvents?.(this.clock());
-      await this.store.ensureAutomationOutcomeEvents?.(this.clock());
+      const backupRecovery = this.store.getSyncOutboxRecovery?.() || null;
+      if (!backupRecovery) {
+        await this.store.ensureSyncSnapshot?.(this.clock());
+        await this.store.ensureSyncIncidentEvents?.(this.clock());
+        await this.store.ensureAutomationOutcomeEvents?.(this.clock());
+      }
       const payload = {
         agentSeenVersion: Number(platform.agentSeenVersion || 0),
         hubRuntime: this.runtime,
@@ -669,6 +701,34 @@ class PlatformPairing {
         || new Set(areaBindings.map((binding) => binding.areaId)).size !== areaBindings.length
         || new Set(areaBindings.map((binding) => binding.hubAreaId)).size !== areaBindings.length) {
         throw new Error("Platform returned an invalid Native V1 area binding map");
+      }
+      if (backupRecovery) {
+        const recoveredOutbox = this.store.getSyncOutbox();
+        const currentHomeId = String(result.homeId || platform.homeId || "");
+        if (installationSyncMode !== "ACTIVE" || reportedHubInstallId !== backupRecovery.hubInstallId
+          || currentHomeId !== backupRecovery.homeId) {
+          throw Object.assign(new Error("Store rollback recovery requires the same actively authorized Home and enrolled hub identity"), { code: "hub_sync_backup_recovery_authority_changed" });
+        }
+        const transitionPending = recoveredOutbox.inFlight?.streamReconciliation?.version === 1
+          && recoveredOutbox.inFlight.streamReconciliation.previousStreamId === backupRecovery.previousStreamId;
+        const transitionAccepted = backupRecovery.reconciledStreamId === recoveredOutbox.streamId
+          && backupRecovery.reconciledThroughSequence != null
+          && Number.isSafeInteger(Number(backupRecovery.reconciledThroughSequence));
+        if (serverStreamId === backupRecovery.previousStreamId) {
+          if (serverAcceptedSequence < Number(backupRecovery.backupAcknowledgedSequence)) {
+            throw Object.assign(new Error("Platform's signed cursor is behind the verified backup cursor; preserving the archived stream"), { code: "hub_sync_backup_recovery_remote_cursor_behind" });
+          }
+          if (recoveredOutbox.streamId === backupRecovery.previousStreamId) {
+            await this.store.prepareSyncBackupRecovery({ backupSha256: backupRecovery.backupSha256 });
+          } else if (!transitionPending || transitionAccepted) {
+            throw Object.assign(new Error("The recovery stream changed without its exact durable reconciliation batch; preserving all queue data"), { code: "hub_sync_backup_recovery_outbox_changed" });
+          }
+        } else if (serverStreamId !== recoveredOutbox.streamId
+          || (!transitionPending && !transitionAccepted)) {
+          throw Object.assign(new Error("Platform's active stream differs from both the verified backup and its exact pending recovery transition"), { code: "hub_sync_backup_recovery_stream_changed" });
+        } else if (transitionAccepted && serverAcceptedSequence < Number(backupRecovery.reconciledThroughSequence)) {
+          throw Object.assign(new Error("Platform's signed cursor is behind the durable recovery transition receipt"), { code: "hub_sync_backup_recovery_remote_cursor_behind" });
+        }
       }
       const previousOperatorCredentialStates = Array.isArray(platform.operatorCredentialStates) ? platform.operatorCredentialStates : [];
       let operatorCredentialStates = Array.isArray(result.operatorCredentialStates)
@@ -724,7 +784,7 @@ class PlatformPairing {
       if (Number(syncState.cloudRevision || 0) > serverCloudConfigurationRevision) {
         throw Object.assign(new Error("Local cloud configuration is newer than the authoritative Platform revision"), { code: "hub_sync_configuration_revision_conflict" });
       }
-      if (Number(syncState.cloudRevision || 0) < serverAcknowledgedCloudRevision) {
+      if (backupRecovery || Number(syncState.cloudRevision || 0) < serverAcknowledgedCloudRevision) {
         if (installationSyncMode !== "ACTIVE") {
           throw Object.assign(new Error("A stale configuration cannot be refreshed through a restricted installation bootstrap session"), { code: "hub_sync_configuration_refresh_unavailable" });
         }
@@ -754,8 +814,30 @@ class PlatformPairing {
         await this.store.applySyncConfigurationSnapshot(Number(refreshed.cloudRevision));
         syncState = this.store.getSyncOutbox();
       }
+      if (backupRecovery) {
+        // Build the complete first inventory only after applying the current
+        // signed configuration. This prevents a stale backed-up descriptor or
+        // Area policy from being the first event in the replacement stream.
+        await this.store.ensureSyncSnapshot?.(this.clock());
+        await this.store.ensureSyncIncidentEvents?.(this.clock());
+        await this.store.ensureAutomationOutcomeEvents?.(this.clock());
+        syncState = this.store.getSyncOutbox();
+        if (this.store.getSyncOutboxRecovery?.()?.snapshotThroughSequence == null) {
+          await this.store.setSyncBackupRecoverySnapshotBoundary?.({
+            streamId: syncState.streamId,
+            throughSequence: Number(syncState.nextSequence || 1) - 1,
+          });
+          syncState = this.store.getSyncOutbox();
+        }
+      }
       let syncBatch = null;
       const streamMismatch = serverStreamId !== null && serverStreamId !== String(syncState.streamId);
+      const requestLossRecovery = syncState.requestLossRecovery;
+      if (streamMismatch && requestLossRecovery?.version === 1 && !requestLossRecovery.completedAt
+        && (serverStreamId !== requestLossRecovery.previousStreamId
+          || serverAcceptedSequence !== requestLossRecovery.serverAcceptedSequence)) {
+        throw Object.assign(new Error("The signed server cursor changed after the reviewed request-loss recovery checkpoint"), {code:"hub_sync_request_loss_remote_changed"});
+      }
       if (streamMismatch) {
         if (installationSyncMode !== "ACTIVE" || serverAcceptedSequence < 1) {
           throw Object.assign(new Error("Only an active Home with a current accepted server cursor can reconcile a divergent durable stream"), { code: "hub_sync_stream_reconciliation_required" });
@@ -786,6 +868,20 @@ class PlatformPairing {
         && installationSyncMode === "ACTIVE"
         && syncState.lastErrorCode === "hub_sync_descriptor_stale") {
         const reconciliation = await this.store.reconcileRejectedDescriptorSync?.({
+          streamId: serverStreamId,
+          acceptedSequence: serverAcceptedSequence,
+          errorCode: syncState.lastErrorCode,
+        });
+        if (reconciliation?.reconciled) syncState = this.store.getSyncOutbox();
+      }
+      // The same explicit-rejection rule covers a control catalogue queued
+      // before the device revision it describes. Only that superseded catalogue
+      // changes; the device upsert, sequence numbers and acknowledged cursor stay.
+      if (!streamMismatch && serverStreamId === String(syncState.streamId)
+        && serverAcceptedSequence === localAcknowledgedSequence
+        && installationSyncMode === "ACTIVE"
+        && syncState.lastErrorCode === "hub_sync_catalog_revision_mismatch") {
+        const reconciliation = await this.store.reconcileRejectedCatalogOrder?.({
           streamId: serverStreamId,
           acceptedSequence: serverAcceptedSequence,
           errorCode: syncState.lastErrorCode,
@@ -900,6 +996,7 @@ class PlatformPairing {
           await this.store.acknowledgeSyncBatch({
             streamId: syncResult.streamId,
             acceptedThroughSequence: Number(syncResult.acceptedThroughSequence),
+            duplicate: syncResult.duplicate === true,
             cloudRevision: Number(syncResult.cloudRevision),
             configurationAppliedRevision: Number(syncResult.configurationAppliedRevision),
             bodyHash: syncEnvelope.usageClosureRecovery ? String(syncResult.acceptedBodyHash || "") : undefined,
@@ -909,6 +1006,19 @@ class PlatformPairing {
           await this.store.acknowledgeSyncConfiguration(Number(syncResult.cloudRevision), this.clock());
         }
         await this.store.advanceSyncUsage?.(this.clock());
+      }
+      const recoveryAfterSync = this.store.getSyncOutboxRecovery?.();
+      const outboxAfterRecoverySync = this.store.getSyncOutbox?.();
+      if (recoveryAfterSync?.reconciledStreamId === outboxAfterRecoverySync?.streamId
+        && recoveryAfterSync.snapshotThroughSequence != null
+        && Number.isSafeInteger(Number(recoveryAfterSync.snapshotThroughSequence))
+        && Number(outboxAfterRecoverySync.acknowledgedSequence) >= Number(recoveryAfterSync.snapshotThroughSequence)) {
+        const runtimeResumed = await this.onBackupRecoveryComplete({
+          streamId: outboxAfterRecoverySync.streamId,
+          acceptedThroughSequence: Number(outboxAfterRecoverySync.acknowledgedSequence),
+          snapshotThroughSequence: Number(recoveryAfterSync.snapshotThroughSequence),
+        });
+        if (runtimeResumed === true) await this.store.completeSyncBackupRecovery?.({ streamId: outboxAfterRecoverySync.streamId });
       }
       const heartbeatAt = this.clock();
       if (nativeIdentity && (installationSyncMode === "INSTALLATION_BOOTSTRAP" || this.pendingEndpointHeartbeat || heartbeatAt - this.lastHeartbeatAt >= this.heartbeatIntervalMs)) {
@@ -921,8 +1031,12 @@ class PlatformPairing {
       if (syncResult) this.lastSuccess = new Date().toISOString();
       this.lastError = null;
       const outboxAfterSync = this.store.getSyncOutbox?.();
-      const nextPending = (outboxAfterSync?.events || []).find((event) => event.sequence > Number(outboxAfterSync?.acknowledgedSequence || 0));
-      if (nextPending && (installationSyncMode === "ACTIVE" || (syncResult && nextPending.type === "area.upsert"))) {
+      const pendingAfterSync = (outboxAfterSync?.events || []).filter((event) => event.sequence > Number(outboxAfterSync?.acknowledgedSequence || 0));
+      const nextPending = pendingAfterSync[0];
+      // Routine telemetry waits for the next scheduled sync; only events that
+      // change what tenants, owners or Platform can do are sent straight away.
+      const nextUrgent = pendingAfterSync.find((event) => !ROUTINE_SYNC_EVENT_TYPES.has(event.type));
+      if (!this.stopped && ((nextUrgent && installationSyncMode === "ACTIVE") || (syncResult && nextPending?.type === "area.upsert"))) {
         setImmediate(() => this.syncNow().catch(() => {}));
       }
       this.retryAttempt = 0;
@@ -930,7 +1044,7 @@ class PlatformPairing {
       if (this.retryTimer) clearTimeout(this.retryTimer);
       this.retryTimer = null;
       if (Number(result.publishedVersion || 0) >= nextVersion) this.publishAttempts = 0;
-      else if (nextVersion > 0 && this.publishAttempts < 3) {
+      else if (!this.stopped && nextVersion > 0 && this.publishAttempts < 3) {
         this.publishAttempts += 1;
         setImmediate(() => this.syncNow().catch(() => {}));
       }
@@ -977,7 +1091,7 @@ class PlatformPairing {
       return null;
     } finally {
       this.syncing = false;
-      if (this.queuedImmediateSync) {
+      if (this.queuedImmediateSync && !this.stopped) {
         this.queuedImmediateSync = false;
         setImmediate(() => this.syncNow().catch(() => {}));
       }
@@ -986,8 +1100,9 @@ class PlatformPairing {
 
   start() {
     if (!this.apiUrl || !this.serial) return;
+    this.stopped = false;
     this.syncNow().catch(() => {});
-    this.timer = setInterval(() => this.syncNow().catch(() => {}), this.intervalMs);
+    this.timer = setInterval(() => this.scheduledSync().catch(() => {}), this.intervalMs);
     this.timer.unref?.();
     const publishRecovery = () => {
       this.publishRecoveryLanEndpoint().catch((error) => {
@@ -1001,6 +1116,7 @@ class PlatformPairing {
   }
 
   stop() {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     if (this.retryTimer) clearTimeout(this.retryTimer);
     if (this.recoveryEndpointTimer) clearInterval(this.recoveryEndpointTimer);
