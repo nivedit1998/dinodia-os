@@ -32,10 +32,9 @@ The published product history intentionally excludes these Pi-incident-only file
 - `scripts/recover-store.js`
 - `scripts/recover-sync-request-loss.js`
 - `scripts/repair-lan-network.js`
-- `src/dockerNetworkGuard.js` and its script-specific test
 - `test/recover-store.test.js`
 
-The installer no longer exposes the one-off `DINODIA_STORE_RECOVERY_MODE=incident-20261016` path. Generic Store durability, backup, restore, and signed request-loss recovery code/tests remain. The removed incident materials, including the historical installer version that referenced them, were preserved outside the repository in a mode-0700 private directory; the archive SHA-256 is `f2b74f7ec6e4251d92782f46708df339cbf60e0aaa6175e4fc31d13281a4ea06`.
+`src/dockerNetworkGuard.js` and `test/docker-network-guard.test.js` are retained: they implement and verify a generic production guard against Docker bridge subnets overlapping host LAN/VPN routes. Only `scripts/repair-lan-network.js`, which performs a fixed incident-specific repair, is excluded. The installer no longer exposes the one-off `DINODIA_STORE_RECOVERY_MODE=incident-20261016` path. Generic Store durability, backup, restore, and signed request-loss recovery code/tests remain. The removed incident materials, including the historical installer version that referenced them, were preserved outside the repository in a mode-0700 private directory; the archive SHA-256 is `f2b74f7ec6e4251d92782f46708df339cbf60e0aaa6175e4fc31d13281a4ea06`.
 
 ## Branch and integration target
 
