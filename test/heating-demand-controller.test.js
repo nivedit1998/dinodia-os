@@ -177,7 +177,7 @@ test("controller is disabled by default and controls a mapped boiler only after 
   assert.equal(writes.length, 2);
   assert.equal(writes[1].serviceId, "climate.set_hvac_mode");
   assert.deepEqual(writes[1].data, { hvac_mode: "off" });
-  controller.stop();
+  await controller.stop();
 });
 
 test("restart clears only the transient pending marker and does not send a command", async () => {
@@ -190,7 +190,39 @@ test("restart clears only the transient pending marker and does not send a comma
   await controller.start();
   assert.equal(store.getHeatingDemandController().runtime.commandPending, null);
   assert.equal(writes, 0);
-  controller.stop();
+  await controller.stop();
+});
+
+test("stop drains an in-flight evaluation and rejects late device reconciliation writes", async () => {
+  const config = { ...DEFAULT_HEATING_DEMAND_CONFIG, boilerDeviceId: null, radiatorDeviceIds: [] };
+  const store = fakeStore(config);
+  let runtimeSaves = 0;
+  const saveRuntime = store.saveHeatingDemandControllerRuntime;
+  store.saveHeatingDemandControllerRuntime = async (runtime) => {
+    runtimeSaves += 1;
+    return saveRuntime(runtime);
+  };
+  let releaseIntegrations;
+  const integrationsReady = new Promise((resolve) => { releaseIntegrations = resolve; });
+  const controller = new HeatingDemandController({
+    store,
+    getDevices: () => [],
+    getIntegrations: () => integrationsReady,
+    activity: { record: async () => {} },
+    now: () => NOW,
+  });
+
+  const evaluation = controller.evaluate({ execute: false });
+  await new Promise((resolve) => setImmediate(resolve));
+  const stopping = controller.stop();
+  releaseIntegrations({});
+  await Promise.all([evaluation, stopping]);
+  const savesAfterStop = runtimeSaves;
+
+  await controller.evaluate({ reason: "late_test", execute: false });
+  await controller.reconcileDeviceChange(device("late-radiator", "radiator"), null);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(runtimeSaves, savesAfterStop, "stopped controller ignores late evaluations and device reconciliation");
 });
 
 test("command failures use a bounded exponential retry window", async () => {

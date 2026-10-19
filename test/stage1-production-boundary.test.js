@@ -1302,6 +1302,8 @@ test("offline enrolled authority reaches only the actual loopback customer TLS l
     hubSignature: crypto.randomBytes(48).toString("base64url"),
   };
   const resolverReferences = [];
+  let storeDigestAfterStop = "";
+  let storeSnapshotAfterStop = null;
   hub.pairing.requestPermanentClaimChallenge = async (reference) => {
     resolverReferences.push(reference);
     return issuedResolverChallenge;
@@ -1413,5 +1415,12 @@ test("offline enrolled authority reaches only the actual loopback customer TLS l
     assert.equal(Object.hasOwn(changedPolicy.body, "data"), false);
   } finally {
     await hub.stop();
+    storeSnapshotAfterStop = JSON.parse(await fs.readFile(path.join(directory, "dinodia.json"), "utf8"));
+    storeDigestAfterStop = crypto.createHash("sha256").update(JSON.stringify(storeSnapshotAfterStop)).digest("hex");
   }
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const storeSnapshotAfterDrain = JSON.parse(await fs.readFile(path.join(directory, "dinodia.json"), "utf8"));
+  const storeDigestAfterDrain = crypto.createHash("sha256").update(JSON.stringify(storeSnapshotAfterDrain)).digest("hex");
+  const changedSections = Object.keys(storeSnapshotAfterDrain).filter((key) => JSON.stringify(storeSnapshotAfterDrain[key]) !== JSON.stringify(storeSnapshotAfterStop?.[key]));
+  assert.equal(storeDigestAfterDrain, storeDigestAfterStop, `hub.stop drains queued event-journal persistence before returning; sections=${changedSections.join(",")}`);
 });

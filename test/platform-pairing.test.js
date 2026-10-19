@@ -477,6 +477,7 @@ test("an explicit stale-descriptor rejection safely replaces only superseded dev
   const serial = "DINODIA-DESCRIPTOR-RECONCILE-HUB";
   const hubInstallId = "11111111-1111-4111-8111-111111111111";
   const fixture = await pairingFixture({ serial, hubInstallId, configurationRevision: 5, acknowledgedCloudRevision: 5 });
+  let pairing;
   try {
     const { store, vault } = fixture;
     const homeId = "home-a";
@@ -537,7 +538,7 @@ test("an explicit stale-descriptor rejection safely replaces only superseded dev
     let remoteAcceptedSequence = 10;
     let remoteStreamId = streamId;
     const sentBatches = [];
-    const pairing = new PlatformPairing({
+    pairing = new PlatformPairing({
       store, vault, apiUrl: "https://platform.test", serial, intervalMs: 60000, logger: { error() {}, warn() {} },
       fetchImpl: async (url, options) => {
         const body = JSON.parse(options.body);
@@ -578,7 +579,12 @@ test("an explicit stale-descriptor rejection safely replaces only superseded dev
     assert.deepEqual(sentBatches[1].events.slice(-2).map((event) => event.type), ["device.upsert", "control.catalog.upsert"]);
     assert.equal(store.getSyncOutbox().acknowledgedSequence, 38);
     assert.equal(store.getSyncOutbox().lastErrorCode, null);
-  } finally { await fs.rm(fixture.directory, { recursive: true, force: true }); }
+  } finally {
+    pairing?.stop();
+    const stopDeadline = Date.now() + 2000;
+    while (pairing?.syncing && Date.now() < stopDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    await fs.rm(fixture.directory, { recursive: true, force: true });
+  }
 });
 
 test("a divergent stream reconciles one exact durable batch and retries the same request after a lost response", async () => {
@@ -664,6 +670,155 @@ test("a divergent stream reconciles one exact durable batch and retries the same
     assert.equal(after.lastErrorCode, null);
     pairing.stop();
   } finally { await fs.rm(fixture.directory, { recursive: true, force: true }); }
+});
+
+test("request-loss recovery refuses a changed signed remote cursor before sending its replacement stream", async () => {
+  const serial="DINODIA-REQUEST-LOSS-CURSOR-GUARD";
+  const hubInstallId="22222222-2222-4222-8222-222222222222";
+  const fixture=await pairingFixture({serial,hubInstallId});
+  let pairing;
+  try {
+    const {store,vault}=fixture;
+    await store.queueSyncEvent("update.status","updater",{revision:1,trustState:"unprovisioned"},{critical:true});
+    await store.commit(state=>{
+      state.syncOutbox.cloudRevision=5;state.syncOutbox.configurationAppliedRevision=5;
+      state.syncOutbox.requestLossRecovery={version:1,previousStreamId:"reviewed-previous-stream",serverAcceptedSequence:17,completedAt:null};
+    });
+    const before=store.getSyncOutbox();let syncRequests=0;
+    pairing=new PlatformPairing({store,vault,apiUrl:"https://platform.test",serial,logger:{error(){},warn(){}},
+      fetchImpl:async url=>{
+        if(url.endsWith("/token-state"))return {ok:true,async json(){return {
+          hubInstallId,homeId:"home-a",latestVersion:0,publishedVersion:0,operatorCredentialStates:[],offlineAuthorisations:[],
+          areaBindings:[],policyRevision:1,installationSyncMode:"ACTIVE",syncStreamId:"reviewed-previous-stream",
+          syncAcceptedSequence:18,cloudConfigurationRevision:5,acknowledgedCloudRevision:5,
+        };}};
+        if(url.endsWith("/v2/sync"))syncRequests++;
+        throw Error("No sync mutation should be sent for changed recovery authority");
+      }});
+    await pairing.syncNow();
+    const after=store.getSyncOutbox();
+    assert.equal(syncRequests,0);
+    assert.equal(after.lastErrorCode,"hub_sync_request_loss_remote_changed");
+    assert.equal(after.acknowledgedSequence,0);
+    assert.deepEqual(after.events,before.events);
+    assert.equal(after.inFlight,null);
+  } finally {pairing?.stop();await fs.rm(fixture.directory,{recursive:true,force:true});}
+});
+
+test("verified Store rollback waits for signed same-Home cursor, archives old outbox and reconciles a fresh inventory snapshot", async () => {
+  const serial = "DINODIA-STORE-ROLLBACK-RECOVERY-HUB";
+  const hubInstallId = "11111111-1111-4111-8111-111111111111";
+  const homeId = "home-store-recovery";
+  const previousStreamId = "verified-backup-stream-0001";
+  const fixture = await pairingFixture({ serial, hubInstallId, syncStreamId: previousStreamId, syncAcceptedSequence: 18,
+    configurationRevision: 5, acknowledgedCloudRevision: 5 });
+  let pairing;
+  try {
+    const { store, vault } = fixture;
+    const area = await store.saveArea({ name: "Room 1" }, "room-1");
+    const recoveryAreas = [{ id: "canonical-room-1", osAreaId: area.id, originalName: "Room 1", overrideName: null, revision: 1 }];
+    for (let index = 2; index <= 46; index += 1) {
+      const extraArea = await store.saveArea({ name: `Recovery room ${index}` }, `recovery-room-${index}`);
+      recoveryAreas.push({ id: `canonical-room-${index}`, osAreaId: extraArea.id, originalName: extraArea.name, overrideName: null, revision: 1 });
+    }
+    await store.savePlatform({ paired: true, homeId, hubInstallId, cloudRevision: 0, devicePolicies: {} });
+    const device = await store.upsertDevice({ id: "zigbee:room-1-radiator", name: "Room 1 Radiator", protocol: "zigbee", areaId: area.id,
+      setup: { status: "ready" }, metadata: { model: "TRVZB" }, entities: {} }, { devicePolicy: {
+      managementClass: "PROPERTY_DEVICE", ownerMembershipId: null, lifecycle: "INSTALLED", canonicalAreaIds: ["33333333-3333-4333-8333-333333333333"],
+      platformDeviceId: "44444444-4444-4444-8444-444444444444", installationRequestId: "55555555-5555-4555-8555-555555555555",
+      catalogueStatus: "ready", usefulReadings: true, descriptorRevision: 1, descriptorDigest: "a".repeat(64), overrideName: "Room 1 Radiator",
+    } });
+    store.state.syncOutbox = {
+      ...store.getSyncOutbox(), streamId: previousStreamId, acknowledgedSequence: 7, nextSequence: 10,
+      cloudRevision: 0, configurationAppliedRevision: 0,
+      events: [
+        { id: "old-usage-8", sequence: 8, type: "usage.bucket", aggregateId: "old-bucket", occurredAt: new Date(8000).toISOString(), critical: false, payload: { revision: 3, osDeviceId: device.id } },
+        { id: "old-device-9", sequence: 9, type: "device.upsert", aggregateId: device.id, occurredAt: new Date(9000).toISOString(), critical: true, payload: { osDeviceId: device.id } },
+      ],
+    };
+    store.state.syncOutboxRecovery = { version: 1, backupSha256: "c".repeat(64), previousStreamId,
+      backupAcknowledgedSequence: 7, homeId, hubInstallId, preparedAt: new Date().toISOString() };
+    await store.persist();
+
+    const configuration = signedConfiguration({ revision: 5, policyRevision: 1,
+      areas: recoveryAreas,
+      memberships: [], devicePolicies: [{ osDeviceId: device.id, managementClass: "PROPERTY_DEVICE", ownerMembershipId: null,
+        analyticsCategory: "RADIATOR", lifecycle: "INSTALLED", customerLabel: "Radiator", overrideName: "Room 1 Radiator",
+        descriptorRevision: 1, descriptorDigest: "a".repeat(64), osAreaIds: [area.id] }],
+      automations: [], releasePolicy: { mode: "MANUAL", automaticInstallEnabled: false, desiredRelease: null } });
+    const seen = [];
+    let runtimeReleaseCalls = 0;
+    let remoteStreamId = previousStreamId;
+    let remoteAcceptedSequence = 18;
+    pairing = new PlatformPairing({
+      store, vault, apiUrl: "https://platform.test", serial, intervalMs: 60000,
+      onBackupRecoveryComplete: async () => { runtimeReleaseCalls += 1; return true; },
+      logger: { error() {}, warn() {} },
+      fetchImpl: async (url, options) => {
+        const body = JSON.parse(options.body || "{}");
+        seen.push({ url, body: structuredClone(body) });
+        if (url.endsWith("/token-state")) return { ok: true, async json() { return {
+          hubInstallId, homeId, latestVersion: 0, publishedVersion: 0, operatorCredentialStates: [], offlineAuthorisations: [],
+          areaBindings: [], policyRevision: 1, installationSyncMode: "ACTIVE", syncStreamId: remoteStreamId,
+          syncAcceptedSequence: remoteAcceptedSequence, cloudConfigurationRevision: 5, acknowledgedCloudRevision: 5,
+        }; } };
+        if (url.endsWith("/v2/sync") && body.configurationRefreshOnly === true) return { ok: true, async json() { return {
+          configurationRefreshOnly: true, streamId: body.streamId, syncStreamId: remoteStreamId,
+          syncAcceptedSequence: remoteAcceptedSequence, cloudRevision: 5, configurationAppliedRevision: body.acknowledgedCloudRevision,
+          configuration,
+        }; } };
+        if (url.endsWith("/v2/sync")) {
+          if (body.streamReconciliation) {
+            assert.equal(body.streamReconciliation.previousStreamId, previousStreamId);
+            assert.equal(body.streamReconciliation.previousAcceptedSequence, 18);
+            assert.equal(body.fromSequence, 1);
+          }
+          assert.equal(body.events.some((event) => event.type === "usage.bucket" && event.id === "old-usage-8"), false,
+            "rolled-back pending telemetry is archived and never replayed as if it were a current snapshot");
+          remoteStreamId = body.streamId;
+          remoteAcceptedSequence = body.toSequence;
+          return { ok: true, async json() { return {
+            streamId: body.streamId, cloudRevision: 5, configurationAppliedRevision: 5,
+            acceptedThroughSequence: body.toSequence,
+            ...(body.streamReconciliation ? { streamReconciled: true,
+              reconciledFromStreamId: previousStreamId, reconciledFromSequence: 18 } : {}),
+            resnapshotRequired: false, configuration,
+          }; } };
+        }
+        if (url.endsWith("/heartbeat")) return { ok: true, async json() { return { ok: true, online: true, lanTlsIdentity: { acknowledgedGeneration: 0 } }; } };
+        throw new Error(`Unexpected recovery sync route: ${url}`);
+      },
+    });
+
+    await pairing.syncNow();
+    const recoveryDeadline = Date.now() + 10000;
+    while (store.getSyncOutboxRecovery() && Date.now() < recoveryDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    pairing.stop();
+    assert.equal(seen[0].url.endsWith("/token-state"), true, "signed authority is checked before local outbox transition");
+    const refreshIndexes = seen.map((entry, index) => entry.body.configurationRefreshOnly === true ? index : -1).filter((index) => index >= 0);
+    const firstInventorySyncIndex = seen.findIndex((entry) => entry.url.endsWith("/v2/sync") && entry.body.configurationRefreshOnly !== true);
+    assert.ok(refreshIndexes.length >= 1 && refreshIndexes[0] < firstInventorySyncIndex,
+      "current signed cloud policy is applied before replacement inventory snapshots are generated");
+    assert.equal(store.getSyncOutboxRecovery(), null, "the recovery marker clears only after every batch through the durable snapshot boundary is accepted");
+    assert.equal(runtimeReleaseCalls, 1, "runtime release is requested only after the complete current inventory snapshot is accepted");
+    assert.equal(store.getSyncOutbox().streamId, remoteStreamId);
+    assert.equal(store.getSyncOutbox().acknowledgedSequence, remoteAcceptedSequence);
+    assert.ok(seen.filter((entry) => entry.url.endsWith("/v2/sync") && !entry.body.configurationRefreshOnly).length >= 2,
+      "the 46-area plus device/catalogue snapshot is accepted over multiple receipt-backed batches before runtime release");
+    const sentInventory = seen.flatMap((entry) => entry.body.events || []);
+    assert.equal(sentInventory.filter((event) => event.type === "area.upsert").length, recoveryAreas.length);
+    assert.ok(sentInventory.some((event) => event.type === "device.upsert" && event.payload.osDeviceId === device.id));
+    assert.ok(sentInventory.some((event) => event.type === "control.catalog.upsert" && event.payload.osDeviceId === device.id));
+    const archivePath = path.join(fixture.directory, `dinodia.json.sync-recovery-${"c".repeat(16)}.json`);
+    const archive = JSON.parse(await fs.readFile(archivePath, "utf8"));
+    assert.deepEqual(archive.outbox.events.map((event) => event.id), ["old-usage-8", "old-device-9"]);
+    assert.equal(archive.outbox.acknowledgedSequence, 7);
+  } finally {
+    pairing?.stop();
+    const stopDeadline = Date.now() + 10000;
+    while (pairing?.syncing && Date.now() < stopDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    await fs.rm(fixture.directory, { recursive: true, force: true });
+  }
 });
 
 test("a divergent stream with a known local retention gap remains held without changing the outbox", async () => {

@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { AsyncLocalStorage } = require("node:async_hooks");
 const { isDeepStrictEqual } = require("node:util");
 const { fixedLabelState } = require("./labelCatalog");
 const { normalizeCapability, text } = require("./capabilities/schema");
@@ -13,6 +14,25 @@ const { serializeDevice } = require("./contracts/dinodiaV1");
 const { SYNC_BATCH_MAX_EVENTS, compactUnregisteredPropertyDeviceEvents, enqueueSyncEventInState, initialSyncOutbox, nextSyncBatch, normalizeSyncOutbox } = require("./sync/syncOutbox");
 const { validateCloudConfiguration, projectCloudDevicePolicies } = require("./sync/cloudConfiguration");
 const { activityFor, advanceUsage, endUsageAssignment, initialUsageState, observeUsage } = require("./sync/usageBuckets");
+const { assertNoRestorePendingSync, ensureInitializedMarkerSync, hasInitializedMarkerSync, persistStoreJson } = require("./durableStoreFile");
+
+const STORE_MUTATION_CONTEXT = new AsyncLocalStorage();
+const SERIALIZED_STORE_MUTATIONS = Object.freeze([
+  "commit", "mutateAtomically", "persist", "acknowledgeTenantDeviceRemoval", "upsertDevice", "migrateDeviceIdentity",
+  "updateDeviceState", "deleteDevice", "deleteDevicesByProtocol", "saveArea", "ensureAreaByName", "removeArea", "deleteArea",
+  "saveLabel", "deleteLabel", "saveZigbee", "clearZigbee", "markZigbeeAdapterRemoved", "saveThread", "clearThread",
+  "updateDevice", "completeDeviceSetup", "clearDeviceSetup", "rebuildPresentation", "updateEntity", "removeEntity",
+  "renameEntity", "saveIdentity", "saveSetup", "saveAuth", "saveSecurity", "prepareSyncBackupRecovery",
+  "reconcileRejectedSyncBatchSize", "reconcileRejectedDescriptorSync", "reconcileRejectedCatalogOrder", "queueSyncEvent", "prepareSyncBatch", "prepareUsageClosureRecovery", "prepareSyncRequestLossRecovery",
+  "prepareSyncStreamReconciliation", "ensureSyncSnapshot", "advanceSyncUsage", "ensureSyncIncidentEvents",
+  "ensureUpdaterStatusEvent", "ensureAutomationOutcomeEvents", "acknowledgeSyncBatch", "acknowledgeSyncConfiguration",
+  "applySyncConfigurationSnapshot", "markSyncFailure", "savePlatform", "saveHive", "clearHive", "saveAlexa",
+  "saveGoogleNest", "clearGoogleNest", "saveHeatingDemandControllerConfig", "saveHeatingDemandControllerRuntime",
+  "resetHeatingDemandControllerRuntime", "saveConfigEntry", "deleteConfigEntry", "saveRemoteBinding", "deleteRemoteBinding",
+  "factoryReset", "saveCloudflare", "saveAutomation", "deleteAutomation", "mutateNativeAutomation", "addEvent",
+  "setActivityRuntime", "appendActivity", "updateActivity", "pruneActivity", "saveActiveIncident", "resolveActiveIncident",
+  "queueIncidentEnvelope", "acknowledgeIncidentEnvelopes", "markIncidentUploadError",
+]);
 
 function sourceTimestamp(value) {
   if (typeof value !== "string") return null;
@@ -344,6 +364,8 @@ function nativeIncidentSyncProjection(envelope = {}, state = null) {
 }
 
 const ACTIVITY_MAX_RECORDS = 2000;
+// Telemetry-only device reports coalesce into one whole-Store write per window.
+const DEFERRED_PERSIST_MS = 10000;
 const ACTIVITY_RETENTION_MONTHS = 4;
 const CANONICAL_PLATFORM_ORIGIN = "https://dinodia-platform-v2.vercel.app";
 
@@ -536,6 +558,7 @@ function initialState() {
     activity: initialActivityState(),
     incidentOutbox: normalizeIncidentOutbox(),
     syncOutbox: initialSyncOutbox(),
+    syncOutboxRecovery: null,
     syncUsage: initialUsageState(),
     cloudflare: { mode: "disabled", hostname: "", token: "", origin: "http://127.0.0.1:8123" },
     zigbee: { adapterPath: "", adapterName: "", adapterType: "", recommended: false, discoveryPrefix: "dinodia-ha", removedAdapterPaths: [] },
@@ -737,6 +760,33 @@ function normalizeState(value) {
     activity,
     incidentOutbox: normalizeIncidentOutbox(value.incidentOutbox),
     syncOutbox: normalizeSyncOutbox(value.syncOutbox),
+    syncOutboxRecovery: value.syncOutboxRecovery && typeof value.syncOutboxRecovery === "object" && !Array.isArray(value.syncOutboxRecovery)
+      && value.syncOutboxRecovery.version === 1
+      && /^[a-f0-9]{64}$/i.test(String(value.syncOutboxRecovery.backupSha256 || ""))
+      && /^[a-zA-Z0-9._:-]{16,80}$/.test(String(value.syncOutboxRecovery.previousStreamId || ""))
+      && Number.isSafeInteger(Number(value.syncOutboxRecovery.backupAcknowledgedSequence))
+      && Number(value.syncOutboxRecovery.backupAcknowledgedSequence) >= 0
+      && typeof value.syncOutboxRecovery.homeId === "string" && value.syncOutboxRecovery.homeId.length > 0
+      && typeof value.syncOutboxRecovery.hubInstallId === "string" && value.syncOutboxRecovery.hubInstallId.length > 0
+      ? {
+        version: 1,
+        backupSha256: String(value.syncOutboxRecovery.backupSha256).toLowerCase(),
+        previousStreamId: String(value.syncOutboxRecovery.previousStreamId),
+        backupAcknowledgedSequence: Number(value.syncOutboxRecovery.backupAcknowledgedSequence),
+        homeId: String(value.syncOutboxRecovery.homeId),
+        hubInstallId: String(value.syncOutboxRecovery.hubInstallId),
+        preparedAt: typeof value.syncOutboxRecovery.preparedAt === "string" ? value.syncOutboxRecovery.preparedAt : null,
+        snapshotThroughSequence: value.syncOutboxRecovery.snapshotThroughSequence != null
+          && Number.isSafeInteger(Number(value.syncOutboxRecovery.snapshotThroughSequence))
+          && Number(value.syncOutboxRecovery.snapshotThroughSequence) >= 0
+          ? Number(value.syncOutboxRecovery.snapshotThroughSequence) : null,
+        reconciledStreamId: /^[a-zA-Z0-9._:-]{16,80}$/.test(String(value.syncOutboxRecovery.reconciledStreamId || ""))
+          ? String(value.syncOutboxRecovery.reconciledStreamId) : null,
+        reconciledThroughSequence: Number.isSafeInteger(Number(value.syncOutboxRecovery.reconciledThroughSequence))
+          && Number(value.syncOutboxRecovery.reconciledThroughSequence) >= 1
+          ? Number(value.syncOutboxRecovery.reconciledThroughSequence) : null,
+      }
+      : null,
     syncUsage: initialUsageState(value.syncUsage),
     cloudflare: value.cloudflare && typeof value.cloudflare === "object" ? { ...base.cloudflare, ...value.cloudflare } : base.cloudflare,
     zigbee: value.zigbee && typeof value.zigbee === "object" ? { ...base.zigbee, ...value.zigbee, removedAdapterPaths: normalizeIds(value.zigbee.removedAdapterPaths) } : base.zigbee,
@@ -925,7 +975,26 @@ function mergeEntities(existing, incoming, deviceId, state, options = {}) {
   const stateObject = state && typeof state === "object" ? state : {};
   const reportedStateKeys = Array.isArray(options.reportedStateKeys) ? new Set(options.reportedStateKeys.map(String)) : null;
   const endpointHint = String(options.reportedEndpointId || "").trim();
-  const definitionRows = Object.entries(definitions).map(([id, raw]) => [id, raw && typeof raw === "object" ? raw : { stateKey: raw }]);
+  // A legacy generated `deviceId:property` row can duplicate a declared row on
+  // the same endpoint with the same public controlId. Two candidates make every
+  // report ambiguous, so neither row would ever receive the value. The declared
+  // row keeps the controlId (and every reference to it); retire the duplicate.
+  const isDeclaredTwin = (twinId, twin, entity) => twinId && twin && !twin.autoGeneratedStateEntity
+    && String(twin.stateKey || "") === String(entity.stateKey || "")
+    && String(twin.endpointId || "0") === String(entity.endpointId || "0")
+    && String(twin.capability?.controlId || "") === String(entity.capability?.controlId || "");
+  const retiredDuplicateIds = new Set();
+  for (const pool of [entities, definitions]) {
+    for (const [entityId, entity] of Object.entries(pool)) {
+      if (!entity || typeof entity !== "object" || entity.autoGeneratedStateEntity !== true
+        || entityId !== `${deviceId}:${String(entity.stateKey || "")}` || !entity.capability?.controlId) continue;
+      if (Object.entries({ ...entities, ...definitions }).some(([twinId, twin]) => twinId !== entityId
+        && !retiredDuplicateIds.has(twinId) && isDeclaredTwin(twinId, twin, entity))) retiredDuplicateIds.add(entityId);
+    }
+  }
+  for (const entityId of retiredDuplicateIds) delete entities[entityId];
+  const definitionRows = Object.entries(definitions).filter(([id]) => !retiredDuplicateIds.has(id))
+    .map(([id, raw]) => [id, raw && typeof raw === "object" ? raw : { stateKey: raw }]);
   const entityProperties = (entity) => [...new Set([
     String(entity?.stateKey || ""), String(entity?.binding?.property || ""), String(entity?.logicalKey || ""),
   ].filter(Boolean))];
@@ -970,6 +1039,7 @@ function mergeEntities(existing, incoming, deviceId, state, options = {}) {
     }
   }
   for (const [entityId, input] of Object.entries(definitions)) {
+    if (retiredDuplicateIds.has(entityId)) continue;
     const matchingKey = Object.keys(entities).find((key) => key === entityId || entities[key]?.sourceId === entityId || entities[key]?.entityId === entityId);
     const previous = (matchingKey && entities[matchingKey]) || {};
     if (matchingKey && matchingKey !== entityId) delete entities[matchingKey];
@@ -1028,7 +1098,11 @@ function mergeEntities(existing, incoming, deviceId, state, options = {}) {
       state: nextState,
       sourceObservedAt,
       sourceReceivedAt,
+      stateRevision: Math.max(0, Number(previous.stateRevision) || 0) + (candidateIsNewer ? 1 : 0),
       lastChanged: stateChanged ? new Date().toISOString() : (previous.lastChanged || previous.updatedAt || new Date().toISOString()),
+      // Only an adapter report (updateDeviceState) that actually carried this
+      // attribute counts as a report; metadata/definition rewrites never do.
+      lastReportedAt: options.adapterReport === true && hasReportedState ? new Date().toISOString() : (previous.lastReportedAt || null),
       updatedAt: new Date().toISOString(),
     };
   }
@@ -1060,6 +1134,7 @@ function mergeEntities(existing, incoming, deviceId, state, options = {}) {
       sourceReceivedAt: previous.sourceReceivedAt || null,
       autoGeneratedStateEntity: true,
       lastChanged: JSON.stringify(previous.state) !== JSON.stringify(stateObject[stateKey]) ? new Date().toISOString() : (previous.lastChanged || previous.updatedAt || new Date().toISOString()),
+      lastReportedAt: options.adapterReport === true && reportedStateKeys?.has(stateKey) ? new Date().toISOString() : (previous.lastReportedAt || null),
       updatedAt: new Date().toISOString(),
     };
   }
@@ -1069,30 +1144,67 @@ function mergeEntities(existing, incoming, deviceId, state, options = {}) {
 class Store {
   constructor(filePath) {
     this.filePath = filePath;
+    this.durabilityUncertain = false;
     this.state = this.load();
     this.syncSourceGeneration = null;
     this.writeQueue = Promise.resolve();
+    this.mutationQueue = Promise.resolve();
     this.automationPolicyQueue = Promise.resolve();
+    for (const methodName of SERIALIZED_STORE_MUTATIONS) {
+      const method = this[methodName];
+      if (typeof method !== "function") throw new Error(`Store mutation is missing its serialized method: ${methodName}`);
+      this[methodName] = (...args) => this.serializeMutation(() => method.apply(this, args));
+    }
+  }
+
+  serializeMutation(work) {
+    if (STORE_MUTATION_CONTEXT.getStore() === this) return work();
+    const operation = this.mutationQueue.then(() => STORE_MUTATION_CONTEXT.run(this, work));
+    this.mutationQueue = operation.catch(() => {});
+    return operation;
   }
 
   setSyncSourceGeneration(value) {
-      stateRevision: Math.max(0, Number(previous.stateRevision) || 0) + (candidateIsNewer ? 1 : 0),
     const generation = Number(value);
     this.syncSourceGeneration = Number.isSafeInteger(generation) && generation > 0 ? generation : null;
     return this.syncSourceGeneration;
   }
 
   load() {
+    assertNoRestorePendingSync(this.filePath);
     try {
+      let fileStat;
+      try { fileStat = fs.lstatSync(this.filePath); }
+      catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+        if (hasInitializedMarkerSync(this.filePath)) {
+          throw Object.assign(new Error("The initialized Native OS store file is missing; refusing to initialize an empty Home"), { code: "store_initialized_file_missing" });
+        }
+        return initialState();
+      }
+      if (!fileStat.isFile() || fileStat.isSymbolicLink()) {
+        throw Object.assign(new Error("Native OS store path is not a regular non-symlink file"), { code: "store_file_type_invalid" });
+      }
       const persisted = JSON.parse(fs.readFileSync(this.filePath, "utf8"));
       if (!persisted || typeof persisted !== "object" || Array.isArray(persisted)) {
         throw new Error("The stored Native OS document is not an object");
       }
+      // Existing valid deployments are marked during load so an accidental
+      // later deletion cannot be mistaken for a first boot, even before the
+      // next application write.
+      ensureInitializedMarkerSync(this.filePath);
       return normalizeState(persisted);
     } catch (error) {
-      if (error?.code === "ENOENT") return initialState();
       throw Object.assign(new Error("Native OS store could not be read safely", { cause: error }), { code: "store_data_unavailable" });
     }
+  }
+
+  restoreSnapshot(before, error = null) {
+    if (error?.code === "store_durability_uncertain" && error.committed === true) {
+      this.durabilityUncertain = true;
+      return;
+    }
+    this.state = before;
   }
 
   snapshot() {
@@ -1106,7 +1218,7 @@ class Store {
       await this.persist();
       return result === undefined ? undefined : clone(result);
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
   }
@@ -1226,21 +1338,37 @@ class Store {
     });
   }
 
+  /** Coalesces telemetry writes: one whole-Store write per window instead of one per device report. */
+  schedulePersist() {
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      this.persist().catch((error) => console.error(`[dinodia] deferred Store write failed: ${error?.code || error?.message || "unknown"}`));
+    }, DEFERRED_PERSIST_MS);
+    this.persistTimer.unref?.();
+  }
+
+  async flushPersist() {
+    if (this.persistTimer) { clearTimeout(this.persistTimer); this.persistTimer = null; }
+    return this.persist();
+  }
+
   async persist() {
+    // Every write below commits the whole state, so any deferred write is covered.
+    if (this.persistTimer) { clearTimeout(this.persistTimer); this.persistTimer = null; }
     const operation = this.writeQueue.then(async () => {
+      if (this.durabilityUncertain) {
+        throw Object.assign(new Error("Store writes are blocked because the previous commit's directory durability is uncertain"), { code: "store_durability_uncertain" });
+      }
       this.state.updatedAt = new Date().toISOString();
       const serialized = JSON.stringify(this.state, null, 2);
-      await fs.promises.mkdir(path.dirname(this.filePath), { recursive: true });
-      // A PID-only temporary name collides when a controlled restart briefly
-      // has two Store instances for the same durable path (for example, a
-      // late completion from the stopped server racing the replacement). Each
-      // atomic writer needs its own same-directory name before rename.
-      const tempPath = `${this.filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
       try {
-        await fs.promises.writeFile(tempPath, serialized, { mode: 0o600, flag: "wx" });
-        await fs.promises.rename(tempPath, this.filePath);
+        await persistStoreJson(this.filePath, serialized);
       } catch (error) {
-        await fs.promises.unlink(tempPath).catch(() => {});
+        if (error?.code === "store_durability_uncertain" && error.committed === true) {
+          this.durabilityUncertain = true;
+          process.emit("dinodia:store-durability-uncertain", error);
+        }
         throw error;
       }
     });
@@ -1329,6 +1457,7 @@ class Store {
         ...options,
         protectedControlIds,
         reportedStateKeys: options.reportedStateKeys || Object.keys(device.state || {}),
+        adapterReport: Array.isArray(options.reportedStateKeys),
       }),
       available: device.available === undefined ? existing.available !== false : Boolean(device.available),
       updatedAt: new Date().toISOString(),
@@ -1370,9 +1499,11 @@ class Store {
     const devicePolicy = this.state.platform?.devicePolicies?.[id];
     const previousProjection = existing.id ? nativeSyncDeviceProjection(existing, devicePolicy) : null;
     const syncProjection = nativeSyncDeviceProjection(next, devicePolicy);
+    let syncEnqueued = false;
     if (this.state.platform?.devicePolicies?.[id] && (!previousProjection || JSON.stringify(previousProjection) !== JSON.stringify(syncProjection)
       || JSON.stringify(nativeSyncControlCatalogProjection(this.state, existing)?.controls || []) !== JSON.stringify(nativeSyncControlCatalogProjection(this.state, next)?.controls || []))) {
       enqueueNativeDeviceSync(this.state, existing.id ? existing : null, next, { critical: !previousProjection });
+      syncEnqueued = true;
     }
     recordDeviceSyncObservations(this.state, next, observationNow, {
       ...(areaChanged ? { ignoreThroughMs: observationNow } : {}),
@@ -1380,10 +1511,16 @@ class Store {
     });
     for (const legacyId of this.state.devices[id].legacyIds) this.state.aliases[String(legacyId)] = id;
     if (device.metadata?.friendly_name && String(device.metadata.friendly_name) !== id) this.state.aliases[String(device.metadata.friendly_name)] = id;
+    // Telemetry from a bridge may defer the whole-Store write. Sync events, area
+    // changes, usage and policy changes always write immediately.
+    if (options.deferPersist === true && !syncEnqueued && !areaChanged && !options.devicePolicy) {
+      this.schedulePersist();
+      return this.getDevice(id);
+    }
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return this.getDevice(id);
@@ -1431,14 +1568,14 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return this.getDevice(targetId);
   }
 
   async updateDeviceState(id, state, extra = {}) {
-    const { sourceObservedAtByStateKey, sourceReceivedAtByStateKey, reportedEndpointId, reportedStateKeys, nowMs, ...deviceExtra } = extra;
+    const { sourceObservedAtByStateKey, sourceReceivedAtByStateKey, reportedEndpointId, reportedStateKeys, nowMs, deferPersist, ...deviceExtra } = extra;
     const existing = this.state.devices[id] || {
       id,
       name: id,
@@ -1459,6 +1596,7 @@ class Store {
       reportedEndpointId,
       reportedStateKeys: reportedStateKeys || Object.keys(state || {}),
       requireExplicitObservation: true,
+      deferPersist: deferPersist === true,
       ...(Number.isSafeInteger(nowMs) ? { nowMs } : {}),
     });
   }
@@ -1473,7 +1611,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return existed;
@@ -1526,7 +1664,7 @@ class Store {
       ids.forEach((id) => this.removeDeviceFromState(id));
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return ids;
@@ -1559,7 +1697,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return clone(area);
@@ -1615,7 +1753,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return { removed: true, areaId, areaName: area.name, deviceAssignmentsCleared, entityAssignmentsCleared };
@@ -1654,7 +1792,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return clone(label);
@@ -1677,7 +1815,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return true;
@@ -1704,7 +1842,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return this.getZigbee();
@@ -1729,7 +1867,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return this.getZigbee();
@@ -1746,7 +1884,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return this.getZigbee();
@@ -1772,7 +1910,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return this.getThread();
@@ -1867,7 +2005,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return this.getDevice(resolvedId);
@@ -1897,7 +2035,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return clone(device.entities[entityId]);
@@ -1920,7 +2058,7 @@ class Store {
       await this.persist();
       return true;
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
   }
@@ -1954,7 +2092,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return clone(next);
@@ -2011,10 +2149,222 @@ class Store {
     return clone(this.state.syncOutbox || initialSyncOutbox());
   }
 
+  getSyncOutboxRecovery() {
+    return this.state.syncOutboxRecovery ? clone(this.state.syncOutboxRecovery) : null;
+  }
+
+  async setSyncBackupRecoverySnapshotBoundary({ streamId, throughSequence } = {}) {
+    const recovery = this.state.syncOutboxRecovery;
+    const outbox = normalizeSyncOutbox(this.state.syncOutbox);
+    const boundary = Number(throughSequence);
+    if (!recovery || String(streamId || "") !== outbox.streamId
+      || !Number.isSafeInteger(boundary) || boundary < 0 || boundary >= outbox.nextSequence) {
+      throw Object.assign(new Error("The recovery snapshot boundary does not match the durable replacement stream"), { code: "hub_sync_backup_recovery_boundary_invalid" });
+    }
+    if (recovery.snapshotThroughSequence != null) {
+      if (Number(recovery.snapshotThroughSequence) !== boundary) {
+        throw Object.assign(new Error("The durable recovery snapshot boundary changed after it was recorded"), { code: "hub_sync_backup_recovery_boundary_changed" });
+      }
+      return clone(recovery);
+    }
+    const before = this.snapshot();
+    try {
+      this.state.syncOutboxRecovery = { ...recovery, snapshotThroughSequence: boundary };
+      await this.persist();
+      return clone(this.state.syncOutboxRecovery);
+    } catch (error) {
+      this.restoreSnapshot(before, error);
+      throw error;
+    }
+  }
+
+  async completeSyncBackupRecovery({ streamId } = {}) {
+    const recovery = this.state.syncOutboxRecovery;
+    const outbox = normalizeSyncOutbox(this.state.syncOutbox);
+    if (!recovery || String(streamId || "") !== outbox.streamId
+      || recovery.reconciledStreamId !== outbox.streamId
+      || recovery.snapshotThroughSequence == null
+      || !Number.isSafeInteger(Number(recovery.snapshotThroughSequence))
+      || outbox.acknowledgedSequence < Number(recovery.snapshotThroughSequence)
+      || outbox.inFlight || outbox.gapDetected || outbox.criticalBacklog || outbox.telemetryPaused
+      || outbox.droppedTelemetryCount !== 0
+      || outbox.configurationAppliedRevision !== outbox.cloudRevision) {
+      throw Object.assign(new Error("The complete current-policy recovery snapshot has not been durably acknowledged"), { code: "hub_sync_backup_recovery_incomplete" });
+    }
+    const before = this.snapshot();
+    try {
+      this.state.syncOutboxRecovery = null;
+      await this.persist();
+      return true;
+    } catch (error) {
+      this.restoreSnapshot(before, error);
+      throw error;
+    }
+  }
+
+  async prepareSyncBackupRecovery({ backupSha256 } = {}) {
+    const recovery = this.state.syncOutboxRecovery;
+    const expectedHash = String(backupSha256 || "").toLowerCase();
+    if (!recovery || recovery.version !== 1 || !/^[a-f0-9]{64}$/.test(expectedHash)
+      || recovery.backupSha256 !== expectedHash) {
+      throw Object.assign(new Error("No matching, verified Store-backup recovery authorization is present"), { code: "hub_sync_backup_recovery_not_authorized" });
+    }
+    const platform = this.state.platform || {};
+    if (platform.paired !== true || String(platform.homeId || "") !== recovery.homeId
+      || String(platform.hubInstallId || "") !== recovery.hubInstallId) {
+      throw Object.assign(new Error("Recovered Store identity no longer matches its enrolled Home and hub installation"), { code: "hub_sync_backup_recovery_identity_changed" });
+    }
+    const current = normalizeSyncOutbox(this.state.syncOutbox);
+    if (current.streamId !== recovery.previousStreamId
+      || current.acknowledgedSequence !== recovery.backupAcknowledgedSequence
+      || current.inFlight || current.gapDetected || current.criticalBacklog || current.telemetryPaused
+      || current.droppedTelemetryCount !== 0) {
+      throw Object.assign(new Error("Recovered outbox has changed or contains an unresolved gap/in-flight request; preserving it for review"), { code: "hub_sync_backup_recovery_outbox_changed" });
+    }
+    const pending = current.events.filter((event) => Number(event.sequence) > current.acknowledgedSequence);
+    if (pending.length !== current.nextSequence - current.acknowledgedSequence - 1
+      || pending.some((event, index) => Number(event.sequence) !== current.acknowledgedSequence + index + 1)) {
+      throw Object.assign(new Error("Recovered outbox is not a complete contiguous queue; preserving it for review"), { code: "hub_sync_backup_recovery_outbox_gap" });
+    }
+
+    const before = this.snapshot();
+    try {
+      const archivePath = `${this.filePath}.sync-recovery-${expectedHash.slice(0, 16)}.json`;
+      const archive = {
+        schemaVersion: 1,
+        backupSha256: expectedHash,
+        archivedAt: new Date().toISOString(),
+        previousStreamId: current.streamId,
+        previousAcknowledgedSequence: current.acknowledgedSequence,
+        previousNextSequence: current.nextSequence,
+        outbox: current,
+      };
+      const archiveBytes = `${JSON.stringify(archive, null, 2)}\n`;
+      try {
+        const handle = await fs.promises.open(archivePath, "wx", 0o600);
+        try {
+          await handle.writeFile(archiveBytes, "utf8");
+          await handle.sync();
+        } finally { await handle.close(); }
+        const directory = await fs.promises.open(path.dirname(archivePath), "r");
+        try { await directory.sync(); } finally { await directory.close(); }
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+        let existing;
+        try { existing = JSON.parse(await fs.promises.readFile(archivePath, "utf8")); }
+        catch (readError) { throw Object.assign(new Error("Existing sync-recovery archive is unreadable; preserving the current outbox"), { code: "hub_sync_backup_recovery_archive_invalid", cause: readError }); }
+        if (existing?.schemaVersion !== 1 || existing.backupSha256 !== expectedHash
+          || existing.previousStreamId !== current.streamId
+          || Number(existing.previousAcknowledgedSequence) !== current.acknowledgedSequence
+          || Number(existing.previousNextSequence) !== current.nextSequence
+          || !isDeepStrictEqual(existing.outbox, current)) {
+          throw Object.assign(new Error("A conflicting sync-recovery archive already exists; the current outbox was not changed"), { code: "hub_sync_backup_recovery_archive_conflict" });
+        }
+      }
+
+      const next = initialSyncOutbox();
+      next.cloudRevision = current.cloudRevision;
+      next.configurationAppliedRevision = current.configurationAppliedRevision;
+      this.state.syncOutbox = next;
+      await this.persist();
+      return { prepared: true, streamId: next.streamId, archivedOutboxPath: archivePath };
+    } catch (error) {
+      this.restoreSnapshot(before, error);
+      throw error;
+    }
+  }
+
+  async prepareSyncRequestLossRecovery({ previousStreamId, previousAcknowledgedSequence,
+    previousNextSequence, serverAcceptedSequence, acceptedRequestBodyHash, now = Date.now() } = {}) {
+    const current = normalizeSyncOutbox(this.state.syncOutbox);
+    const platform = this.state.platform || {};
+    const pending = current.events.filter(event => event.sequence > current.acknowledgedSequence);
+    // This is an explicit operator recovery, not an automatic acknowledgement
+    // of an unknown request. The old stream/ACK and ALL pending events are
+    // archived; a replacement stream must earn its own signed cloud receipts.
+    if (platform.paired !== true || !platform.homeId || !platform.hubInstallId
+      || this.state.syncOutboxRecovery || current.requestLossRecovery
+      || current.streamId !== previousStreamId || current.acknowledgedSequence !== previousAcknowledgedSequence
+      || current.nextSequence !== previousNextSequence || current.inFlight
+      || current.lastErrorCode !== "hub_sync_stream_reconciliation_required"
+      || current.gapDetected || current.criticalBacklog || current.telemetryPaused || current.droppedTelemetryCount !== 0
+      || !Number.isSafeInteger(serverAcceptedSequence) || serverAcceptedSequence !== current.acknowledgedSequence + 1
+      || !/^[a-f0-9]{64}$/.test(String(acceptedRequestBodyHash || ""))
+      || current.configurationAppliedRevision !== current.cloudRevision
+      || pending.length !== current.nextSequence - current.acknowledgedSequence - 1
+      || pending.some((event,index) => event.sequence !== current.acknowledgedSequence + index + 1)
+      || pending[0]?.type !== "sync.compacted" || pending[0]?.critical !== false
+      || !pending.some(event => event.sequence === pending[0]?.payload?.supersededBy)) {
+      throw Object.assign(new Error("Request-loss recovery requires the reviewed one-marker cursor discrepancy and a complete retained queue"), {code:"hub_sync_request_loss_recovery_not_eligible"});
+    }
+    const before = this.snapshot();
+    const archiveHash = canonicalHash(current);
+    const archivePath = `${this.filePath}.request-loss-${archiveHash.slice(0,16)}.json`;
+    const archive = {schemaVersion:1, reason:"missing_exact_request", outboxSha256:archiveHash,
+      acceptedRequestBodyHash, serverAcceptedSequence, homeId:platform.homeId,
+      hubInstallId:platform.hubInstallId, outbox:current};
+    try {
+      try {
+        const handle = await fs.promises.open(archivePath,"wx",0o600);
+        try { await handle.writeFile(`${JSON.stringify(archive,null,2)}\n`); await handle.sync(); }
+        finally { await handle.close(); }
+        const directory = await fs.promises.open(path.dirname(archivePath),"r");
+        try { await directory.sync(); } finally { await directory.close(); }
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+        const info = await fs.promises.lstat(archivePath);
+        if (!info.isFile() || info.isSymbolicLink()
+          || !isDeepStrictEqual(JSON.parse(await fs.promises.readFile(archivePath,"utf8")),archive)) {
+          throw Object.assign(new Error("The retained request-loss archive does not match the current queue"), {code:"hub_sync_request_loss_archive_conflict"});
+        }
+      }
+      const next = initialSyncOutbox();
+      next.cloudRevision = current.cloudRevision;
+      next.configurationAppliedRevision = current.configurationAppliedRevision;
+      next.acknowledgedAutomationOccurrences = clone(current.acknowledgedAutomationOccurrences);
+      this.state.syncOutbox = next;
+      // Establish CURRENT inventory/catalogue before replaying delayed source
+      // observations. No observation timestamp/value is inferred or renewed.
+      for (const area of Object.values(this.state.areas || {})) {
+        enqueueSyncEventInState(this.state,"area.upsert",String(area.id),{
+          osAreaId:String(area.id).slice(0,160),name:String(area.name||area.id).slice(0,160),icon:String(area.icon||"room").slice(0,40),
+        },{now,critical:true});
+      }
+      this.state.syncOutbox.snapshotCreatedAt = new Date(now).toISOString();
+      for (const device of Object.values(this.state.devices || {})) {
+        if (platform.devicePolicies?.[device.id]?.managementClass !== "PROPERTY_DEVICE") continue;
+        enqueueNativeDeviceSync(this.state,null,device,{now,critical:true});
+        this.state.syncOutbox.snapshotDeviceIds.push(String(device.id));
+      }
+      const replacement = this.state.syncOutbox;
+      const snapshotThroughSequence = replacement.nextSequence - 1;
+      const replacementSequences = new Map(pending.map((event,index) => [event.sequence,replacement.nextSequence+index]));
+      const replacementNext = replacement.nextSequence + pending.length;
+      for (const event of pending) {
+        const retained = {...clone(event),sequence:replacement.nextSequence++};
+        // Only stream-relative no-op references change with resequencing.
+        // The original marker is retained in the immutable archive; physical
+        // observations, event IDs and authority tombstones remain unchanged.
+        if (retained.type === "sync.compacted") {
+          retained.payload.supersededBy = replacementSequences.get(event.payload.supersededBy) || replacementNext;
+        }
+        replacement.events.push(retained);
+      }
+      replacement.requestLossRecovery = {version:1,reason:"missing_exact_request",
+        previousStreamId:current.streamId,previousAcknowledgedSequence:current.acknowledgedSequence,
+        previousNextSequence:current.nextSequence,serverAcceptedSequence,acceptedRequestBodyHash,
+        archivedOutboxSha256:archiveHash,retainedEventCount:pending.length,snapshotThroughSequence,
+        retainedThroughSequence:replacement.nextSequence-1,preparedAt:new Date(now).toISOString(),completedAt:null};
+      await this.persist();
+      return {prepared:true,streamId:replacement.streamId,archivedOutboxPath:archivePath,
+        retainedEventCount:pending.length,snapshotThroughSequence,retainedThroughSequence:replacement.nextSequence-1};
+    } catch (error) { this.restoreSnapshot(before,error); throw error; }
+  }
+
   async reconcileRejectedSyncBatchSize({ hubInstallationId, streamId, acceptedSequence, errorCode } = {}) {
     const before = this.snapshot();
     const noChange = () => {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       return { reconciled: false, previousEventCount: 0, nextEventCount: 0 };
     };
     try {
@@ -2051,7 +2401,7 @@ class Store {
       await this.persist();
       return { reconciled: true, previousEventCount, nextEventCount: Math.min(previousEventCount, SYNC_BATCH_MAX_EVENTS) };
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
   }
@@ -2059,7 +2409,7 @@ class Store {
   async reconcileRejectedDescriptorSync({ streamId, acceptedSequence, errorCode } = {}) {
     const before = this.snapshot();
     const noChange = () => {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       return { reconciled: false, compactedEvents: 0, refreshedDevices: 0 };
     };
     try {
@@ -2169,7 +2519,99 @@ class Store {
       await this.persist();
       return { reconciled: true, compactedEvents: targetEvents.size, refreshedDevices: staleDeviceIds.size };
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
+      throw error;
+    }
+  }
+
+  async reconcileRejectedCatalogOrder({ streamId, acceptedSequence, errorCode } = {}) {
+    const before = this.snapshot();
+    const noChange = () => ({ reconciled: false, compactedCatalogs: 0, refreshedDevices: 0 });
+    try {
+      const outbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
+      const accepted = Number(acceptedSequence);
+      const batch = outbox.inFlight;
+      if (errorCode !== "hub_sync_catalog_revision_mismatch" || outbox.lastErrorCode !== errorCode
+        || String(streamId || "") !== outbox.streamId || !Number.isSafeInteger(accepted)
+        || accepted !== outbox.acknowledgedSequence || !batch || batch.streamId !== outbox.streamId
+        || outbox.gapDetected || outbox.criticalBacklog || outbox.telemetryPaused || outbox.droppedTelemetryCount !== 0
+        || Number(batch.fromSequence) !== accepted + 1 || !Number.isSafeInteger(Number(batch.toSequence))
+        || Number(batch.toSequence) < Number(batch.fromSequence) || !Array.isArray(batch.events)) {
+        return noChange();
+      }
+
+      const batchFrom = Number(batch.fromSequence);
+      const batchTo = Number(batch.toSequence);
+      const range = outbox.events.filter((event) => event.sequence >= batchFrom && event.sequence <= batchTo);
+      if (range.length !== batchTo - batchFrom + 1 || batch.events.length !== range.length
+        || range.some((event, index) => event.sequence !== batchFrom + index
+          || Number(batch.events[index]?.sequence) !== event.sequence
+          || String(batch.events[index]?.id) !== event.id)) {
+        return noChange();
+      }
+      if (range.some((event) => event.type === "control.catalog.tombstone")) return noChange();
+
+      // Platform applies a batch strictly in order inside one transaction. A
+      // control catalogue that arrives before the device revision it describes
+      // is rejected, and the identical batch is then retried. When the matching
+      // device upsert appears only later in this same batch, the early catalogue
+      // is superseded and the current catalogue is queued again after the batch.
+      // Sequence numbers, event ids and the device upsert are kept unchanged.
+      const deviceIdOf = (event) => String(event.payload?.osDeviceId || "");
+      const targets = [];
+      const deviceIds = new Set();
+      for (const event of range) {
+        if (event.type !== "control.catalog.upsert") continue;
+        const id = deviceIdOf(event);
+        const revision = Number(event.payload?.catalogRevision);
+        const digest = String(event.payload?.descriptorDigest || "");
+        if (!id || event.aggregateId !== id || !Number.isSafeInteger(revision) || revision < 1
+          || !/^[a-f0-9]{64}$/i.test(digest)) return noChange();
+        const matchesDevice = (entry) => entry.type === "device.upsert" && deviceIdOf(entry) === id
+          && Number(entry.payload?.descriptorRevision) === revision && String(entry.payload?.descriptorDigest || "") === digest;
+        if (range.some((entry) => entry.sequence < event.sequence && matchesDevice(entry))) continue;
+        if (!range.some((entry) => entry.sequence > event.sequence && matchesDevice(entry))) return noChange();
+        const device = this.state.devices?.[id];
+        const policy = this.state.platform?.devicePolicies?.[id];
+        if (!device || policy?.managementClass !== "PROPERTY_DEVICE"
+          || ["REMOVAL_PENDING", "REMOVED", "RETIRED", "RECOMMISSION_REQUIRED"].includes(String(policy.lifecycle))) return noChange();
+        // Repair only while the hub's current descriptor content is the one the
+        // rejected catalogue describes. The revision counter is not compared: it
+        // moves on restart even when the content digest is unchanged.
+        const current = nativeSyncDeviceProjection(device, policy);
+        if (current.descriptorDigest !== digest) return noChange();
+        targets.push(event);
+        deviceIds.add(id);
+      }
+      if (!targets.length) return noChange();
+
+      const replacementSequence = outbox.nextSequence;
+      for (const event of targets) {
+        event.type = "sync.compacted";
+        event.aggregateId = "";
+        event.payload = { supersededBy: replacementSequence };
+      }
+      for (const id of deviceIds) {
+        enqueueNativeDeviceSync(this.state, null, this.state.devices[id], { critical: true });
+      }
+
+      const reconciledOutbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
+      const refreshedRange = reconciledOutbox.events.filter((event) => event.sequence >= batchFrom && event.sequence <= batchTo);
+      const queueDepth = reconciledOutbox.events.filter((event) => event.sequence > accepted).length;
+      reconciledOutbox.inFlight = {
+        ...batch,
+        events: refreshedRange.map(clone),
+        queueDepth,
+        runtime: batch.runtime && typeof batch.runtime === "object"
+          ? { ...batch.runtime, capabilities: { ...(batch.runtime.capabilities || {}), nativeSyncOutbox: {
+            ...(batch.runtime.capabilities?.nativeSyncOutbox || {}), queueDepth,
+          } } }
+          : batch.runtime,
+      };
+      await this.persist();
+      return { reconciled: true, compactedCatalogs: targets.length, refreshedDevices: deviceIds.size };
+    } catch (error) {
+      this.restoreSnapshot(before, error);
       throw error;
     }
   }
@@ -2202,7 +2644,7 @@ class Store {
       await this.persist();
       return event;
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
   }
@@ -2282,10 +2724,11 @@ class Store {
       await this.persist();
       return clone(nextBatch);
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
   }
+
   async prepareSyncBatch(hubInstallationId, runtime, now = Date.now(), options = {}) {
     const before = this.snapshot();
     try {
@@ -2316,7 +2759,7 @@ class Store {
       }
       return clone(outbox.inFlight);
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
   }
@@ -2377,7 +2820,7 @@ class Store {
       await this.persist();
       return clone(batch);
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
   }
@@ -2411,7 +2854,7 @@ class Store {
       if (changed) await this.persist();
       return changed;
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
   }
@@ -2448,7 +2891,7 @@ class Store {
       if (advanced.changedBuckets.length || queued || JSON.stringify(before.syncUsage) !== JSON.stringify(this.state.syncUsage)) await this.persist();
       return { changedBuckets: advanced.changedBuckets.length, queued };
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
   }
@@ -2470,7 +2913,7 @@ class Store {
       if (queued) await this.persist();
       return queued;
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
   }
@@ -2498,7 +2941,7 @@ class Store {
       await this.persist();
       return true;
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
   }
@@ -2542,7 +2985,7 @@ class Store {
       if (queued) await this.persist();
       return queued;
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
   }
@@ -2578,6 +3021,10 @@ class Store {
       }
       outbox.usageClosureRejection = null;
       outbox.acknowledgedSequence = Math.max(outbox.acknowledgedSequence, batch.toSequence);
+      if (outbox.requestLossRecovery?.version === 1 && !outbox.requestLossRecovery.completedAt
+        && outbox.acknowledgedSequence >= outbox.requestLossRecovery.retainedThroughSequence) {
+        outbox.requestLossRecovery.completedAt = new Date(Number(now)).toISOString();
+      }
       const acceptedIncidentEvents = new Map((batch.events || []).filter((event) => event.type === "incident.transition")
         .map((event) => [`${event.payload.incidentKey}|${Number(event.payload.revision)}`, event]));
       if (acceptedIncidentEvents.size) {
@@ -2620,10 +3067,21 @@ class Store {
       outbox.gapDetected = outbox.gapDetected || receipt.resnapshotRequired === true;
       outbox.criticalBacklog = false;
       outbox.telemetryPaused = false;
+      const reconciliation = batch.streamReconciliation;
+      const recovery = this.state.syncOutboxRecovery;
+      if (recovery && reconciliation?.version === 1
+        && reconciliation.previousStreamId === recovery.previousStreamId
+        && Number(reconciliation.previousAcceptedSequence) >= Number(recovery.backupAcknowledgedSequence)) {
+        this.state.syncOutboxRecovery = {
+          ...recovery,
+          reconciledStreamId: outbox.streamId,
+          reconciledThroughSequence: batch.toSequence,
+        };
+      }
       await this.persist();
       return this.getSyncOutbox();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
   }
@@ -2641,7 +3099,7 @@ class Store {
       await this.persist();
       return this.getSyncOutbox();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
   }
@@ -2660,7 +3118,7 @@ class Store {
       outbox.configurationAppliedRevision = Math.max(outbox.configurationAppliedRevision, next);
       await this.persist();
       return this.getSyncOutbox();
-    } catch (error) { this.state = before; throw error; }
+    } catch (error) { this.restoreSnapshot(before, typeof error === "undefined" ? null : error); throw error; }
   }
 
   async markSyncFailure(code, evidence = {}) {
@@ -2734,7 +3192,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return this.getHive();
@@ -2764,7 +3222,7 @@ class Store {
         unsupportedProductCount: 0,
       });
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
   }
@@ -2798,7 +3256,7 @@ class Store {
     const currentReceipts = Array.isArray(existing.directiveReceipts) ? existing.directiveReceipts : [];
     const nextReceipts = safePatch.directiveReceipts === undefined ? currentReceipts : safePatch.directiveReceipts;
     this.state.integrations.alexa = { enabled: true, linked: false, status: "disconnected", endpointCount: 0, catalogRevision: null, lastSuccessfulSyncAt: null, lastStatusCheckAt: null, errorCode: null, lastErrorAt: null, directiveReceipts: [], ...existing, ...safePatch, directiveReceipts: nextReceipts, updatedAt: new Date().toISOString() };
-    try { await this.persist(); } catch (error) { this.state = before; throw error; }
+    try { await this.persist(); } catch (error) { this.restoreSnapshot(before, typeof error === "undefined" ? null : error); throw error; }
     return this.getAlexa();
   }
 
@@ -2818,7 +3276,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return this.getGoogleNest();
@@ -2831,7 +3289,7 @@ class Store {
       if (this.state.configEntries?.ce_google_nest) delete this.state.configEntries.ce_google_nest;
       return await this.saveGoogleNest({ configured: false, status: "disconnected", releaseChannel: "sandbox_beta", accountFingerprint: "", connectedAt: null, lastAuthorizationAttemptAt: null, lastSuccessfulPollAt: null, nextPollAt: null, lastErrorCode: null, lastErrorAt: null, reauthRequired: false, consecutiveFailures: 0, thermostatDeviceCount: 0, unsupportedDeviceCount: 0, ignoredDeviceIds: [], ignoredDeviceSummaries: [] });
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
   }
@@ -2848,7 +3306,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return this.getHeatingDemandController();
@@ -2864,7 +3322,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return this.getHeatingDemandController();
@@ -2942,7 +3400,7 @@ class Store {
       await this.persist();
       return true;
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
   }
@@ -3106,7 +3564,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return this.getActivityState();
@@ -3133,7 +3591,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return clone(next);
@@ -3156,7 +3614,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return clone(this.state.activity.records[index]);
@@ -3219,7 +3677,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return this.getActivityState();
@@ -3241,7 +3699,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return this.getActiveIncident(key);
@@ -3270,7 +3728,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return clone(entry);
@@ -3317,7 +3775,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
     return { acknowledged, pending: this.listPendingIncidentEnvelopes() };
@@ -3331,7 +3789,7 @@ class Store {
     try {
       await this.persist();
     } catch (error) {
-      this.state = before;
+      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
       throw error;
     }
   }

@@ -28,6 +28,7 @@ class HeatingUsageTracker {
     this.entityIdFor = entityIdFor || ((entity, device, rawId) => entity.haEntityId || entity.entityId || rawId);
     this.logger = logger;
     this.persistTimer = null;
+    this.persistQueue = Promise.resolve();
     this.config = { schemaVersion: 1, efficiencyBandsVersion: 1, defaultBoilerEfficiencyBand: DEFAULT_BAND, boilerBandsByEntityId: {} };
   }
 
@@ -44,9 +45,24 @@ class HeatingUsageTracker {
     if (this.persistTimer) return;
     this.persistTimer = setTimeout(() => {
       this.persistTimer = null;
-      this.store.persist().catch((error) => this.logger.error(`[heating] ${error.message}`));
+      void this.persistNow();
     }, 500);
     this.persistTimer.unref?.();
+  }
+
+  persistNow() {
+    const operation = this.persistQueue.then(() => this.store.persist());
+    this.persistQueue = operation.catch((error) => this.logger.error(`[heating] ${error.message}`));
+    return this.persistQueue;
+  }
+
+  async flush() {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+      await this.persistNow();
+    }
+    await this.persistQueue;
   }
 
   relevantLabel(device, entity) {

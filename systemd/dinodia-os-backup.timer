@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily validated private Dinodia OS Store backup
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+Persistent=true
+RandomizedDelaySec=10m
+Unit=dinodia-os-backup.service
+
+[Install]
+WantedBy=timers.target

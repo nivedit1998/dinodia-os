@@ -437,6 +437,7 @@ class HeatingDemandController {
     this.logger = logger;
     this.now = now;
     this.timer = null;
+    this.stopped = false;
     this.evaluationInFlight = null;
     this.commandInFlight = null;
     this.lastCommandSignature = null;
@@ -520,6 +521,7 @@ class HeatingDemandController {
   }
 
   async evaluate({ reason = "scheduled", execute = true } = {}) {
+    if (this.stopped) return this.status();
     if (this.evaluationInFlight) return this.evaluationInFlight;
     this.evaluationInFlight = this._evaluate({ reason, execute });
     this.evaluationInFlight.finally(() => { this.evaluationInFlight = null; }).catch(() => {});
@@ -640,9 +642,11 @@ class HeatingDemandController {
   }
 
   async reconcileDeviceChange(device, previous) {
+    if (this.stopped) return this.status();
     void device;
     void previous;
     await this.syncMappings();
+    if (this.stopped) return this.status();
     return this.evaluate({ reason: "device_changed", execute: true });
   }
 
@@ -687,6 +691,7 @@ class HeatingDemandController {
 
   async start() {
     if (this.timer) return;
+    this.stopped = false;
     await this._saveRuntime({ commandPending: null });
     let intervalSeconds = DEFAULT_HEATING_DEMAND_CONFIG.evaluationIntervalSeconds;
     try { intervalSeconds = this.config().evaluationIntervalSeconds || intervalSeconds; } catch (error) { this.logger.warn?.("[heating-controller] using default evaluation interval: " + error.message); }
@@ -694,9 +699,11 @@ class HeatingDemandController {
     this.timer.unref?.();
   }
 
-  stop() {
+  async stop() {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    await Promise.allSettled([this.evaluationInFlight, this.commandInFlight].filter(Boolean));
   }
 
   async markObserved(boiler) {

@@ -1,0 +1,24 @@
+[Unit]
+Description=Create and verify a private encrypted Dinodia OS Store backup
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=@INSTALL_USER@
+Group=@INSTALL_USER@
+UMask=0077
+WorkingDirectory=@INSTALL_DIR@
+Environment=DINODIA_BACKUP_DATA_DIR=@DATA_DIR@
+ExecStart=@NODE_BIN@ @INSTALL_DIR@/scripts/backup.js
+Nice=10
+IOSchedulingClass=idle
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=@DATA_DIR@

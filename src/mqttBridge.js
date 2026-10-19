@@ -415,8 +415,6 @@ class MqttBridge {
         for (const property of observationContract.properties || []) {
           if (reportedState[property] === null) delete reportedState[property];
         }
-        // Only exact properties excluded from this publisher's composed cache
-        // can establish per-property physical evidence, including controls.
         for (const property of observationContract.properties || []) {
           if (!Object.prototype.hasOwnProperty.call(reportedState, property)) continue;
           const matchingEntities = Object.values(existing.entities || {}).filter((entity) => String(entity.stateKey || entity.binding?.property || "") === property
@@ -439,6 +437,7 @@ class MqttBridge {
         protocol: "zigbee", available: true, name: existing?.name || id,
         reportedStateKeys: Object.keys(reportedState),
         nowMs: receivedMs,
+        deferPersist: true,
         ...(lastSeenAt ? { lastSeenAt } : {}),
         sourceObservedAtByStateKey, sourceReceivedAtByStateKey,
         reportedEndpointId: value.endpoint ?? value.endpoint_id,

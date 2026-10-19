@@ -18,6 +18,8 @@ SERVICE_FILE="/etc/systemd/system/dinodia-os.service"
 IDENTITY_SERVICE_FILE="/etc/systemd/system/dinodia-identityd.service"
 DISCOVERY_SERVICE_FILE="/etc/systemd/system/dinodia-setup-discovery-sync.service"
 DISCOVERY_TIMER_FILE="/etc/systemd/system/dinodia-setup-discovery-sync.timer"
+BACKUP_SERVICE_FILE="/etc/systemd/system/dinodia-os-backup.service"
+BACKUP_TIMER_FILE="/etc/systemd/system/dinodia-os-backup.timer"
 AVAHI_CONFIG="/etc/avahi/avahi-daemon.conf"
 INSTALL_USER="${SUDO_USER:-${USER:-dinodia}}"
 CURRENT_ENV="${DINODIA_ENV_FILE:-$INSTALL_DIR/.env}"
@@ -37,6 +39,10 @@ OLD_DISCOVERY_SERVICE_PRESENT=0
 OLD_DISCOVERY_TIMER_PRESENT=0
 OLD_DISCOVERY_TIMER_ENABLED=0
 OLD_DISCOVERY_TIMER_ACTIVE=0
+OLD_BACKUP_SERVICE_PRESENT=0
+OLD_BACKUP_TIMER_PRESENT=0
+OLD_BACKUP_TIMER_ENABLED=0
+OLD_BACKUP_TIMER_ACTIVE=0
 OLD_DISCOVERY_LINK_PRESENT=0
 OLD_DISCOVERY_LINK_TARGET=""
 DISCOVERY_LINK_SWITCHED=0
@@ -143,6 +149,8 @@ cleanup_failed_install() {
   if [[ "$SWITCHED" -eq 1 ]]; then
     systemctl disable --now dinodia-setup-discovery-sync.timer >/dev/null 2>&1 || true
     systemctl stop dinodia-setup-discovery-sync.service >/dev/null 2>&1 || true
+    systemctl disable --now dinodia-os-backup.timer >/dev/null 2>&1 || true
+    systemctl stop dinodia-os-backup.service >/dev/null 2>&1 || true
     systemctl stop dinodia-os dinodia-identityd >/dev/null 2>&1 || true
     if [[ "$OLD_RELEASE_ROLLBACK_SAFE" -eq 1 ]]; then
       rm -f -- "$INSTALL_DIR"
@@ -151,6 +159,8 @@ cleanup_failed_install() {
       if [[ "$OLD_IDENTITY_UNIT_PRESENT" -eq 1 && -f "$BACKUP_DIR/dinodia-identityd.service" ]]; then install -o root -g root -m 0644 "$BACKUP_DIR/dinodia-identityd.service" "$IDENTITY_SERVICE_FILE"; else rm -f "$IDENTITY_SERVICE_FILE"; fi
       if [[ "$OLD_DISCOVERY_SERVICE_PRESENT" -eq 1 && -f "$BACKUP_DIR/dinodia-setup-discovery-sync.service" ]]; then install -o root -g root -m 0644 "$BACKUP_DIR/dinodia-setup-discovery-sync.service" "$DISCOVERY_SERVICE_FILE"; else rm -f "$DISCOVERY_SERVICE_FILE"; fi
       if [[ "$OLD_DISCOVERY_TIMER_PRESENT" -eq 1 && -f "$BACKUP_DIR/dinodia-setup-discovery-sync.timer" ]]; then install -o root -g root -m 0644 "$BACKUP_DIR/dinodia-setup-discovery-sync.timer" "$DISCOVERY_TIMER_FILE"; else rm -f "$DISCOVERY_TIMER_FILE"; fi
+      if [[ "$OLD_BACKUP_SERVICE_PRESENT" -eq 1 && -f "$BACKUP_DIR/dinodia-os-backup.service" ]]; then install -o root -g root -m 0644 "$BACKUP_DIR/dinodia-os-backup.service" "$BACKUP_SERVICE_FILE"; else rm -f "$BACKUP_SERVICE_FILE"; fi
+      if [[ "$OLD_BACKUP_TIMER_PRESENT" -eq 1 && -f "$BACKUP_DIR/dinodia-os-backup.timer" ]]; then install -o root -g root -m 0644 "$BACKUP_DIR/dinodia-os-backup.timer" "$BACKUP_TIMER_FILE"; else rm -f "$BACKUP_TIMER_FILE"; fi
       if [[ "$DISCOVERY_LINK_SWITCHED" -eq 1 ]]; then
         if [[ "$OLD_DISCOVERY_LINK_PRESENT" -eq 1 && -d "$OLD_DISCOVERY_LINK_TARGET" ]]; then
           discovery_link_tmp="${DISCOVERY_CURRENT_LINK}.rollback-${BASHPID}"
@@ -171,6 +181,8 @@ cleanup_failed_install() {
     if [[ "$FAIL_CLOSED_CANDIDATE" -eq 0 ]]; then
       if [[ "$OLD_DISCOVERY_TIMER_ENABLED" -eq 1 ]]; then systemctl enable dinodia-setup-discovery-sync.timer >/dev/null 2>&1 || true; else systemctl disable dinodia-setup-discovery-sync.timer >/dev/null 2>&1 || true; fi
       if [[ "$OLD_DISCOVERY_TIMER_ACTIVE" -eq 1 ]]; then systemctl start dinodia-setup-discovery-sync.timer >/dev/null 2>&1 || true; else systemctl stop dinodia-setup-discovery-sync.timer >/dev/null 2>&1 || true; fi
+      if [[ "$OLD_BACKUP_TIMER_ENABLED" -eq 1 ]]; then systemctl enable dinodia-os-backup.timer >/dev/null 2>&1 || true; else systemctl disable dinodia-os-backup.timer >/dev/null 2>&1 || true; fi
+      if [[ "$OLD_BACKUP_TIMER_ACTIVE" -eq 1 ]]; then systemctl start dinodia-os-backup.timer >/dev/null 2>&1 || true; else systemctl stop dinodia-os-backup.timer >/dev/null 2>&1 || true; fi
     fi
   elif [[ -n "${RELEASE_DIR:-}" && -e "$RELEASE_DIR" ]]; then
     # A copy/install failure before the switch must not strand a partial
@@ -269,7 +281,6 @@ fi
 # changes. This catches an accidental copy/formatting defect in the staged env.
 STAGED_BUILD_ID="$(node "$STAGE_DIR/scripts/install_pi_preflight.mjs" --source "$STAGE_DIR" --env "$STAGE_DIR/.env" --identity "$IDENTITY_DIR" --print-build-id)"
 [[ "$STAGED_BUILD_ID" == "$BUILD_ID" ]] || die "staged candidate fingerprint changed unexpectedly"
-
 if command -v cloudflared >/dev/null 2>&1; then
   echo "cloudflared: $(cloudflared --version | head -1)"
 else
@@ -283,8 +294,12 @@ if [[ -e "$SERVICE_FILE" ]]; then cp -p "$SERVICE_FILE" "$BACKUP_DIR/dinodia-os.
 if [[ -e "$IDENTITY_SERVICE_FILE" ]]; then cp -p "$IDENTITY_SERVICE_FILE" "$BACKUP_DIR/dinodia-identityd.service"; OLD_IDENTITY_UNIT_PRESENT=1; fi
 if [[ -e "$DISCOVERY_SERVICE_FILE" ]]; then cp -p "$DISCOVERY_SERVICE_FILE" "$BACKUP_DIR/dinodia-setup-discovery-sync.service"; OLD_DISCOVERY_SERVICE_PRESENT=1; fi
 if [[ -e "$DISCOVERY_TIMER_FILE" ]]; then cp -p "$DISCOVERY_TIMER_FILE" "$BACKUP_DIR/dinodia-setup-discovery-sync.timer"; OLD_DISCOVERY_TIMER_PRESENT=1; fi
+if [[ -e "$BACKUP_SERVICE_FILE" ]]; then cp -p "$BACKUP_SERVICE_FILE" "$BACKUP_DIR/dinodia-os-backup.service"; OLD_BACKUP_SERVICE_PRESENT=1; fi
+if [[ -e "$BACKUP_TIMER_FILE" ]]; then cp -p "$BACKUP_TIMER_FILE" "$BACKUP_DIR/dinodia-os-backup.timer"; OLD_BACKUP_TIMER_PRESENT=1; fi
 systemctl is-enabled --quiet dinodia-setup-discovery-sync.timer && OLD_DISCOVERY_TIMER_ENABLED=1 || true
 systemctl is-active --quiet dinodia-setup-discovery-sync.timer && OLD_DISCOVERY_TIMER_ACTIVE=1 || true
+systemctl is-enabled --quiet dinodia-os-backup.timer && OLD_BACKUP_TIMER_ENABLED=1 || true
+systemctl is-active --quiet dinodia-os-backup.timer && OLD_BACKUP_TIMER_ACTIVE=1 || true
 if [[ -f "$AVAHI_CONFIG" ]]; then cp -p "$AVAHI_CONFIG" "$BACKUP_DIR/avahi-daemon.conf"; OLD_AVAHI_CONFIG_PRESENT=1; fi
 if [[ "$OLD_DISCOVERY_LINK_PRESENT" -eq 1 ]]; then
   printf '%s\n' "$OLD_DISCOVERY_LINK_TARGET" > "$BACKUP_DIR/dinodia-setup-discovery-current.target"
@@ -351,6 +366,11 @@ sed -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" -e "s#@IDENTITY_DIR@#$IDENTITY_DIR#g" -e
 install -o root -g root -m 0644 "$discovery_service_tmp" "$DISCOVERY_SERVICE_FILE"
 rm -f "$discovery_service_tmp"
 install -o root -g root -m 0644 "$RELEASE_DIR/systemd/dinodia-setup-discovery-sync.timer" "$DISCOVERY_TIMER_FILE"
+backup_service_tmp="$(mktemp /tmp/dinodia-os-backup.service.XXXXXX)"
+sed -e "s#@INSTALL_USER@#$INSTALL_USER#g" -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" -e "s#@DATA_DIR@#$DATA_DIR#g" -e "s#@NODE_BIN@#$(command -v node)#g" "$RELEASE_DIR/systemd/dinodia-os-backup.service" > "$backup_service_tmp"
+install -o root -g root -m 0644 "$backup_service_tmp" "$BACKUP_SERVICE_FILE"
+rm -f "$backup_service_tmp"
+install -o root -g root -m 0644 "$RELEASE_DIR/systemd/dinodia-os-backup.timer" "$BACKUP_TIMER_FILE"
 install -d -o root -g root -m 0700 "$IDENTITY_DIR"
 systemctl daemon-reload
 
@@ -385,6 +405,7 @@ AVAHI_CONFIG_CANDIDATE=""
 # candidate and existing setup discovery have passed their health checks. Its
 # root trust policy is created disabled and is never replaced on later runs.
 bash "$RELEASE_DIR/scripts/install-updater-service.sh" "$RELEASE_DIR" "$BUILD_ID"
+systemctl enable --now dinodia-os-backup.timer || die "daily private Store-backup timer failed to enable"
 
 COMPLETED=1
 SERVICES_STOPPED=0

@@ -118,6 +118,12 @@ function compactSuperseded(outbox, type, aggregateId) {
   if (!COALESCIBLE_TYPES.has(type) || outbox.inFlight) return false;
   const previous = [...outbox.events].reverse().find((event) => event.type === type && event.aggregateId === aggregateId && event.sequence > outbox.acknowledgedSequence);
   if (!previous) return false;
+  // A queued control catalogue is applied by Platform only against the device
+  // revision that precedes it. Superseding that earlier device upsert would
+  // leave the catalogue ahead of the only revision it can match, and Platform
+  // would reject the whole batch, so the earlier snapshot is kept.
+  if (type === "device.upsert" && outbox.events.some((event) => event.type === "control.catalog.upsert"
+    && event.aggregateId === aggregateId && event.sequence > Math.max(previous.sequence, outbox.acknowledgedSequence))) return false;
   // Preserve the contiguous sequence while compacting only superseded metadata.
   previous.type = "sync.compacted";
   previous.aggregateId = "";
