@@ -4,13 +4,15 @@ Date: 2026-10-19
 
 ## Live Hub evidence
 
-A read-only SSH check of `dinodia@192.168.0.110` reported installed build `native-v2-cb8fdabed761a404b0fb7f32`. Before this branch's telemetry-event correction, the live source hashes for `src/platformPairing.js`, `src/server.js`, and `src/store.js` were respectively:
+At initial reconciliation, a read-only SSH check of `dinodia@192.168.0.110` reported build `native-v2-cb8fdabed761a404b0fb7f32`. After the reviewed batching release was installed, the live build is `native-v2-6b64d60ad5caee80b54bb871`; the code rollback target is `native-v2-cb8fdabed761a404b0fb7f32`. Current live source hashes for `src/platformPairing.js`, `src/server.js`, `src/store.js`, `src/mqttBridge.js`, and `src/sync/usageBuckets.js` are respectively:
 
 - `a5c690a31fea6b0e3588cd4c084b346b24cc5b40b8d40a6c3beb62f677b349a6`
 - `c47d4ed5bfd9e06f4377da20955cbe8266b019cf96f0d223c74fbf3ab3980426`
-- `70ea4dad7681744adc7e6d78827dc1dfddaae769f874abce825d9974a00ee21e`
+- `b564003a2e7835ba98e8de27c843114d30b23260717e72039db0f9459731c605`
+- `d76484635f516f8e2080f2f262ca50aa71d3776dec435a57c53c38923d7a15b9`
+- `ce5bc60547bddfd759bb9ee3a1d36c11e1389b9dedaecc2e9ec2163f0d256d2d`
 
-Those three files were byte-identical to the reconciled source branch before the changes below. The Pi's source also confirmed the idle sync cadence and the 10-second deferred Store persistence code are installed. The deferred persistence path is reached from `src/mqttBridge.js` for Zigbee state reports.
+These live files are byte-identical to the reviewed release branch. The Pi is running the idle sync cadence and 10-second deferred Store persistence code. The deferred path is reached from `src/mqttBridge.js` for Zigbee state reports.
 
 The original Stage 12 checkout had 41 changed/untracked paths (27 tracked modifications and 14 additions). Comparing those contents with the live-source reconciliation isolated the substantive conflict to these three files: `src/platformPairing.js`, `src/server.js`, and `src/store.js`. The dirty-checkout variants were not selected because the Pi's hashes matched the reconciled release versions. The rest of the required source snapshot was imported from the verified release package; incident-only materials were separated as described below.
 
@@ -38,7 +40,7 @@ The published product history intentionally excludes these Pi-incident-only file
 
 ## Branch and integration target
 
-The source reconciliation was built from local Stage 12 commit `71e9093`. GitHub currently exposes `main` (`80e9390`) and `stage-01-security` (`dc87f7f`); there is no remote Stage 12 branch. The reviewed branch is `release/native-v2-cb8fdab-sync-loop-20261019`. For a focused review, the proposed base is the Stage 12 starting commit `71e9093`, immediately before `7231bb4`; that exposes only the four reconciliation/sync-loop/LAN-guard/Store-persistence commits. A remote Stage 12 base branch and PR have not been created. Integration of the broader Stage 12 stack into `main` is a separate decision. No production installation is implied by this record.
+The source reconciliation was built from local Stage 12 commit `71e9093`. A remote review base, `review/native-v2-stage12-base-20261019`, points at that commit. PR [#1](https://github.com/nivedit1998/dinodia-os/pull/1) is open against that base from `release/native-v2-cb8fdab-sync-loop-20261019`; it is not merged. The PR contains the reconciliation, sync-loop, LAN-guard, and Store-persistence history. Integration of the broader Stage 12 stack into `main` remains a separate decision.
 
 ## Verification and limits
 
@@ -47,5 +49,8 @@ The source reconciliation was built from local Stage 12 commit `71e9093`. GitHub
 - Python Hive adapter tests: 4 passed. Syntax, Native V2 boundary, and Hive lock checks passed.
 - A previous packaged-source baseline passed 510 tests: 506 passed, 0 failed, 4 skipped.
 - The Pi install log reports the sync-loop fix is installed on build `native-v2-cb8fdabed761a404b0fb7f32`. The user relayed Claude's read-only Vercel Observability measurement for 21:18–22:18 UTC after installation: 52 `sync` calls, 52 `token-state` calls, 190 total function calls, compared with about 1,300 calls for each hub route and 2,800 total in the earlier comparison window. These reported figures imply roughly 96% fewer calls across those two hub routes and 93% fewer total calls; Codex has not independently queried Vercel. A longer 24-hour comparison remains useful but is not required to show the short-term reduction.
+- The Store batching release was installed on build `native-v2-6b64d60ad5caee80b54bb871`, with `native-v2-cb8fdabed761a404b0fb7f32` retained as its code rollback target. The install output reports the private backup manifest passed, Store schema 10, the Zigbee configuration unchanged, and local installation checks passed. A subsequent read-only check confirmed the live build, health, MQTT/Matter connectivity, active services, zero service restarts, and no recent Dinodia OS error entries.
+- A read-only 60-second sample used one-second `stat` sampling of `dinodia.json` metadata only (inode, size, mtime, ctime); it detected 5 metadata transitions. Compared with the owner-provided earlier baseline of about 57 writes/minute on `cb8fdabe`, this idle sample is clearly lower, but it is not a controlled same-window comparison or syscall-level count; multiple writes between samples could appear as one transition. No Store contents were read by the sampler.
+- One owner-initiated Radiator 1 control change and confirmation/receipt timing check is still pending. No control was issued by Codex.
 - The original working checkout and its 41 pre-existing modified/untracked paths have not been staged, reset, or edited.
 - Repository public visibility is intentional per the owner; no visibility change was requested or made.
