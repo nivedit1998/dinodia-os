@@ -25,7 +25,7 @@ const SERIALIZED_STORE_MUTATIONS = Object.freeze([
   "renameEntity", "saveIdentity", "saveSetup", "saveAuth", "saveSecurity", "prepareSyncBackupRecovery",
   "reconcileRejectedSyncBatchSize", "reconcileRejectedDescriptorSync", "reconcileRejectedCatalogOrder", "queueSyncEvent", "prepareSyncBatch", "prepareUsageClosureRecovery", "prepareSyncRequestLossRecovery",
   "prepareSyncStreamReconciliation", "ensureSyncSnapshot", "advanceSyncUsage", "ensureSyncIncidentEvents",
-  "ensureUpdaterStatusEvent", "ensureAutomationOutcomeEvents", "acknowledgeSyncBatch", "acknowledgeSyncConfiguration",
+  "ensureUpdaterStatusEvent", "ensureAutomationOutcomeEvents", "ensureControlCatalogPublications", "acknowledgeSyncBatch", "acknowledgeSyncConfiguration",
   "applySyncConfigurationSnapshot", "markSyncFailure", "savePlatform", "saveHive", "clearHive", "saveAlexa",
   "saveGoogleNest", "clearGoogleNest", "saveHeatingDemandControllerConfig", "saveHeatingDemandControllerRuntime",
   "resetHeatingDemandControllerRuntime", "saveConfigEntry", "deleteConfigEntry", "saveRemoteBinding", "deleteRemoteBinding",
@@ -2949,6 +2949,36 @@ class Store {
       return true;
     } catch (error) {
       this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
+      throw error;
+    }
+  }
+
+  // Publish each property device's public control catalogue once per distinct content, so a
+  // same-revision change such as `automatable` reaches the Platform after an update. The marker
+  // is the catalogue digest; the Platform accepts only the approved eligibility upgrade at the
+  // same revision (see the Platform catalogue-eligibility rule). Idempotent across restarts.
+  async ensureControlCatalogPublications(now = Date.now()) {
+    const before = this.snapshot();
+    try {
+      const outbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
+      const published = this.state.platform.controlCatalogPublications = { ...(this.state.platform.controlCatalogPublications || {}) };
+      let queued = 0;
+      for (const device of Object.values(this.state.devices || {})) {
+        const catalog = nativeSyncControlCatalogProjection(this.state, device);
+        if (!catalog) continue;
+        const digest = crypto.createHash("sha256").update(JSON.stringify({ r: catalog.catalogRevision, d: catalog.descriptorDigest, c: catalog.controls }), "utf8").digest("hex");
+        const id = String(device.id);
+        if (published[id] === digest) continue;
+        if (outbox.events.some((event) => event.type === "control.catalog.upsert" && event.aggregateId === id && event.payload?.catalogRevision === catalog.catalogRevision
+          && JSON.stringify(event.payload?.controls) === JSON.stringify(catalog.controls))) { published[id] = digest; continue; }
+        enqueueSyncEventInState(this.state, "control.catalog.upsert", id, catalog, { now, critical: true });
+        published[id] = digest;
+        queued += 1;
+      }
+      if (queued) await this.persist();
+      return queued;
+    } catch (error) {
+      this.restoreSnapshot(before, error);
       throw error;
     }
   }

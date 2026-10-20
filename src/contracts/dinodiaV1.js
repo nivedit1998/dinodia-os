@@ -20,6 +20,7 @@ function isUtcTimestamp(x) {
   return day >= 1 && day <= daysInMonth && Number.isFinite(Date.parse(x));
 }
 function hasOnlyKeys(value, allowed) { return Object.keys(value).every((key) => allowed.includes(key)); }
+const { effectiveAutomatable } = require('../capabilities/schema');
 const deviceKeys = ['id','homeId','managementClass','ownerMembershipId','lifecycle','technicalLabel','customerLabel','areaIds','controls','descriptorRevision'];
 const controlKeys = ['schemaVersion','deviceId','surfaceId','controlId','label','group','sortOrder','valueType','interactionKind','semanticRole','readable','writable','automatable','observable','idempotency','confirmationPolicy','riskLevel','stepUpPolicy','constraints','expectedReportingIntervalSeconds','maxStateValiditySeconds','unsupportedReason','catalogRevision'];
 function validateEnvelope(value, homeId) {
@@ -195,7 +196,7 @@ function serializeDevice({ device, homeId, homeMembershipId, role, areaIds, surf
         semanticRole: nativeRole,
         readable: capability.readable !== false,
         writable,
-        automatable: capability.automatable === true && stepUpPolicy !== 'required',
+        automatable: effectiveAutomatable(capability) && stepUpPolicy !== 'required',
         observable: capability.observable !== false,
         idempotency: capability.idempotency === 'invoke' ? 'invoke_once' : writable ? 'set_value' : 'none',
         confirmationPolicy: stepUpPolicy === 'required' ? 'step_up' : writable ? 'matching_observation' : 'none',

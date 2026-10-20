@@ -653,6 +653,7 @@ class PlatformPairing {
         await this.store.ensureSyncSnapshot?.(this.clock());
         await this.store.ensureSyncIncidentEvents?.(this.clock());
         await this.store.ensureAutomationOutcomeEvents?.(this.clock());
+        await this.store.ensureControlCatalogPublications?.(this.clock());
       }
       const payload = {
         agentSeenVersion: Number(platform.agentSeenVersion || 0),
@@ -821,6 +822,7 @@ class PlatformPairing {
         await this.store.ensureSyncSnapshot?.(this.clock());
         await this.store.ensureSyncIncidentEvents?.(this.clock());
         await this.store.ensureAutomationOutcomeEvents?.(this.clock());
+        await this.store.ensureControlCatalogPublications?.(this.clock());
         syncState = this.store.getSyncOutbox();
         if (this.store.getSyncOutboxRecovery?.()?.snapshotThroughSequence == null) {
           await this.store.setSyncBackupRecoverySnapshotBoundary?.({

@@ -81,6 +81,20 @@ function normalizeBindings(input) {
   }).filter(Boolean).slice(0, MAX_MANIFEST_SERVICES);
 }
 
+// Roles the owner approved for Platform schedules. The allowlist is the safety boundary: an
+// explicit `automatable: false` on an approved role is overridden (persisted capabilities always
+// carry an explicit false), while every other control keeps its explicit flag unchanged.
+const AUTOMATABLE_SEMANTIC_ROLES = new Set(["target_temperature", "operating_mode", "power", "brightness"]);
+const AUTOMATABLE_KINDS = new Set(["binary", "number", "enum"]);
+const LOCK_ROLES = new Set(["security_lock", "lock_state"]);
+
+function effectiveAutomatable(capability = {}) {
+  if (capability.sensitive === true || capability.stepUpPolicy === "required" || LOCK_ROLES.has(String(capability.semanticRole || ""))) return false;
+  if (capability.writable !== true || capability.readable === false || capability.idempotency === "invoke") return false;
+  if (AUTOMATABLE_SEMANTIC_ROLES.has(String(capability.semanticRole || "")) && AUTOMATABLE_KINDS.has(String(capability.kind || ""))) return true;
+  return capability.automatable === true;
+}
+
 function normalizeCapability(input = {}, fallback = {}) {
   const kind = KINDS.has(String(input.kind || fallback.kind || "sensor")) ? String(input.kind || fallback.kind) : "sensor";
   const category = CATEGORIES.has(String(input.category || fallback.category || "control")) ? String(input.category || fallback.category) : "control";
@@ -271,5 +285,7 @@ module.exports = {
   safeServiceId,
   VOICE_SEMANTICS,
   NATIVE_SEMANTIC_ROLES,
+  AUTOMATABLE_SEMANTIC_ROLES,
+  effectiveAutomatable,
   text,
 };
