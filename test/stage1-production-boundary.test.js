@@ -568,7 +568,7 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
   };
   let controlledClock = Date.now();
   const makeHub = () => createHub({
-    config: { nodeEnv: "production", v2Environment: "test", nativeCommandConfirmationTimeoutMs: 200, appPublicKeys: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), hubId: "native-command-hub", port: 0, nativeApiPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
+    config: { nodeEnv: "production", v2Environment: "test", nativeCommandConfirmationTimeoutMs: 200, nativeCommandDispatchTimeoutMs: 150, appPublicKeys: keys.publicKey.export({ type: "spki", format: "pem" }).toString(), hubId: "native-command-hub", port: 0, nativeApiPort: 0, dataDir: directory, dataFile: path.join(directory, "dinodia.json"), backupDir: path.join(directory, "backups"), staticDir: path.join(__dirname, "..", "public"), otbrUrl: "" },
     identityBroker,
     mqttBridge: mockIntegration(), matterBridge: mockIntegration(),
     cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false, connected: false, running: false, mode: "disabled", publicUrl: "", lastError: null }; } },
@@ -1182,6 +1182,26 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     await new Promise((resolve) => setTimeout(resolve, 50));
     const lateOutcome = await request(base, `/api/dinodia/v1/commands/${encodeURIComponent(timeoutCommand.commandId)}`, { headers });
     assert.equal(lateOutcome.body.status, "applied", "a later correlated matching observation resolves the same receipt without redispatch");
+
+    // A dispatch that never returns is bounded: its receipt never stays "dispatching",
+    // the serial command queue is released, and the device's own matching report settles it.
+    const stalledCommand = { ...command, commandId: "command-native-stalled-dispatch", controlId: outcomePower.controlId, descriptorRevision: outcomeDevice.descriptorRevision, idempotencyKey: "native-command-stalled-dispatch-0001", value: true };
+    hub.store.updateEntity = () => new Promise(() => {});
+    const stalled = await send(stalledCommand);
+    hub.store.updateEntity = originalUpdateEntity;
+    assert.equal(stalled.response.status, 202);
+    assert.equal(stalled.body.status, "uncertain", "a stalled adapter dispatch becomes an explicit uncertain receipt");
+    const stalledRecord = Object.values(hub.store.getSecurity().nativeCommandResults).find((entry) => entry.result?.commandId === stalledCommand.commandId);
+    assert.notEqual(stalledRecord.status, "dispatching", "the durable record does not hang at dispatching");
+    await originalUpdateEntity(deviceId, stateEntityId, { state: "ON", stateRevision: Number(stalledRecord.observationRevision || 0) + 1, lastChanged: new Date().toISOString() });
+    hub.eventBus.emit("state_changed", { entity_id: stateEntityId });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const stalledLate = await request(base, `/api/dinodia/v1/commands/${encodeURIComponent(stalledCommand.commandId)}`, { headers });
+    assert.equal(stalledLate.body.status, "applied", "the device's own matching report resolves a stalled dispatch without redispatch");
+    const afterStall = { ...command, commandId: "command-native-after-stall", controlId: outcomePower.controlId, descriptorRevision: outcomeDevice.descriptorRevision, idempotencyKey: "native-command-after-stall-0001", value: false };
+    const afterStallOutcome = await send(afterStall);
+    assert.equal(afterStallOutcome.response.status, 202, "later commands are not blocked by the stalled dispatch");
+    assert.equal(afterStallOutcome.body.status, "applied");
 
     const beforeRetiredProbe = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
     await hub.store.updateDeviceState(deviceId, { state: "ON" }, { protocol: "virtual", available: true });

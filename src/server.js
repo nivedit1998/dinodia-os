@@ -1464,6 +1464,17 @@ function nativeDeviceView(principal, device) {
   const nativeCommandReceiptTtlMs = 24 * 60 * 60 * 1000;
   const nativeCommandReceiptCapacity = 512;
   const nativeCommandConfirmationTimeoutMs = Math.max(50, Math.min(60_000, Number(config.nativeCommandConfirmationTimeoutMs) || 15_000));
+  // An adapter dispatch that never returns must not strand its receipt at "dispatching"
+  // or block the serial command queue for every later command.
+  const nativeCommandDispatchTimeoutMs = Math.max(50, Math.min(60_000, Number(config.nativeCommandDispatchTimeoutMs) || 10_000));
+  function boundedNativeDispatch(work) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(Object.assign(new Error("The adapter did not return in time; the outcome is uncertain"), { code: "COMMAND_DISPATCH_TIMEOUT" })), nativeCommandDispatchTimeoutMs);
+      timer.unref?.();
+    });
+    return Promise.race([Promise.resolve().then(work), timeout]).finally(() => clearTimeout(timer));
+  }
   function nativeCommandPrincipalFingerprint(principal) {
     return crypto.createHash("sha256")
       .update(stableJson({ sub: String(principal?.sub || ""), homeId: String(principal?.homeId || ""), membershipId: String(principal?.membershipId || ""), ...(principal?.principalType === "alexa" ? { alexaLinkId: String(principal?.linkId || "") } : {}) }), "utf8")
@@ -1621,7 +1632,7 @@ function nativeDeviceView(principal, device) {
   async function reconcileNativeCommandObservation(deviceId, controlId) {
     const security = hubStore.getSecurity?.() || {};
     const candidates = Object.entries(security.nativeCommandResults || {})
-      .filter(([, entry]) => String(entry.deviceId) === String(deviceId) && String(entry.controlId) === String(controlId) && ["accepted", "uncertain", "timed_out"].includes(String(entry.status)) && entry.result?.acceptedAt)
+      .filter(([, entry]) => String(entry.deviceId) === String(deviceId) && String(entry.controlId) === String(controlId) && ["dispatching", "accepted", "uncertain", "timed_out"].includes(String(entry.status)) && entry.result?.acceptedAt)
       .sort((a, b) => Date.parse(String(b[1].result.acceptedAt)) - Date.parse(String(a[1].result.acceptedAt)));
     const [key, entry] = candidates[0] || [];
     if (!entry) return;
@@ -1650,6 +1661,8 @@ function nativeDeviceView(principal, device) {
   }
 
   function scheduleNativeCommandTimeout(idempotencyHash) {
+    const previous = nativeCommandOutcomeTimers.get(idempotencyHash);
+    if (previous) clearTimeout(previous);
     const timer = setTimeout(() => {
       nativeCommandOutcomeTimers.delete(idempotencyHash);
       saveNativeCommandOutcome(idempotencyHash, "timed_out", "COMMAND_CONFIRMATION_TIMEOUT").catch(() => {});
@@ -2574,6 +2587,8 @@ function nativeDeviceView(principal, device) {
         };
         commandIdIndex[commandIdKey] = idempotencyHash;
         await hubStore.saveSecurity({ nativeCommandResults: commandResults, nativeCommandIdIndex: commandIdIndex });
+        // The confirmation window starts at the claim, so a stalled dispatch still settles.
+        scheduleNativeCommandTimeout(idempotencyHash);
         try {
           // Persisting the dispatch claim is asynchronous. Re-resolve both
           // session authority and the live descriptor after that await, at
@@ -2637,7 +2652,7 @@ function nativeDeviceView(principal, device) {
             await hubStore.saveSecurity({ nativeCommandResults: commandResults, nativeCommandIdIndex: commandIdIndex });
             return nativeContractError(res, 409, "CATALOG_REVISION_MISMATCH", "The current session or control authority changed before dispatch; refresh and confirm again");
           }
-          const dispatched = await dispatchNativeCommand(currentPrincipal, dispatchDevice, dispatchControl, command.value);
+          const dispatched = await boundedNativeDispatch(() => dispatchNativeCommand(currentPrincipal, dispatchDevice, dispatchControl, command.value));
           if (!dispatched?.dispatched) throw Object.assign(new Error("The current protocol binding is unavailable"), { code: "CONTROL_BINDING_UNAVAILABLE", statusCode: 409 });
           // Adapter dispatch can overlap receipt timers/physical reports.
           // Never replace every receipt with the pre-dispatch snapshot or
@@ -2662,6 +2677,7 @@ function nativeDeviceView(principal, device) {
           const definiteFailure = Number(error?.statusCode) >= 400 && Number(error?.statusCode) < 500;
           const finalStatus = definiteFailure ? "failed" : "uncertain";
           const finalCode = String(error?.code || (definiteFailure ? "COMMAND_REJECTED" : "COMMAND_OUTCOME_UNCERTAIN"));
+          console.error(`[native-command] dispatch ended ${finalStatus}: ${finalCode}`);
           const settled = await saveNativeCommandOutcome(idempotencyHash, finalStatus, finalCode).catch(() => null);
           if (!settled) {
             commandResults[idempotencyHash] = { ...commandResults[idempotencyHash], status: finalStatus, result: nativeCommandOutcome(result, finalStatus, finalCode) };
