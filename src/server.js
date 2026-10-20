@@ -1419,7 +1419,15 @@ function nativeDeviceView(principal, device) {
         // A value re-reported unchanged by the adapter is still a current
         // observation (a thermostat setpoint can sit unchanged for hours).
         // Without a change timestamp there is still no observation at all.
-        const observedMs = Number.isFinite(changedMs) && Number.isFinite(reportedMs) ? Math.max(changedMs, reportedMs) : changedMs;
+        const reportedObservedMs = Number.isFinite(changedMs) && Number.isFinite(reportedMs) ? Math.max(changedMs, reportedMs) : changedMs;
+        // Report-on-change devices (e.g. a TRV) do not re-send unchanged values. While the
+        // device itself keeps checking in (its validated lastSeenAt) and is not offline, an
+        // unchanged non-null value is still current. A silent device still expires normally.
+        const seenMs = Date.parse(String(source.lastSeenAt || ""));
+        const deviceReachable = !(source.availability === "offline" || source.online === false || source.available === false);
+        const hasValue = rawState !== null && rawState !== undefined && rawState !== "";
+        const observedMs = deviceReachable && hasValue && Number.isFinite(reportedObservedMs) && Number.isFinite(seenMs)
+          && seenMs > reportedObservedMs && seenMs <= now + 5000 ? seenMs : reportedObservedMs;
         const receivedMs = Date.parse(String(entity?.updatedAt || ""));
         const hasObservedAt = Number.isFinite(observedMs);
         const hasReceivedAt = Number.isFinite(receivedMs);
