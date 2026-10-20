@@ -111,6 +111,17 @@ function effectiveControlQuality(state, now = Date.now()) {
   const validUntil = Date.parse(state.validUntil);
   return !Number.isFinite(validUntil) || validUntil <= now ? 'unknown' : state.quality;
 }
+// Battery Zigbee devices (e.g. a SONOFF TRVZB) sleep and report only on change, and check in
+// less often than every seven minutes. Their readings stay current for up to 30 minutes after
+// the device's last report or check-in; a device that stays silent longer still expires.
+const BATTERY_REPORT_ON_CHANGE_VALIDITY_SECONDS = 1800;
+function reportOnChangeValiditySeconds(device, baseSeconds) {
+  const power = String(device?.metadata?.power_source || device?.metadata?.powerSource || '').toLowerCase();
+  return device?.protocol === 'zigbee' && power === 'battery'
+    ? Math.max(baseSeconds, BATTERY_REPORT_ON_CHANGE_VALIDITY_SECONDS)
+    : baseSeconds;
+}
+
 function serializeDevice({ device, homeId, homeMembershipId, role, areaIds, surfaces, revision = 0 }) {
   if (!isObject(device) || !Array.isArray(surfaces)) return null;
   const metadata = isObject(device.metadata) ? device.metadata : {};
@@ -191,7 +202,7 @@ function serializeDevice({ device, homeId, homeMembershipId, role, areaIds, surf
         riskLevel: stepUpPolicy === 'required' ? 'sensitive' : writable ? 'normal' : 'low',
         stepUpPolicy,
         ...(Object.keys(constraints).length ? { constraints } : {}),
-        ...(capability.observable !== false ? { expectedReportingIntervalSeconds: Number.isInteger(capability.expectedReportingIntervalSeconds) ? capability.expectedReportingIntervalSeconds : 120, maxStateValiditySeconds: Number.isInteger(capability.maxStateValiditySeconds) ? capability.maxStateValiditySeconds : 420 } : {}),
+        ...(capability.observable !== false ? { expectedReportingIntervalSeconds: Number.isInteger(capability.expectedReportingIntervalSeconds) ? capability.expectedReportingIntervalSeconds : 120, maxStateValiditySeconds: reportOnChangeValiditySeconds(device, Number.isInteger(capability.maxStateValiditySeconds) ? capability.maxStateValiditySeconds : 420) } : {}),
         unsupportedReason: null,
         catalogRevision: revisionForControl,
       });

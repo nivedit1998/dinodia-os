@@ -515,3 +515,18 @@ test("unreferenced exact generated endpoint-0 fallback is retired, but similar d
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("battery Zigbee TRV readings stay current for 30 minutes; mains devices keep the base window", () => {
+  const battery = readyTrv();
+  battery.metadata = { ...(battery.metadata || {}), power_source: "Battery" };
+  const batteryControls = publicDescriptor(battery).controls.filter((control) => control.observable);
+  assert.ok(batteryControls.length > 0);
+  for (const control of batteryControls) {
+    assert.equal(control.maxStateValiditySeconds, 1800, `${control.label} uses the report-on-change window`);
+  }
+  const mains = readyTrv();
+  mains.metadata = { ...(mains.metadata || {}), power_source: "Mains (single phase)" };
+  for (const control of publicDescriptor(mains).controls.filter((item) => item.observable)) {
+    assert.equal(control.maxStateValiditySeconds, 420, `${control.label} keeps the base window`);
+  }
+});
