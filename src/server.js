@@ -2146,6 +2146,11 @@ function nativeDeviceView(principal, device) {
       }
       try {
         const result = await pairing.requestWithHubIdentity(path, forwarded);
+        // A committed tenant automation change has a new cloud configuration waiting. Pull it now
+        // instead of on the next 2-minute sync, so the app sees "Active"/"Disabled" within seconds.
+        if (pathname === "/api/dinodia/v1/tenant-automations" && forwarded.operation !== "list") {
+          for (const delayMs of [300, 5000]) setTimeout(() => { Promise.resolve(pairing.syncNow?.()).catch(() => {}); }, delayMs).unref?.();
+        }
         return json(res, 200, result, { "Cache-Control": "no-store, private", "Pragma": "no-cache" });
       } catch (error) {
         const status = Number(error?.statusCode);
