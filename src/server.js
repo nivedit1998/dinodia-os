@@ -2146,6 +2146,11 @@ function nativeDeviceView(principal, device) {
       }
       try {
         const result = await pairing.requestWithHubIdentity(path, forwarded);
+        // A committed tenant automation change has a new cloud configuration waiting. Pull it now
+        // instead of on the next 2-minute sync, so the app sees "Active"/"Disabled" within seconds.
+        if (pathname === "/api/dinodia/v1/tenant-automations" && forwarded.operation !== "list") {
+          for (const delayMs of [300, 5000]) setTimeout(() => { Promise.resolve(pairing.syncNow?.()).catch(() => {}); }, delayMs).unref?.();
+        }
         return json(res, 200, result, { "Cache-Control": "no-store, private", "Pragma": "no-cache" });
       } catch (error) {
         const status = Number(error?.statusCode);
@@ -4593,6 +4598,12 @@ function nativeDeviceView(principal, device) {
   const nativeEventServer = new WebSocket.Server({ noServer: true, maxPayload: 16 * 1024 });
   const commissioningEventServer = new WebSocket.Server({ noServer: true, maxPayload: 16 * 1024 });
   const server = http.createServer(handleUnifiedRequest);
+  // The Cloudflare tunnel (CloudURL) proxies to this loopback listener and reuses idle origin
+  // connections for up to 90 s. Node's 5 s default closed them first, so the tunnel's next
+  // request on a reused connection failed ("error proxying to origin") and a command POST was
+  // lost before reaching the Hub. Keep idle connections open longer than cloudflared does.
+  server.keepAliveTimeout = 120_000;
+  server.headersTimeout = 125_000;
   function sendOperatorRefresh(resource) {
     if (!new Set(["dashboard", "devices", "activity"]).has(resource)) return;
     const message = JSON.stringify({ schemaVersion: "dinodia.v1", type: "refresh", resource });

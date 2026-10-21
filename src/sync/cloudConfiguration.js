@@ -152,6 +152,27 @@ function validateCloudConfiguration(value, current = {}) {
   return true;
 }
 
+// The app and Platform choose controls from the Hub's PUBLIC descriptor (e.g. the entity-based
+// setpoint ID), while the native executor validates and runs controls from the internal
+// automation catalogue (surface-based IDs). Translate a descriptor ID to the catalogue control
+// on the same surface for the roles both sides model identically; anything else is left as-is
+// and is still rejected by the catalogue validation.
+const DESCRIPTOR_ROLE_TO_CATALOG_KEY = { target_temperature: "temperature", operating_mode: "hvac_mode", power: "power", brightness: "brightness" };
+function catalogControlIdFor(device, controlId, catalogue) {
+  const entry = catalogue.find((item) => String(item.deviceId) === String(device.id));
+  const controls = entry?.controls || [];
+  if (controls.some((control) => String(control.controlId) === String(controlId))) return String(controlId);
+  const { serializeDevice } = require("../contracts/dinodiaV1");
+  const { getSurfaces } = require("../capabilities/devicePresentation");
+  const descriptor = serializeDevice({ device, homeId: "catalogue-bridge", homeMembershipId: "catalogue-bridge", role: "OWNER",
+    areaIds: device.areaId ? [String(device.areaId)] : [], surfaces: getSurfaces(device) });
+  const source = descriptor?.controls?.find((control) => String(control.controlId) === String(controlId));
+  const key = source && DESCRIPTOR_ROLE_TO_CATALOG_KEY[source.semanticRole];
+  if (!key || !source.surfaceId) return String(controlId);
+  const match = controls.find((control) => String(control.controlId) === `${source.surfaceId}::${key}`);
+  return match ? String(match.controlId) : String(controlId);
+}
+
 async function applyCloudConfiguration(store, value) {
   const current = store.getPlatform?.() || {};
   if (!validateCloudConfiguration(value, current)) throw Object.assign(new Error("Cloud configuration is malformed, stale, or checksum-invalid"), { code: "sync_configuration_invalid" });
@@ -196,7 +217,8 @@ async function applyCloudConfiguration(store, value) {
             id: definition.triggers[0].id, type: "schedule",
             payload: { ...definition.triggers[0].configuration, timeZoneIdentifier: definition.timezone },
           },
-          actions: definition.actions.map((action) => ({ id: action.id, deviceId: action.osDeviceId, controlId: action.controlId, targetValue: action.actionValue })),
+          actions: definition.actions.map((action) => ({ id: action.id, deviceId: action.osDeviceId,
+            controlId: catalogControlIdFor(store.getDevice(action.osDeviceId), action.controlId, catalogue), targetValue: action.actionValue })),
         },
         existing, homeId: localHomeId, owner: { type: "platform", subjectId: "cloud-policy" },
       });
