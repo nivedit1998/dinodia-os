@@ -129,3 +129,16 @@ test("the system mode descriptor ID is also accepted", async () => {
   assert.deepEqual(await schedulerFor(store, async (input) => { effects.push(input.action.targetValue.option); }).tick(NOW), { claimed: 1 });
   assert.deepEqual(effects, ["heat"]);
 });
+
+test("the live scheduler (service keyed by Hub serial) runs a Platform schedule stored under the instance ID", async () => {
+  // Production builds AutomationService with homeId = Hub serial, while cloud configuration stores
+  // Platform rules under identity.instanceId. The scheduler must still see and run them.
+  const { store, device, setpoint } = await trvHome();
+  await applyCloudConfiguration(store, configurationFor(device, [actionFor(device, setpoint, { type: "number", number: 21.5 })]));
+  const effects = [];
+  const service = new AutomationService({ store, homeId: () => "DINODIA-SCHEDULED-RUN-HUB", now: () => new Date(NOW) });
+  const executor = new AutomationExecutor({ store, now: () => new Date(NOW), executeControl: async (input) => { effects.push(input.action.targetValue.number); }, logger: { error() {}, warn() {}, log() {} } });
+  const scheduler = new AutomationScheduler({ store, service, executor, now: () => new Date(NOW), setIntervalFn: () => null, clearIntervalFn() {}, logger: { error() {}, warn() {}, log() {} } });
+  assert.deepEqual(await scheduler.tick(NOW), { claimed: 1 });
+  assert.deepEqual(effects, [21.5]);
+});

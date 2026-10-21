@@ -87,7 +87,9 @@ class AutomationScheduler {
         if (!item.enabled) continue;
         const stored = this.store.getNativeAutomation(item.id);
         if (!stored?.trigger) continue;
-        const projected = this.service.projected(item.id);
+        // The Hub store holds one Home. Platform rules are stored under the identity instance ID while the
+        // service defaults to the Hub serial, so check each rule against its own stored Home.
+        const projected = this.service.projected(item.id, { homeId: stored.automation.homeId || undefined });
         if (!projected?.health?.executable) continue;
       const candidates = dueMinuteCandidates(previous, now, this.intervalMs);
         for (const date of candidates) {
