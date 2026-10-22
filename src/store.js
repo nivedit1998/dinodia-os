@@ -13,7 +13,7 @@ const { getSurfaces } = require("./capabilities/devicePresentation");
 const { serializeDevice } = require("./contracts/dinodiaV1");
 const { SYNC_BATCH_MAX_EVENTS, compactUnregisteredPropertyDeviceEvents, enqueueSyncEventInState, initialSyncOutbox, nextSyncBatch, normalizeSyncOutbox } = require("./sync/syncOutbox");
 const { validateCloudConfiguration, projectCloudDevicePolicies } = require("./sync/cloudConfiguration");
-const { activityFor, advanceUsage, endUsageAssignment, initialUsageState, observeUsage } = require("./sync/usageBuckets");
+const { activityFor, advanceUsage, capUsageAtLastAlive, endUsageAssignment, initialUsageState, observeUsage, usageClockTrusted } = require("./sync/usageBuckets");
 const { assertNoRestorePendingSync, ensureInitializedMarkerSync, hasInitializedMarkerSync, persistStoreJson } = require("./durableStoreFile");
 
 const STORE_MUTATION_CONTEXT = new AsyncLocalStorage();
@@ -217,6 +217,23 @@ function queueUsageBucket(state, bucketKey, now) {
   if (!event) return false;
   usage.queuedRevisions[bucketKey] = bucket.revision;
   return true;
+}
+
+function readUsageAlive(filePath) {
+  try {
+    const value = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    const ms = Date.parse(String(value?.aliveThroughAt || ""));
+    return Number.isSafeInteger(ms) ? ms : null;
+  } catch {
+    return null;
+  }
+}
+
+// systemd-timesyncd creates this file once the clock is synchronized after boot. Where timesyncd
+// is not in use (development machines), the clock is trusted as before.
+function systemClockSynchronized() {
+  if (process.platform !== "linux" || !fs.existsSync("/run/systemd/timesync")) return true;
+  return fs.existsSync("/run/systemd/timesync/synchronized");
 }
 
 function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
@@ -1153,6 +1170,14 @@ class Store {
     this.durabilityUncertain = false;
     this.state = this.load();
     this.syncSourceGeneration = null;
+    // Offline history: the last moment this Hub recorded itself running (written every minute and
+    // at shutdown). Time after it, until the next trusted reading, is Unknown.
+    this.usageAliveFile = `${filePath}.alive.json`;
+    this.usageAliveThroughMs = readUsageAlive(this.usageAliveFile);
+    if (this.usageAliveThroughMs !== null) this.state.syncUsage = capUsageAtLastAlive(this.state.syncUsage, this.usageAliveThroughMs);
+    this.usageClockTrust = systemClockSynchronized;
+    this.usageClockWasUntrusted = false;
+    this.usageClockTrustedSinceMs = null;
     this.writeQueue = Promise.resolve();
     this.mutationQueue = Promise.resolve();
     this.automationPolicyQueue = Promise.resolve();
@@ -1168,6 +1193,38 @@ class Store {
     const operation = this.mutationQueue.then(() => STORE_MUTATION_CONTEXT.run(this, work));
     this.mutationQueue = operation.catch(() => {});
     return operation;
+  }
+
+  /// Replaces the clock check (tests; platforms without systemd-timesyncd keep the default).
+  setUsageClockTrust(check) {
+    this.usageClockTrust = typeof check === "function" ? check : systemClockSynchronized;
+  }
+
+  /// Whether readings at `nowMs` may enter history. Remembers when trust returned after an
+  /// untrusted period, so readings stamped before then are ignored.
+  isUsageClockTrusted(nowMs) {
+    let synchronized = false;
+    try { synchronized = this.usageClockTrust() === true; } catch { synchronized = false; }
+    const trusted = usageClockTrusted({ synchronized, nowMs, aliveThroughMs: this.usageAliveThroughMs });
+    if (!trusted) { this.usageClockWasUntrusted = true; this.usageClockTrustedSinceMs = null; }
+    else if (this.usageClockWasUntrusted && this.usageClockTrustedSinceMs === null) this.usageClockTrustedSinceMs = nowMs;
+    return trusted;
+  }
+
+  getUsageHistoryClockStatus(nowMs = Date.now()) {
+    return { trusted: this.isUsageClockTrusted(nowMs), aliveThroughAt: this.usageAliveThroughMs === null ? null : new Date(this.usageAliveThroughMs).toISOString() };
+  }
+
+  /// Records that the Hub is running at `nowMs` (only under a trusted clock). Small separate file,
+  /// so the whole Store is not rewritten every minute.
+  async markUsageAlive(nowMs = Date.now()) {
+    if (!Number.isSafeInteger(nowMs) || !this.isUsageClockTrusted(nowMs)) return false;
+    if (this.usageAliveThroughMs !== null && nowMs <= this.usageAliveThroughMs) return false;
+    const temporary = `${this.usageAliveFile}.${process.pid}.tmp`;
+    await fs.promises.writeFile(temporary, JSON.stringify({ version: 1, aliveThroughAt: new Date(nowMs).toISOString() }), { mode: 0o600 });
+    await fs.promises.rename(temporary, this.usageAliveFile);
+    this.usageAliveThroughMs = nowMs;
+    return true;
   }
 
   setSyncSourceGeneration(value) {
@@ -1511,9 +1568,14 @@ class Store {
       enqueueNativeDeviceSync(this.state, existing.id ? existing : null, next, { critical: !previousProjection });
       syncEnqueued = true;
     }
+    // Readings under an untrusted clock never enter history; once trusted again, readings stamped
+    // before that moment are ignored (their times were guessed).
+    const historyClockTrusted = this.isUsageClockTrusted(observationNow);
+    const ignoreThroughMs = Math.max(areaChanged ? observationNow : -1,
+      this.usageClockTrustedSinceMs === null ? -1 : this.usageClockTrustedSinceMs - 1);
     const durableSyncMutation = recordDeviceSyncObservations(this.state, next, observationNow, {
-      ...(areaChanged ? { ignoreThroughMs: observationNow } : {}),
-      sourceGeneration: this.syncSourceGeneration,
+      ...(ignoreThroughMs >= 0 ? { ignoreThroughMs } : {}),
+      sourceGeneration: historyClockTrusted ? this.syncSourceGeneration : null,
     });
     for (const legacyId of this.state.devices[id].legacyIds) this.state.aliases[String(legacyId)] = id;
     if (device.metadata?.friendly_name && String(device.metadata.friendly_name) !== id) this.state.aliases[String(device.metadata.friendly_name)] = id;
@@ -2869,6 +2931,8 @@ class Store {
   async advanceSyncUsage(now = Date.now()) {
     const nowMs = now instanceof Date ? now.getTime() : Number(now);
     if (!Number.isSafeInteger(nowMs)) throw new Error("Invalid native usage advance time");
+    // Never account time under an untrusted clock; it is accounted (as Unknown) once trusted.
+    if (!this.isUsageClockTrusted(nowMs)) return { changedBuckets: 0, queued: 0 };
     const before = this.snapshot();
     try {
       const usage = this.state.syncUsage = initialUsageState(this.state.syncUsage);

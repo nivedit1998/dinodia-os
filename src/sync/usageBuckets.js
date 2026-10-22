@@ -243,4 +243,29 @@ function advanceUsage(stateValue, nowMs) {
   return { state, changedBuckets: [...changed] };
 }
 
-module.exports = { activityFor, advanceUsage, endUsageAssignment, initialUsageState, observeUsage };
+// After a restart, no reading may count beyond the last moment the Hub is known to have been
+// running: the time the Hub was off (a power cut) is not evidence of any device state, so it
+// becomes Unknown instead of extending the last reading up to its validity deadline.
+function capUsageAtLastAlive(stateValue, aliveThroughMs) {
+  const state = initialUsageState(stateValue);
+  if (!Number.isSafeInteger(aliveThroughMs)) return state;
+  const boundary = new Date(aliveThroughMs).toISOString();
+  for (const source of Object.values(state.sources)) {
+    if (source.assignmentEndedAt != null || source.validUntil == null) continue;
+    const validUntil = validInstant(source.validUntil);
+    const accountedThrough = validInstant(source.accountedThroughAt);
+    if (validUntil === null || validUntil <= aliveThroughMs) continue;
+    source.validUntil = accountedThrough !== null && accountedThrough > aliveThroughMs ? source.accountedThroughAt : boundary;
+  }
+  return state;
+}
+
+// History may only be recorded under a clock the system has synchronized, and never under a
+// clock that is behind the last time the Hub recorded itself running (a Pi without a hardware
+// clock can boot with a stale time when it has no internet).
+function usageClockTrusted({ synchronized, nowMs, aliveThroughMs }) {
+  if (synchronized !== true || !Number.isSafeInteger(nowMs)) return false;
+  return !Number.isSafeInteger(aliveThroughMs) || nowMs >= aliveThroughMs;
+}
+
+module.exports = { activityFor, advanceUsage, capUsageAtLastAlive, endUsageAssignment, initialUsageState, observeUsage, usageClockTrusted };

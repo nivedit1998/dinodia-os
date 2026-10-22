@@ -619,6 +619,9 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   }
   const activity = new ActivityService({ store: hubStore, eventBus, logger });
   let activityIntegrationTimer = null;
+  // Offline history: record every minute that the Hub is running, so time it was off (a power cut)
+  // is Unknown in usage history after a restart.
+  let usageAliveTimer = null;
   let electricTimer = null;
   const heating = new HeatingUsageTracker({
     store: hubStore,
@@ -4484,6 +4487,7 @@ function nativeDeviceView(principal, device) {
         buildId: runtimeConfig.buildId || undefined,
         version: VERSION,
         uptimeSeconds: Math.round(process.uptime()),
+        usageHistory: hubStore.getUsageHistoryClockStatus?.() ?? null,
         memory: { rssMb: Math.round(memory.rss / 1024 / 1024), heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024) },
         storeSchemaVersion: hubStore.state?.version || 0,
         storeRecovery: {
@@ -4945,6 +4949,10 @@ function nativeDeviceView(principal, device) {
     await activity.record({ type: "hub_started", detail: previousShutdownClean ? "Dinodia OS is running and ready for local control." : "Dinodia OS restarted after an unclean shutdown; inspect recent activity for interrupted work.", change: { previousShutdownClean } });
     activityIntegrationTimer = setInterval(() => integrationStatus().catch((error) => logger.error(`[activity] ${error.message}`)), 30000);
     activityIntegrationTimer.unref?.();
+    const markUsageAlive = () => hubStore.markUsageAlive(Date.now()).catch((error) => logger.warn(`[usage] running marker not saved (${String(error?.code || "storage_unavailable")})`));
+    await markUsageAlive();
+    usageAliveTimer = setInterval(markUsageAlive, 60000);
+    usageAliveTimer.unref?.();
     if (lanTlsIdentity) {
       try { await lanTlsIdentity.initialize(); }
       catch { logger.warn("[lan-tls] customer HTTPS identity unavailable; direct LAN control remains fail-closed"); }
@@ -5006,6 +5014,8 @@ function nativeDeviceView(principal, device) {
     activity.stop();
     if (activityIntegrationTimer) clearInterval(activityIntegrationTimer);
     activityIntegrationTimer = null;
+    if (usageAliveTimer) clearInterval(usageAliveTimer);
+    usageAliveTimer = null;
     if (electricTimer) clearInterval(electricTimer);
     electricTimer = null;
     // State-change listeners and delivery projections append durable data
@@ -5015,6 +5025,7 @@ function nativeDeviceView(principal, device) {
     await heating.flush();
     await electric.flush();
     await drainStoreTasks();
+    await hubStore.markUsageAlive(Date.now()).catch(() => false);
     await hubStore.setActivityRuntime({ lastShutdownClean: true, lastStoppedAt: new Date().toISOString() });
     await closeListeningServer(httpsServer);
     await closeListeningServer(setupServer);
