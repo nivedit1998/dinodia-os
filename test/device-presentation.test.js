@@ -109,3 +109,31 @@ test("unsupported Zigbee metadata fails closed without a household surface", asy
   assert.equal(device.presentation.status, "no_safe_controls");
   assert.equal(Object.keys(device.presentation.surfaces).length, 0);
 });
+
+test("Zigbee runtime settings (reporting, bindings, scenes, network address, interview progress) never change the descriptor revision", async () => {
+  const device = await configured(normalizeZigbeeDevice(fixture("dimmable-light.json")));
+  const revision = device.presentation.descriptorRevision;
+  const withRuntime = JSON.parse(JSON.stringify(device));
+  withRuntime.metadata.network_address = 4242;
+  withRuntime.metadata.interviewing = true;
+  withRuntime.metadata.interview_state = "IN_PROGRESS";
+  withRuntime.metadata.endpoints = { 1: {
+    bindings: [{ cluster: "genOnOff", target: { type: "endpoint", ieee_address: "0x00", endpoint: 1 } }],
+    configured_reportings: [{ cluster: "genOnOff", attribute: "onOff", minimum_report_interval: 0, maximum_report_interval: 300, reportable_change: 0 }],
+    scenes: [{ id: 1, name: "evening" }],
+    clusters: { input: ["genOnOff", "genLevelCtrl"], output: [] },
+  } };
+  const first = buildPresentation(withRuntime);
+  withRuntime.presentation = first;
+  withRuntime.metadata.endpoints[1].configured_reportings.push({ cluster: "genLevelCtrl", attribute: "currentLevel", minimum_report_interval: 0, maximum_report_interval: 3600, reportable_change: 1 });
+  withRuntime.metadata.endpoints[1].bindings = [];
+  withRuntime.metadata.network_address = 999;
+  const second = buildPresentation(withRuntime);
+  assert.equal(second.descriptorRevision, first.descriptorRevision, "changing reporting or bindings must not look like a new device description");
+
+  // A genuine description change (endpoint clusters, i.e. what the device can do) still bumps it.
+  withRuntime.presentation = second;
+  withRuntime.metadata.endpoints[1].clusters = { input: ["genOnOff"], output: [] };
+  assert.equal(buildPresentation(withRuntime).descriptorRevision, second.descriptorRevision + 1);
+  assert.ok(revision >= 1);
+});

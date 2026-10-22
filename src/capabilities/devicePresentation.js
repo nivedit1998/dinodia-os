@@ -388,13 +388,34 @@ function rawRoleSummary(device) {
   return roles;
 }
 
+// Zigbee runtime settings describe how the device is currently set up on the network, not what it
+// is or can do. Including them made every reporting change, rejoin or staged Zigbee2MQTT start-up
+// look like a new device description, bumping the descriptor revision (and suspending automations).
+const ZIGBEE_RUNTIME_METADATA = ["network_address", "interviewing", "interview_state"];
+const ZIGBEE_RUNTIME_ENDPOINT_FIELDS = ["bindings", "configured_reportings", "scenes"];
+
+function descriptorMetadata(metadata) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return metadata;
+  const copy = { ...metadata };
+  for (const key of ZIGBEE_RUNTIME_METADATA) delete copy[key];
+  if (copy.endpoints && typeof copy.endpoints === "object" && !Array.isArray(copy.endpoints)) {
+    copy.endpoints = Object.fromEntries(Object.entries(copy.endpoints).map(([id, endpoint]) => {
+      if (!endpoint || typeof endpoint !== "object" || Array.isArray(endpoint)) return [id, endpoint];
+      const kept = { ...endpoint };
+      for (const key of ZIGBEE_RUNTIME_ENDPOINT_FIELDS) delete kept[key];
+      return [id, kept];
+    }));
+  }
+  return copy;
+}
+
 function sourceFingerprint(device) {
   const relevant = {
     id: device.id,
     protocol: device.protocol,
     identity: device.protocolIdentity,
     definition: device.definition,
-    metadata: device.metadata,
+    metadata: descriptorMetadata(device.metadata),
     areaId: device.areaId || null,
     setupStatus: String(device.setup?.status || "needs_setup"),
     lifecycle: device.retired === true ? "retired" : "active",
