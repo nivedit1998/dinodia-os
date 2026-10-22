@@ -2639,7 +2639,12 @@ class Store {
         const matchesDevice = (entry) => entry.type === "device.upsert" && deviceIdOf(entry) === id
           && Number(entry.payload?.descriptorRevision) === revision && String(entry.payload?.descriptorDigest || "") === digest;
         if (range.some((entry) => entry.sequence < event.sequence && matchesDevice(entry))) continue;
-        if (!range.some((entry) => entry.sequence > event.sequence && matchesDevice(entry))) return noChange();
+        // Either the device update comes later in this batch, or it is missing altogether (a
+        // start-up rebuild advanced the revision without an inventory update). Both are repaired
+        // the same way below, provided the Hub's current descriptor is the one being described.
+        const laterDeviceUpdate = range.some((entry) => entry.sequence > event.sequence && matchesDevice(entry));
+        const anyDeviceUpdate = range.some((entry) => entry.type === "device.upsert" && deviceIdOf(entry) === id);
+        if (!laterDeviceUpdate && anyDeviceUpdate) return noChange();
         const device = this.state.devices?.[id];
         const policy = this.state.platform?.devicePolicies?.[id];
         if (!device || policy?.managementClass !== "PROPERTY_DEVICE"
@@ -2649,6 +2654,7 @@ class Store {
         // moves on restart even when the content digest is unchanged.
         const current = nativeSyncDeviceProjection(device, policy);
         if (current.descriptorDigest !== digest) return noChange();
+        if (!laterDeviceUpdate && Number(current.descriptorRevision) !== revision) return noChange();
         targets.push(event);
         deviceIds.add(id);
       }
@@ -3035,6 +3041,14 @@ class Store {
         if (published[id] === digest) continue;
         if (outbox.events.some((event) => event.type === "control.catalog.upsert" && event.aggregateId === id && event.payload?.catalogRevision === catalog.catalogRevision
           && JSON.stringify(event.payload?.controls) === JSON.stringify(catalog.controls))) { published[id] = digest; continue; }
+        // The Platform accepts a catalogue only for the descriptor revision it already holds, so
+        // the device update for this revision always goes first. A start-up rebuild can advance the
+        // revision without any inventory update; without this the catalogue was rejected forever.
+        // A same-revision device update is harmless (no descriptor change on the Platform).
+        const policy = this.state.platform?.devicePolicies?.[id];
+        if (policy?.managementClass === "PROPERTY_DEVICE") {
+          enqueueSyncEventInState(this.state, "device.upsert", id, nativeSyncDeviceProjection(device, policy), { now, critical: true });
+        }
         enqueueSyncEventInState(this.state, "control.catalog.upsert", id, catalog, { now, critical: true });
         published[id] = digest;
         queued += 1;
