@@ -611,8 +611,10 @@ test("cloud configuration applies exact active automation revisions and removes 
     assert.equal(store.getPlatform().cloudRevision, 3);
 
     const stale = { ...active, revision: 6, actions: [{ ...active.actions[0], descriptorRevision: device.presentation.descriptorRevision + 1 }] };
-    await assert.rejects(() => applyCloudConfiguration(store, makeConfig(4, [stale])), { code: "sync_automation_target_stale" });
-    assert.equal(store.getPlatform().cloudRevision, 3, "invalid active policy cannot partially advance the applied config revision");
+    await applyCloudConfiguration(store, makeConfig(4, [stale]));
+    assert.equal(store.getNativeAutomation(stale.id), null, "a rule whose target description changed never runs locally");
+    assert.equal(store.getPlatform().cloudRevision, 4,
+      "the rest of the configuration applies, so the Hub can upload the new description and the Platform can suspend the rule");
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

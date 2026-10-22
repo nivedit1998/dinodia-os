@@ -202,13 +202,17 @@ async function applyCloudConfiguration(store, value) {
         || definition.actions.length === 0 || definition.actions.some((action) => action.needsAttention)) {
         throw Object.assign(new Error("An active Platform automation is not executable by the current native OS schema"), { code: "sync_automation_invalid" });
       }
-      for (const action of definition.actions) {
+      // A target whose device description or Area changed since the Platform validated the rule
+      // must never run, but it must not block the whole configuration either: the Platform only
+      // learns of the change (and marks the rule as needing attention) from this Hub's next
+      // upload, which it accepts only after this configuration is applied. So the rule is left
+      // out of the local runtime and the rest of the configuration applies.
+      const staleTarget = definition.actions.some((action) => {
         const device = store.getDevice(action.osDeviceId);
-        if (!device || Number(device.presentation?.descriptorRevision || 0) !== Number(action.descriptorRevision)
-          || String(device.areaId || "") !== String(action.osAreaId)) {
-          throw Object.assign(new Error("An active Platform automation target is stale or outside its current OS area"), { code: "sync_automation_target_stale" });
-        }
-      }
+        return !device || Number(device.presentation?.descriptorRevision || 0) !== Number(action.descriptorRevision)
+          || String(device.areaId || "") !== String(action.osAreaId);
+      });
+      if (staleTarget) continue;
       const existing = store.getNativeAutomation(definition.id)?.automation || null;
       const normalized = normalizeDefinition({
         input: {
