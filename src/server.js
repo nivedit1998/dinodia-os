@@ -1436,15 +1436,18 @@ function nativeDeviceView(principal, device) {
         // Freshness is per value (owner decision D9, 23 Oct 2026): a device check-in, battery or
         // other-attribute message never renews this value. It is current only until its own
         // lifetime after its own last report; then it is Unknown until the device reports it again.
-        const observedMs = reportedObservedMs;
-        const receivedMs = Date.parse(String(entity?.updatedAt || ""));
+        const observedMs = source.protocol === "zigbee" ? Date.parse(String(entity?.sourceObservedAt || "")) : reportedObservedMs;
+        const receivedMs = Date.parse(String(source.protocol === "zigbee" ? entity?.sourceReceivedAt || "" : entity?.updatedAt || ""));
         const hasObservedAt = Number.isFinite(observedMs);
         const hasReceivedAt = Number.isFinite(receivedMs);
         const effectiveObservedMs = hasObservedAt ? observedMs : NaN;
         const effectiveReceivedMs = hasReceivedAt ? receivedMs : hasObservedAt ? observedMs : NaN;
         const observedAt = Number.isFinite(effectiveObservedMs) ? new Date(effectiveObservedMs).toISOString() : null;
         const receivedAt = Number.isFinite(effectiveReceivedMs) ? new Date(Math.max(effectiveReceivedMs, Number.isFinite(effectiveObservedMs) ? effectiveObservedMs : effectiveReceivedMs)).toISOString() : null;
-        const validUntilMs = Number.isFinite(effectiveObservedMs) ? effectiveObservedMs + control.maxStateValiditySeconds * 1000 : NaN;
+        const savedDeadlineMs = Date.parse(String(entity?.sourceValidUntil || ""));
+        const computedDeadlineMs = effectiveObservedMs + control.maxStateValiditySeconds * 1000;
+        const validUntilMs = Number.isFinite(effectiveObservedMs)
+          ? Number.isFinite(savedDeadlineMs) ? Math.min(savedDeadlineMs, computedDeadlineMs) : computedDeadlineMs : NaN;
         const isExpired = Number.isFinite(validUntilMs) && validUntilMs <= now;
         let value = rawState;
         if (!hasObservedAt) value = null;

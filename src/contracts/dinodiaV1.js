@@ -241,4 +241,4 @@ function makeEnvelope({ homeId, streamId, sequence, generatedAt, revision, data 
   const value = { schemaVersion: VERSION, homeId, streamId, sequence, generatedAt, revision, data };
   return validateEnvelope(value, homeId) ? value : null;
 }
-module.exports = { VERSION, validateEnvelope, validateMembership, validateArea, validateDevice, validateCommand, validateControlState, effectiveControlQuality, serializeDevice, makeEnvelope };
+module.exports = { VERSION, validateEnvelope, validateMembership, validateArea, validateDevice, validateCommand, validateControlState, effectiveControlQuality, observationTiming, serializeDevice, makeEnvelope };

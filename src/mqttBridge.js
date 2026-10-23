@@ -289,6 +289,7 @@ class MqttBridge {
       this.rawDeviceInventory = value.map((item) => JSON.parse(JSON.stringify(item)));
       let stopPairingAfterSync = false;
       for (const item of value) {
+        try {
         const normalized = normalizeZigbeeDevice(item);
         if (normalized.infrastructure) continue;
         const id = normalized.id;
@@ -341,6 +342,12 @@ class MqttBridge {
         });
         if (newForPairing && updated.interviewStatus === "successful" && !pairingState.id) stopPairingAfterSync = true;
         if (this.onDeviceChanged) await this.onDeviceChanged(updated, existing);
+        } catch (error) {
+          // One registry projection must not starve all policy discovery. The Store
+          // rolls failed mutations back; reconciliation sees only registered devices.
+          this.lastError = String(error?.code || "inventory_projection_failed");
+          this.logger?.error?.(`[mqtt] inventory projection deferred (${this.lastError})`);
+        }
       }
       await this.notifyObservationPolicy("onInventory", value);
       if (stopPairingAfterSync && this.pairingSession.status().active) {

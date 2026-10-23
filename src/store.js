@@ -10,10 +10,10 @@ const { DEFAULT_HEATING_DEMAND_CONFIG, DEFAULT_HEATING_DEMAND_RUNTIME } = requir
 const { NATIVE_AUTOMATION_STORE_VERSION, LIMITS } = require("./automations/constants");
 const { migrateLegacyAutomations } = require("./automations/legacyAdapter");
 const { getSurfaces } = require("./capabilities/devicePresentation");
-const { serializeDevice } = require("./contracts/dinodiaV1");
+const { observationTiming, serializeDevice } = require("./contracts/dinodiaV1");
 const { SYNC_BATCH_MAX_EVENTS, compactUnregisteredPropertyDeviceEvents, enqueueSyncEventInState, initialSyncOutbox, nextSyncBatch, normalizeSyncOutbox } = require("./sync/syncOutbox");
 const { validateCloudConfiguration, projectCloudDevicePolicies } = require("./sync/cloudConfiguration");
-const { activityFor, advanceUsage, capUsageAtLastAlive, endUsageAssignment, initialUsageState, observeUsage, usageClockTrusted } = require("./sync/usageBuckets");
+const { activityFor, advanceUsage, capUsageAtLastAlive, endUsageAssignment, endUsageDeviceAvailability, initialUsageState, observeUsage, usageClockTrusted } = require("./sync/usageBuckets");
 const { assertNoRestorePendingSync, ensureInitializedMarkerSync, hasInitializedMarkerSync, persistStoreJson } = require("./durableStoreFile");
 
 const STORE_MUTATION_CONTEXT = new AsyncLocalStorage();
@@ -247,6 +247,28 @@ function systemClockSynchronized() {
   return fs.existsSync("/run/systemd/timesync/synchronized");
 }
 
+function freezeObservationDeadlines(previous, next) {
+  const priorEntities = Object.values(previous?.entities || {});
+  for (const entity of Object.values(next.entities || {})) {
+    const observed = sourceTimestamp(entity.sourceObservedAt);
+    if (!observed) { entity.sourceValidUntil = null; continue; }
+    const prior = priorEntities.find(item => item.id === entity.id
+      || item.capability?.controlId && item.capability.controlId === entity.capability?.controlId);
+    const computed = Date.parse(observed) + observationTiming(next, entity, entity.capability || {}).maxStateValiditySeconds * 1000;
+    const saved = prior?.sourceObservedAt === observed ? Date.parse(String(prior.sourceValidUntil || "")) : NaN;
+    // A later policy may shorten current presentation but never extend an existing
+    // sample. The next genuine observation takes the newly configured lifetime.
+    const deadline = Number.isFinite(saved) ? Math.min(saved, computed) : computed;
+    entity.sourceValidUntil = Number.isFinite(deadline) ? new Date(deadline).toISOString() : null;
+  }
+}
+
+function observationDeadline(entity, observedMs, maximumSeconds) {
+  const saved = Date.parse(String(entity?.sourceValidUntil || ""));
+  const computed = observedMs + maximumSeconds * 1000;
+  return Number.isFinite(saved) ? Math.min(saved, computed) : computed;
+}
+
 function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
   const deviceId = String(device?.id || "");
   const policy = state.platform?.devicePolicies?.[deviceId];
@@ -263,6 +285,12 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
   let durableSyncMutation = false;
   const entities = Object.values(device.entities || {});
   const usage = state.syncUsage = initialUsageState(state.syncUsage);
+  if (device.available === false) {
+    const ended = endUsageDeviceAvailability(usage, deviceId, nowMs);
+    state.syncUsage = ended.state;
+    for (const key of ended.changedBuckets) queueUsageBucket(state, key, nowMs);
+    return ended.changed;
+  }
   const usageControls = catalog.controls.filter((control) => control.observable
     && Number.isSafeInteger(control.maxStateValiditySeconds) && control.maxStateValiditySeconds > 0
     && (policy.analyticsCategory === "LIGHT" && ["power", "brightness"].includes(String(control.semanticRole || "") )
@@ -293,7 +321,8 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
         const observedMs = timestamp ? Date.parse(timestamp) : NaN;
         const validityMs = Math.min(item.maxStateValiditySeconds * 1000, 30 * 60 * 1000);
         if (!source || !Number.isFinite(observedMs) || observedMs > nowMs || nowMs - observedMs > 30 * 60 * 1000 || observedMs + validityMs <= nowMs) return null;
-        return { role: item.semanticRole, value: currentEntityValue(source), observedAt: timestamp, validUntilMs: observedMs + validityMs };
+        return { role: item.semanticRole, value: currentEntityValue(source), observedAt: timestamp,
+          validUntilMs: observationDeadline(source, observedMs, validityMs / 1000) };
       }).filter(Boolean);
       if (!signals.length) continue;
       const active = signals.some((signal) => signal.role === "power"
@@ -311,11 +340,18 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
       const observedMs = Date.parse(observedAt);
       if (observedMs > nowMs || nowMs - observedMs > 30 * 60 * 1000) continue;
       const validityMs = Math.min(control.maxStateValiditySeconds * 1000, policy.analyticsCategory === "RADIATOR" ? 30 * 60 * 1000 : Number.MAX_SAFE_INTEGER);
-      validUntil = new Date(observedMs + validityMs).toISOString();
+      validUntil = new Date(observationDeadline(entity, observedMs, validityMs / 1000)).toISOString();
       activity = activityFor({ category: policy.analyticsCategory, role, value: currentEntityValue(entity), available: device.available !== false });
     }
     if (!observedAt || !validUntil || !activity) continue;
     if (Number.isSafeInteger(options.ignoreThroughMs) && Date.parse(observedAt) <= options.ignoreThroughMs) continue;
+    const prior = usage.sources[[deviceId, policy.analyticsCategory, String(control.controlId), generation].join("|")];
+    // Registry/descriptor refreshes replay existing values. Their deadline was fixed
+    // when observed (and may have been capped at shutdown); a new descriptor is not
+    // new physical evidence. This also accepts legacy capped sources without
+    // observationValidUntil, without extending their coverage or rewriting buckets.
+    if (prior && prior.assignmentEndedAt == null && prior.osAreaId === String(device.areaId || "")
+      && prior.lastObservedAt === observedAt && prior.activity === activity) continue;
     const result = observeUsage(usage, {
       osDeviceId: deviceId,
       osAreaId: String(device.areaId || ""),
@@ -688,7 +724,8 @@ function normalizeState(value) {
       // and reconcile any cached surface whose source entities changed while
       // the OS was stopped. The source fingerprint is computed from current
       // stored authority, never from a client-supplied revision.
-      presentation: hasCurrentRevision ? presentation : buildPresentation({ ...device, presentation }, "1970-01-01T00:00:00.000Z"),
+      presentation: hasCurrentRevision ? presentation : buildPresentation({ ...device, presentation },
+        sourceTimestamp(device.updatedAt) || sourceTimestamp(value.updatedAt) || null),
     }];
   }));
   const aliases = value.aliases && typeof value.aliases === "object" ? { ...value.aliases } : {};
@@ -1138,7 +1175,8 @@ function mergeEntities(existing, incoming, deviceId, state, options = {}) {
       lastChanged: stateChanged ? new Date().toISOString() : (previous.lastChanged || previous.updatedAt || new Date().toISOString()),
       // Only an adapter report (updateDeviceState) that actually carried this
       // attribute counts as a report; metadata/definition rewrites never do.
-      lastReportedAt: options.adapterReport === true && hasReportedState ? new Date().toISOString() : (previous.lastReportedAt || null),
+      lastReportedAt: options.adapterReport === true && hasReportedState && (!options.requireExplicitObservation || candidateIsNewer)
+        ? candidateSourceObservedAt || new Date().toISOString() : (previous.lastReportedAt || null),
       updatedAt: new Date().toISOString(),
     };
   }
@@ -1170,7 +1208,8 @@ function mergeEntities(existing, incoming, deviceId, state, options = {}) {
       sourceReceivedAt: previous.sourceReceivedAt || null,
       autoGeneratedStateEntity: true,
       lastChanged: JSON.stringify(previous.state) !== JSON.stringify(stateObject[stateKey]) ? new Date().toISOString() : (previous.lastChanged || previous.updatedAt || new Date().toISOString()),
-      lastReportedAt: options.adapterReport === true && reportedStateKeys?.has(stateKey) ? new Date().toISOString() : (previous.lastReportedAt || null),
+      lastReportedAt: options.adapterReport === true && reportedStateKeys?.has(stateKey) && !options.requireExplicitObservation
+        ? new Date().toISOString() : (previous.lastReportedAt || null),
       updatedAt: new Date().toISOString(),
     };
   }
@@ -1505,6 +1544,7 @@ class Store {
     if (!device || !device.id) throw new Error("device.id is required");
     const id = String(device.id);
     const before = this.snapshot();
+    try {
     const existing = this.state.devices[id] || {};
     const protectedControlIds = new Set(options.protectedControlIds || []);
     const declaredByProperty = new Map();
@@ -1576,6 +1616,7 @@ class Store {
       sourceFingerprint: sourceFingerprint(next),
     } : null);
     next.presentation = buildPresentation({ ...next, presentation: previousPresentation });
+    freezeObservationDeadlines(existing, next);
     const observationNow = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
     if (options.devicePolicy && typeof options.devicePolicy === "object" && !Array.isArray(options.devicePolicy)) {
       this.state.platform = this.state.platform || initialState().platform;
@@ -1623,13 +1664,12 @@ class Store {
       this.schedulePersist();
       return this.getDevice(id);
     }
-    try {
-      await this.persist();
+    await this.persist();
+    return this.getDevice(id);
     } catch (error) {
-      this.restoreSnapshot(before, typeof error === "undefined" ? null : error);
+      this.restoreSnapshot(before, error);
       throw error;
     }
-    return this.getDevice(id);
   }
 
   async migrateDeviceIdentity(fromId, toId, patch = {}) {
