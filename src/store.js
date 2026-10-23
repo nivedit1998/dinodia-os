@@ -2666,6 +2666,7 @@ class Store {
       const deviceIdOf = (event) => String(event.payload?.osDeviceId || "");
       const targets = [];
       const deviceIds = new Set();
+      const supersededOnly = new Set();
       for (const event of range) {
         if (event.type !== "control.catalog.upsert") continue;
         const id = deviceIdOf(event);
@@ -2690,6 +2691,15 @@ class Store {
         // rejected catalogue describes. The revision counter is not compared: it
         // moves on restart even when the content digest is unchanged.
         const current = nativeSyncDeviceProjection(device, policy);
+        // Superseded: the Hub's descriptor has since moved on, and the device update and catalogue
+        // for the current revision are already queued after this batch. The stale catalogue can
+        // never be accepted; replacing it is safe and needs nothing new queued.
+        const supersededByQueued = !laterDeviceUpdate && Number(current.descriptorRevision) > revision
+          && outbox.events.some((entry) => entry.sequence > batchTo && entry.type === "device.upsert" && deviceIdOf(entry) === id
+            && Number(entry.payload?.descriptorRevision) === Number(current.descriptorRevision))
+          && outbox.events.some((entry) => entry.sequence > batchTo && entry.type === "control.catalog.upsert" && deviceIdOf(entry) === id
+            && Number(entry.payload?.catalogRevision) === Number(current.descriptorRevision));
+        if (supersededByQueued) { targets.push(event); supersededOnly.add(id); continue; }
         if (current.descriptorDigest !== digest) return noChange();
         if (!laterDeviceUpdate && Number(current.descriptorRevision) !== revision) return noChange();
         targets.push(event);
@@ -2704,6 +2714,7 @@ class Store {
         event.payload = { supersededBy: replacementSequence };
       }
       for (const id of deviceIds) {
+        if (supersededOnly.has(id)) continue;
         enqueueNativeDeviceSync(this.state, null, this.state.devices[id], { critical: true });
       }
 

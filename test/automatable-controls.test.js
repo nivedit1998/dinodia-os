@@ -156,3 +156,31 @@ test("a rejected batch whose catalogue has no device update anywhere is repaired
     assert.deepEqual(queued, ["device.upsert", "control.catalog.upsert"], "device update then catalogue are queued after the batch");
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
+
+test("a rejected stale catalogue superseded by newer queued revisions is replaced without queuing anything new", async () => {
+  const { directory, store, id } = await publishedRadiatorStore();
+  try {
+    // Live shape on 23 Oct: in flight [usage, catalogue rev N]; queued after it: device + catalogue rev N+2.
+    await store.ensureControlCatalogPublications(Date.now());
+    await store.commit((state) => {
+      for (const event of state.syncOutbox.events) {
+        if (event.type === "device.upsert") { event.type = "sync.compacted"; event.aggregateId = ""; event.payload = { supersededBy: event.sequence + 1 }; }
+      }
+    });
+    const batch = await store.prepareSyncBatch("00000000-0000-4000-8000-000000000031", { kind: "dinodia_os", version: "test", capabilities: {} }, Date.now());
+    await store.markSyncFailure("hub_sync_catalog_revision_mismatch");
+    await store.commit((state) => {
+      const live = state.devices[id];
+      live.presentation = { ...live.presentation, descriptorRevision: live.presentation.descriptorRevision + 2, sourceFingerprint: `${live.presentation.sourceFingerprint}-moved-on` };
+    });
+    store.state.platform.controlCatalogPublications = {};
+    await store.ensureControlCatalogPublications(Date.now());
+    const before = store.getSyncOutbox();
+    const queuedBefore = before.events.filter((event) => event.sequence > batch.toSequence).length;
+    const result = await store.reconcileRejectedCatalogOrder({ streamId: before.streamId, acceptedSequence: before.acknowledgedSequence, errorCode: "hub_sync_catalog_revision_mismatch" });
+    assert.equal(result.reconciled, true);
+    const after = store.getSyncOutbox();
+    assert.deepEqual(after.inFlight.events.map((event) => event.type), ["sync.compacted", "sync.compacted"]);
+    assert.equal(after.events.filter((event) => event.sequence > batch.toSequence).length, queuedBefore, "the newer device update and catalogue were already queued");
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});

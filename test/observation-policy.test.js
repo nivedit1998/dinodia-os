@@ -404,3 +404,25 @@ test("profile activation is one intentional descriptor revision; rebuilding the 
   assert.equal(withoutProfile.descriptorRevision, first.descriptorRevision + 1, "a profile change (here: no longer matched) is one revision");
   assert.equal(periodicLifetime(600), 660);
 });
+
+test("an unnamed endpoint resolves only when exactly one endpoint carries the cluster (live TRVZB stores endpoint 0)", () => {
+  const device = normalizeZigbeeDevice(trvzbRaw());
+  const running = { ...Object.values(device.entities).find((entity) => entity.stateKey === "running_state"), endpointId: "0" };
+  const one = { ...device, metadata: { ...device.metadata, endpoints: { 1: { clusters: { input: ["genBasic", "hvacThermostat"], output: [] } } } } };
+  assert.equal(matchObservationProfile(one, running)?.id, "zigbee.sonoff.trvzb.running_state");
+  const two = { ...device, metadata: { ...device.metadata, endpoints: { 1: { clusters: { input: ["hvacThermostat"] } }, 2: { clusters: { input: ["hvacThermostat"] } } } } };
+  assert.equal(matchObservationProfile(two, running), null, "ambiguous: never guessed");
+  const none = { ...device, metadata: { ...device.metadata, endpoints: { 1: { clusters: { input: ["genBasic"] } } } } };
+  assert.equal(matchObservationProfile(none, running), null);
+});
+
+test("each descriptor revision records which fingerprint sections changed", () => {
+  const device = normalizeZigbeeDevice(trvzbRaw());
+  device.areaId = "room"; device.setup = { status: "ready", assignmentMode: "device_inherited_v1" };
+  const first = buildPresentation(device);
+  const second = buildPresentation({ ...device, metadata: { ...device.metadata, software_build_id: "1.5.0" }, presentation: first });
+  assert.equal(second.descriptorRevision, first.descriptorRevision + 1);
+  assert.deepEqual(second.revisionHistory.at(-1).changed, ["metadata.software_build_id"]);
+  const third = buildPresentation({ ...device, metadata: { ...device.metadata, software_build_id: "1.5.0" }, presentation: second });
+  assert.equal(third.revisionHistory.length, second.revisionHistory.length, "no entry without a revision change");
+});

@@ -410,8 +410,8 @@ function descriptorMetadata(metadata) {
   return copy;
 }
 
-function sourceFingerprint(device) {
-  const relevant = {
+function fingerprintInputs(device) {
+  return {
     id: device.id,
     protocol: device.protocol,
     identity: device.protocolIdentity,
@@ -428,7 +428,28 @@ function sourceFingerprint(device) {
     tenantOwnerMembershipId: device.tenantOwnerMembershipId || device.metadata?.tenantOwnerMembershipId || null,
     entities: rawEntities(device).map((entity) => ({ id: entity.id, name: entity.name, original_name: entity.original_name, endpointId: entity.endpointId, endpointName: entity.endpointName, logicalKey: entity.logicalKey, stateKey: entity.stateKey, domain: entity.domain, category: entity.category, capability: entity.capability, expose: entity.expose, binding: entity.binding })),
   };
-  return `sha256:${crypto.createHash("sha256").update(JSON.stringify(canonicalValue(relevant))).digest("hex")}`;
+}
+
+function sourceFingerprint(device) {
+  return `sha256:${crypto.createHash("sha256").update(JSON.stringify(canonicalValue(fingerprintInputs(device)))).digest("hex")}`;
+}
+
+// Short hashes of each fingerprint section (diagnostics only; never part of the descriptor). When the
+// revision moves, the names of the sections that changed are kept, so a churn source is identifiable.
+function fingerprintSections(device) {
+  const inputs = fingerprintInputs(device);
+  const hash = (value) => crypto.createHash("sha256").update(JSON.stringify(canonicalValue(value ?? null))).digest("hex").slice(0, 12);
+  const sections = {};
+  for (const [key, value] of Object.entries(inputs)) {
+    if (key === "metadata" && value && typeof value === "object") {
+      for (const [metaKey, metaValue] of Object.entries(value)) sections[`metadata.${metaKey}`] = hash(metaValue);
+    } else if (key === "entities" && Array.isArray(value)) {
+      for (const entity of value) sections[`entity.${entity.id}`] = hash(entity);
+    } else {
+      sections[key] = hash(value);
+    }
+  }
+  return sections;
 }
 
 function buildPresentation(device, now = new Date().toISOString()) {
@@ -438,6 +459,13 @@ function buildPresentation(device, now = new Date().toISOString()) {
   const descriptorRevision = hasPreviousRevision && device.presentation?.sourceFingerprint === descriptorFingerprint
     ? previousRevision
     : (hasPreviousRevision ? previousRevision + 1 : 1);
+  const sections = fingerprintSections(device);
+  const previousSections = device.presentation?.fingerprintSections || {};
+  const history = Array.isArray(device.presentation?.revisionHistory) ? device.presentation.revisionHistory : [];
+  const revisionHistory = descriptorRevision !== previousRevision && hasPreviousRevision
+    ? [...history, { revision: descriptorRevision, at: now, changed: [...new Set([...Object.keys(sections), ...Object.keys(previousSections)])]
+      .filter((key) => sections[key] !== previousSections[key]).slice(0, 20) }].slice(-8)
+    : history.slice(-8);
   const selectedLabel = labelId(device);
   const configured = isConfigured(device) && ["ready", "preview"].includes(String(device.setup?.status || ""));
   const groups = configured ? groupEntities(device) : new Map();
@@ -460,6 +488,8 @@ function buildPresentation(device, now = new Date().toISOString()) {
     policyRevision: POLICY_REVISION,
     sourceFingerprint: descriptorFingerprint,
     descriptorRevision,
+    fingerprintSections: sections,
+    revisionHistory,
     generatedAt: now,
     status,
     inferredType,

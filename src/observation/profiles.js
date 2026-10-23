@@ -88,6 +88,21 @@ function entityEndpoint(entity) {
   return String(entity?.endpointId ?? entity?.binding?.endpoint ?? entity?.expose?.endpoint ?? "").trim();
 }
 
+/// The Zigbee endpoint that actually carries a cluster for this control. Zigbee2MQTT exposes some
+/// values without an endpoint (stored as "0"/empty); then the endpoint is resolved only when exactly
+/// one endpoint of the device carries the cluster. Otherwise there is no match (never a guess).
+function resolvedEndpoint(device, entity, cluster) {
+  const declared = entityEndpoint(entity);
+  if (declared && declared !== "0") return declared;
+  if (!cluster) return declared;
+  const endpoints = device?.metadata?.endpoints && typeof device.metadata.endpoints === "object" ? device.metadata.endpoints : {};
+  const carrying = Object.entries(endpoints).filter(([, endpoint]) => {
+    const input = endpoint?.clusters?.input;
+    return Array.isArray(input) && input.includes(cluster);
+  }).map(([id]) => String(id));
+  return carrying.length === 1 ? carrying[0] : null;
+}
+
 function entityProperty(entity) {
   return String(entity?.stateKey || entity?.binding?.property || "").trim();
 }
@@ -99,7 +114,6 @@ function matchObservationProfile(device, entity, { approvedModels = [] } = {}) {
   const integration = normalized(device.protocol);
   const manufacturer = normalized(device.metadata?.manufacturer || device.metadata?.vendor);
   const model = normalized(device.metadata?.model || device.metadata?.model_id);
-  const endpoint = entityEndpoint(entity);
   const property = entityProperty(entity);
   const role = String(entity.capability?.semanticRole || "");
   if (entity.capability?.observable !== true) return null;
@@ -108,7 +122,7 @@ function matchObservationProfile(device, entity, { approvedModels = [] } = {}) {
     if (normalized(profile.integration) !== integration) return false;
     if (profile.manufacturer && normalized(profile.manufacturer) !== manufacturer) return false;
     if (profile.model && normalized(profile.model) !== model) return false;
-    if (profile.endpoint !== null && profile.endpoint !== endpoint) return false;
+    if (profile.endpoint !== null && profile.endpoint !== resolvedEndpoint(device, entity, profile.cluster)) return false;
     if (profile.property && profile.property !== property) return false;
     if (profile.semanticRole && profile.semanticRole !== role) return false;
     if (profile.requiresModelApproval && !approvedModels.some((entry) => entry.profileId === profile.id
@@ -154,6 +168,7 @@ module.exports = {
   entityEndpoint,
   entityProperty,
   matchObservationProfile,
+  resolvedEndpoint,
   periodicLifetime,
   reportingMatches,
 };

@@ -10,7 +10,7 @@
 // (no target, power, mode or other writes): only reporting read and reporting configure requests.
 
 const crypto = require("node:crypto");
-const { DELIVERY_GRACE_SECONDS, cachedReportingFor, entityEndpoint, matchObservationProfile, reportingMatches } = require("./profiles");
+const { DELIVERY_GRACE_SECONDS, cachedReportingFor, matchObservationProfile, reportingMatches, resolvedEndpoint } = require("./profiles");
 
 const STATES = Object.freeze({
   UNKNOWN: "configuration_unknown",
@@ -111,7 +111,8 @@ class ObservationReconciler {
       for (const entity of Object.values(device.entities || {})) {
         const profile = matchObservationProfile(device, entity);
         if (!profile || !profile.approvedForAutomaticConfiguration || !profile.desired) continue;
-        const endpoint = entityEndpoint(entity);
+        const endpoint = resolvedEndpoint(device, entity, profile.cluster);
+        if (!endpoint) continue;
         const key = recordKey(deviceId, profile.id, endpoint);
         seen.add(key);
         const cached = cachedReportingFor(raw, profile, endpoint);
@@ -155,7 +156,8 @@ class ObservationReconciler {
     const observedMs = Date.parse(String(observedAtIso || ""));
     if (!Number.isFinite(observedMs)) return;
     for (const record of this.records.values()) {
-      if (record.deviceId !== String(deviceId) || record.endpoint !== String(endpoint ?? record.endpoint)) continue;
+      if (record.deviceId !== String(deviceId)) continue;
+      if (endpoint && endpoint !== "0" && record.endpoint !== String(endpoint)) continue;
       if (!record.profileId.endsWith(`.${property}`)) continue;
       const times = [...(this.reportTimes.get(record.key) || []), observedMs].slice(-this.options.maxReportTimes);
       this.reportTimes.set(record.key, times);
