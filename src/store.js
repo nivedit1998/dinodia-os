@@ -1387,10 +1387,20 @@ class Store {
         if (policy.analyticsInterval) policy.analyticsStartAt = previousPolicies[deviceId]?.analyticsInterval?.id === policy.analyticsInterval.id
           ? previousPolicies[deviceId].analyticsStartAt || new Date(policyTime).toISOString() : new Date(policyTime).toISOString();
       }
-      if (this.isUsageClockTrusted(policyTime)) for (const [deviceId, previous] of Object.entries(previousPolicies)) {
+      for (const [deviceId, previous] of Object.entries(previousPolicies)) {
         const next = incomingPolicies[deviceId];
         const identity = value => JSON.stringify([value?.managementClass, value?.lifecycle, value?.analyticsCategory, value?.analyticsInterval?.id, value?.analyticsInterval?.selectedControlId, value?.analyticsInterval?.writerEnabled]);
         if (identity(previous) === identity(next)) continue;
+        if (!this.isUsageClockTrusted(policyTime)) {
+          // No trustworthy receipt time: stop at each source's last durably
+          // accounted boundary. Never leave the former authority open across
+          // clock recovery, or fabricate coverage using an untrusted clock.
+          for (const source of Object.values(state.syncUsage?.sources || {})) {
+            if (source.osDeviceId === deviceId && source.assignmentEndedAt == null)
+              source.assignmentEndedAt = source.accountedThroughAt;
+          }
+          continue;
+        }
         for (const areaId of new Set(Object.values(state.syncUsage?.sources || {}).filter(source => source.osDeviceId === deviceId && source.assignmentEndedAt == null).map(source => source.osAreaId))) {
           const ended = endUsageAssignment(state.syncUsage, { osDeviceId: deviceId, osAreaId: areaId, endedAtMs: policyTime });
           state.syncUsage = ended.state;

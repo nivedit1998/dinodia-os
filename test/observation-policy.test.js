@@ -62,6 +62,17 @@ async function harness({ raw = trvzbRaw() } = {}) {
 const reply = (sent, status, extra = {}) => ({ status: "ok", transaction: sent.at(-1).payload.transaction,
   data: { cluster: "hvacThermostat", endpoint: 1, configs: [{ attrId: 41, status, ...extra }] } });
 
+test('approved live-state profile remains tracked when analytics category is NONE', async () => {
+  const h = await harness();
+  try {
+    await h.store.savePlatform({ devicePolicies: { [h.device.id]: {
+      managementClass: 'PROPERTY_DEVICE', lifecycle: 'INSTALLED', analyticsCategory: 'NONE',
+    } } });
+    const reconciler = h.make(); await reconciler.onInventory([trvzbRaw()]);
+    assert.equal(reconciler.records.size, 1);
+  } finally { h.cleanup(); }
+});
+
 test("profiles match the exact integration, model, endpoint, property and role", () => {
   const device = normalizeZigbeeDevice(trvzbRaw());
   const running = Object.values(device.entities).find((entity) => entity.stateKey === "running_state");

@@ -130,8 +130,10 @@ class ObservationReconciler {
       for (const entity of Object.values(device.entities || {})) {
         let profile = matchObservationProfile(device, entity);
         const policy = this.store.getPlatform?.()?.devicePolicies?.[deviceId];
-        if (policy && !analyticsEligible(policy)) continue;
-        if (policy?.analyticsInterval) {
+        // Existing explicitly approved live-state profiles are independent of
+        // analytics category. Only generic analytics collectors require it.
+        if (!profile && policy && !analyticsEligible(policy)) continue;
+        if (!profile && policy?.analyticsInterval) {
           const binding = resolveCategoryBinding({ signedPolicy: policy, controls: Object.values(device.entities || {}).map(item => ({
             ...item.capability, controlId: item.capability?.controlId || item.id, endpointId: item.endpointId || item.binding?.endpoint,
           })) });

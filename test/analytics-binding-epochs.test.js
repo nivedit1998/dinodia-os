@@ -29,7 +29,7 @@ test('three interval revisions partition a same-hour source switch and switch-ba
   assert.equal(Object.values(state.buckets).reduce((n, b) => n + b.onSeconds + b.offSeconds + b.unknownSeconds, 0), 1800);
 });
 
-test('actual signed-policy application closes NONE immediately and never seeds switch-back with an old sample', async () => {
+for (const transition of ['NONE', 'writer_disabled']) for (const trustedAtChange of [true, false]) test(`actual signed-policy application closes ${transition} with trusted clock=${trustedAtChange} and never seeds switch-back with an old sample`, async () => {
   const fs = require('node:fs'), os = require('node:os'), path = require('node:path'); const { Store } = require('../src/store');
   const { normalizeZigbeeDevice } = require('../src/integrations/zigbee/exposeNormalizer');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'uc-lifecycle-'));
@@ -39,13 +39,19 @@ test('actual signed-policy application closes NONE immediately and never seeds s
     await store.saveArea({ name: 'room' }, 'room');
     await store.savePlatform({ homeId: 'synthetic-home' });
     const d = normalizeZigbeeDevice(require('./fixtures/zigbee/dimmable-light.json'));
-    const policy = revision => ({ managementClass: 'PROPERTY_DEVICE', lifecycle: 'INSTALLED', analyticsCategory: revision === 2 ? 'NONE' : 'LIGHT',
-      analyticsInterval: { id: `interval-${revision}`, revision, writerEnabled: true, sourceGeneration: 1, validFrom: new Date(at + (revision - 1) * 60000).toISOString() } });
+    const policy = revision => ({ managementClass: 'PROPERTY_DEVICE', lifecycle: 'INSTALLED', analyticsCategory: revision === 2 && transition === 'NONE' ? 'NONE' : 'LIGHT',
+      analyticsInterval: { id: `interval-${revision}`, revision, writerEnabled: !(revision === 2 && transition === 'writer_disabled'), sourceGeneration: 1, validFrom: new Date(at + (revision - 1) * 60000).toISOString() } });
     await store.upsertDevice({ ...d, areaId: 'room', setup: { status: 'ready', assignmentMode: 'device_inherited_v1' } }, { devicePolicy: policy(1), nowMs: at });
     const report = async (time, state) => store.updateDeviceState(d.id, { state }, { nowMs: time, reportedStateKeys: ['state'],
       sourceObservedAtByStateKey: { state: new Date(time).toISOString() }, sourceReceivedAtByStateKey: { state: new Date(time).toISOString() } });
     await report(at + 1000, 'OFF');
+    await store.advanceSyncUsage(at + 60000);
+    store.setUsageClockTrust(() => trustedAtChange);
     await store.applyCloudConfigurationSnapshot({ cloudRevision: 2, devicePolicies: { [d.id]: policy(2) } }, [], { nowMs: at + 60000 });
+    store.setUsageClockTrust(() => true);
+    await report(at + 70000, 'ON');
+    assert.equal(Object.values(store.snapshot().syncUsage.sources).some(source => source.assignmentEndedAt == null), false,
+      'neither a new report nor clock recovery may resume recording under disabled authority');
     await store.advanceSyncUsage(at + 120000);
     assert.equal(Object.values(store.snapshot().syncUsage.buckets).reduce((n, b) => n + b.offSeconds + b.unknownSeconds, 0), 59);
     await store.applyCloudConfigurationSnapshot({ cloudRevision: 3, devicePolicies: { [d.id]: policy(3) } }, [], { nowMs: at + 120000 });
