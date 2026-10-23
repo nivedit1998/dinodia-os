@@ -14,6 +14,7 @@ const baseConfig = require("./config");
 const { Store } = require("./store");
 const { MqttBridge } = require("./mqttBridge");
 const { ObservationReconciler } = require("./observation/reconciler");
+const { BoundedReadCoordinator, readTargets } = require('./observation/readCoordinator');
 const { MatterBridge } = require("./matterBridge");
 const { resolveMatterServerUrl } = require("./integrations/matter/connectionConfig");
 const { createBackup } = require("./backup");
@@ -264,7 +265,7 @@ function maskHiveEmail(value) {
   return at > 0 ? `${raw[0]}***${raw.slice(at)}` : raw ? "***" : "";
 }
 
-function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, googleNestBridge, googleNestFetchImpl, googleNestNow, googleNestUpdateSource, platformSync, cloudflareTunnel, zigbeeService, threadService, identityBroker: providedIdentityBroker = null, lanTlsIdentityForTest = null, setupDiscoveryForTest = null, serialAdapterLister = listSerialAdapters, serialAdapterProbe = probeSerialAdapter, logger = console, clock = Date.now } = {}) {
+function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, googleNestBridge, googleNestFetchImpl, googleNestNow, googleNestUpdateSource, platformSync, cloudflareTunnel, zigbeeService, threadService, identityBroker: providedIdentityBroker = null, lanTlsIdentityForTest = null, setupDiscoveryForTest = null, serialAdapterLister = listSerialAdapters, serialAdapterProbe = probeSerialAdapter, collectionReadAdapters = {}, logger = console, clock = Date.now } = {}) {
   const runtimeConfig = { ...baseConfig, ...config };
   if ((lanTlsIdentityForTest || setupDiscoveryForTest || config.loopbackLanListenerForTest === true)
     && config.v2Environment !== "test") throw new Error("Loopback LAN listener injection is test-only");
@@ -678,6 +679,15 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     logger,
   });
   mqtt.observationPolicy = observationPolicy;
+  // Installed integrations currently lack a verified correlated network-read
+  // contract. Their adapters remain absent until that evidence exists; this
+  // path never substitutes an SDK cache lookup or invents an API.
+  const collectionReads = new BoundedReadCoordinator({ store: hubStore, adapters: collectionReadAdapters, clock,
+    admit: (observation, target) => hubStore.updateDeviceState(target.deviceId, { [target.property]: observation.rawValue ?? observation.value }, {
+      nowMs: clock(), sourceObservedAtByStateKey: { [target.property]: observation.observedAt },
+      sourceReceivedAtByStateKey: { [target.property]: new Date(clock()).toISOString() },
+      sourceLifetimeSecondsByStateKey: { [target.property]: 360 }, reportedEndpointId: target.endpointId,
+    }) });
   let observationPolicyTimer = null;
   const matter = matterBridge || new MatterBridge({
     // The local Matter Server also supports Wi-Fi devices; a selected Thread
@@ -1127,7 +1137,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       nodeEnv: runtimeConfig.nodeEnv,
       kind: "dinodia_os",
       version: VERSION,
-      capabilities: { managedAreaProvisioningV1: true, managedDevicePresentationV1: true, activityIncidentReportingV1: true, alexaNativeProjectionV1: true, alexaNativeDirectiveV1: true, nativeTenantAutomationProjectionV1: true,
+      capabilities: { managedAreaProvisioningV1: true, managedDevicePresentationV1: true, activityIncidentReportingV1: true, alexaNativeProjectionV1: true, alexaNativeDirectiveV1: true, nativeTenantAutomationProjectionV1: true, nativeUniversalAnalyticsV2: true,
         ...runtimeConfig.nativeCommissioningCapabilities },
     },
     getAreaSnapshot: () => ({ schemaVersion: 1, capturedAt: new Date().toISOString(), areas: hubStore.listAreas().map((area) => ({ areaId: area.id, name: area.name })) }),
@@ -3085,7 +3095,7 @@ function nativeDeviceView(principal, device) {
     if (resource === "devices" && req.method === "GET" && !id) {
       const devices = hubStore.listDevices()
         .filter((device) => supportOperator ? supportCanReadDevice(operatorPrincipal, device) : (!scopedPrincipal || appCanReadDevice(scopedPrincipal, device)))
-        .map((device) => dashboardDevice(device, operatorPrincipal?.scope?.length === 1 && operatorPrincipal.scope[0] === "os:admin" ? hubStore.getPlatform?.() : null));
+        .map((device) => dashboardDevice(device, operatorPrincipal?.scope?.length === 1 && operatorPrincipal.scope[0] === "os:admin" ? hubStore.getPlatform?.() : null, hubStore));
       return json(res, 200, { devices });
     }
     if (resource === "devices" && req.method === "POST" && !id) {
@@ -4497,7 +4507,7 @@ function nativeDeviceView(principal, device) {
         version: VERSION,
         uptimeSeconds: Math.round(process.uptime()),
         usageHistory: hubStore.getUsageHistoryClockStatus?.() ?? null,
-        observationPolicy: observationPolicy.status().map(({ profileId, endpoint, state, lastError }) => ({ profileId, endpoint, state, lastError })),
+        observationPolicy: observationPolicy.status().map(({ profileId, endpoint, state, lastError }) => ({ profileId: profileId.startsWith('generic.') ? 'generic_category_signal' : profileId, endpoint, state, lastError })),
         memory: { rssMb: Math.round(memory.rss / 1024 / 1024), heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024) },
         storeSchemaVersion: hubStore.state?.version || 0,
         storeRecovery: {
@@ -4963,8 +4973,10 @@ function nativeDeviceView(principal, device) {
     await markUsageAlive();
     usageAliveTimer = setInterval(markUsageAlive, 60000);
     usageAliveTimer.unref?.();
-    observationPolicyTimer = setInterval(() => observationPolicy.tick()
-      .catch((error) => logger.warn(`[observation] step deferred (${String(error?.code || "error")})`)), 30000);
+    observationPolicyTimer = setInterval(async () => {
+      try { await observationPolicy.tick(); await collectionReads.tick(readTargets(hubStore)); }
+      catch (error) { logger.warn(`[observation] step deferred (${String(error?.code || "error")})`); }
+    }, 10000);
     observationPolicyTimer.unref?.();
     if (lanTlsIdentity) {
       try { await lanTlsIdentity.initialize(); }

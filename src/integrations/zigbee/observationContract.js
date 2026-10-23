@@ -102,21 +102,21 @@ function matchesDevice(entry, identity = {}) {
   return requested.some((value) => candidates.includes(value));
 }
 
-function validateObservationConfiguration(contents, identity = {}) {
+function validateObservationConfiguration(contents, identity = {}, properties = TRACKED_PROPERTIES) {
   const configuration = parseYamlSections(contents);
   const matching = configuration.devices.filter((entry) => matchesDevice(entry, identity));
   if (configuration.advanced.last_seen !== "ISO_8601") return { ok: false, reason: "utc_last_seen_not_enabled" };
   if (matching.length !== 1) return { ok: false, reason: matching.length ? "device_configuration_ambiguous" : "device_configuration_missing" };
   const [device] = matching;
   if (device.values.optimistic !== false) return { ok: false, reason: "optimistic_updates_not_disabled" };
-  if (!TRACKED_PROPERTIES.every((property) => device.filteredCache.includes(property))) return { ok: false, reason: "tracked_properties_not_filtered_from_cache" };
+  if (!properties.length || properties.some(property => !/^[A-Za-z0-9_]+$/.test(property)) || !properties.every((property) => device.filteredCache.includes(property))) return { ok: false, reason: "tracked_properties_not_filtered_from_cache" };
   return { ok: true, reason: null };
 }
 
-async function readObservationConfiguration(filePath, identity, { includeProperties = false } = {}) {
+async function readObservationConfiguration(filePath, identity, { includeProperties = false, properties = TRACKED_PROPERTIES } = {}) {
   try {
     const contents = await fs.readFile(filePath, "utf8");
-    const validated = validateObservationConfiguration(contents, identity);
+    const validated = validateObservationConfiguration(contents, identity, properties);
     if (!validated.ok || !includeProperties) return validated;
     const device = parseYamlSections(contents).devices.find(entry => matchesDevice(entry, identity));
     return { ...validated, properties: [...new Set(device.filteredCache)]

@@ -335,7 +335,7 @@ const { advanceUsage, initialUsageState, observeUsage } = require("../src/sync/u
 
 test("fallback reads: interval and lifetime align, so successful reads leave no gap and a failed read leaves exactly one", () => {
   const lifetime = boundedReadLifetime(600);
-  assert.equal(lifetime, 690);
+  assert.equal(lifetime, 660); // D9: the 30-second timeout is inside the 60-second delivery allowance.
   let state = initialUsageState();
   const start = Date.parse("2026-10-23T10:00:00.000Z");
   const read = (offsetSeconds, activity = "on") => {
@@ -351,7 +351,7 @@ test("fallback reads: interval and lifetime align, so successful reads leave no 
   state = gapped;
   for (const index of [0, 1, 3, 4, 5, 6]) read(index * 600 + 20); // the read at 1220 s fails
   state = advanceUsage(state, start + 3600 * 1000).state;
-  assert.equal(Object.values(state.buckets)[0].unknownSeconds, 1820 - (620 + 690), "only the time beyond the last good read's lifetime is Unknown");
+  assert.equal(Object.values(state.buckets)[0].unknownSeconds, 1820 - (620 + 660), "only the time beyond the last good read's lifetime is Unknown");
 });
 
 test("bounded read planning honours interval, device cap, Hub spacing and refuses budgets that would leave gaps", () => {

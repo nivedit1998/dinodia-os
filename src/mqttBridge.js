@@ -271,6 +271,19 @@ class MqttBridge {
       return;
     }
     const relative = topic.startsWith(`${this.baseTopic}/`) ? topic.slice(this.baseTopic.length + 1) : topic;
+    if (relative === 'bridge/info' && value && typeof value === 'object') {
+      // Keep only observation-related runtime options, never the full config
+      // (which may include credentials). The documented bridge/info contract
+      // exposes the effective config and restart_required independently.
+      this.effectiveObservationOptions = {
+        active: value.restart_required === false && value.config?.advanced?.last_seen === 'ISO_8601',
+        devices: Object.fromEntries(Object.entries(value.config?.devices || {}).slice(0, 2000).map(([key, options]) => [key, {
+          friendly_name: String(options?.friendly_name || ''), optimistic: options?.optimistic === false,
+          filtered_cache: Array.isArray(options?.filtered_cache) ? options.filtered_cache.filter(property => /^[A-Za-z0-9_]+$/.test(property)).slice(0, 128) : [],
+        }])),
+      };
+      return;
+    }
     if (relative === "bridge/devices" && Array.isArray(value)) {
       if (this.store.saveConfigEntry) await this.store.saveConfigEntry({ entry_id: "ce_zigbee", domain: "zha", title: "Zigbee" });
       const normalizedInventory = value.map((item) => normalizeZigbeeDevice(item))
@@ -420,7 +433,20 @@ class MqttBridge {
         observationContract = await readObservationConfiguration(this.observationConfigPath, {
           friendlyName: existing.metadata?.friendly_name || existing.metadata?.friendlyName || parts[0],
           ieeeAddress: existing.metadata?.ieee_address || existing.protocolIdentity?.ieeeAddress,
-        }, { includeProperties: true });
+        }, { includeProperties: true, ...(this.observationPolicy?.selectedProperties?.(id)?.length
+          ? { properties: this.observationPolicy.selectedProperties(id) } : {}) });
+      }
+      if (sourceObservedAt && observationContract.ok && existing) {
+        const policy = this.store.getPlatform?.()?.devicePolicies?.[existing.id];
+        if (policy?.analyticsInterval?.genericCollectionEnabled === true) {
+          const options = this.effectiveObservationOptions;
+          const ieee = existing.metadata?.ieee_address || existing.protocolIdentity?.ieeeAddress;
+          const runtime = options?.devices?.[ieee] || Object.values(options?.devices || {}).find(item => item.friendly_name === parts[0]);
+          const properties = this.observationPolicy?.selectedProperties?.(existing.id) || [];
+          if (!options?.active || !runtime?.optimistic || !properties.length || properties.some(property => !runtime.filtered_cache.includes(property))) {
+            observationContract = { ok: false, reason: 'effective_publisher_options_unverified' };
+          } else observationContract.properties = (observationContract.properties || []).filter(property => runtime.filtered_cache.includes(property));
+        }
       }
       if (sourceObservedAt && observationContract.ok && existing) {
         // Zigbee2MQTT's Home Assistant extension inserts null mock properties
@@ -463,6 +489,8 @@ class MqttBridge {
         deferPersist: true,
         ...(lastSeenAt ? { lastSeenAt } : {}),
         sourceObservedAtByStateKey, sourceReceivedAtByStateKey,
+        sourceLifetimeSecondsByStateKey: Object.fromEntries(Object.keys(sourceObservedAtByStateKey).map(property => [property,
+          this.observationPolicy?.lifetimeFor?.(id, property, observedEndpointByStateKey[property]) ?? null])),
         reportedEndpointId: value.endpoint ?? value.endpoint_id,
       });
       for (const [property, observedAt] of Object.entries(sourceObservedAtByStateKey)) {

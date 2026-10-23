@@ -702,6 +702,111 @@
       },
       "additionalProperties": false
     },
+    "analyticsIntervalUsage": {
+      "description": "Version-two signed Hub usage payload. Existing version-one envelopes remain supported. Interval identity authorizes historical coverage, never current control authority. Counters partition the explicit span; ambiguous spans are preserved separately, not split.",
+      "type": "object",
+      "required": [
+        "osDeviceId",
+        "osAreaId",
+        "analyticsCategory",
+        "controlId",
+        "bucketStart",
+        "onSeconds",
+        "offSeconds",
+        "unknownSeconds",
+        "sourceGeneration",
+        "revision",
+        "closedAt",
+        "purgeAt",
+        "coverageStartAt",
+        "coverageEndAt",
+        "analyticsIntervalId",
+        "bindingRevision",
+        "analyticsPolicyVersion"
+      ],
+      "properties": {
+        "osDeviceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "osAreaId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "analyticsCategory": {
+          "enum": [
+            "LIGHT",
+            "RADIATOR",
+            "BOILER"
+          ]
+        },
+        "controlId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "bucketStart": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "onSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600
+        },
+        "offSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600
+        },
+        "unknownSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600
+        },
+        "sourceGeneration": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "closedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "purgeAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "coverageStartAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "coverageEndAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "analyticsIntervalId": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+        },
+        "bindingRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "analyticsPolicyVersion": {
+          "const": 2
+        }
+      },
+      "additionalProperties": false
+    },
     "analyticsObservation": {
       "type": "object",
       "required": [
@@ -763,6 +868,17 @@
       },
       "additionalProperties": false
     },
+    "analyticsCoverageStatus": {
+      "type": "object",
+      "required": ["eligibleDeviceCount", "reportingDeviceCount", "missingDeviceCount", "unallocatedEventCount"],
+      "properties": {
+        "eligibleDeviceCount": { "type": "integer", "minimum": 0 },
+        "reportingDeviceCount": { "type": "integer", "minimum": 0 },
+        "missingDeviceCount": { "type": "integer", "minimum": 0 },
+        "unallocatedEventCount": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
     "analyticsUsageResponse": {
       "type": "object",
       "required": ["schemaVersion", "ok", "homeId", "metric", "level", "timezone", "from", "to", "retentionStartAt", "generatedAt", "selectedDeviceCount", "devices", "buckets"],
@@ -772,6 +888,7 @@
         "timezone": { "type": "string", "minLength": 1, "maxLength": 80 }, "from": { "$ref": "#/$defs/timestamp" }, "to": { "$ref": "#/$defs/timestamp" },
         "retentionStartAt": { "$ref": "#/$defs/timestamp" }, "generatedAt": { "$ref": "#/$defs/timestamp" },
         "selectedDeviceCount": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "coverageStatus": { "$ref": "#/$defs/analyticsCoverageStatus" },
         "devices": { "type": "array", "maxItems": 100, "items": { "type": "object", "required": ["id", "label", "historicalOnly"], "properties": { "id": { "$ref": "#/$defs/id" }, "label": { "type": "string", "maxLength": 120 }, "historicalOnly": { "type": "boolean" } }, "additionalProperties": false } },
         "buckets": { "type": "array", "maxItems": 50000, "items": { "$ref": "#/$defs/analyticsUsageBucket" } }
       },

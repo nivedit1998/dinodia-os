@@ -237,6 +237,9 @@ function normalizeZigbeeDevice(input = {}) {
       model: input.definition?.model || input.model_id,
       description: input.definition?.description,
       definition: clone(definition),
+      endpoints: Object.fromEntries(Object.entries(input.endpoints || {}).slice(0, 32).map(([id, endpoint]) => [id, {
+        clusters: { input: Array.isArray(endpoint?.clusters?.input) ? endpoint.clusters.input.slice(0, 64) : [] },
+      }])),
       endpoint: clone(input.endpoint),
       power_source: input.power_source,
       supported: input.supported,

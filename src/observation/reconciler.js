@@ -11,6 +11,9 @@
 
 const crypto = require("node:crypto");
 const { DELIVERY_GRACE_SECONDS, cachedReportingFor, matchObservationProfile, reportingMatches, resolvedEndpoint } = require("./profiles");
+const { discoverCollectionStrategy } = require('./strategyResolver');
+const { resolveCategoryBinding } = require('../analytics/resolveBinding');
+const { analyticsEligible } = require('../analytics/categoryPolicies');
 
 const STATES = Object.freeze({
   UNKNOWN: "configuration_unknown",
@@ -69,10 +72,10 @@ class ObservationReconciler {
     this.clock = clock;
     this.logger = logger;
     this.options = { ...DEFAULTS, ...options };
-    this.records = new Map(Object.entries(store.getObservationPolicyRecords?.() || {}));
+    this.records = new Map(Object.entries(store.getObservationPolicyRecords?.() || {}).filter(([key]) => !key.startsWith('__')));
     this.reportTimes = new Map(); // key -> recent report times (memory only; cadence restarts after a Hub restart)
     this.availability = new Map(); // deviceId -> boolean
-    this.lastCommandAt = 0;
+    this.lastCommandAt = Math.max(Number(store.getObservationManagementAt?.() || 0), ...[...this.records.values()].map(record => Number(record.lastCommandAt || 0)));
     this.pending = new Map(); // transaction -> { key, kind, sentAt }
     this.interrupted = new Set([...this.records].filter(([, record]) =>
       [STATES.READ_PENDING, STATES.CONFIGURING].includes(record.state)).map(([key]) => key));
@@ -114,6 +117,8 @@ class ObservationReconciler {
   /// records; never sends commands itself (tick() does, within budget).
   async onInventory(rawDevices) {
     if (!Array.isArray(rawDevices)) return;
+    this.inventory = rawDevices.slice(0, 1000);
+    this.policyRevision = this.store.getPlatform?.()?.cloudRevision;
     const now = this.clock();
     const seen = new Set();
     for (const raw of rawDevices) {
@@ -123,14 +128,38 @@ class ObservationReconciler {
       if (!device) continue;
       const fingerprint = fingerprintOf(raw);
       for (const entity of Object.values(device.entities || {})) {
-        const profile = matchObservationProfile(device, entity);
-        if (!profile || !profile.approvedForAutomaticConfiguration || !profile.desired) continue;
+        let profile = matchObservationProfile(device, entity);
+        const policy = this.store.getPlatform?.()?.devicePolicies?.[deviceId];
+        if (policy && !analyticsEligible(policy)) continue;
+        if (policy?.analyticsInterval) {
+          const binding = resolveCategoryBinding({ signedPolicy: policy, controls: Object.values(device.entities || {}).map(item => ({
+            ...item.capability, controlId: item.capability?.controlId || item.id, endpointId: item.endpointId || item.binding?.endpoint,
+          })) });
+          if (binding.status !== 'resolved' || binding.primaryControlId !== (entity.capability?.controlId || entity.id)) continue;
+        }
+        if (!profile && policy?.analyticsInterval?.genericCollectionEnabled === true) {
+          const controls = Object.values(device.entities || {}).map(item => ({ ...item.capability, controlId: item.capability?.controlId || item.id,
+            endpointId: item.endpointId || item.binding?.endpoint, entity: item }));
+          const binding = resolveCategoryBinding({ signedPolicy: policy, controls });
+          const controlId = entity.capability?.controlId || entity.id;
+          const strategy = binding.status === 'resolved' && binding.primaryControlId === controlId ? discoverCollectionStrategy(device, entity) : null;
+          if (strategy?.strategy === 'verify_existing_reporting') {
+            const maximum = /mains|dc source|single.phase|three.phase/i.test(String(device.metadata?.power_source || raw.power_source || '')) ? 300 : 600;
+            profile = { id: `generic.${controlId}`, version: 1, ...strategy,
+              desired: { minimumReportInterval: 0, maximumReportInterval: maximum, reportableChange: 0 }, approvedForAutomaticConfiguration: false };
+          }
+        }
+        if (!profile?.desired) continue;
         const endpoint = resolvedEndpoint(device, entity, profile.cluster);
         if (!endpoint) continue;
         const key = recordKey(deviceId, profile.id, endpoint);
         seen.add(key);
         const cached = cachedReportingFor(raw, profile, endpoint);
         const existing = this.records.get(key);
+        if (existing?.suspended && sameFingerprint(existing.fingerprint, fingerprint)) {
+          await this.save({ ...existing, suspended: false, state: STATES.UNKNOWN, cadence: null, nextAttemptAt: Math.max(now, existing.nextAttemptAt || 0), updatedAt: now });
+          continue;
+        }
         if (!existing || !sameFingerprint(existing.fingerprint, fingerprint) || existing.profileVersion !== profile.version) {
           // New device, replacement, firmware/model change or new profile version: start from
           // unknown and read the device's actual configuration first.
@@ -139,7 +168,9 @@ class ObservationReconciler {
           for (const [transaction, pending] of this.pending) if (pending.key === key) this.pending.delete(transaction);
           await this.save({ key, deviceId, ieee: fingerprint.ieee, friendlyName: String(raw.friendly_name || raw.ieee_address),
             profileId: profile.id, profileVersion: profile.version, endpoint, cluster: profile.cluster, attribute: profile.attribute,
-            desired: profile.desired, fingerprint, cached, readBack: null, cadence: null, state: STATES.UNKNOWN,
+            desired: profile.desired, property: entity.stateKey, controlId: entity.capability?.controlId || entity.id,
+            approvedForAutomaticConfiguration: profile.approvedForAutomaticConfiguration === true,
+            fingerprint, cached, readBack: null, cadence: null, state: STATES.UNKNOWN,
             attempts: 0, attemptsWindowStartAt: now, nextAttemptAt: now, lastError: null, updatedAt: now });
           continue;
         }
@@ -155,7 +186,12 @@ class ObservationReconciler {
     // Device removed from Zigbee2MQTT (and not merely offline): cancel its policy work.
     for (const [key, record] of this.records) {
       const stillPresent = rawDevices.some((raw) => raw && String(raw.ieee_address || "") === record.ieee);
-      if (!seen.has(key) && !stillPresent) await this.remove(key);
+      const policy = this.store.getPlatform?.()?.devicePolicies?.[record.deviceId];
+      if (!seen.has(key) && (!stillPresent || policy && !analyticsEligible(policy))) await this.remove(key);
+      else if (!seen.has(key) && !record.suspended) {
+        for (const [transaction, pending] of this.pending) if (pending.key === key) this.pending.delete(transaction);
+        await this.save({ ...record, suspended: true, pendingRequest: null, lastError: 'capability_temporarily_unavailable', updatedAt: now });
+      }
     }
   }
 
@@ -174,8 +210,9 @@ class ObservationReconciler {
     if (!Number.isFinite(observedMs)) return;
     for (const record of this.records.values()) {
       if (record.deviceId !== String(deviceId)) continue;
+      if (record.suspended) continue;
       if (endpoint && endpoint !== "0" && record.endpoint !== String(endpoint)) continue;
-      if (!record.profileId.endsWith(`.${property}`)) continue;
+      if ((record.property || record.profileId.split('.').at(-1)) !== property) continue;
       const previousTimes = this.reportTimes.get(record.key) || [];
       if (previousTimes.length && observedMs <= previousTimes.at(-1)) continue;
       if (record.readBack?.at && observedMs < Date.parse(record.readBack.at)) continue;
@@ -205,6 +242,9 @@ class ObservationReconciler {
   /// One bounded step: at most one reporting request, only when due, budgeted and the device is
   /// reachable. Also expires unanswered requests into "pending delivery".
   async tick() {
+    if (this.inventory && this.policyRevision !== this.store.getPlatform?.()?.cloudRevision) {
+      await ObservationReconciler.prototype.onInventory.call(this, this.inventory);
+    }
     const now = this.clock();
     for (const key of this.interrupted) {
       const record = this.records.get(key);
@@ -246,7 +286,7 @@ class ObservationReconciler {
     if ([...this.pending.values()].length) return null; // one outstanding request at a time
     const due = [...this.records.values()]
       .filter((record) => [STATES.UNKNOWN, STATES.DRIFTED, STATES.CADENCE_FAILED, STATES.PENDING_DELIVERY].includes(record.state))
-      .filter((record) => (record.nextAttemptAt || 0) <= now && this.isAvailable(record.deviceId))
+      .filter((record) => !record.suspended && (record.nextAttemptAt || 0) <= now && this.isAvailable(record.deviceId))
       .sort((a, b) => (a.nextAttemptAt || 0) - (b.nextAttemptAt || 0))[0];
     if (!due) return null;
     const configure = due.state === STATES.DRIFTED || (due.state === STATES.PENDING_DELIVERY && due.retryKind === "configure");
@@ -255,6 +295,7 @@ class ObservationReconciler {
   }
 
   mayConfigure(record, now) {
+    if (record.approvedForAutomaticConfiguration === false) return false;
     const windowStart = Number(record.attemptsWindowStartAt || 0);
     const attempts = now - windowStart > 24 * 3_600_000 ? 0 : Number(record.attempts || 0);
     return attempts < this.options.maxConfigureAttemptsPerDay;
@@ -269,7 +310,7 @@ class ObservationReconciler {
       : { id: record.ieee || record.friendlyName, endpoint: Number(record.endpoint), cluster: record.cluster, configs: [{ attribute: record.attribute }], transaction };
     const windowExpired = now - Number(record.attemptsWindowStartAt || 0) > 24 * 3_600_000;
     await this.save({ ...record, state: kind === "configure" ? STATES.CONFIGURING : STATES.READ_PENDING, lastTransaction: transaction,
-      lastRequestKind: kind, pendingRequest: { kind, transaction, sentAt: now },
+      lastRequestKind: kind, lastCommandAt: now, pendingRequest: { kind, transaction, sentAt: now },
       attempts: kind === "configure" ? (windowExpired ? 1 : Number(record.attempts || 0) + 1) : Number(record.attempts || 0),
       attemptsWindowStartAt: kind === "configure" && windowExpired ? now : record.attemptsWindowStartAt, updatedAt: now });
     this.lastCommandAt = now;
@@ -293,6 +334,20 @@ class ObservationReconciler {
       nextAttemptAt: now + wait, lastError: reason, updatedAt: now });
   }
 
+  lifetimeFor(deviceId, property, endpoint) {
+    const records = [...this.records.values()].filter(record => !record.suspended && record.deviceId === String(deviceId)
+      && (record.property || record.profileId.split('.').at(-1)) === property
+      && (!endpoint || String(endpoint) === '0' || String(record.endpoint) === String(endpoint))
+      && [STATES.READ_BACK, STATES.CADENCE_PENDING, STATES.CADENCE_VERIFIED].includes(record.state)
+      && record.readBack?.maximumReportInterval > 0);
+    return records.length === 1 ? records[0].readBack.maximumReportInterval + DELIVERY_GRACE_SECONDS : null;
+  }
+
+  selectedProperties(deviceId) {
+    return [...new Set([...this.records.values()].filter(record => !record.suspended && record.deviceId === String(deviceId))
+      .map(record => record.property || record.profileId.split('.').at(-1)))];
+  }
+
   /// bridge/response/device/reporting/{read,configure}. Late replies are accepted by transaction.
   async onBridgeResponse(kind, message) {
     const transaction = String(message?.transaction || "");
@@ -307,14 +362,17 @@ class ObservationReconciler {
     this.interrupted.delete(record.key);
     const now = this.clock();
     if (String(message?.status || "").toLowerCase() !== "ok") {
-      return this.deliveryFailed(record, `bridge_${String(message?.error || "error").slice(0, 60)}`);
+      return this.deliveryFailed(record, 'bridge_request_rejected');
     }
     if (kind === "configure") {
       // Accepted is not proof: read the device back next.
       return this.save({ ...record, state: STATES.UNKNOWN, pendingRequest: null, nextAttemptAt: now, lastError: null, updatedAt: now });
     }
     const config = Array.isArray(message?.data?.configs) && message.data.configs.length === 1 ? message.data.configs[0] : null;
+    const attributeId = { runningState: 41, onOff: 0, currentLevel: 0 }[record.attribute];
     if (!config || !Number.isInteger(config.status)
+      || config.attrId !== undefined && Number(config.attrId) !== attributeId
+      || config.attribute !== undefined && config.attribute !== record.attribute
       || message.data?.endpoint !== undefined && String(message.data.endpoint) !== String(record.endpoint)
       || message.data?.cluster !== undefined && String(message.data.cluster) !== String(record.cluster)) {
       return this.deliveryFailed(record, "invalid_reporting_reply");
@@ -333,7 +391,9 @@ class ObservationReconciler {
       || readBack.maximumReportInterval < 0 || readBack.minimumReportInterval > 65535 || readBack.maximumReportInterval > 65535)) {
       return this.deliveryFailed(record, "invalid_reporting_reply");
     }
-    if (status === ZCL_SUCCESS && reportingMatches(readBack, record.desired)) {
+    const genericGuarantee = record.profileId.startsWith('generic.') && status === ZCL_SUCCESS && readBack.maximumReportInterval > 0
+      && readBack.maximumReportInterval <= record.desired.maximumReportInterval && readBack.minimumReportInterval <= readBack.maximumReportInterval;
+    if (status === ZCL_SUCCESS && (reportingMatches(readBack, record.desired) || genericGuarantee)) {
       // Read-back verifies configuration only. Recovery from a failed cadence
       // needs a new sequence of genuine value reports after this verification.
       this.reportTimes.delete(record.key);
@@ -341,7 +401,8 @@ class ObservationReconciler {
         cadence: null, lastError: null, updatedAt: now });
     }
     // Absent (0x8B) or different: drifted; configure only for approved profiles (all records are).
-    return this.save({ ...record, state: STATES.DRIFTED, readBack, pendingRequest: null, nextAttemptAt: now, lastError: status === ZCL_NOT_FOUND ? "not_configured" : "differs", updatedAt: now });
+    return this.save({ ...record, state: record.approvedForAutomaticConfiguration === false ? STATES.UNSUPPORTED : STATES.DRIFTED,
+      readBack, pendingRequest: null, nextAttemptAt: now, lastError: status === ZCL_NOT_FOUND ? "not_configured" : "differs", updatedAt: now });
   }
 }
 

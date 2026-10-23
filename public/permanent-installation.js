@@ -186,6 +186,7 @@
       const item = document.createElement("li");
       const sync = row.sync === "pending" ? "Home sync pending" : row.sync === "acknowledged" ? "Home sync acknowledged" : "Home sync not verified";
       item.textContent = `${row.name}${row.model ? ` · ${row.model}` : ""} · ${row.protocol || "device"} · ${row.areaName || "Area unavailable"} · ${row.lifecycle === "VIEW_ONLY" ? "view-only" : "permanent"} · ${row.analyticsCategory && row.analyticsCategory !== "NONE" ? `${row.analyticsCategory} analytics · ` : ""}${sync}`;
+      if (row.analyticsReadiness) item.textContent += ` · Analytics ${row.analyticsReadiness.state}${row.analyticsReadiness.reason ? `: ${row.analyticsReadiness.reason.replaceAll('_', ' ')}` : ''}`;
       list.append(item);
     }
   }

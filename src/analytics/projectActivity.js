@@ -18,6 +18,8 @@ function projectActivity({ binding, sample, nowMs, authorityValid, clockTrusted,
   if (!sample || sample.controlId !== binding.primaryControlId || sample.quality !== 'fresh' ||
       !Number.isFinite(observed) || !Number.isFinite(deadline) || observed > nowMs ||
       deadline <= nowMs || deadline <= observed) return 'unknown';
+  if (binding.semanticRole === 'brightness' && (typeof sample.value !== 'number' || !Number.isFinite(sample.value)
+    || sample.value < 0 || binding.minimum != null && sample.value < binding.minimum || binding.maximum != null && sample.value > binding.maximum)) return 'unknown';
   const signals = binding.category === 'LIGHT'
     ? (binding.hasAuthoritativePower ? { powerOn: sample.value } : { brightness: sample.value })
     : binding.category === 'RADIATOR' ? { activeHeatDemand: sample.value } : { activeHeatProduction: sample.value };
