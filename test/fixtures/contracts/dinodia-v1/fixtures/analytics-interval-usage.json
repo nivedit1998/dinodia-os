@@ -1,0 +1,7 @@
+{
+  "osDeviceId": "synthetic-device", "osAreaId": "synthetic-area", "analyticsCategory": "LIGHT", "controlId": "power:1",
+  "bucketStart": "2026-10-23T10:00:00.000Z", "onSeconds": 300, "offSeconds": 300, "unknownSeconds": 0,
+  "sourceGeneration": 1, "revision": 1, "closedAt": null, "purgeAt": "2027-10-23T10:00:00.000Z",
+  "coverageStartAt": "2026-10-23T10:00:00.000Z", "coverageEndAt": "2026-10-23T10:10:00.000Z",
+  "analyticsIntervalId": "00000000-0000-4000-8000-000000000001", "bindingRevision": 1, "analyticsPolicyVersion": 2
+}

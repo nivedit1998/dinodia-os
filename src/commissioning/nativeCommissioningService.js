@@ -397,12 +397,17 @@ class NativeCommissioningService {
         model: String(device.metadata?.model || device.metadata?.model_id || "").slice(0, 80),
         protocol: String(device.protocol || "").toUpperCase(), areaName: String(area?.name || "Authorized Area"),
         lifecycle: String(policy.lifecycle), catalogueStatus: String(policy.catalogueStatus || "unknown"), analyticsCategory: String(policy.analyticsCategory || "NONE"), sync: syncState,
+        analyticsReadiness: require('../analytics/readiness').analyticsReadiness(this.store, device, policy),
         completedAt: String(device.updatedAt || "") });
     }
     return result.slice(0, 100);
   }
 
   async updateAnalyticsCategory(principal, input) {
+    const selectionKeys = ['selectedControlId', 'expectedSelectedControlId'].filter(key => Object.hasOwn(input || {}, key));
+    if (selectionKeys.length && (selectionKeys.length !== 2 || selectionKeys.some(key => input[key] !== null && !/^[A-Za-z0-9:_./-]{1,160}$/.test(String(input[key]))))) {
+      fail(SAFE_ERROR.invalid, 400, 'Choose one exact analytics source and its current revision');
+    }
     const platform = this.store.getPlatform?.() || {};
     const identity = await this.currentIdentity();
     const osDeviceId = String(input?.osDeviceId || "");
@@ -458,6 +463,7 @@ class NativeCommissioningService {
         osDeviceId, expectedManagementRevision,
         ...(expectedInventoryRevision === null ? {} : { expectedInventoryRevision }),
         expectedAnalyticsCategory, analyticsCategory, operationId,
+        ...(selectionKeys.length ? { selectedControlId: input.selectedControlId, expectedSelectedControlId: input.expectedSelectedControlId } : {}),
       });
     } catch (error) {
       // A conflict means the signed Home snapshot was stale. Refresh it before

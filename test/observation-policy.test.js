@@ -62,6 +62,17 @@ async function harness({ raw = trvzbRaw() } = {}) {
 const reply = (sent, status, extra = {}) => ({ status: "ok", transaction: sent.at(-1).payload.transaction,
   data: { cluster: "hvacThermostat", endpoint: 1, configs: [{ attrId: 41, status, ...extra }] } });
 
+test('approved live-state profile remains tracked when analytics category is NONE', async () => {
+  const h = await harness();
+  try {
+    await h.store.savePlatform({ devicePolicies: { [h.device.id]: {
+      managementClass: 'PROPERTY_DEVICE', lifecycle: 'INSTALLED', analyticsCategory: 'NONE',
+    } } });
+    const reconciler = h.make(); await reconciler.onInventory([trvzbRaw()]);
+    assert.equal(reconciler.records.size, 1);
+  } finally { h.cleanup(); }
+});
+
 test("profiles match the exact integration, model, endpoint, property and role", () => {
   const device = normalizeZigbeeDevice(trvzbRaw());
   const running = Object.values(device.entities).find((entity) => entity.stateKey === "running_state");
@@ -335,7 +346,7 @@ const { advanceUsage, initialUsageState, observeUsage } = require("../src/sync/u
 
 test("fallback reads: interval and lifetime align, so successful reads leave no gap and a failed read leaves exactly one", () => {
   const lifetime = boundedReadLifetime(600);
-  assert.equal(lifetime, 690);
+  assert.equal(lifetime, 660); // D9: the 30-second timeout is inside the 60-second delivery allowance.
   let state = initialUsageState();
   const start = Date.parse("2026-10-23T10:00:00.000Z");
   const read = (offsetSeconds, activity = "on") => {
@@ -351,7 +362,7 @@ test("fallback reads: interval and lifetime align, so successful reads leave no 
   state = gapped;
   for (const index of [0, 1, 3, 4, 5, 6]) read(index * 600 + 20); // the read at 1220 s fails
   state = advanceUsage(state, start + 3600 * 1000).state;
-  assert.equal(Object.values(state.buckets)[0].unknownSeconds, 1820 - (620 + 690), "only the time beyond the last good read's lifetime is Unknown");
+  assert.equal(Object.values(state.buckets)[0].unknownSeconds, 1820 - (620 + 660), "only the time beyond the last good read's lifetime is Unknown");
 });
 
 test("bounded read planning honours interval, device cap, Hub spacing and refuses budgets that would leave gaps", () => {

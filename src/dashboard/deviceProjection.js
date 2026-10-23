@@ -1,4 +1,5 @@
-function dashboardDevice(device, platform = null) {
+const { analyticsReadiness } = require('../analytics/readiness');
+function dashboardDevice(device, platform = null, store = null) {
   if (!device || typeof device !== "object") return device;
   const result = JSON.parse(JSON.stringify(device));
   const policy = platform?.devicePolicies?.[String(result.id || "")];
@@ -9,6 +10,7 @@ function dashboardDevice(device, platform = null) {
     && Number.isSafeInteger(managementRevision) && managementRevision >= 1) {
     result.analyticsCategory = String(policy.analyticsCategory);
     result.analyticsManagementRevision = managementRevision;
+    result.analyticsReadiness = analyticsReadiness(store || {}, device, policy);
     if (Number.isSafeInteger(Number(policy.inventoryRevision)) && Number(policy.inventoryRevision) > 0) result.analyticsInventoryRevision = Number(policy.inventoryRevision);
     else delete result.analyticsInventoryRevision;
   } else {

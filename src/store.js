@@ -3,6 +3,8 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { AsyncLocalStorage } = require("node:async_hooks");
 const { isDeepStrictEqual } = require("node:util");
+const { resolveCategoryBinding } = require("./analytics/resolveBinding");
+const { projectActivity } = require("./analytics/projectActivity");
 const { fixedLabelState } = require("./labelCatalog");
 const { normalizeCapability, text } = require("./capabilities/schema");
 const { buildPresentation, isConfigured, labelId, sourceFingerprint } = require("./capabilities/devicePresentation");
@@ -181,7 +183,7 @@ function enqueueNativeDeviceSync(state, previous, current, options = {}) {
   const previousCatalog = previous ? nativeSyncControlCatalogProjection(state, previous) : null;
   if (previousCatalog && previousCatalog.catalogRevision === currentCatalog.catalogRevision
     && JSON.stringify(previousCatalog.controls) === JSON.stringify(currentCatalog.controls)) return;
-  enqueueSyncEventInState(state, "control.catalog.upsert", id, currentCatalog, { critical: true });
+  enqueueSyncEventInState(state, "control.catalog.upsert", id, currentCatalog, { critical: true, ...(options.now !== undefined ? { now: options.now } : {}) });
   if (previousCatalog) {
     const retained = new Set(currentCatalog.controls.map((control) => String(control.controlId)));
     const removedControlIds = previousCatalog.controls.map((control) => String(control.controlId)).filter((controlId) => !retained.has(controlId));
@@ -199,6 +201,7 @@ function bucketEventProjection(bucket) {
     coverageStartAt: bucket.coverageStartAt, coverageEndAt: bucket.coverageEndAt,
     revision: bucket.revision, onSeconds: bucket.onSeconds, offSeconds: bucket.offSeconds,
     unknownSeconds: bucket.unknownSeconds, closedAt: bucket.closedAt, purgeAt: bucket.purgeAt,
+    ...(bucket.bindingRevision > 0 ? { bindingRevision: bucket.bindingRevision, analyticsPolicyVersion: 2, analyticsIntervalId: bucket.analyticsIntervalId } : {}),
   };
 }
 
@@ -227,7 +230,7 @@ function normalizeObservationPolicy(value) {
     ? value.records : {};
   const kept = Object.entries(records).filter(([key, record]) => typeof key === "string" && key.length <= 400
     && record && typeof record === "object" && !Array.isArray(record)).slice(-OBSERVATION_POLICY_MAX_RECORDS);
-  return { version: 1, records: Object.fromEntries(kept.map(([key, record]) => [key, clone(record)])) };
+  return { version: 1, records: Object.fromEntries(kept.map(([key, record]) => [key, clone(record)])), lastCommandAt: Number(value?.lastCommandAt || 0) };
 }
 
 function readUsageAlive(filePath) {
@@ -254,7 +257,9 @@ function freezeObservationDeadlines(previous, next) {
     if (!observed) { entity.sourceValidUntil = null; continue; }
     const prior = priorEntities.find(item => item.id === entity.id
       || item.capability?.controlId && item.capability.controlId === entity.capability?.controlId);
-    const computed = Date.parse(observed) + observationTiming(next, entity, entity.capability || {}).maxStateValiditySeconds * 1000;
+    const declared = observationTiming(next, entity, entity.capability || {}).maxStateValiditySeconds;
+    const lifetime = Number.isSafeInteger(entity.sourceLifetimeSeconds) && entity.sourceLifetimeSeconds > 0 ? Math.min(declared, entity.sourceLifetimeSeconds) : declared;
+    const computed = Date.parse(observed) + lifetime * 1000;
     const saved = prior?.sourceObservedAt === observed ? Date.parse(String(prior.sourceValidUntil || "")) : NaN;
     // A later policy may shorten current presentation but never extend an existing
     // sample. The next genuine observation takes the newly configured lifetime.
@@ -296,56 +301,41 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
     && (policy.analyticsCategory === "LIGHT" && ["power", "brightness"].includes(String(control.semanticRole || "") )
       || policy.analyticsCategory === "RADIATOR" && control.semanticRole === "active_heat_demand"
       || policy.analyticsCategory === "BOILER" && control.semanticRole === "active_heat_production"));
-  // One physical Light produces one activity series even when its descriptor
-  // exposes both power and brightness. The frozen rule is logical OR for On;
-  // independent per-control counters would double-count the same device.
-  const selectedUsageControls = policy.analyticsCategory === "LIGHT"
-    ? usageControls.filter((control) => control.semanticRole === "power").slice(0, 1).length
-      ? usageControls.filter((control) => control.semanticRole === "power").slice(0, 1)
-      : usageControls.filter((control) => control.semanticRole === "brightness").slice(0, 1)
-    : usageControls.slice(0, 1);
+  const entityFor = (item) => entities.find((entity) => String(entity.capability?.controlId || entity.controlId || entity.id || entity.sourceId || "") === item.controlId);
+  const binding = resolveCategoryBinding({ signedPolicy: policy, controls: usageControls.map(control => {
+    const entity = entityFor(control);
+    const endpointId = entity?.endpointId ?? entity?.binding?.endpoint;
+    return { ...control, endpointId, brightnessMeaning: entity?.capability?.brightnessMeaning,
+      physicalSourceKey: entity?.binding?.property ? `${endpointId}|${entity.binding.property}|${control.semanticRole}` : null };
+  }) });
+  const interval = policy.analyticsInterval;
+  const versionTwo = interval?.writerEnabled === true;
+  if (!versionTwo && Object.values(usage.sources).some(source => source.osDeviceId === deviceId && source.bindingRevision > 0)) return false;
+  const selectedUsageControls = binding.status === "resolved"
+    ? usageControls.filter(control => control.controlId === binding.primaryControlId) : [];
   for (const control of selectedUsageControls) {
     const role = String(control.semanticRole || "");
-    const entityFor = (item) => entities.find((entity) => String(entity.capability?.controlId || entity.controlId || entity.id || entity.sourceId || "") === item.controlId);
-    let entity = entityFor(control);
+    const entity = entityFor(control);
     // Only adapter/source observation times establish telemetry freshness.
     // Entity update/snapshot read time is not evidence that the physical value
     // was observed now and must never renew analytics validity.
-    let observedAt = sourceTimestamp(entity?.sourceObservedAt || "");
-    let validUntil = null;
-    let activity;
-    if (policy.analyticsCategory === "LIGHT") {
-      const signals = usageControls.filter((item) => ["power", "brightness"].includes(item.semanticRole)).map((item) => {
-        const source = entityFor(item);
-        const timestamp = sourceTimestamp(source?.sourceObservedAt || "");
-        const observedMs = timestamp ? Date.parse(timestamp) : NaN;
-        const validityMs = Math.min(item.maxStateValiditySeconds * 1000, 30 * 60 * 1000);
-        if (!source || !Number.isFinite(observedMs) || observedMs > nowMs || nowMs - observedMs > 30 * 60 * 1000 || observedMs + validityMs <= nowMs) return null;
-        return { role: item.semanticRole, value: currentEntityValue(source), observedAt: timestamp,
-          validUntilMs: observationDeadline(source, observedMs, validityMs / 1000) };
-      }).filter(Boolean);
-      if (!signals.length) continue;
-      const active = signals.some((signal) => signal.role === "power"
-        ? signal.value === true || String(signal.value || "").trim().toLowerCase() === "on"
-        : typeof signal.value === "number" && Number.isFinite(signal.value) && signal.value > 0);
-      const inactive = signals.every((signal) => signal.role === "power"
-        ? signal.value === false || String(signal.value || "").trim().toLowerCase() === "off"
-        : typeof signal.value === "number" && Number.isFinite(signal.value) && signal.value === 0);
-      activity = device.available === false ? "unknown" : active ? "on" : inactive ? "off" : "unknown";
-      observedAt = signals.map((signal) => signal.observedAt).sort().at(-1);
-      validUntil = new Date(Math.min(...signals.map((signal) => signal.validUntilMs))).toISOString();
-      entity = entityFor(control);
-    } else {
-      if (!entity || !observedAt) continue;
-      const observedMs = Date.parse(observedAt);
-      if (observedMs > nowMs || nowMs - observedMs > 30 * 60 * 1000) continue;
-      const validityMs = Math.min(control.maxStateValiditySeconds * 1000, policy.analyticsCategory === "RADIATOR" ? 30 * 60 * 1000 : Number.MAX_SAFE_INTEGER);
-      validUntil = new Date(observationDeadline(entity, observedMs, validityMs / 1000)).toISOString();
-      activity = activityFor({ category: policy.analyticsCategory, role, value: currentEntityValue(entity), available: device.available !== false });
-    }
+    const observedAt = sourceTimestamp(entity?.sourceObservedAt || "");
+    if (!entity || !observedAt) continue;
+    const observedMs = Date.parse(observedAt);
+    if (versionTwo && (interval.sourceGeneration !== generation || observedMs < Math.max(Date.parse(interval.validFrom), Date.parse(policy.analyticsStartAt || interval.validFrom)))) continue;
+    if (observedMs > nowMs || nowMs - observedMs > 30 * 60 * 1000) continue;
+    const validUntil = new Date(observationDeadline(entity, observedMs, control.maxStateValiditySeconds)).toISOString();
+    const scalar = currentEntityValue(entity);
+    const normalized = activityFor({ category: policy.analyticsCategory, role, value: scalar });
+    const value = role === "brightness" ? scalar : normalized === "on" ? true : normalized === "off" ? false : null;
+    // Generation admission above is supplied only while the caller's history clock is trusted.
+    const activity = projectActivity({ binding, sample: { controlId: control.controlId, value, observedAt, validUntil, quality: "fresh" },
+      nowMs, authorityValid: true, clockTrusted: true, deviceAvailable: device.available });
+    // Expiry advances through existing accounting; never rewrite an old timestamp as Unknown.
+    if (Date.parse(validUntil) <= nowMs) continue;
     if (!observedAt || !validUntil || !activity) continue;
     if (Number.isSafeInteger(options.ignoreThroughMs) && Date.parse(observedAt) <= options.ignoreThroughMs) continue;
-    const prior = usage.sources[[deviceId, policy.analyticsCategory, String(control.controlId), generation].join("|")];
+    const prior = usage.sources[[deviceId, policy.analyticsCategory, String(control.controlId), generation, ...(versionTwo ? [interval.revision] : [])].join("|")];
     // Registry/descriptor refreshes replay existing values. Their deadline was fixed
     // when observed (and may have been capped at shutdown); a new descriptor is not
     // new physical evidence. This also accepts legacy capped sources without
@@ -358,6 +348,7 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
       category: policy.analyticsCategory,
       controlId: String(control.controlId),
       sourceGeneration: generation,
+      ...(versionTwo ? { bindingRevision: interval.revision, analyticsIntervalId: interval.id, analyticsPolicyVersion: 2 } : {}),
       activity,
       observedAt,
       validUntil,
@@ -1162,6 +1153,7 @@ function mergeEntities(existing, incoming, deviceId, state, options = {}) {
       ...clone(entity),
       id: entityId,
       sourceId: String(entity.sourceId || previous.sourceId || entityId),
+      sourceLifetimeSeconds: candidateIsNewer ? options.sourceLifetimeSecondsByStateKey?.[mappedObservationKey] ?? null : previous.sourceLifetimeSeconds ?? null,
       deviceId: String(entity.deviceId || previous.deviceId || deviceId),
       stateKey,
       endpointId,
@@ -1254,6 +1246,8 @@ class Store {
     return clone(normalizeObservationPolicy(this.state.observationPolicy).records);
   }
 
+  getObservationManagementAt() { return Number(this.state.observationPolicy?.lastCommandAt || 0); }
+
   /// Writes (or with null removes) one observation-policy record. Called only on state transitions,
   /// so routine reports never add Store writes.
   async putObservationPolicyRecord(key, record) {
@@ -1266,6 +1260,7 @@ class Store {
           throw Object.assign(new Error("Observation policy record limit reached"), { code: "observation_policy_full" });
         }
         policy.records[String(key)] = clone(record);
+        policy.lastCommandAt = Math.max(policy.lastCommandAt, Number(record.lastCommandAt || 0));
       }
       await this.persist();
     } catch (error) {
@@ -1376,14 +1371,42 @@ class Store {
     finally { release(); }
   }
 
-  async applyCloudConfigurationSnapshot(platformPatch, runtimeAutomations = []) {
+  async applyCloudConfigurationSnapshot(platformPatch, runtimeAutomations = [], options = {}) {
     return this.withAutomationPolicyLock(() => this.mutateAtomically((state) => {
       const acceptedConfiguration = platformPatch?.cloudConfiguration
         && validateCloudConfiguration(platformPatch.cloudConfiguration, state.platform || {})
         ? platformPatch.cloudConfiguration : null;
       state.areas = restoreMissingCloudAreas(state.areas, acceptedConfiguration, state.updatedAt);
       const previousPolicies = state.platform?.devicePolicies || {};
-      const incomingPolicies = platformPatch.devicePolicies || {};
+      const incomingPolicies = clone(platformPatch.devicePolicies || {});
+      // Stop old accounting at receipt of a changed signed policy. Already
+      // generated coverage crossing its earlier cloud effective time is kept
+      // intact; the Platform preserves it as unallocated (D11).
+      const policyTime = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
+      for (const [deviceId, policy] of Object.entries(incomingPolicies)) {
+        if (policy.analyticsInterval) policy.analyticsStartAt = previousPolicies[deviceId]?.analyticsInterval?.id === policy.analyticsInterval.id
+          ? previousPolicies[deviceId].analyticsStartAt || new Date(policyTime).toISOString() : new Date(policyTime).toISOString();
+      }
+      for (const [deviceId, previous] of Object.entries(previousPolicies)) {
+        const next = incomingPolicies[deviceId];
+        const identity = value => JSON.stringify([value?.managementClass, value?.lifecycle, value?.analyticsCategory, value?.analyticsInterval?.id, value?.analyticsInterval?.selectedControlId, value?.analyticsInterval?.writerEnabled]);
+        if (identity(previous) === identity(next)) continue;
+        if (!this.isUsageClockTrusted(policyTime)) {
+          // No trustworthy receipt time: stop at each source's last durably
+          // accounted boundary. Never leave the former authority open across
+          // clock recovery, or fabricate coverage using an untrusted clock.
+          for (const source of Object.values(state.syncUsage?.sources || {})) {
+            if (source.osDeviceId === deviceId && source.assignmentEndedAt == null)
+              source.assignmentEndedAt = source.accountedThroughAt;
+          }
+          continue;
+        }
+        for (const areaId of new Set(Object.values(state.syncUsage?.sources || {}).filter(source => source.osDeviceId === deviceId && source.assignmentEndedAt == null).map(source => source.osAreaId))) {
+          const ended = endUsageAssignment(state.syncUsage, { osDeviceId: deviceId, osAreaId: areaId, endedAtMs: policyTime });
+          state.syncUsage = ended.state;
+          for (const key of ended.changedBuckets) queueUsageBucket(state, key, policyTime);
+        }
+      }
       const pendingRemovals = new Map((state.platform?.pendingTenantDeviceRemovals || []).map((entry) => [String(entry.osDeviceId), clone(entry)]));
       for (const [osDeviceId, previous] of Object.entries(previousPolicies)) {
         const next = incomingPolicies[osDeviceId];
@@ -1646,7 +1669,7 @@ class Store {
     let syncEnqueued = false;
     if (this.state.platform?.devicePolicies?.[id] && (!previousProjection || JSON.stringify(previousProjection) !== JSON.stringify(syncProjection)
       || JSON.stringify(nativeSyncControlCatalogProjection(this.state, existing)?.controls || []) !== JSON.stringify(nativeSyncControlCatalogProjection(this.state, next)?.controls || []))) {
-      enqueueNativeDeviceSync(this.state, existing.id ? existing : null, next, { critical: !previousProjection });
+      enqueueNativeDeviceSync(this.state, existing.id ? existing : null, next, { critical: !previousProjection, now: observationNow });
       syncEnqueued = true;
     }
     // Readings under an untrusted clock never enter history; once trusted again, readings stamped
@@ -1724,7 +1747,7 @@ class Store {
   }
 
   async updateDeviceState(id, state, extra = {}) {
-    const { sourceObservedAtByStateKey, sourceReceivedAtByStateKey, reportedEndpointId, reportedStateKeys, nowMs, deferPersist, ...deviceExtra } = extra;
+    const { sourceObservedAtByStateKey, sourceReceivedAtByStateKey, sourceLifetimeSecondsByStateKey, reportedEndpointId, reportedStateKeys, nowMs, deferPersist, ...deviceExtra } = extra;
     const existing = this.state.devices[id] || {
       id,
       name: id,
@@ -1742,6 +1765,7 @@ class Store {
     }, {
       sourceObservedAtByStateKey,
       sourceReceivedAtByStateKey,
+      sourceLifetimeSecondsByStateKey,
       reportedEndpointId,
       reportedStateKeys: reportedStateKeys || Object.keys(state || {}),
       requireExplicitObservation: true,

@@ -3,7 +3,10 @@
   "now": "2026-09-27T10:02:00Z",
   "activityCases": [
     { "id": "light-power-on", "category": "light", "quality": "fresh", "validUntil": "2026-09-27T10:03:00Z", "signals": { "powerOn": true, "brightness": 0 }, "expected": "on" },
-    { "id": "light-brightness-on", "category": "light", "quality": "fresh", "validUntil": "2026-09-27T10:03:00Z", "signals": { "powerOn": false, "brightness": 1 }, "expected": "on" },
+    { "id": "light-power-off-overrides-remembered-brightness", "category": "light", "quality": "fresh", "validUntil": "2026-09-27T10:03:00Z", "signals": { "powerOn": false, "brightness": 1 }, "expected": "off" },
+    { "id": "light-missing-authoritative-power", "category": "light", "powerCapabilityPresent": true, "quality": "fresh", "validUntil": "2026-09-27T10:03:00Z", "signals": { "brightness": 70 }, "expected": "unknown" },
+    { "id": "light-certified-output-only", "category": "light", "powerCapabilityPresent": false, "brightnessMeaning": "actual_output", "quality": "fresh", "validUntil": "2026-09-27T10:03:00Z", "signals": { "brightness": 70 }, "expected": "on" },
+    { "id": "light-uncertified-output-only", "category": "light", "powerCapabilityPresent": false, "quality": "fresh", "validUntil": "2026-09-27T10:03:00Z", "signals": { "brightness": 70 }, "expected": "unknown" },
     { "id": "light-reliably-off", "category": "light", "quality": "fresh", "validUntil": "2026-09-27T10:03:00Z", "signals": { "powerOn": false, "brightness": 0 }, "expected": "off" },
     { "id": "light-no-activity-signal", "category": "light", "quality": "fresh", "validUntil": "2026-09-27T10:03:00Z", "signals": {}, "expected": "unknown" },
     { "id": "radiator-demand", "category": "radiator", "quality": "fresh", "validUntil": "2026-09-27T10:03:00Z", "signals": { "activeHeatDemand": true, "targetTemperature": 22 }, "expected": "on" },

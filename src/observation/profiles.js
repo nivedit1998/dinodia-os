@@ -18,7 +18,7 @@ function periodicLifetime(maxIntervalSeconds) {
 }
 
 function boundedReadLifetime(intervalSeconds) {
-  return intervalSeconds * (1 + MISSED_REPORTS_TOLERATED) + READ_REPLY_TIMEOUT_SECONDS + DELIVERY_GRACE_SECONDS;
+  return intervalSeconds * (1 + MISSED_REPORTS_TOLERATED) + DELIVERY_GRACE_SECONDS;
 }
 
 const PROFILES = Object.freeze([
@@ -73,8 +73,8 @@ const PROFILES = Object.freeze([
     semanticRole: null,
     power: "mains",
     strategy: "bounded_read",
-    readIntervalSeconds: 600,
-    lifetimeSeconds: boundedReadLifetime(600),
+    readIntervalSeconds: 300,
+    lifetimeSeconds: boundedReadLifetime(300),
     approvedForAutomaticConfiguration: false,
     requiresModelApproval: true,
   }),

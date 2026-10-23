@@ -1,0 +1,79 @@
+{
+  "status": "UC-02 draft; not a published wire-contract change",
+  "now": "2026-10-23T08:00:00.000Z",
+  "validUntil": "2026-10-23T08:07:00.000Z",
+  "cases": [
+    {
+      "id": "power-off-overrides-remembered-brightness",
+      "category": "light",
+      "signals": {
+        "powerOn": false,
+        "brightness": 128
+      },
+      "expected": "off"
+    },
+    {
+      "id": "present-but-unknown-power-is-not-brightness-fallback",
+      "category": "light",
+      "signals": {
+        "powerOn": null,
+        "brightness": 128
+      },
+      "powerCapabilityPresent": true,
+      "expected": "unknown"
+    },
+    {
+      "id": "brightness-only-positive",
+      "brightnessMeaning": "actual_output",
+      "category": "light",
+      "signals": {
+        "brightness": 128
+      },
+      "powerCapabilityPresent": false,
+      "expected": "on"
+    },
+    {
+      "id": "brightness-only-zero",
+      "brightnessMeaning": "actual_output",
+      "category": "light",
+      "signals": {
+        "brightness": 0
+      },
+      "powerCapabilityPresent": false,
+      "expected": "off"
+    },
+    {
+      "id": "radiator-target-is-not-heating",
+      "category": "radiator",
+      "signals": {
+        "targetTemperature": 24,
+        "mode": "heat"
+      },
+      "expected": "unknown"
+    },
+    {
+      "id": "boiler-demand-is-not-production",
+      "category": "boiler",
+      "signals": {
+        "activeHeatDemand": true
+      },
+      "expected": "unknown"
+    },
+    {
+      "id": "radiator-measured-idle",
+      "category": "radiator",
+      "signals": {
+        "activeHeatDemand": false
+      },
+      "expected": "off"
+    },
+    {
+      "id": "boiler-measured-production",
+      "category": "boiler",
+      "signals": {
+        "activeHeatProduction": true
+      },
+      "expected": "on"
+    }
+  ]
+}

@@ -359,14 +359,16 @@
   ],
   "analytics": {
     "activityCategories": ["light", "radiator", "boiler"],
-    "lightOnWhenPowerOnOrBrightnessAboveZero": true,
+    "lightOnWhenPowerOnOrBrightnessAboveZero": false,
+    "categoryPolicyVersion": 2,
+    "authoritativePowerWins": true,
     "radiatorOnRequiresActiveHeatDemand": true,
     "boilerOnRequiresActiveHeatProduction": true,
     "expiredOrUnreliableTelemetryIsUnknown": true,
     "targetTemperatureIsActivity": false,
     "tenantDeviceIncluded": false,
     "onRules": {
-      "light": "reported power on OR brightness > 0",
+      "light": "authoritative reported power; otherwise certified actual-output brightness only",
       "radiator": "reported active heat demand",
       "boiler": "reported active heat production"
     },

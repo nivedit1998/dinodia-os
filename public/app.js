@@ -144,7 +144,10 @@ function analyticsCategoryEditor(device) {
       ? "Platform accepted this category. Waiting for the hub's next signed configuration. Retry reuses the same safe operation."
       : "This category update is awaiting confirmation. Retry reuses the same operation; do not submit a different category yet."
     : "Optional reporting metadata only; category does not create readings. Radiator Usage represents observed heat-demand activity, not gas volume or cost.";
-  return `<section class="analytics-category-editor" data-analytics-editor="${escapeHtml(device.id)}"><label><span>Analytics category (optional)</span><select data-analytics-category="${escapeHtml(device.id)}" aria-label="Analytics category" ${disabled ? "disabled" : ""}>${ANALYTICS_CATEGORIES.map((category) => `<option value="${category}" ${selected === category ? "selected" : ""}>${ANALYTICS_CATEGORY_LABELS[category]}</option>`).join("")}</select></label><button class="secondary" data-save-analytics-category="${escapeHtml(device.id)}" type="button">${activePending ? "Retry category update" : "Save category"}</button><small data-analytics-category-status="${escapeHtml(device.id)}">${escapeHtml(status)}</small></section>`;
+  const readiness = device.analyticsReadiness;
+  const sources = readiness?.candidates?.flatMap(group => group.controls) || [];
+  const sourceEditor = sources.length > 1 ? `<label><span>Analytics source (one channel)</span><select data-analytics-source="${escapeHtml(device.id)}" ${disabled ? 'disabled' : ''}><option value="">Automatic only when unambiguous</option>${sources.map(control => `<option value="${escapeHtml(control.controlId)}" ${readiness.selectedControlId === control.controlId ? 'selected' : ''}>${escapeHtml(control.label)}</option>`).join('')}</select></label>` : '';
+  return `<section class="analytics-category-editor" data-analytics-editor="${escapeHtml(device.id)}"><label><span>Analytics category (optional)</span><select data-analytics-category="${escapeHtml(device.id)}" aria-label="Analytics category" ${disabled ? "disabled" : ""}>${ANALYTICS_CATEGORIES.map((category) => `<option value="${category}" ${selected === category ? "selected" : ""}>${ANALYTICS_CATEGORY_LABELS[category]}</option>`).join("")}</select></label>${sourceEditor}<button class="secondary" data-save-analytics-category="${escapeHtml(device.id)}" type="button">${activePending ? "Retry category update" : "Save category"}</button><small data-analytics-category-status="${escapeHtml(device.id)}">${escapeHtml(status)}</small>${readiness ? `<small>Analytics ${escapeHtml(readiness.state)}${readiness.reason ? ` · ${escapeHtml(readiness.reason.replaceAll('_', ' '))}` : ''}</small>` : ''}</section>`;
 }
 function setupForm(device) {
   const id = escapeHtml(device.id);
@@ -191,11 +194,14 @@ function renderDevices() {
         if (status) status.textContent = "Only a permanent property device with a current signed policy can be changed.";
         return;
       }
-      if (analyticsCategory === device.analyticsCategory) {
+      const sourceSelect = button.closest('[data-analytics-editor]')?.querySelector('[data-analytics-source]');
+      const selectedControlId = sourceSelect ? sourceSelect.value || null : device.analyticsReadiness?.selectedControlId ?? null;
+      if (analyticsCategory === device.analyticsCategory && selectedControlId === (device.analyticsReadiness?.selectedControlId ?? null)) {
         if (status) status.textContent = "No category change to save.";
         return;
       }
       pending = { body: { analyticsCategory, expectedAnalyticsCategory: device.analyticsCategory, expectedManagementRevision: Number(device.analyticsManagementRevision),
+        ...(sourceSelect ? { selectedControlId, expectedSelectedControlId: device.analyticsReadiness?.selectedControlId ?? null } : {}),
         ...(Number.isSafeInteger(Number(device.analyticsInventoryRevision)) && Number(device.analyticsInventoryRevision) > 0 ? { expectedInventoryRevision: Number(device.analyticsInventoryRevision) } : {}),
         operationId: createAreaOperationId() }, managementRevision: null };
       writeAnalyticsCategoryPending(id, pending);
