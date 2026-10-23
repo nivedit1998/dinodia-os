@@ -74,6 +74,20 @@ class ObservationReconciler {
     this.availability = new Map(); // deviceId -> boolean
     this.lastCommandAt = 0;
     this.pending = new Map(); // transaction -> { key, kind, sentAt }
+    this.interrupted = new Set([...this.records].filter(([, record]) =>
+      [STATES.READ_PENDING, STATES.CONFIGURING].includes(record.state)).map(([key]) => key));
+    // MQTT inventory, responses, reports and the timer can arrive concurrently.
+    // Serialize policy transitions so an older awaited Store write cannot replace
+    // a newer response or publish a duplicate request.
+    this.operationQueue = Promise.resolve();
+    for (const name of ["onInventory", "onAvailability", "onValueObserved", "onBridgeResponse", "tick"]) {
+      const method = this[name];
+      this[name] = (...args) => {
+        const operation = this.operationQueue.then(() => method.apply(this, args));
+        this.operationQueue = operation.catch(() => {});
+        return operation;
+      };
+    }
   }
 
   status() {
@@ -85,15 +99,15 @@ class ObservationReconciler {
   }
 
   async save(record) {
-    this.records.set(record.key, record);
     await this.store.putObservationPolicyRecord(record.key, record);
+    this.records.set(record.key, record);
   }
 
   async remove(key) {
+    await this.store.putObservationPolicyRecord(key, null);
     this.records.delete(key);
     this.reportTimes.delete(key);
     for (const [transaction, pending] of this.pending) if (pending.key === key) this.pending.delete(transaction);
-    await this.store.putObservationPolicyRecord(key, null);
   }
 
   /// Zigbee2MQTT bridge/devices (retained, complete inventory). Creates, resets or schedules
@@ -120,6 +134,9 @@ class ObservationReconciler {
         if (!existing || !sameFingerprint(existing.fingerprint, fingerprint) || existing.profileVersion !== profile.version) {
           // New device, replacement, firmware/model change or new profile version: start from
           // unknown and read the device's actual configuration first.
+          this.interrupted.delete(key);
+          this.reportTimes.delete(key);
+          for (const [transaction, pending] of this.pending) if (pending.key === key) this.pending.delete(transaction);
           await this.save({ key, deviceId, ieee: fingerprint.ieee, friendlyName: String(raw.friendly_name || raw.ieee_address),
             profileId: profile.id, profileVersion: profile.version, endpoint, cluster: profile.cluster, attribute: profile.attribute,
             desired: profile.desired, fingerprint, cached, readBack: null, cadence: null, state: STATES.UNKNOWN,
@@ -159,7 +176,10 @@ class ObservationReconciler {
       if (record.deviceId !== String(deviceId)) continue;
       if (endpoint && endpoint !== "0" && record.endpoint !== String(endpoint)) continue;
       if (!record.profileId.endsWith(`.${property}`)) continue;
-      const times = [...(this.reportTimes.get(record.key) || []), observedMs].slice(-this.options.maxReportTimes);
+      const previousTimes = this.reportTimes.get(record.key) || [];
+      if (previousTimes.length && observedMs <= previousTimes.at(-1)) continue;
+      if (record.readBack?.at && observedMs < Date.parse(record.readBack.at)) continue;
+      const times = [...previousTimes, observedMs].slice(-this.options.maxReportTimes);
       this.reportTimes.set(record.key, times);
       const limitSeconds = record.desired.maximumReportInterval + DELIVERY_GRACE_SECONDS;
       const gaps = times.slice(1).map((time, index) => (time - times[index]) / 1000);
@@ -167,7 +187,8 @@ class ObservationReconciler {
       let state = record.state;
       if ([STATES.CADENCE_PENDING, STATES.CADENCE_VERIFIED].includes(state) && Number.isFinite(lastGap) && lastGap > limitSeconds && this.isAvailable(deviceId)) {
         state = STATES.CADENCE_FAILED; // the promise was not kept; read the device back
-      } else if ([STATES.CADENCE_PENDING, STATES.CADENCE_FAILED].includes(state)) {
+        this.reportTimes.set(record.key, [observedMs]);
+      } else if (state === STATES.CADENCE_PENDING) {
         const recent = gaps.slice(-(this.options.cadenceReportsToVerify - 1));
         if (recent.length >= this.options.cadenceReportsToVerify - 1 && recent.every((gap) => gap <= limitSeconds)) state = STATES.CADENCE_VERIFIED;
       }
@@ -185,6 +206,19 @@ class ObservationReconciler {
   /// reachable. Also expires unanswered requests into "pending delivery".
   async tick() {
     const now = this.clock();
+    for (const key of this.interrupted) {
+      const record = this.records.get(key);
+      if (record) {
+        const sentAt = Number(record.pendingRequest?.sentAt ?? record.updatedAt ?? now);
+        // Delivery is uncertain after process loss. Wait out the bounded delivery
+        // window, then READ first: an interrupted configure may already be applied.
+        await this.save({ ...record, state: STATES.PENDING_DELIVERY, retryKind: "read", pendingRequest: null,
+          nextAttemptAt: Math.max(Number(record.nextAttemptAt) || 0, sentAt + Math.max(this.options.backoffBaseMs,
+            this.options.batteryCheckinMs + this.options.retryAfterCheckinMarginMs)),
+          lastError: "request_interrupted", updatedAt: now });
+      }
+      this.interrupted.delete(key);
+    }
     for (const [transaction, pending] of this.pending) {
       if (now - pending.sentAt < this.options.replyTimeoutMs) continue;
       this.pending.delete(transaction);
@@ -197,6 +231,13 @@ class ObservationReconciler {
       if (![STATES.CADENCE_PENDING, STATES.CADENCE_VERIFIED, STATES.READ_BACK].includes(record.state)) continue;
       const last = Date.parse(String(record.cadence?.lastReportAt || record.readBack?.at || ""));
       const silentMs = record.desired.maximumReportInterval * 1000 * this.options.silenceFactor;
+      const overdueMs = (record.desired.maximumReportInterval + DELIVERY_GRACE_SECONDS) * 1000;
+      if (record.state === STATES.CADENCE_VERIFIED && Number.isFinite(last) && now - last > overdueMs && this.isAvailable(record.deviceId)) {
+        this.reportTimes.delete(record.key);
+        await this.save({ ...record, state: STATES.CADENCE_FAILED, cadence: { ...record.cadence, verifiedAt: null },
+          nextAttemptAt: Math.max(now, last + silentMs), lastError: "value_overdue", updatedAt: now });
+        continue;
+      }
       if (Number.isFinite(last) && now - last > silentMs && this.isAvailable(record.deviceId)) {
         await this.save({ ...record, state: STATES.UNKNOWN, nextAttemptAt: now, lastError: "value_silent", updatedAt: now });
       }
@@ -226,12 +267,13 @@ class ObservationReconciler {
         minimum_report_interval: record.desired.minimumReportInterval, maximum_report_interval: record.desired.maximumReportInterval,
         reportable_change: record.desired.reportableChange, transaction }
       : { id: record.ieee || record.friendlyName, endpoint: Number(record.endpoint), cluster: record.cluster, configs: [{ attribute: record.attribute }], transaction };
-    this.lastCommandAt = now;
-    this.pending.set(transaction, { key: record.key, kind, sentAt: now });
     const windowExpired = now - Number(record.attemptsWindowStartAt || 0) > 24 * 3_600_000;
     await this.save({ ...record, state: kind === "configure" ? STATES.CONFIGURING : STATES.READ_PENDING, lastTransaction: transaction,
+      lastRequestKind: kind, pendingRequest: { kind, transaction, sentAt: now },
       attempts: kind === "configure" ? (windowExpired ? 1 : Number(record.attempts || 0) + 1) : Number(record.attempts || 0),
       attemptsWindowStartAt: kind === "configure" && windowExpired ? now : record.attemptsWindowStartAt, updatedAt: now });
+    this.lastCommandAt = now;
+    this.pending.set(transaction, { key: record.key, kind, sentAt: now });
     try {
       await this.publishBridgeRequest(kind === "configure" ? "device/reporting/configure" : "device/reporting/read", payload);
     } catch (error) {
@@ -247,7 +289,7 @@ class ObservationReconciler {
       this.options.backoffBaseMs * 2 ** Math.max(0, Number(record.attempts || 1) - 1));
     const wasConfigure = record.state === STATES.CONFIGURING || (record.state === STATES.PENDING_DELIVERY && record.retryKind === "configure");
     const exhausted = wasConfigure && !this.mayConfigure(record, now);
-    await this.save({ ...record, state: exhausted ? STATES.FAILED : STATES.PENDING_DELIVERY, retryKind: wasConfigure ? "configure" : "read",
+    await this.save({ ...record, state: exhausted ? STATES.FAILED : STATES.PENDING_DELIVERY, retryKind: wasConfigure ? "configure" : "read", pendingRequest: null,
       nextAttemptAt: now + wait, lastError: reason, updatedAt: now });
   }
 
@@ -261,29 +303,45 @@ class ObservationReconciler {
     this.pending.delete(transaction);
     const record = key ? this.records.get(key) : null;
     if (!record) return;
+    if (record.lastTransaction !== transaction || record.lastRequestKind && record.lastRequestKind !== kind) return;
+    this.interrupted.delete(record.key);
     const now = this.clock();
     if (String(message?.status || "").toLowerCase() !== "ok") {
       return this.deliveryFailed(record, `bridge_${String(message?.error || "error").slice(0, 60)}`);
     }
     if (kind === "configure") {
       // Accepted is not proof: read the device back next.
-      return this.save({ ...record, state: STATES.UNKNOWN, nextAttemptAt: now, lastError: null, updatedAt: now });
+      return this.save({ ...record, state: STATES.UNKNOWN, pendingRequest: null, nextAttemptAt: now, lastError: null, updatedAt: now });
     }
-    const config = Array.isArray(message?.data?.configs) ? message.data.configs[0] : null;
+    const config = Array.isArray(message?.data?.configs) && message.data.configs.length === 1 ? message.data.configs[0] : null;
+    if (!config || !Number.isInteger(config.status)
+      || message.data?.endpoint !== undefined && String(message.data.endpoint) !== String(record.endpoint)
+      || message.data?.cluster !== undefined && String(message.data.cluster) !== String(record.cluster)) {
+      return this.deliveryFailed(record, "invalid_reporting_reply");
+    }
     const status = Number(config?.status);
     if (status === ZCL_UNSUPPORTED_ATTRIBUTE || status === ZCL_UNREPORTABLE_ATTRIBUTE) {
-      return this.save({ ...record, state: STATES.UNSUPPORTED, readBack: { status, at: new Date(now).toISOString() }, lastError: null, updatedAt: now });
+      return this.save({ ...record, state: STATES.UNSUPPORTED, pendingRequest: null, readBack: { status, at: new Date(now).toISOString() }, lastError: null, updatedAt: now });
     }
     const readBack = status === ZCL_SUCCESS
       ? { status, at: new Date(now).toISOString(), minimumReportInterval: Number(config.minRepIntval), maximumReportInterval: Number(config.maxRepIntval),
         reportableChange: config.repChange === undefined ? null : Number(config.repChange) }
       : { status: Number.isFinite(status) ? status : null, at: new Date(now).toISOString() };
+    if (status !== ZCL_SUCCESS && status !== ZCL_NOT_FOUND) return this.deliveryFailed(record, "reporting_read_rejected");
+    if (status === ZCL_SUCCESS && (!Number.isInteger(readBack.minimumReportInterval)
+      || !Number.isInteger(readBack.maximumReportInterval) || readBack.minimumReportInterval < 0
+      || readBack.maximumReportInterval < 0 || readBack.minimumReportInterval > 65535 || readBack.maximumReportInterval > 65535)) {
+      return this.deliveryFailed(record, "invalid_reporting_reply");
+    }
     if (status === ZCL_SUCCESS && reportingMatches(readBack, record.desired)) {
-      const state = record.state === STATES.CADENCE_VERIFIED || record.cadence?.verifiedAt ? STATES.CADENCE_VERIFIED : STATES.CADENCE_PENDING;
-      return this.save({ ...record, state, readBack, lastError: null, updatedAt: now });
+      // Read-back verifies configuration only. Recovery from a failed cadence
+      // needs a new sequence of genuine value reports after this verification.
+      this.reportTimes.delete(record.key);
+      return this.save({ ...record, state: STATES.CADENCE_PENDING, readBack, pendingRequest: null,
+        cadence: null, lastError: null, updatedAt: now });
     }
     // Absent (0x8B) or different: drifted; configure only for approved profiles (all records are).
-    return this.save({ ...record, state: STATES.DRIFTED, readBack, nextAttemptAt: now, lastError: status === ZCL_NOT_FOUND ? "not_configured" : "differs", updatedAt: now });
+    return this.save({ ...record, state: STATES.DRIFTED, readBack, pendingRequest: null, nextAttemptAt: now, lastError: status === ZCL_NOT_FOUND ? "not_configured" : "differs", updatedAt: now });
   }
 }
 

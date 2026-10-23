@@ -214,7 +214,10 @@ function observeUsage(stateValue, input) {
       // interval. Never advance the ended Area's source across the move.
     } else {
       if (priorObserved === observedAt) {
-        if (prior.activity !== input.activity || prior.validUntil !== (validUntil === null ? null : new Date(validUntil).toISOString())) throw new Error("Conflicting native activity observation timestamp");
+        // A restart may have shortened coverage, but not the original observation's
+        // identity. Replaying it must neither conflict nor restore the shortened tail.
+        const originalDeadline = Object.hasOwn(prior, "observationValidUntil") ? prior.observationValidUntil : prior.validUntil;
+        if (prior.activity !== input.activity || originalDeadline !== (validUntil === null ? null : new Date(validUntil).toISOString())) throw new Error("Conflicting native activity observation timestamp");
         return { state, changedBuckets: [], stale: false, changed: false };
       }
       if (priorObserved !== null && observedAt < priorObserved || accountedThrough !== null && observedAt < accountedThrough) {
@@ -229,6 +232,7 @@ function observeUsage(stateValue, input) {
     activity: input.activity, lastObservedAt: new Date(observedAt).toISOString(),
     accountedThroughAt: new Date(observedAt).toISOString(),
     validUntil: validUntil === null ? null : new Date(validUntil).toISOString(),
+    observationValidUntil: validUntil === null ? null : new Date(validUntil).toISOString(),
   };
   state.sources[key] = source;
   modified.push(...advanceSource(state, source, input.nowMs));
@@ -243,6 +247,27 @@ function advanceUsage(stateValue, nowMs) {
   return { state, changedBuckets: [...changed] };
 }
 
+// An availability event ends supported coverage at receipt time. It is not
+// another report of the old attribute at that attribute's original timestamp.
+function endUsageDeviceAvailability(stateValue, deviceId, nowMs) {
+  const state = initialUsageState(stateValue);
+  const changed = new Set();
+  let capped = false;
+  for (const source of Object.values(state.sources)) {
+    if (source.osDeviceId !== String(deviceId) || source.assignmentEndedAt != null) continue;
+    for (const key of advanceSource(state, source, nowMs)) changed.add(key);
+    const deadline = validInstant(source.validUntil);
+    const through = validInstant(source.accountedThroughAt);
+    const end = Math.max(nowMs, through ?? nowMs);
+    if (deadline !== null && deadline > end) {
+      if (!Object.hasOwn(source, "observationValidUntil")) source.observationValidUntil = source.validUntil;
+      source.validUntil = new Date(end).toISOString();
+      capped = true;
+    }
+  }
+  return { state, changedBuckets: [...changed], changed: capped || changed.size > 0 };
+}
+
 // After a restart, no reading may count beyond the last moment the Hub is known to have been
 // running: the time the Hub was off (a power cut) is not evidence of any device state, so it
 // becomes Unknown instead of extending the last reading up to its validity deadline.
@@ -255,6 +280,7 @@ function capUsageAtLastAlive(stateValue, aliveThroughMs) {
     const validUntil = validInstant(source.validUntil);
     const accountedThrough = validInstant(source.accountedThroughAt);
     if (validUntil === null || validUntil <= aliveThroughMs) continue;
+    if (!Object.hasOwn(source, "observationValidUntil")) source.observationValidUntil = source.validUntil;
     source.validUntil = accountedThrough !== null && accountedThrough > aliveThroughMs ? source.accountedThroughAt : boundary;
   }
   return state;
@@ -268,4 +294,4 @@ function usageClockTrusted({ synchronized, nowMs, aliveThroughMs }) {
   return !Number.isSafeInteger(aliveThroughMs) || nowMs >= aliveThroughMs;
 }
 
-module.exports = { activityFor, advanceUsage, capUsageAtLastAlive, endUsageAssignment, initialUsageState, observeUsage, usageClockTrusted };
+module.exports = { activityFor, advanceUsage, capUsageAtLastAlive, endUsageAssignment, endUsageDeviceAvailability, initialUsageState, observeUsage, usageClockTrusted };
