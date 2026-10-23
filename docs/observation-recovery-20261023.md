@@ -17,6 +17,10 @@ calling the reconciler directly with the same inventory created its record.
   Legacy already-capped records are accepted without renewing their coverage.
 - Roll back the complete device mutation on failure. An isolated inventory
   projection failure no longer prevents reconciliation of registered devices.
+- Preserve declared entity definitions on metadata/availability-only updates.
+  Live deployment exposed a separate pre-existing availability/inventory cycle
+  that alternated generic and declared capabilities, causing descriptor churn.
+  The real bridge availability regression fails before this follow-up repair.
 - Availability loss ends coverage at receipt time, rather than fabricating an
   Unknown attribute report at an older timestamp. Reconnection alone is not a
   fresh observation.
@@ -42,7 +46,9 @@ grace, with zero missed reports tolerated. Other profiles remain framework-only.
 
 Untouched base: 556 tests, 552 passed, zero failed, four skipped. The first ten
 new recovery regressions failed on the old source. Final full suite: 572 tests,
-568 passed, zero failed, four skipped; syntax checks passed. Recovery tests cover the real
+568 passed, zero failed, four skipped before the availability follow-up; syntax
+checks passed. Final follow-up: 573 tests, 569 passed, zero failed, four skipped;
+all 17 recovery regressions passed. Recovery tests cover the real
 Store/bridge/reconciler path plus legacy replay, atomicity, source provenance,
 deadline changes, availability loss, request recovery and cadence recovery.
 

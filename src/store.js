@@ -1044,7 +1044,10 @@ function containsReferenceKeyOrValue(value, references) {
 
 function mergeEntities(existing, incoming, deviceId, state, options = {}) {
   const entities = existing && typeof existing === "object" ? clone(existing) : {};
-  const definitions = incoming && typeof incoming === "object" ? incoming : {};
+  // A metadata/availability-only update carries no new definition. Reuse the
+  // declared controls: rebuilding them as generic state fallbacks changes their
+  // capability fingerprint and then changes it back on the next inventory.
+  const definitions = incoming && typeof incoming === "object" ? incoming : entities;
   const stateObject = state && typeof state === "object" ? state : {};
   const reportedStateKeys = Array.isArray(options.reportedStateKeys) ? new Set(options.reportedStateKeys.map(String)) : null;
   const endpointHint = String(options.reportedEndpointId || "").trim();

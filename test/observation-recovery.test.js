@@ -48,6 +48,20 @@ async function household(run) {
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 }
 
+test('retained availability followed by inventory never rewrites declared capabilities or churns the descriptor', async () => {
+  await household(async ({ store, device, raw }) => {
+    const bridge = new MqttBridge({ url: '', store, logger: { log() {}, error() {}, warn() {} } });
+    await bridge.handleMessage('zigbee2mqtt/bridge/devices', Buffer.from(JSON.stringify([raw])), { retain: true });
+    const before = store.getDevice(device.id);
+    await bridge.handleMessage(`zigbee2mqtt/${raw.friendly_name}/availability`, Buffer.from('online'), { retain: true });
+    const after = store.getDevice(device.id);
+    assert.equal(after.presentation.descriptorRevision, before.presentation.descriptorRevision);
+    assert.equal(after.presentation.sourceFingerprint, before.presentation.sourceFingerprint);
+    await bridge.handleMessage('zigbee2mqtt/bridge/devices', Buffer.from(JSON.stringify([raw])), { retain: true });
+    assert.equal(store.getDevice(device.id).presentation.descriptorRevision, before.presentation.descriptorRevision);
+  });
+});
+
 test('real bridge startup after a saved running marker discovers existing-device policy without replaying history', async () => {
   await household(async ({ store, file, device, raw, t }) => {
     await store.markUsageAlive(t + 60_000);
