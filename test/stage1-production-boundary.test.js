@@ -669,16 +669,15 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     const recoveredState = recoveredObservation.body.data.states.find((state) => state.deviceId === deviceId && state.controlId === powerControlId);
     assert.equal(recoveredState?.quality, "fresh", "a new genuine observation restores finite freshness");
 
-    // Report-on-change: an unchanged value stays current while the device itself keeps
-    // checking in, expires once the device goes silent, and never while it is offline.
+    // Per-value freshness (D9): a device check-in never renews an unchanged value; it expires at
+    // its own deadline whether or not the device keeps checking in, and never renews while offline.
     {
       const changedMs = Date.parse(recoveredState.observedAt);
       const deviceBeforeCheckIn = hub.store.getDevice(deviceId);
       await hub.store.upsertDevice({ ...deviceBeforeCheckIn, lastSeenAt: new Date(changedMs + 300_000).toISOString() });
       controlledClock = changedMs + 500_000;
       const checkedIn = (await request(base, "/api/dinodia/v1/snapshot", { headers })).body.data.states.find((state) => state.deviceId === deviceId && state.controlId === powerControlId);
-      assert.equal(checkedIn?.quality, "fresh", "an unchanged value stays current while the device checks in");
-      assert.equal(checkedIn?.value, false);
+      assert.equal(checkedIn?.quality, "unknown", "a check-in after the value's own deadline does not renew it");
       controlledClock = changedMs + 300_000 + 420_000;
       const silent = (await request(base, "/api/dinodia/v1/snapshot", { headers })).body.data.states.find((state) => state.deviceId === deviceId && state.controlId === powerControlId);
       assert.equal(silent?.quality, "unknown", "a device that stops checking in still expires after the validity window");

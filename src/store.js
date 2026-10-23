@@ -26,6 +26,7 @@ const SERIALIZED_STORE_MUTATIONS = Object.freeze([
   "reconcileRejectedSyncBatchSize", "reconcileRejectedDescriptorSync", "reconcileRejectedCatalogOrder", "queueSyncEvent", "prepareSyncBatch", "prepareUsageClosureRecovery", "prepareSyncRequestLossRecovery",
   "prepareSyncStreamReconciliation", "ensureSyncSnapshot", "advanceSyncUsage", "ensureSyncIncidentEvents",
   "ensureUpdaterStatusEvent", "ensureAutomationOutcomeEvents", "ensureControlCatalogPublications", "acknowledgeSyncBatch", "acknowledgeSyncConfiguration",
+  "putObservationPolicyRecord",
   "applySyncConfigurationSnapshot", "markSyncFailure", "savePlatform", "saveHive", "clearHive", "saveAlexa",
   "saveGoogleNest", "clearGoogleNest", "saveHeatingDemandControllerConfig", "saveHeatingDemandControllerRuntime",
   "resetHeatingDemandControllerRuntime", "saveConfigEntry", "deleteConfigEntry", "saveRemoteBinding", "deleteRemoteBinding",
@@ -217,6 +218,16 @@ function queueUsageBucket(state, bucketKey, now) {
   if (!event) return false;
   usage.queuedRevisions[bucketKey] = bucket.revision;
   return true;
+}
+
+// Durable observation-policy records (see src/observation/reconciler.js): bounded, plain data.
+const OBSERVATION_POLICY_MAX_RECORDS = 500;
+function normalizeObservationPolicy(value) {
+  const records = value && typeof value === "object" && value.records && typeof value.records === "object" && !Array.isArray(value.records)
+    ? value.records : {};
+  const kept = Object.entries(records).filter(([key, record]) => typeof key === "string" && key.length <= 400
+    && record && typeof record === "object" && !Array.isArray(record)).slice(-OBSERVATION_POLICY_MAX_RECORDS);
+  return { version: 1, records: Object.fromEntries(kept.map(([key, record]) => [key, clone(record)])) };
 }
 
 function readUsageAlive(filePath) {
@@ -583,6 +594,7 @@ function initialState() {
     syncOutbox: initialSyncOutbox(),
     syncOutboxRecovery: null,
     syncUsage: initialUsageState(),
+    observationPolicy: { version: 1, records: {} },
     cloudflare: { mode: "disabled", hostname: "", token: "", origin: "http://127.0.0.1:8123" },
     zigbee: { adapterPath: "", adapterName: "", adapterType: "", recommended: false, discoveryPrefix: "dinodia-ha", removedAdapterPaths: [] },
     thread: { configured: false, rcpDevice: "", rcpName: "", baudRate: 460800, infraIf: "eth0", threadIf: "wpan0", updatedAt: null },
@@ -811,6 +823,7 @@ function normalizeState(value) {
       }
       : null,
     syncUsage: initialUsageState(value.syncUsage),
+    observationPolicy: normalizeObservationPolicy(value.observationPolicy),
     cloudflare: value.cloudflare && typeof value.cloudflare === "object" ? { ...base.cloudflare, ...value.cloudflare } : base.cloudflare,
     zigbee: value.zigbee && typeof value.zigbee === "object" ? { ...base.zigbee, ...value.zigbee, removedAdapterPaths: normalizeIds(value.zigbee.removedAdapterPaths) } : base.zigbee,
     thread: value.thread && typeof value.thread === "object" ? { ...base.thread, ...value.thread, configured: Boolean(value.thread.configured), rcpDevice: String(value.thread.rcpDevice || ""), rcpName: String(value.thread.rcpName || ""), baudRate: Number(value.thread.baudRate) || 460800, infraIf: String(value.thread.infraIf || "eth0"), threadIf: String(value.thread.threadIf || "wpan0") } : base.thread,
@@ -1193,6 +1206,30 @@ class Store {
     const operation = this.mutationQueue.then(() => STORE_MUTATION_CONTEXT.run(this, work));
     this.mutationQueue = operation.catch(() => {});
     return operation;
+  }
+
+  getObservationPolicyRecords() {
+    return clone(normalizeObservationPolicy(this.state.observationPolicy).records);
+  }
+
+  /// Writes (or with null removes) one observation-policy record. Called only on state transitions,
+  /// so routine reports never add Store writes.
+  async putObservationPolicyRecord(key, record) {
+    const before = this.snapshot();
+    try {
+      const policy = this.state.observationPolicy = normalizeObservationPolicy(this.state.observationPolicy);
+      if (record === null) delete policy.records[String(key)];
+      else {
+        if (!policy.records[String(key)] && Object.keys(policy.records).length >= OBSERVATION_POLICY_MAX_RECORDS) {
+          throw Object.assign(new Error("Observation policy record limit reached"), { code: "observation_policy_full" });
+        }
+        policy.records[String(key)] = clone(record);
+      }
+      await this.persist();
+    } catch (error) {
+      this.restoreSnapshot(before, error);
+      throw error;
+    }
   }
 
   /// Replaces the clock check (tests; platforms without systemd-timesyncd keep the default).

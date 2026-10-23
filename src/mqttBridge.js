@@ -69,6 +69,8 @@ class MqttBridge {
     this.permitJoinUntil = null;
     this.remoteEventWindow = new Map();
     this.pendingRemovals = new Map();
+    // Hub-managed observation policy (src/observation/reconciler.js); set by the server.
+    this.observationPolicy = null;
     this.discovery = {};
     this.events = new ZigbeeEventNormalizer({ logger, duplicateWindowMs: eventDedupeMs });
     this.pairingSession = new ZigbeePairingSession({ logger, ttlSeconds: pairingSeconds });
@@ -340,6 +342,7 @@ class MqttBridge {
         if (newForPairing && updated.interviewStatus === "successful" && !pairingState.id) stopPairingAfterSync = true;
         if (this.onDeviceChanged) await this.onDeviceChanged(updated, existing);
       }
+      await this.notifyObservationPolicy("onInventory", value);
       if (stopPairingAfterSync && this.pairingSession.status().active) {
         if (this.client && this.connected) await this.permitJoin(0);
         this.pairingSession.stop();
@@ -369,6 +372,11 @@ class MqttBridge {
       }
       return;
     }
+    if ((relative === "bridge/response/device/reporting/read" || relative === "bridge/response/device/reporting/configure")
+      && value && typeof value === "object") {
+      await this.notifyObservationPolicy("onBridgeResponse", relative.endsWith("/read") ? "read" : "configure", value);
+      return;
+    }
     if (relative.startsWith("bridge/")) return;
     const parts = relative.split("/");
     if (!parts[0]) return;
@@ -387,6 +395,7 @@ class MqttBridge {
         protocol: "zigbee",
         available: String(availability).toLowerCase() === "online",
       });
+      await this.notifyObservationPolicy("onAvailability", id, String(availability).toLowerCase() === "online");
     } else if (parts.length === 1 && value && typeof value === "object" && !Array.isArray(value)) {
       const existing = this.store.getDevice(id);
       previous = existing;
@@ -395,6 +404,7 @@ class MqttBridge {
       for (const metadataKey of ["last_seen", "elapsed", "endpoint", "endpoint_id", "action"]) delete reportedState[metadataKey];
       const sourceObservedAtByStateKey = {};
       const sourceReceivedAtByStateKey = {};
+      const observedEndpointByStateKey = {};
       const sourceObservedAt = packet?.retain === false
         ? strictUtcTimestamp(value.last_seen, receivedMs)
         : null;
@@ -425,8 +435,14 @@ class MqttBridge {
           const matches = matchingEntities.length === 1 ? matchingEntities
             : endpoint ? matchingEntities.filter((entity) => String(entity.endpointId || entity.binding?.endpoint || entity.expose?.endpoint || "") === endpoint) : [];
           if (matches.length !== 1) continue;
+          // A replay (cache republish or redelivery after the bridge is online) carries the same
+          // or an older last_seen. Only a strictly newer last_seen is a new observation of this
+          // value; an identical value re-reported with a newer last_seen does refresh it.
+          const previousObservedMs = Date.parse(String(matches[0].sourceObservedAt || ""));
+          if (Number.isFinite(previousObservedMs) && previousObservedMs >= Date.parse(sourceObservedAt)) continue;
           sourceObservedAtByStateKey[property] = sourceObservedAt;
           sourceReceivedAtByStateKey[property] = receivedAt;
+          observedEndpointByStateKey[property] = String(matches[0].endpointId || matches[0].binding?.endpoint || matches[0].expose?.endpoint || "");
         }
       }
       const previousLastSeenAt = strictUtcTimestamp(existing?.lastSeenAt, receivedMs);
@@ -442,6 +458,9 @@ class MqttBridge {
         sourceObservedAtByStateKey, sourceReceivedAtByStateKey,
         reportedEndpointId: value.endpoint ?? value.endpoint_id,
       });
+      for (const [property, observedAt] of Object.entries(sourceObservedAtByStateKey)) {
+        await this.notifyObservationPolicy("onValueObserved", device.id, property, observedEndpointByStateKey[property], observedAt);
+      }
     } else {
       return;
     }
@@ -467,6 +486,25 @@ class MqttBridge {
       this.client.publish(topic, payload, { qos: 0, retain: false }, (error) => error ? reject(error) : resolve());
     });
     await this.store.addEvent({ type: "device_command", deviceId: String(deviceId), protocol: "zigbee" });
+  }
+
+  /// Hands an event to the observation policy; its failures never interrupt device handling.
+  async notifyObservationPolicy(method, ...args) {
+    if (!this.observationPolicy || typeof this.observationPolicy[method] !== "function") return;
+    try { await this.observationPolicy[method](...args); }
+    catch (error) { this.logger?.warn?.(`[observation] ${method} deferred (${String(error?.code || error?.message || "error").slice(0, 80)})`); }
+  }
+
+  /// A Zigbee2MQTT bridge request (reporting read/configure only; see the observation policy).
+  async bridgeRequest(requestPath, payload) {
+    if (!["device/reporting/read", "device/reporting/configure"].includes(String(requestPath))) {
+      throw Object.assign(new Error("Only reporting read/configure bridge requests are permitted"), { code: "bridge_request_not_permitted" });
+    }
+    if (!this.client || !this.connected) throw Object.assign(new Error("Zigbee2MQTT is not connected"), { code: "zigbee_unavailable" });
+    const topic = `${this.baseTopic}/bridge/request/${requestPath}`;
+    await new Promise((resolve, reject) => {
+      this.client.publish(topic, JSON.stringify(payload || {}), { qos: 0, retain: false }, (error) => error ? reject(error) : resolve());
+    });
   }
 
   resolveDeviceId(value) {

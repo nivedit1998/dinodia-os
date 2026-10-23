@@ -522,11 +522,14 @@ test("battery Zigbee TRV readings stay current for 30 minutes; mains devices kee
   const batteryControls = publicDescriptor(battery).controls.filter((control) => control.observable);
   assert.ok(batteryControls.length > 0);
   for (const control of batteryControls) {
-    assert.equal(control.maxStateValiditySeconds, 1800, `${control.label} uses the report-on-change window`);
+    // Heating demand has a verified 10-minute report profile (660 s lifetime); the rest report on change.
+    const expected = control.semanticRole === "active_heat_demand" ? 660 : 1800;
+    assert.equal(control.maxStateValiditySeconds, expected, `${control.label} lifetime`);
   }
   const mains = readyTrv();
   mains.metadata = { ...(mains.metadata || {}), power_source: "Mains (single phase)" };
   for (const control of publicDescriptor(mains).controls.filter((item) => item.observable)) {
-    assert.equal(control.maxStateValiditySeconds, 420, `${control.label} keeps the base window`);
+    const expected = control.semanticRole === "active_heat_demand" ? 660 : 420;
+    assert.equal(control.maxStateValiditySeconds, expected, `${control.label} keeps its window`);
   }
 });

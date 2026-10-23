@@ -1,4 +1,5 @@
 'use strict';
+const { matchObservationProfile } = require('../observation/profiles');
 const VERSION = 'dinodia.v1';
 const roles = new Set(['OWNER', 'PROPERTY_MANAGER', 'TENANT']);
 const interactions = new Set(['toggle', 'slider', 'thermostat', 'picker', 'text_input', 'momentary_action', 'read_only']);
@@ -123,6 +124,22 @@ function reportOnChangeValiditySeconds(device, baseSeconds) {
     : baseSeconds;
 }
 
+// The lifetime of one measured value. A matched observation profile fixes it for that exact control
+// (live state and usage history both read it from here); otherwise the existing defaults apply.
+function observationTiming(device, entity, capability) {
+  const profile = matchObservationProfile(device, entity);
+  if (profile && profile.desired) {
+    return { expectedReportingIntervalSeconds: profile.desired.maximumReportInterval, maxStateValiditySeconds: profile.lifetimeSeconds };
+  }
+  if (profile && profile.readIntervalSeconds) {
+    return { expectedReportingIntervalSeconds: profile.readIntervalSeconds, maxStateValiditySeconds: profile.lifetimeSeconds };
+  }
+  return {
+    expectedReportingIntervalSeconds: Number.isInteger(capability.expectedReportingIntervalSeconds) ? capability.expectedReportingIntervalSeconds : 120,
+    maxStateValiditySeconds: reportOnChangeValiditySeconds(device, Number.isInteger(capability.maxStateValiditySeconds) ? capability.maxStateValiditySeconds : 420),
+  };
+}
+
 function serializeDevice({ device, homeId, homeMembershipId, role, areaIds, surfaces, revision = 0 }) {
   if (!isObject(device) || !Array.isArray(surfaces)) return null;
   const metadata = isObject(device.metadata) ? device.metadata : {};
@@ -203,7 +220,7 @@ function serializeDevice({ device, homeId, homeMembershipId, role, areaIds, surf
         riskLevel: stepUpPolicy === 'required' ? 'sensitive' : writable ? 'normal' : 'low',
         stepUpPolicy,
         ...(Object.keys(constraints).length ? { constraints } : {}),
-        ...(capability.observable !== false ? { expectedReportingIntervalSeconds: Number.isInteger(capability.expectedReportingIntervalSeconds) ? capability.expectedReportingIntervalSeconds : 120, maxStateValiditySeconds: reportOnChangeValiditySeconds(device, Number.isInteger(capability.maxStateValiditySeconds) ? capability.maxStateValiditySeconds : 420) } : {}),
+        ...(capability.observable !== false ? observationTiming(device, source, capability) : {}),
         unsupportedReason: null,
         catalogRevision: revisionForControl,
       });

@@ -13,6 +13,7 @@ const QRCode = require("qrcode");
 const baseConfig = require("./config");
 const { Store } = require("./store");
 const { MqttBridge } = require("./mqttBridge");
+const { ObservationReconciler } = require("./observation/reconciler");
 const { MatterBridge } = require("./matterBridge");
 const { resolveMatterServerUrl } = require("./integrations/matter/connectionConfig");
 const { createBackup } = require("./backup");
@@ -669,6 +670,15 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     ),
     logger,
   });
+  // Hub-managed observation policy: keeps approved devices' reporting configured and verified.
+  const observationPolicy = new ObservationReconciler({
+    store: hubStore,
+    publishBridgeRequest: (requestPath, payload) => mqtt.bridgeRequest(requestPath, payload),
+    resolveDeviceId: (value) => mqtt.resolveDeviceId(value),
+    logger,
+  });
+  mqtt.observationPolicy = observationPolicy;
+  let observationPolicyTimer = null;
   const matter = matterBridge || new MatterBridge({
     // The local Matter Server also supports Wi-Fi devices; a selected Thread
     // RCP enables its local controller connection without creating a Thread
@@ -1423,14 +1433,10 @@ function nativeDeviceView(principal, device) {
         // observation (a thermostat setpoint can sit unchanged for hours).
         // Without a change timestamp there is still no observation at all.
         const reportedObservedMs = Number.isFinite(changedMs) && Number.isFinite(reportedMs) ? Math.max(changedMs, reportedMs) : changedMs;
-        // Report-on-change devices (e.g. a TRV) do not re-send unchanged values. While the
-        // device itself keeps checking in (its validated lastSeenAt) and is not offline, an
-        // unchanged non-null value is still current. A silent device still expires normally.
-        const seenMs = Date.parse(String(source.lastSeenAt || ""));
-        const deviceReachable = !(source.availability === "offline" || source.online === false || source.available === false);
-        const hasValue = rawState !== null && rawState !== undefined && rawState !== "";
-        const observedMs = deviceReachable && hasValue && Number.isFinite(reportedObservedMs) && Number.isFinite(seenMs)
-          && seenMs > reportedObservedMs && seenMs <= now + 5000 ? seenMs : reportedObservedMs;
+        // Freshness is per value (owner decision D9, 23 Oct 2026): a device check-in, battery or
+        // other-attribute message never renews this value. It is current only until its own
+        // lifetime after its own last report; then it is Unknown until the device reports it again.
+        const observedMs = reportedObservedMs;
         const receivedMs = Date.parse(String(entity?.updatedAt || ""));
         const hasObservedAt = Number.isFinite(observedMs);
         const hasReceivedAt = Number.isFinite(receivedMs);
@@ -4488,6 +4494,7 @@ function nativeDeviceView(principal, device) {
         version: VERSION,
         uptimeSeconds: Math.round(process.uptime()),
         usageHistory: hubStore.getUsageHistoryClockStatus?.() ?? null,
+        observationPolicy: observationPolicy.status().map(({ profileId, endpoint, state, lastError }) => ({ profileId, endpoint, state, lastError })),
         memory: { rssMb: Math.round(memory.rss / 1024 / 1024), heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024) },
         storeSchemaVersion: hubStore.state?.version || 0,
         storeRecovery: {
@@ -4953,6 +4960,9 @@ function nativeDeviceView(principal, device) {
     await markUsageAlive();
     usageAliveTimer = setInterval(markUsageAlive, 60000);
     usageAliveTimer.unref?.();
+    observationPolicyTimer = setInterval(() => observationPolicy.tick()
+      .catch((error) => logger.warn(`[observation] step deferred (${String(error?.code || "error")})`)), 30000);
+    observationPolicyTimer.unref?.();
     if (lanTlsIdentity) {
       try { await lanTlsIdentity.initialize(); }
       catch { logger.warn("[lan-tls] customer HTTPS identity unavailable; direct LAN control remains fail-closed"); }
@@ -5016,6 +5026,8 @@ function nativeDeviceView(principal, device) {
     activityIntegrationTimer = null;
     if (usageAliveTimer) clearInterval(usageAliveTimer);
     usageAliveTimer = null;
+    if (observationPolicyTimer) clearInterval(observationPolicyTimer);
+    observationPolicyTimer = null;
     if (electricTimer) clearInterval(electricTimer);
     electricTimer = null;
     // State-change listeners and delivery projections append durable data

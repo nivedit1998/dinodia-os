@@ -1,6 +1,7 @@
 const crypto = require("node:crypto");
 const { normalizeCapability } = require("./schema");
 const { haObjectId } = require("./identity");
+const { matchObservationProfile } = require("../observation/profiles");
 
 const PRESENTATION_VERSION = 1;
 const POLICY_REVISION = "device-presentation-v1";
@@ -416,6 +417,10 @@ function sourceFingerprint(device) {
     identity: device.protocolIdentity,
     definition: device.definition,
     metadata: descriptorMetadata(device.metadata),
+    // Activating or changing an observation profile changes control lifetimes: one intentional
+    // descriptor revision. Runtime verification state is deliberately not part of it.
+    observationProfiles: rawEntities(device).map((entity) => matchObservationProfile(device, entity))
+      .filter(Boolean).map((profile) => `${profile.id}@${profile.version}`).sort(),
     areaId: device.areaId || null,
     setupStatus: String(device.setup?.status || "needs_setup"),
     lifecycle: device.retired === true ? "retired" : "active",
