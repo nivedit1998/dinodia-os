@@ -3,6 +3,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { normalizeZigbeeDevice } = require('../src/integrations/zigbee/exposeNormalizer');
 const { matchObservationProfile } = require('../src/observation/profiles');
+// Discovery is deliberately separate from the legacy profile's lifetime/write permission.
+let discoverCollectionStrategy;
+try { ({ discoverCollectionStrategy } = require('../src/observation/strategyResolver')); }
+catch (error) { if (error.code !== 'MODULE_NOT_FOUND') throw error; }
 const template = require('./fixtures/zigbee/sonoff-trvzb-observation.json');
 function device(vendor, model) {
   const raw = structuredClone(template);
@@ -12,7 +16,10 @@ function device(vendor, model) {
       maximum_report_interval: 600, reportable_change: 0 }
   ] } };
   raw.power_source = 'Battery'; raw.type = 'EndDevice';
-  return normalizeZigbeeDevice(raw);
+  const normalized = normalizeZigbeeDevice(raw);
+  // The bridge adds exact endpoint discovery separately from the expose normalizer.
+  normalized.metadata.endpoints = structuredClone(raw.endpoints);
+  return normalized;
 }
 test('next policy: discovery of an existing exact reporting capability is not manufacturer-gated', () => {
   const known = device('SONOFF', 'TRVZB');
@@ -21,9 +28,12 @@ test('next policy: discovery of an existing exact reporting capability is not ma
   assert.equal(control(generic).capability.semanticRole, 'active_heat_demand');
   assert.equal(control(generic).capability.observable, true);
   assert.ok(matchObservationProfile(known, control(known)), 'positive legacy seam control');
-  // This tests the current strategy-discovery seam only. Discovery is NOT permission to configure.
-  assert.ok(matchObservationProfile(generic, control(generic)),
-    'identical declared endpoint/attribute capability needs a generic discovery strategy, with writes separately authorized');
+  assert.equal(typeof discoverCollectionStrategy, 'function', 'pure discovery seam must exist');
+  const discovered = discoverCollectionStrategy(generic, control(generic));
+  assert.equal(discovered.strategy, 'verify_existing_reporting');
+  assert.equal(discovered.approvedForAutomaticConfiguration, false);
+  assert.equal(discovered.lifetimeSeconds, undefined, 'discovery alone grants no lifetime');
+  assert.equal(matchObservationProfile(generic, control(generic)), null, 'legacy write approval must not broaden');
 });
 test('writable thermostat mode is not measured heat demand (existing safety guard)', () => {
   const d = device('SONOFF', 'TRVZB');

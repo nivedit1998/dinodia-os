@@ -1,17 +1,10 @@
 'use strict';
+const { activityFromSignals } = require('../analytics/projectActivity');
 
 function classifyActivityV1(evidence, nowMs) {
   const deadline = Date.parse(evidence?.validUntil ?? '');
   if (evidence?.quality !== 'fresh' || !Number.isFinite(deadline) || deadline <= nowMs) return 'unknown';
-  const signals = evidence.signals || {};
-  if (evidence.category === 'light') {
-    if (signals.powerOn === true || typeof signals.brightness === 'number' && Number.isFinite(signals.brightness) && signals.brightness > 0) return 'on';
-    if (signals.powerOn === false || typeof signals.brightness === 'number' && Number.isFinite(signals.brightness) && signals.brightness === 0) return 'off';
-    return 'unknown';
-  }
-  if (evidence.category === 'radiator') return typeof signals.activeHeatDemand === 'boolean' ? signals.activeHeatDemand ? 'on' : 'off' : 'unknown';
-  if (evidence.category === 'boiler') return typeof signals.activeHeatProduction === 'boolean' ? signals.activeHeatProduction ? 'on' : 'off' : 'unknown';
-  return 'unknown';
+  return activityFromSignals(evidence);
 }
 
 function validateSample(sample) {

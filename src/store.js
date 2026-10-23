@@ -3,6 +3,8 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { AsyncLocalStorage } = require("node:async_hooks");
 const { isDeepStrictEqual } = require("node:util");
+const { resolveCategoryBinding } = require("./analytics/resolveBinding");
+const { projectActivity } = require("./analytics/projectActivity");
 const { fixedLabelState } = require("./labelCatalog");
 const { normalizeCapability, text } = require("./capabilities/schema");
 const { buildPresentation, isConfigured, labelId, sourceFingerprint } = require("./capabilities/devicePresentation");
@@ -296,53 +298,34 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
     && (policy.analyticsCategory === "LIGHT" && ["power", "brightness"].includes(String(control.semanticRole || "") )
       || policy.analyticsCategory === "RADIATOR" && control.semanticRole === "active_heat_demand"
       || policy.analyticsCategory === "BOILER" && control.semanticRole === "active_heat_production"));
-  // One physical Light produces one activity series even when its descriptor
-  // exposes both power and brightness. The frozen rule is logical OR for On;
-  // independent per-control counters would double-count the same device.
-  const selectedUsageControls = policy.analyticsCategory === "LIGHT"
-    ? usageControls.filter((control) => control.semanticRole === "power").slice(0, 1).length
-      ? usageControls.filter((control) => control.semanticRole === "power").slice(0, 1)
-      : usageControls.filter((control) => control.semanticRole === "brightness").slice(0, 1)
-    : usageControls.slice(0, 1);
+  const entityFor = (item) => entities.find((entity) => String(entity.capability?.controlId || entity.controlId || entity.id || entity.sourceId || "") === item.controlId);
+  const binding = resolveCategoryBinding({ signedPolicy: policy, controls: usageControls.map(control => {
+    const entity = entityFor(control);
+    const endpointId = entity?.endpointId ?? entity?.binding?.endpoint;
+    return { ...control, endpointId, brightnessMeaning: entity?.capability?.brightnessMeaning,
+      physicalSourceKey: entity?.binding?.property ? `${endpointId}|${entity.binding.property}|${control.semanticRole}` : null };
+  }) });
+  const selectedUsageControls = binding.status === "resolved"
+    ? usageControls.filter(control => control.controlId === binding.primaryControlId) : [];
   for (const control of selectedUsageControls) {
     const role = String(control.semanticRole || "");
-    const entityFor = (item) => entities.find((entity) => String(entity.capability?.controlId || entity.controlId || entity.id || entity.sourceId || "") === item.controlId);
-    let entity = entityFor(control);
+    const entity = entityFor(control);
     // Only adapter/source observation times establish telemetry freshness.
     // Entity update/snapshot read time is not evidence that the physical value
     // was observed now and must never renew analytics validity.
-    let observedAt = sourceTimestamp(entity?.sourceObservedAt || "");
-    let validUntil = null;
-    let activity;
-    if (policy.analyticsCategory === "LIGHT") {
-      const signals = usageControls.filter((item) => ["power", "brightness"].includes(item.semanticRole)).map((item) => {
-        const source = entityFor(item);
-        const timestamp = sourceTimestamp(source?.sourceObservedAt || "");
-        const observedMs = timestamp ? Date.parse(timestamp) : NaN;
-        const validityMs = Math.min(item.maxStateValiditySeconds * 1000, 30 * 60 * 1000);
-        if (!source || !Number.isFinite(observedMs) || observedMs > nowMs || nowMs - observedMs > 30 * 60 * 1000 || observedMs + validityMs <= nowMs) return null;
-        return { role: item.semanticRole, value: currentEntityValue(source), observedAt: timestamp,
-          validUntilMs: observationDeadline(source, observedMs, validityMs / 1000) };
-      }).filter(Boolean);
-      if (!signals.length) continue;
-      const active = signals.some((signal) => signal.role === "power"
-        ? signal.value === true || String(signal.value || "").trim().toLowerCase() === "on"
-        : typeof signal.value === "number" && Number.isFinite(signal.value) && signal.value > 0);
-      const inactive = signals.every((signal) => signal.role === "power"
-        ? signal.value === false || String(signal.value || "").trim().toLowerCase() === "off"
-        : typeof signal.value === "number" && Number.isFinite(signal.value) && signal.value === 0);
-      activity = device.available === false ? "unknown" : active ? "on" : inactive ? "off" : "unknown";
-      observedAt = signals.map((signal) => signal.observedAt).sort().at(-1);
-      validUntil = new Date(Math.min(...signals.map((signal) => signal.validUntilMs))).toISOString();
-      entity = entityFor(control);
-    } else {
-      if (!entity || !observedAt) continue;
-      const observedMs = Date.parse(observedAt);
-      if (observedMs > nowMs || nowMs - observedMs > 30 * 60 * 1000) continue;
-      const validityMs = Math.min(control.maxStateValiditySeconds * 1000, policy.analyticsCategory === "RADIATOR" ? 30 * 60 * 1000 : Number.MAX_SAFE_INTEGER);
-      validUntil = new Date(observationDeadline(entity, observedMs, validityMs / 1000)).toISOString();
-      activity = activityFor({ category: policy.analyticsCategory, role, value: currentEntityValue(entity), available: device.available !== false });
-    }
+    const observedAt = sourceTimestamp(entity?.sourceObservedAt || "");
+    if (!entity || !observedAt) continue;
+    const observedMs = Date.parse(observedAt);
+    if (observedMs > nowMs || nowMs - observedMs > 30 * 60 * 1000) continue;
+    const validUntil = new Date(observationDeadline(entity, observedMs, control.maxStateValiditySeconds)).toISOString();
+    const scalar = currentEntityValue(entity);
+    const normalized = activityFor({ category: policy.analyticsCategory, role, value: scalar });
+    const value = role === "brightness" ? scalar : normalized === "on" ? true : normalized === "off" ? false : null;
+    // Generation admission above is supplied only while the caller's history clock is trusted.
+    const activity = projectActivity({ binding, sample: { controlId: control.controlId, value, observedAt, validUntil, quality: "fresh" },
+      nowMs, authorityValid: true, clockTrusted: true, deviceAvailable: device.available });
+    // Expiry advances through existing accounting; never rewrite an old timestamp as Unknown.
+    if (Date.parse(validUntil) <= nowMs) continue;
     if (!observedAt || !validUntil || !activity) continue;
     if (Number.isSafeInteger(options.ignoreThroughMs) && Date.parse(observedAt) <= options.ignoreThroughMs) continue;
     const prior = usage.sources[[deviceId, policy.analyticsCategory, String(control.controlId), generation].join("|")];

@@ -24,6 +24,7 @@
     },
     {
       "id": "brightness-only-positive",
+      "brightnessMeaning": "actual_output",
       "category": "light",
       "signals": {
         "brightness": 128
@@ -33,6 +34,7 @@
     },
     {
       "id": "brightness-only-zero",
+      "brightnessMeaning": "actual_output",
       "category": "light",
       "signals": {
         "brightness": 0

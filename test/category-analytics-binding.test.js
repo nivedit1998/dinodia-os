@@ -8,6 +8,44 @@ const { Store } = require('../src/store');
 const { normalizeZigbeeDevice } = require('../src/integrations/zigbee/exposeNormalizer');
 const template = require('./fixtures/zigbee/dimmable-light.json');
 const at = Date.parse('2026-10-23T08:00:00.000Z');
+async function withLight(run) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dinodia-uc03-light-'));
+  try {
+    const store = new Store(path.join(directory, 'synthetic.json'));
+    store.setUsageClockTrust(() => true); store.setSyncSourceGeneration(1);
+    await store.saveArea({ name: 'Synthetic room' }, 'area');
+    await store.savePlatform({ homeId: 'synthetic-home' });
+    const device = await store.upsertDevice({ ...normalizeZigbeeDevice(structuredClone(template)), areaId: 'area',
+      setup: { status: 'ready', assignmentMode: 'device_inherited_v1' } },
+    { devicePolicy: { managementClass: 'PROPERTY_DEVICE', analyticsCategory: 'LIGHT', lifecycle: 'INSTALLED' } });
+    const report = async (values, now) => store.updateDeviceState(device.id, values, {
+      nowMs: now, reportedStateKeys: Object.keys(values),
+      sourceObservedAtByStateKey: Object.fromEntries(Object.keys(values).map(key => [key, new Date(now).toISOString()])),
+      sourceReceivedAtByStateKey: Object.fromEntries(Object.keys(values).map(key => [key, new Date(now).toISOString()])) });
+    await run({ store, report });
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+}
+test('real Store: power OFF overrides remembered positive brightness in recorded seconds', async () => {
+  await withLight(async ({ store, report }) => {
+    await report({ state: 'OFF', brightness: 128 }, at);
+    await store.advanceSyncUsage(at + 60_000);
+    const totals = Object.values(store.snapshot().syncUsage.buckets).reduce((sum, row) =>
+      [sum[0] + row.onSeconds, sum[1] + row.offSeconds], [0, 0]);
+    assert.deepEqual(totals, [0, 60]);
+  });
+});
+test('real Store: stale authoritative power never falls back to a fresh brightness report', async () => {
+  await withLight(async ({ store, report }) => {
+    await report({ state: 'OFF', brightness: 0 }, at);
+    await store.advanceSyncUsage(at + 421_000);
+    await report({ brightness: 128 }, at + 421_000);
+    await store.advanceSyncUsage(at + 481_000);
+    const totals = Object.values(store.snapshot().syncUsage.buckets).reduce((sum, row) =>
+      [sum[0] + row.onSeconds, sum[1] + row.unknownSeconds], [0, 0]);
+    assert.equal(totals[0], 0);
+    assert.equal(totals[1], 61);
+  });
+});
 test('next binding policy: two unselected light endpoints must not silently select the first', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dinodia-uc02-'));
   try {
