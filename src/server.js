@@ -1429,6 +1429,26 @@ function nativeDeviceView(principal, device) {
     return nativeEventQueue;
   }
 
+  // The last genuinely reported value of a writable control (a setting) whose current window has passed, or
+  // null. It uses the same evidence decision as live state: a real device report with a real observation
+  // time, a trusted clock and an online device. Virtual, unbound, untimestamped or offline sources give none.
+  function nativeLastSetting(principal, device, dto, control, state) {
+    if (!device || !dto || !control || control.writable !== true || !state || state.quality === "fresh") return null;
+    if (!["number", "boolean"].includes(control.valueType) || !Number.isSafeInteger(state.revision) || state.revision < 1) return null;
+    const entity = nativeRawEntityForControl(device, control.controlId);
+    const evidence = resolveStateEvidence({ device: { ...device, managementClass: dto.managementClass,
+      ownerMembershipId: dto.ownerMembershipId }, control, entity,
+      records: hubStore.getObservationPolicyRecords?.() || {},
+      sourceGeneration: hubStore.syncSourceGeneration ?? principal?.identityGeneration,
+      authorityValid: true, clockTrusted: hubStore.getUsageHistoryClockStatus?.(Number(clock()))?.trusted === true,
+      runtimeSessionId: hubStore.observationSessionId, now: Number(clock()) });
+    const last = evidence.lastReported;
+    if (!last || last.provenance !== "device_report" || typeof last.observedAt !== "string"
+      || ["clock_untrusted", "device_offline", "no_observation"].includes(evidence.evidence?.status)) return null;
+    if (control.valueType === "number" ? typeof last.value !== "number" || !Number.isFinite(last.value) : typeof last.value !== "boolean") return null;
+    return { value: last.value, observedAt: last.observedAt, revision: state.revision };
+  }
+
   function nativeControlStates(principal, devices, onlyDeviceId = null, evidenceVersion = 1) {
     const now = Number(clock());
     const states = [];
@@ -2508,7 +2528,15 @@ function nativeDeviceView(principal, device) {
         || ["security_lock", "lock_state"].includes(control.semanticRole))) {
         return nativeContractError(res, 403, "SCOPE_DENIED", "The requested Alexa state surface is not permitted");
       }
-      const states = nativeControlStates(scopedPrincipal, [dto], dto.id).filter((state) => scopedPrincipal.controlIds.includes(state.controlId));
+      const states = nativeControlStates(scopedPrincipal, [dto], dto.id).filter((state) => scopedPrincipal.controlIds.includes(state.controlId))
+        .map((state) => {
+          // A setting (writable: target, brightness, position, on/off) stays as last set until changed, so
+          // its last reported value is a valid baseline for "turn it up/down". value/quality stay strict,
+          // so state reports never present it as current.
+          const control = controls.find((candidate) => candidate.controlId === state.controlId);
+          const lastSetting = control ? nativeLastSetting(scopedPrincipal, device, dto, control, state) : null;
+          return lastSetting ? { ...state, lastSetting } : state;
+        });
       return json(res, 200, { schemaVersion: "dinodia.v1", endpointId: scopedPrincipal.endpointId, homeId: scopedPrincipal.homeId,
         membershipId: scopedPrincipal.membershipId, deviceId: scopedPrincipal.deviceId, descriptorRevision: dto.descriptorRevision, states });
     }
@@ -2674,9 +2702,12 @@ function nativeDeviceView(principal, device) {
           const dispatchObservation = dispatchControl && Number.isSafeInteger(command.expectedObservationRevision)
             ? nativeControlStates(currentPrincipal, [dispatchDto], dispatchDevice.id).find((state) => state.controlId === command.controlId)
             : null;
+          // A setting's last report is still its value until a newer report arrives; the unchanged
+          // revision proves no newer report has. Measurements (read-only) still need a fresh value.
           const observationStillCurrent = command.expectedObservationRevision === undefined
-            || Boolean(dispatchObservation && dispatchObservation.quality === "fresh"
-              && dispatchObservation.revision === command.expectedObservationRevision);
+            || Boolean(dispatchObservation && dispatchObservation.revision === command.expectedObservationRevision
+              && (dispatchObservation.quality === "fresh"
+                || (dispatchControl?.writable === true && nativeLastSetting(currentPrincipal, dispatchDevice, dispatchDto, dispatchControl, dispatchObservation) !== null)));
           const dispatchEntity = dispatchDevice && dispatchControl
             ? nativeRawEntityForControl(dispatchDevice, dispatchControl.controlId)
             : null;
