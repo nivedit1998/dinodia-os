@@ -38,6 +38,24 @@ test('a real report after a missed cadence deadline cannot enter history under t
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('cadence typing uses the exact endpoint control, never a same-named sibling', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dinodia-endpoint-cadence-'));
+  try {
+    const store = new Store(path.join(directory, 'store.json'));
+    const checked = await checkedStateFixture({ store, directory });
+    const device = store.getDevice(checked.deviceId), entity = Object.values(device.entities).find(item => item.stateKey === 'state');
+    const sibling = { ...entity, id: 'sibling', sourceId: 'sibling', endpointId: '2',
+      expose: { type: 'numeric' }, capability: { ...entity.capability, controlId: 'sibling-control', kind: 'number', constraints: { min: 0, max: 100 } } };
+    await store.upsertDevice({ ...device, entities: { sibling, [entity.id]: entity } });
+    store.state.devices[device.id].entities = { sibling, [entity.id]: entity };
+    const record = [...checked.runtime.records.values()][0];
+    const previous = record.cadence.lastReportAt;
+    await checked.runtime.onValueObserved(device.id, 'state', '1', new Date(checked.clock() + 1000).toISOString(), 50);
+    assert.equal(checked.runtime.records.get(record.key).cadence.lastReportAt, previous,
+      'a number permitted by endpoint 2 is not a boolean report from endpoint 1');
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('removal discards old proof and a late callback cannot attach it to re-pairing', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dinodia-repair-proof-'));
   try {

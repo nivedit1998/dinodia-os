@@ -256,7 +256,12 @@ class ObservationReconciler {
       if (endpoint && endpoint !== "0" && record.endpoint !== String(endpoint)) continue;
       if ((record.property || record.profileId.split('.').at(-1)) !== property) continue;
       if (observedValue !== undefined) {
-        const entity = Object.values(this.store.getDevice?.(String(deviceId))?.entities || {}).find(item => item.stateKey === property);
+        const device = this.store.getDevice?.(String(deviceId));
+        const entities = Object.values(device?.entities || {}).filter(item => item.stateKey === property
+          && (item.capability?.controlId || item.id) === record.controlId
+          && String(resolvedEndpoint(device, item, record.cluster)) === String(record.endpoint));
+        if (entities.length !== 1) continue;
+        const entity = entities[0];
         const kind = entity?.expose?.type || entity?.capability?.kind;
         const valueType = ['numeric', 'number'].includes(kind) ? 'number' : ['binary', 'boolean'].includes(kind) ? 'boolean'
           : ['enum', 'option'].includes(kind) ? 'option' : null;
