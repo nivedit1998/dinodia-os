@@ -73,7 +73,9 @@ class ObservationReconciler {
     this.logger = logger;
     this.options = { ...DEFAULTS, ...options };
     this.records = new Map(Object.entries(store.getObservationPolicyRecords?.() || {}).filter(([key]) => !key.startsWith('__')));
-    this.reportTimes = new Map(); // key -> recent report times (memory only; cadence restarts after a Hub restart)
+    this.reportTimes = new Map([...this.records].map(([key, record]) => [key,
+      record.runtimeSessionId === store.observationSessionId && Array.isArray(record.cadenceEvidence)
+        ? record.cadenceEvidence.map(sample => sample.at).filter(Number.isFinite).slice(-this.options.maxReportTimes) : []]));
     this.availability = new Map(); // deviceId -> boolean
     this.lastCommandAt = Math.max(Number(store.getObservationManagementAt?.() || 0), ...[...this.records.values()].map(record => Number(record.lastCommandAt || 0)));
     this.pending = new Map(); // transaction -> { key, kind, sentAt }
@@ -126,6 +128,10 @@ class ObservationReconciler {
       const deviceId = this.resolveDeviceId(raw.friendly_name || raw.ieee_address);
       const device = deviceId ? this.store.getDevice(deviceId) : null;
       if (!device) continue;
+      // Property profile approval is never consent to read/configure a tenant's private device.
+      // Passive reports still update its universal state through the normal adapter/Store path.
+      const devicePolicy = this.store.getPlatform?.()?.devicePolicies?.[deviceId];
+      if (devicePolicy?.managementClass === 'TENANT_DEVICE') continue;
       const fingerprint = fingerprintOf(raw);
       for (const entity of Object.values(device.entities || {})) {
         let profile = matchObservationProfile(device, entity);
@@ -207,7 +213,7 @@ class ObservationReconciler {
   }
 
   /// A genuine observation of a profiled value (provenance already checked by mqttBridge).
-  async onValueObserved(deviceId, property, endpoint, observedAtIso) {
+  async onValueObserved(deviceId, property, endpoint, observedAtIso, observedValue) {
     const observedMs = Date.parse(String(observedAtIso || ""));
     if (!Number.isFinite(observedMs)) return;
     for (const record of this.records.values()) {
@@ -231,12 +237,25 @@ class ObservationReconciler {
         const recent = gaps.slice(-(this.options.cadenceReportsToVerify - 1));
         if (recent.length >= this.options.cadenceReportsToVerify - 1 && recent.every((gap) => gap <= limitSeconds)) state = STATES.CADENCE_VERIFIED;
       }
+      const previousEvidence = record.runtimeSessionId === this.store.observationSessionId && Array.isArray(record.cadenceEvidence) ? record.cadenceEvidence : [];
+      const cadenceEvidence = observedValue !== undefined
+        ? [...previousEvidence.filter(item => item.at < observedMs), { at: observedMs, value: observedValue }].slice(-this.options.cadenceReportsToVerify)
+        : previousEvidence;
+      const unchanged = cadenceEvidence.some((sample, index) => index > 0 && Object.is(sample.value, cadenceEvidence[index - 1].value));
+      const exactCadenceVerified = record.sourceGeneration === this.store.syncSourceGeneration
+        && record.evidenceVersion === 2
+        && Number.isSafeInteger(record.sourceGeneration) && record.sourceGeneration > 0
+        && cadenceEvidence.length === this.options.cadenceReportsToVerify && unchanged
+        && cadenceEvidence.every((sample, index) => !index || sample.at - cadenceEvidence[index - 1].at <= limitSeconds * 1000);
       const cadence = { lastReportAt: new Date(observedMs).toISOString(), lastGapSeconds: Number.isFinite(lastGap) ? Math.round(lastGap) : null,
         verifiedAt: state === STATES.CADENCE_VERIFIED ? (record.cadence?.verifiedAt || new Date(observedMs).toISOString()) : null };
-      if (state !== record.state) {
-        await this.save({ ...record, state, cadence, nextAttemptAt: state === STATES.CADENCE_FAILED ? this.clock() : record.nextAttemptAt, updatedAt: this.clock() });
+      const evidenceVerifiedAt = state === STATES.CADENCE_VERIFIED && exactCadenceVerified
+        ? record.evidenceVerifiedAt || new Date(observedMs).toISOString() : null;
+      if (state !== record.state || evidenceVerifiedAt !== (record.evidenceVerifiedAt || null)) {
+        await this.save({ ...record, state, cadence, cadenceEvidence, evidenceVerifiedAt, runtimeSessionId: this.store.observationSessionId,
+          nextAttemptAt: state === STATES.CADENCE_FAILED ? this.clock() : record.nextAttemptAt, updatedAt: this.clock() });
       } else {
-        this.records.set(record.key, { ...record, cadence }); // memory only: no Store write per report
+        this.records.set(record.key, { ...record, cadence, cadenceEvidence, runtimeSessionId: this.store.observationSessionId }); // no additional Store flush per report
       }
     }
   }
@@ -304,6 +323,13 @@ class ObservationReconciler {
   }
 
   async send(record, kind, now) {
+    // Recheck ownership at dispatch, not only inventory time: a queued property
+    // approval must never survive reassignment to a tenant-private device.
+    const policy = this.store.getPlatform?.()?.devicePolicies?.[record.deviceId];
+    if (policy?.managementClass === 'TENANT_DEVICE') {
+      await this.remove(record.key);
+      return null;
+    }
     const transaction = `dinodia-obs-${crypto.randomBytes(6).toString("hex")}`;
     const payload = kind === "configure"
       ? { id: record.ieee || record.friendlyName, endpoint: Number(record.endpoint), cluster: record.cluster, attribute: record.attribute,
@@ -400,7 +426,9 @@ class ObservationReconciler {
       // needs a new sequence of genuine value reports after this verification.
       this.reportTimes.delete(record.key);
       return this.save({ ...record, state: STATES.CADENCE_PENDING, readBack, pendingRequest: null,
-        cadence: null, lastError: null, updatedAt: now });
+        sourceGeneration: this.store.syncSourceGeneration ?? null, evidenceVersion: 2,
+        proofRevision: Math.max(0, Number(record.proofRevision) || 0) + 1,
+        cadence: null, cadenceEvidence: [], evidenceVerifiedAt: null, lastError: null, updatedAt: now });
     }
     // Absent (0x8B) or different: drifted; configure only for approved profiles (all records are).
     return this.save({ ...record, state: record.approvedForAutomaticConfiguration === false ? STATES.UNSUPPORTED : STATES.DRIFTED,

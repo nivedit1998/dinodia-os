@@ -2138,6 +2138,7 @@ paths:
     get:
       summary: "Read Selected Home Snapshot"
       operationId: readSelectedHomeSnapshot
+      description: "Negotiate X-Dinodia-State-Evidence-Version 2 to receive data.stateEvidenceVersion=2 and independently validated controlStateEvidence2 states. Default v1 shape is unchanged. Both Local and authorized CloudURL use the same authority and evidence."
       tags: [Devices]
       security: [{ CustomerBearer: [] }]
       parameters: [{ name: homeId, in: query, required: true, schema: { type: string } }, { name: homeMembershipId, in: query, required: true, schema: { type: string } }, { name: cursor, in: query, required: false, schema: { type: string } }]
@@ -2176,6 +2177,7 @@ paths:
     get:
       summary: "Subscribe Home Events"
       operationId: subscribeHomeEvents
+      description: "X-Dinodia-State-Evidence-Version 2 selects controlStateEvidence2 for the lifetime of this authenticated stream; reconnect to change versions. Unknown versions are rejected."
       tags: [Devices]
       security: [{ CustomerBearer: [] }]
       parameters: [{ name: homeId, in: query, required: true, schema: { type: string } }, { name: homeMembershipId, in: query, required: true, schema: { type: string } }, { name: streamId, in: query, required: false, schema: { type: string } }, { name: sequence, in: query, required: false, schema: { type: integer, minimum: 0 } }]

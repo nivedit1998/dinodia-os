@@ -494,7 +494,7 @@ class MqttBridge {
         reportedEndpointId: value.endpoint ?? value.endpoint_id,
       });
       for (const [property, observedAt] of Object.entries(sourceObservedAtByStateKey)) {
-        await this.notifyObservationPolicy("onValueObserved", device.id, property, observedEndpointByStateKey[property], observedAt);
+        await this.notifyObservationPolicy("onValueObserved", device.id, property, observedEndpointByStateKey[property], observedAt, reportedState[property]);
       }
     } else {
       return;

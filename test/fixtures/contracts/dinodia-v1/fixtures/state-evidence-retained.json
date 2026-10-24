@@ -1,0 +1,25 @@
+{
+  "stateEvidenceVersion": 2,
+  "homeId": "home:opaque-a",
+  "deviceId": "device:opaque-1",
+  "controlId": "control:power",
+  "descriptorRevision": 4,
+  "revision": 12,
+  "observedAt": null,
+  "receivedAt": null,
+  "validUntil": null,
+  "quality": "unknown",
+  "value": null,
+  "deviceAvailability": "online",
+  "analyticsActivity": "unknown",
+  "lastReported": {
+    "value": false,
+    "observedAt": "2026-10-24T08:00:00.000Z",
+    "receivedAt": "2026-10-24T08:00:00.010Z",
+    "observationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sourceKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "sourceGeneration": 3,
+    "provenance": "device_report"
+  },
+  "evidence": { "status": "no_verified_guarantee", "guaranteeId": null, "policyRevision": 3 }
+}

@@ -336,7 +336,7 @@ test("provenance: same-value genuine reports refresh; replays, retained and othe
     const t2 = new Date(Date.now() - 10_000).toISOString();
     await send({ running_state: "heat", last_seen: t2 });
     assert.equal(running().sourceObservedAt, t2, "the same value genuinely re-reported refreshes it");
-    assert.deepEqual(observed.at(-1).slice(1), ["running_state", "1", t2]);
+    assert.deepEqual(observed.at(-1).slice(1), ["running_state", "1", t2, "heat"], "cadence proof receives the genuine field value as well as its timestamp");
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 

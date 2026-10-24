@@ -127,6 +127,14 @@ function reportOnChangeValiditySeconds(device, baseSeconds) {
 // The lifetime of one measured value. A matched observation profile fixes it for that exact control
 // (live state and usage history both read it from here); otherwise the existing defaults apply.
 function observationTiming(device, entity, capability) {
+  // A ceiling established from exact checked proof is descriptor metadata, not
+  // a guarantee by itself. The state resolver still checks the proof per value.
+  const checked = entity.stateEvidenceTiming;
+  if (checked?.version === 2 && Number.isSafeInteger(checked.maximumReportInterval)
+    && checked.maximumReportInterval > 0 && checked.maximumReportInterval < 65535) {
+    return { expectedReportingIntervalSeconds: checked.maximumReportInterval,
+      maxStateValiditySeconds: checked.maximumReportInterval + 60 };
+  }
   const profile = matchObservationProfile(device, entity);
   if (profile && profile.desired) {
     return { expectedReportingIntervalSeconds: profile.desired.maximumReportInterval, maxStateValiditySeconds: profile.lifetimeSeconds };
