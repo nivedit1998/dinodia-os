@@ -293,10 +293,15 @@ class ObservationReconciler {
         ? [...previousEvidence.filter(item => item.at < observedMs), { at: observedMs, value: observedValue }].slice(-this.options.cadenceReportsToVerify)
         : previousEvidence;
       const unchanged = cadenceEvidence.some((sample, index) => index > 0 && Object.is(sample.value, cadenceEvidence[index - 1].value));
+      // Unchanged reporting is established once for this checked runtime.
+      // A later sequence of real changes does not disprove that guarantee.
+      // Gap/offline/read-back/lifecycle resets still invalidate it normally.
+      const unchangedWasVerified = record.runtimeSessionId === this.store.observationSessionId
+        && typeof record.evidenceVerifiedAt === 'string' && Number.isFinite(Date.parse(record.evidenceVerifiedAt));
       const exactCadenceVerified = record.sourceGeneration === this.store.syncSourceGeneration
         && record.evidenceVersion === 2
         && Number.isSafeInteger(record.sourceGeneration) && record.sourceGeneration > 0
-        && cadenceEvidence.length === this.options.cadenceReportsToVerify && unchanged
+        && cadenceEvidence.length === this.options.cadenceReportsToVerify && (unchanged || unchangedWasVerified)
         && cadenceEvidence.every((sample, index) => !index || sample.at - cadenceEvidence[index - 1].at <= limitSeconds * 1000);
       const cadence = { lastReportAt: new Date(observedMs).toISOString(), lastGapSeconds: Number.isFinite(lastGap) ? Math.round(lastGap) : null,
         verifiedAt: state === STATES.CADENCE_VERIFIED ? (record.cadence?.verifiedAt || new Date(observedMs).toISOString()) : null };

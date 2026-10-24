@@ -11,6 +11,22 @@ const fixture = require('./fixtures/zigbee/sonoff-trvzb-observation.json');
 const { checkedStateFixture } = require('./helpers/checked-state-fixture');
 const { resolveStateEvidence } = require('../src/observation/stateEvidence');
 
+test('a checked periodic guarantee survives consecutive genuine state changes within cadence', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dinodia-changing-cadence-'));
+  try {
+    const store = new Store(path.join(directory, 'store.json'));
+    const checked = await checkedStateFixture({ store, directory });
+    const verifiedAt = Object.values(store.getObservationPolicyRecords())[0].evidenceVerifiedAt;
+    assert.ok(verifiedAt);
+    for (const value of ['OFF', 'ON', 'OFF', 'ON', 'OFF']) {
+      await checked.report(value, { advance: 1000 });
+      const entity = Object.values(store.getDevice(checked.deviceId).entities).find(item => item.stateKey === 'state');
+      assert.equal(entity.admittedEvidence.quality, 'fresh', `a real ${value} report does not revoke a checked unchanged-report guarantee`);
+      assert.equal(Object.values(store.getObservationPolicyRecords())[0].evidenceVerifiedAt, verifiedAt);
+    }
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('offline then online cannot revive a pre-disconnection guarantee', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dinodia-offline-proof-'));
   try {
