@@ -482,6 +482,11 @@ class MqttBridge {
       const lastSeenAt = sourceObservedAt && observationContract.ok
         && (!previousLastSeenAt || Date.parse(sourceObservedAt) > Date.parse(previousLastSeenAt))
         ? sourceObservedAt : null;
+      // Invalidate a missed promise before Store duration admission. Updating
+      // cadence afterward could admit the first post-gap sample under old proof.
+      for (const [property, observedAt] of Object.entries(sourceObservedAtByStateKey)) {
+        await this.notifyObservationPolicy("onValueObserved", id, property, observedEndpointByStateKey[property], observedAt, reportedState[property]);
+      }
       device = await this.store.updateDeviceState(id, reportedState, {
         protocol: "zigbee", available: true, name: existing?.name || id,
         reportedStateKeys: Object.keys(reportedState),
@@ -493,9 +498,6 @@ class MqttBridge {
           this.observationPolicy?.lifetimeFor?.(id, property, observedEndpointByStateKey[property]) ?? null])),
         reportedEndpointId: value.endpoint ?? value.endpoint_id,
       });
-      for (const [property, observedAt] of Object.entries(sourceObservedAtByStateKey)) {
-        await this.notifyObservationPolicy("onValueObserved", device.id, property, observedEndpointByStateKey[property], observedAt, reportedState[property]);
-      }
     } else {
       return;
     }

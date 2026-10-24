@@ -26,6 +26,18 @@ test('offline then online cannot revive a pre-disconnection guarantee', async ()
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('a real report after a missed cadence deadline cannot enter history under the retired promise', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dinodia-missed-cadence-'));
+  try {
+    const store = new Store(path.join(directory, 'store.json'));
+    const checked = await checkedStateFixture({ store, directory });
+    await checked.report('ON', { advance: 1000000 });
+    const entity = Object.values(store.getDevice(checked.deviceId).entities).find(item => item.stateKey === 'state');
+    assert.notEqual(entity.admittedEvidence.quality, 'fresh');
+    assert.equal(entity.lastReported.value, 'ON');
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('removal discards old proof and a late callback cannot attach it to re-pairing', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dinodia-repair-proof-'));
   try {

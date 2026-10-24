@@ -14,6 +14,7 @@ const { DELIVERY_GRACE_SECONDS, cachedReportingFor, matchObservationProfile, rep
 const { discoverCollectionStrategy } = require('./strategyResolver');
 const { resolveCategoryBinding } = require('../analytics/resolveBinding');
 const { analyticsEligible } = require('../analytics/categoryPolicies');
+const { scalarFor } = require('./stateEvidence');
 
 const STATES = Object.freeze({
   UNKNOWN: "configuration_unknown",
@@ -254,6 +255,18 @@ class ObservationReconciler {
       if (record.suspended) continue;
       if (endpoint && endpoint !== "0" && record.endpoint !== String(endpoint)) continue;
       if ((record.property || record.profileId.split('.').at(-1)) !== property) continue;
+      if (observedValue !== undefined) {
+        const entity = Object.values(this.store.getDevice?.(String(deviceId))?.entities || {}).find(item => item.stateKey === property);
+        const kind = entity?.expose?.type || entity?.capability?.kind;
+        const valueType = ['numeric', 'number'].includes(kind) ? 'number' : ['binary', 'boolean'].includes(kind) ? 'boolean'
+          : ['enum', 'option'].includes(kind) ? 'option' : null;
+        const constraints = entity?.capability?.constraints || {};
+        const options = constraints.options || entity?.expose?.values || [];
+        const typed = scalarFor({ valueType, constraints: { minimum: constraints.min, maximum: constraints.max,
+          options: options.map(option => typeof option === 'object' && option !== null ? option : { value: option }) } }, observedValue);
+        if (typed === null) continue;
+        observedValue = typed;
+      }
       const previousTimes = this.reportTimes.get(record.key) || [];
       if (previousTimes.length && observedMs <= previousTimes.at(-1)) continue;
       if (record.readBack?.at && observedMs < Date.parse(record.readBack.at)) continue;
