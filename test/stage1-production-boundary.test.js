@@ -630,9 +630,15 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     const initialDeviceDto = nativeSnapshot.body.data.devices.find((item) => item.id === deviceId);
     const powerControlId = initialDeviceDto?.controls.find((control) => control.semanticRole === "power")?.controlId;
     const initialPowerState = nativeSnapshot.body.data.states.find((state) => state.deviceId === deviceId && state.controlId === powerControlId);
-    assert.equal(initialPowerState?.value, false, `adapter-reported uppercase OFF normalizes to a real boolean observation; states=${JSON.stringify(nativeSnapshot.body.data.states)}`);
-    assert.equal(initialPowerState?.quality, "fresh");
-    assert.equal(initialPowerState?.analyticsActivity, "off");
+    const evidenceSnapshot = await request(base, "/api/dinodia/v1/snapshot", { headers: { ...headers, 'X-Dinodia-State-Evidence-Version': '2' } });
+    assert.equal(evidenceSnapshot.body.data.stateEvidenceVersion, 2, "new clients explicitly negotiate the evidence contract on the real authenticated snapshot route");
+    const evidencePower = evidenceSnapshot.body.data.states.find(state => state.controlId === powerControlId);
+    assert.equal(evidencePower.value, null, "a descriptor lifetime alone is not a verified reporting guarantee");
+    assert.equal(evidencePower.quality, "unknown");
+    assert.equal(initialPowerState?.value, null, 'legacy projection must not call an unproved virtual observation current');
+    assert.equal(initialPowerState?.quality, "unknown");
+    assert.equal(initialPowerState?.analyticsActivity, "unknown");
+    assert.equal(Object.hasOwn(initialPowerState, 'lastReported'), false, 'strict v1 wire shape is unchanged');
     const originalStateDevice = hub.store.getDevice(deviceId);
     const stateEntity = hub.store.state.devices[deviceId].entities[`${deviceId}:0:state`];
     stateEntity.state = "ON";
@@ -651,12 +657,12 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     assert.equal(repeatedMissingTimeState?.value, null, "a repeated snapshot cannot manufacture or extend telemetry");
     assert.equal(repeatedMissingTimeState?.quality, "unknown");
     hub.store.state.devices[deviceId] = originalStateDevice;
-    const observedAt = initialPowerState.observedAt;
-    const validUntilMs = Date.parse(initialPowerState.validUntil);
+    const observedAt = originalStateDevice.entities[`${deviceId}:0:state`].lastChanged;
+    const validUntilMs = Date.parse(observedAt) + 420000;
     controlledClock = validUntilMs - 1;
     const beforeValidityEnd = await request(base, "/api/dinodia/v1/snapshot", { headers });
     const beforeValidityState = beforeValidityEnd.body.data.states.find((state) => state.deviceId === deviceId && state.controlId === powerControlId);
-    assert.equal(beforeValidityState?.quality, "fresh", "the observation remains fresh immediately before its finite deadline");
+    assert.equal(beforeValidityState?.quality, "unknown", "being inside the old guessed window is not a reporting guarantee");
     controlledClock = validUntilMs;
     const atValidityEnd = await request(base, "/api/dinodia/v1/snapshot", { headers });
     const expiredValidityState = atValidityEnd.body.data.states.find((state) => state.deviceId === deviceId && state.controlId === powerControlId);
@@ -667,12 +673,12 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     await originalUpdateEntity(deviceId, `${deviceId}:0:state`, { state: "OFF", stateRevision: 2, lastChanged: new Date(controlledClock).toISOString(), updatedAt: new Date(controlledClock).toISOString() });
     const recoveredObservation = await request(base, "/api/dinodia/v1/snapshot", { headers });
     const recoveredState = recoveredObservation.body.data.states.find((state) => state.deviceId === deviceId && state.controlId === powerControlId);
-    assert.equal(recoveredState?.quality, "fresh", "a new genuine observation restores finite freshness");
+    assert.equal(recoveredState?.quality, "unknown", "a new point observation alone is not an ongoing reporting guarantee");
 
     // Per-value freshness (D9): a device check-in never renews an unchanged value; it expires at
     // its own deadline whether or not the device keeps checking in, and never renews while offline.
     {
-      const changedMs = Date.parse(recoveredState.observedAt);
+      const changedMs = controlledClock;
       const deviceBeforeCheckIn = hub.store.getDevice(deviceId);
       await hub.store.upsertDevice({ ...deviceBeforeCheckIn, lastSeenAt: new Date(changedMs + 300_000).toISOString() });
       controlledClock = changedMs + 500_000;
@@ -711,8 +717,8 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     const activitySnapshot = await request(base, "/api/dinodia/v1/snapshot", { headers });
     for (const fixture of activityFixtures) {
       const activityState = activitySnapshot.body.data.states.find((state) => state.deviceId === fixture.id);
-      assert.equal(activityState?.analyticsActivity, fixture.expected, `${fixture.role} comes from observed activity, not target temperature or enabled mode`);
-      assert.equal(activityState?.quality, "fresh");
+      assert.equal(activityState?.analyticsActivity, 'unknown', `${fixture.role} has no checked reporting guarantee; category alone cannot grant coverage`);
+      assert.equal(activityState?.quality, "unknown");
     }
     nativeSocket = null;
     await hub.stop();
@@ -863,9 +869,8 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     const guardedAlexaToken = alexaCommandToken(guardedAlexaClaims, keys.privateKey);
     assert.ok(verifyAlexaCommandToken(guardedAlexaToken, { publicKeys, hubId: "native-command-hub", policyRevision: 0 }));
     const guardedAlexaAccepted = await sendAlexa(guardedAlexaToken, guardedAlexaCommand);
-    assert.equal(guardedAlexaAccepted.response.status, 202, JSON.stringify(guardedAlexaAccepted.body));
-    assert.equal(guardedAlexaAccepted.body.status, "applied", "a signed expected observation revision is enforced at the OS effect boundary");
-    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON");
+    assert.equal(guardedAlexaAccepted.response.status, 409, 'a matching revision without checked currentness cannot authorize a relative adjustment');
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "OFF");
     const effectsBeforeStaleObservation = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
     const staleObservationCommand = { ...guardedAlexaCommand, commandId: "alexa-command-stale-observation-revision", value: false,
       issuedAt: new Date().toISOString(), idempotencyKey: "alexa-stale-observation-revision-0001" };
@@ -876,9 +881,16 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     const staleObservationToken = alexaCommandToken(staleObservationClaims, keys.privateKey);
     const staleObservationDenied = await sendAlexa(staleObservationToken, staleObservationCommand);
     assert.equal(staleObservationDenied.response.status, 409, "an adjustment based on an observation consumed by a prior command is denied at dispatch");
-    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "OFF");
     assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, effectsBeforeStaleObservation,
       "stale-observation denial produces zero command effects");
+    const absoluteAlexaOn = { ...guardedAlexaCommand, commandId: 'alexa-explicit-on-without-relative-baseline',
+      idempotencyKey: 'alexa-explicit-on-without-relative-baseline-0001', expectedObservationRevision: undefined };
+    const absoluteAlexaClaims = { ...alexaClaims, commandId: absoluteAlexaOn.commandId, idempotencyKey: absoluteAlexaOn.idempotencyKey,
+      valueDigest: crypto.createHash('sha256').update(JSON.stringify(true), 'utf8').digest('hex'), jti: 'alexa-explicit-on-unproved-state',
+      issuedAt: Math.floor(Date.now() / 1000), expiresAt: Math.floor(Date.now() / 1000) + 15 };
+    assert.equal((await sendAlexa(alexaCommandToken(absoluteAlexaClaims, keys.privateKey), absoluteAlexaOn)).response.status, 202,
+      'an explicit absolute request remains available without inventing a current relative baseline');
     const stateClaims = {
       accountId: "account-command-tenant", linkId: "alexa-link-native-test", endpointId: "dos_NativeAlexaEndpoint0000000001",
       homeId: command.homeId, membershipId: command.homeMembershipId, hubInstallationId: "native-command-hub",
@@ -893,6 +905,8 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     assert.equal(alexaState.body.endpointId, stateClaims.endpointId);
     assert.equal(alexaState.body.descriptorRevision, dto.descriptorRevision);
     assert.equal(alexaState.body.states.every((state) => state.deviceId === deviceId && state.controlId === power.controlId), true);
+    assert.equal(alexaState.body.states.every(state => state.quality === 'unknown' && state.value === null), true,
+      'linked tenant Alexa uses the same evidence admission even without analytics enabled');
     assert.equal(JSON.stringify(alexaState.body).includes("tenantOwnerMembershipId"), false, "ReportState returns only the bound native observation, not device metadata");
     const alteredState = await request(base, "/api/dinodia/v1/alexa/state", { method: "POST",
       headers: { authorization: `Bearer ${alexaStateBearer}` }, body: JSON.stringify({ deviceId, controlIds: [lock.controlId] }) });
@@ -900,7 +914,7 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     const alexaStateGenericRead = await request(base, "/api/dinodia/v1/snapshot", { headers: { authorization: `Bearer ${alexaStateBearer}` } });
     assert.equal(alexaStateGenericRead.response.status, 401, "Alexa state authority cannot read a household snapshot");
     const afterAlexaEffects = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
-    assert.equal(afterAlexaEffects, beforeAlexaEffects + 2);
+    assert.equal(afterAlexaEffects, beforeAlexaEffects + 2, 'only the two explicit absolute Alexa requests dispatched');
     const alexaRetry = await sendAlexa(alexaToken);
     assert.equal(alexaRetry.response.status, 202);
     assert.equal(alexaRetry.body.commandId, alexaCommand.commandId);
@@ -916,7 +930,7 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     const alexaExpired = alexaCommandToken({ ...alexaClaims, commandId: "alexa-command-expired", idempotencyKey: "alexa-command-expired-idempotency-0001", issuedAt: now - 30, expiresAt: now - 1 }, keys.privateKey);
     const expiredResult = await sendAlexa(alexaExpired, { ...alexaCommand, commandId: "alexa-command-expired", idempotencyKey: "alexa-command-expired-idempotency-0001" });
     assert.equal(expiredResult.response.status, 401, "an expired Alexa delegation is rejected before effect");
-    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON", "denied Alexa attempts preserve the last state committed by the revision-bound command");
+    assert.equal(hub.store.getDevice(deviceId).entities[`${deviceId}:0:state`].state, "ON", "denied Alexa attempts preserve the last state committed by the absolute command");
     assert.equal(hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length, afterAlexaEffects, "altered, wrong-area, wrong-route and expired delegation attempts have zero dispatch effects");
     const commandReceipt = await request(base, `/api/dinodia/v1/commands/${encodeURIComponent(command.commandId)}`, { headers });
     assert.equal(commandReceipt.response.status, 200);

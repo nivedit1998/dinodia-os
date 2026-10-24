@@ -4,6 +4,7 @@ const WebSocket = require("ws");
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { resolveStateEvidence } = require('./observation/stateEvidence');
 const os = require("node:os");
 const net = require("node:net");
 const { EventEmitter } = require("node:events");
@@ -669,11 +670,13 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       notifyDeviceChanged(...args),
       "MQTT device projection",
     ),
+    clock,
     logger,
   });
   // Hub-managed observation policy: keeps approved devices' reporting configured and verified.
   const observationPolicy = new ObservationReconciler({
     store: hubStore,
+    clock,
     publishBridgeRequest: (requestPath, payload) => mqtt.bridgeRequest(requestPath, payload),
     resolveDeviceId: (value) => mqtt.resolveDeviceId(value),
     logger,
@@ -1137,7 +1140,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       nodeEnv: runtimeConfig.nodeEnv,
       kind: "dinodia_os",
       version: VERSION,
-      capabilities: { managedAreaProvisioningV1: true, managedDevicePresentationV1: true, activityIncidentReportingV1: true, alexaNativeProjectionV1: true, alexaNativeDirectiveV1: true, nativeTenantAutomationProjectionV1: true, nativeUniversalAnalyticsV2: true,
+      capabilities: { managedAreaProvisioningV1: true, managedDevicePresentationV1: true, activityIncidentReportingV1: true, alexaNativeProjectionV1: true, alexaNativeDirectiveV1: true, nativeTenantAutomationProjectionV1: true, nativeUniversalAnalyticsV2: true, nativeStateEvidenceV2: true,
         ...runtimeConfig.nativeCommissioningCapabilities },
     },
     getAreaSnapshot: () => ({ schemaVersion: 1, capturedAt: new Date().toISOString(), areas: hubStore.listAreas().map((area) => ({ areaId: area.id, name: area.name })) }),
@@ -1426,7 +1429,7 @@ function nativeDeviceView(principal, device) {
     return nativeEventQueue;
   }
 
-  function nativeControlStates(principal, devices, onlyDeviceId = null) {
+  function nativeControlStates(principal, devices, onlyDeviceId = null, evidenceVersion = 1) {
     const now = Number(clock());
     const states = [];
     for (const dto of devices) {
@@ -1473,7 +1476,7 @@ function nativeDeviceView(principal, device) {
         if (isExpired) value = null;
         const activityRole = ["power", "active_heat_demand", "active_heat_production"].includes(control.semanticRole);
         const analyticsActivity = activityRole && typeof value === "boolean" ? (value ? "on" : "off") : "unknown";
-        const availability = source.availability === "offline" || source.online === false ? "offline" : value === null ? "unknown" : "online";
+        const availability = source.available === false || source.availability === "offline" || source.online === false ? "offline" : value === null ? "unknown" : "online";
         const state = {
           deviceId: dto.id, controlId: control.controlId, homeId: dto.homeId,
           descriptorRevision: dto.descriptorRevision,
@@ -1481,7 +1484,21 @@ function nativeDeviceView(principal, device) {
           observedAt, receivedAt, quality, value, validUntil: Number.isFinite(validUntilMs) ? new Date(Math.max(validUntilMs, effectiveObservedMs + 1)).toISOString() : null,
           deviceAvailability: availability, analyticsActivity,
         };
-        if (validateNativeControlState(state, dto, control)) states.push(state);
+        if (validateNativeControlState(state, dto, control)) {
+          // Currentness is a live-state contract, never an analytics opt-in.
+          // Legacy consumers keep their strict v1 shape, but not guessed freshness.
+            const evidence = resolveStateEvidence({ device: { ...source, managementClass: dto.managementClass,
+              ownerMembershipId: dto.ownerMembershipId }, control, entity,
+              records: hubStore.getObservationPolicyRecords?.() || {},
+              sourceGeneration: hubStore.syncSourceGeneration ?? principal.identityGeneration,
+              authorityValid: true, clockTrusted: hubStore.getUsageHistoryClockStatus?.(now)?.trusted === true,
+              runtimeSessionId: hubStore.observationSessionId, now });
+            const current = { ...state, value: evidence.value, quality: evidence.quality,
+              observedAt: evidence.observedAt, receivedAt: evidence.receivedAt, validUntil: evidence.validUntil,
+              analyticsActivity: activityRole && typeof evidence.value === 'boolean' ? evidence.value ? 'on' : 'off' : 'unknown' };
+            states.push(evidenceVersion === 2 ? { ...current, stateEvidenceVersion: 2,
+              lastReported: evidence.lastReported, evidence: evidence.evidence } : current);
+        }
       }
     }
     return states;
@@ -1730,7 +1747,7 @@ function nativeDeviceView(principal, device) {
         if (!dto) return;
         revision = dto.descriptorRevision;
         if (record.kind === "state") {
-          data = nativeControlStates(principal, [dto]).find((state) => state.controlId === String(record.controlId));
+          data = nativeControlStates(principal, [dto], null, client.stateEvidenceVersion || 1).find((state) => state.controlId === String(record.controlId));
           if (!data) return;
         } else {
           data = { schemaVersion: "dinodia.v1", homeId: dto.homeId, deviceId: dto.id, catalogRevision: dto.descriptorRevision, controls: dto.controls, deletedControlIds: Array.isArray(record.deletedControlIds) ? record.deletedControlIds : [] };
@@ -2304,7 +2321,11 @@ function nativeDeviceView(principal, device) {
       await rememberNativeCatalog(devices);
       let data;
       if (pathname === "/api/dinodia/v1/snapshot") {
-        data = { areas: nativeAreasFor(scopedPrincipal), devices, states: nativeControlStates(scopedPrincipal, devices) };
+        const requested = req.headers['x-dinodia-state-evidence-version'];
+        if (requested !== undefined && !['1', '2'].includes(requested)) return nativeContractError(res, 400, 'VALIDATION_FAILED', 'Unsupported state evidence version');
+        const version = requested === '2' ? 2 : 1;
+        data = { areas: nativeAreasFor(scopedPrincipal), devices, states: nativeControlStates(scopedPrincipal, devices, null, version),
+          ...(version === 2 ? { stateEvidenceVersion: 2 } : {}) };
       } else if (pathname === "/api/dinodia/v1/areas") {
         data = nativeAreasFor(scopedPrincipal);
       } else if (pathname === "/api/dinodia/v1/control-catalog") {
@@ -4827,6 +4848,10 @@ function nativeDeviceView(principal, device) {
       return;
     }
     if (url.pathname === "/api/dinodia/v1/events") {
+      if (req.headers['x-dinodia-state-evidence-version'] != null
+        && !['1', '2'].includes(req.headers['x-dinodia-state-evidence-version'])) {
+        socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"); return;
+      }
       const token = bearerToken(req);
       let principal = appSessionAuth(token);
       let offline = false;
@@ -4856,7 +4881,8 @@ function nativeDeviceView(principal, device) {
       const platformHomeId = String(hubStore.getPlatform?.()?.homeId || "");
       if (platformHomeId && principal.homeId !== platformHomeId) { socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n"); return; }
       nativeEventServer.handleUpgrade(req, socket, head, (clientSocket) => {
-        const client = { socket: clientSocket, token, principal, offline };
+        const client = { socket: clientSocket, token, principal, offline,
+          stateEvidenceVersion: req.headers['x-dinodia-state-evidence-version'] === '2' ? 2 : 1 };
         nativeEventClients.add(client);
         clientSocket.once("close", () => { nativeEventClients.delete(client); clearInterval(client.authTimer); });
         const security = hubStore.getSecurity?.() || {};

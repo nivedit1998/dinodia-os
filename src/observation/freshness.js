@@ -5,8 +5,8 @@
 function unknownReason({ nowMs, hubRunning = true, clockTrusted = true, deviceAvailable, deviceLastSeenMs, valueObservedMs, valueValidUntilMs, reachabilityWindowSeconds }) {
   if (!hubRunning) return "hub_not_running";
   if (!clockTrusted) return "clock_not_trusted";
-  if (Number.isSafeInteger(valueObservedMs) && Number.isSafeInteger(valueValidUntilMs) && valueObservedMs <= nowMs && nowMs < valueValidUntilMs) return null;
   if (deviceAvailable === false) return "device_unreachable";
+  if (Number.isSafeInteger(valueObservedMs) && Number.isSafeInteger(valueValidUntilMs) && valueObservedMs <= nowMs && nowMs < valueValidUntilMs) return null;
   const window = Number.isSafeInteger(reachabilityWindowSeconds) && reachabilityWindowSeconds > 0 ? reachabilityWindowSeconds * 1000 : 0;
   const reachable = Number.isSafeInteger(deviceLastSeenMs) && window > 0 && nowMs - deviceLastSeenMs <= window;
   if (!Number.isSafeInteger(valueObservedMs)) return reachable ? "value_never_reported" : "device_unreachable";

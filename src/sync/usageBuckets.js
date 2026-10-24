@@ -85,7 +85,7 @@ function addInterval(state, source, startMs, endMs, activity) {
         controlId: source.controlId,
         bucketStart: new Date(start).toISOString(),
         sourceGeneration: source.sourceGeneration,
-        ...(source.bindingRevision > 0 ? { bindingRevision: source.bindingRevision, analyticsIntervalId: source.analyticsIntervalId, analyticsPolicyVersion: 2 } : {}),
+        ...(source.bindingRevision > 0 ? { bindingRevision: source.bindingRevision, analyticsIntervalId: source.analyticsIntervalId, analyticsPolicyVersion: source.analyticsPolicyVersion || 2 } : {}),
         revision: 0,
         onSeconds: 0,
         offSeconds: 0,
@@ -231,7 +231,7 @@ function observeUsage(stateValue, input) {
   const source = {
     osDeviceId: String(input.osDeviceId), osAreaId: String(input.osAreaId), category: input.category,
     controlId: String(input.controlId), sourceGeneration: input.sourceGeneration,
-    ...(input.bindingRevision > 0 ? { bindingRevision: input.bindingRevision, analyticsIntervalId: input.analyticsIntervalId, analyticsPolicyVersion: 2 } : {}),
+    ...(input.bindingRevision > 0 ? { bindingRevision: input.bindingRevision, analyticsIntervalId: input.analyticsIntervalId, analyticsPolicyVersion: input.analyticsPolicyVersion || 2 } : {}),
     activity: input.activity, lastObservedAt: new Date(observedAt).toISOString(),
     accountedThroughAt: new Date(observedAt).toISOString(),
     validUntil: validUntil === null ? null : new Date(validUntil).toISOString(),

@@ -133,7 +133,10 @@ function validateCloudConfiguration(value, current = {}) {
   for (const policy of value.devicePolicies) {
     if (policy.analyticsInterval !== undefined) {
       const interval = policy.analyticsInterval;
-      if (!interval || Object.keys(interval).sort().join('|') !== ['id', 'revision', 'validFrom', 'sourceGeneration', 'selectedControlId', 'writerEnabled', 'genericCollectionEnabled', 'authorizedControlIds'].sort().join('|')
+      const keys = ['id', 'revision', 'validFrom', 'sourceGeneration', 'selectedControlId', 'writerEnabled', 'genericCollectionEnabled', 'authorizedControlIds'];
+      if (interval?.analyticsPolicyVersion !== undefined) keys.push('analyticsPolicyVersion');
+      if (!interval || Object.keys(interval).sort().join('|') !== keys.sort().join('|')
+        || interval.analyticsPolicyVersion !== undefined && ![2, 3].includes(interval.analyticsPolicyVersion)
         || !UUID.test(String(interval.id)) || !Number.isSafeInteger(interval.revision) || interval.revision < 1
         || !UTC.test(String(interval.validFrom)) || !Number.isFinite(Date.parse(interval.validFrom))
         || !Number.isSafeInteger(interval.sourceGeneration) || interval.sourceGeneration < 1

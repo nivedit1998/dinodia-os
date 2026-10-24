@@ -239,6 +239,41 @@
       },
       "additionalProperties": false
     },
+    "controlStateEvidence2": {
+      "type": "object",
+      "required": ["stateEvidenceVersion", "deviceId", "controlId", "homeId", "descriptorRevision", "revision", "observedAt", "receivedAt", "quality", "value", "validUntil", "deviceAvailability", "analyticsActivity", "lastReported", "evidence"],
+      "properties": {
+        "stateEvidenceVersion": { "const": 2 },
+        "deviceId": { "$ref": "#/$defs/id" }, "controlId": { "$ref": "#/$defs/id" }, "homeId": { "$ref": "#/$defs/id" },
+        "descriptorRevision": { "type": "integer", "minimum": 0 }, "revision": { "type": "integer", "minimum": 0 },
+        "observedAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+        "receivedAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+        "validUntil": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+        "quality": { "$ref": "#/$defs/quality" }, "value": {},
+        "deviceAvailability": { "enum": ["online", "offline", "unknown"] },
+        "analyticsActivity": { "enum": ["on", "off", "unknown"] },
+        "lastReported": { "anyOf": [{ "type": "null" }, {
+          "type": "object", "additionalProperties": false,
+          "required": ["value", "observedAt", "receivedAt", "observationId", "sourceKey", "sourceGeneration", "provenance"],
+          "properties": {
+            "value": {}, "observedAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }, "receivedAt": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+            "observationId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "sourceKey": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "sourceGeneration": { "type": "integer", "minimum": 1 },
+            "provenance": { "enum": ["device_report", "device_read", "provider_read", "integration_snapshot"] }
+          }
+        }] },
+        "evidence": {
+          "type": "object", "additionalProperties": false, "required": ["status", "guaranteeId", "policyRevision"],
+          "properties": {
+            "status": { "enum": ["verified", "no_observation", "clock_untrusted", "device_offline", "no_verified_guarantee", "unsupported_guarantee", "expired", "descriptor_limit", "timestamp_unavailable"] },
+            "guaranteeId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+            "policyRevision": { "const": 3 }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "membership": {
       "type": "object",
       "required": [

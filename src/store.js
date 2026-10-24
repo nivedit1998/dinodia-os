@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { resolveStateEvidence, exactSource, scalarFor } = require('./observation/stateEvidence');
 const { AsyncLocalStorage } = require("node:async_hooks");
 const { isDeepStrictEqual } = require("node:util");
 const { resolveCategoryBinding } = require("./analytics/resolveBinding");
@@ -201,7 +202,7 @@ function bucketEventProjection(bucket) {
     coverageStartAt: bucket.coverageStartAt, coverageEndAt: bucket.coverageEndAt,
     revision: bucket.revision, onSeconds: bucket.onSeconds, offSeconds: bucket.offSeconds,
     unknownSeconds: bucket.unknownSeconds, closedAt: bucket.closedAt, purgeAt: bucket.purgeAt,
-    ...(bucket.bindingRevision > 0 ? { bindingRevision: bucket.bindingRevision, analyticsPolicyVersion: 2, analyticsIntervalId: bucket.analyticsIntervalId } : {}),
+    ...(bucket.bindingRevision > 0 ? { bindingRevision: bucket.bindingRevision, analyticsPolicyVersion: bucket.analyticsPolicyVersion || 2, analyticsIntervalId: bucket.analyticsIntervalId } : {}),
   };
 }
 
@@ -265,6 +266,10 @@ function freezeObservationDeadlines(previous, next) {
     // sample. The next genuine observation takes the newly configured lifetime.
     const deadline = Number.isFinite(saved) ? Math.min(saved, computed) : computed;
     entity.sourceValidUntil = Number.isFinite(deadline) ? new Date(deadline).toISOString() : null;
+    if (entity.lastReported?.observedAt === observed && Number.isFinite(deadline)) {
+      const retainedDeadline = Date.parse(String(entity.lastReported.validUntil || ''));
+      entity.lastReported.validUntil = new Date(Number.isFinite(retainedDeadline) ? Math.min(retainedDeadline, deadline) : deadline).toISOString();
+    }
   }
 }
 
@@ -310,6 +315,7 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
   }) });
   const interval = policy.analyticsInterval;
   const versionTwo = interval?.writerEnabled === true;
+  const evidencePolicy = versionTwo && interval.analyticsPolicyVersion === 3;
   if (!versionTwo && Object.values(usage.sources).some(source => source.osDeviceId === deviceId && source.bindingRevision > 0)) return false;
   const selectedUsageControls = binding.status === "resolved"
     ? usageControls.filter(control => control.controlId === binding.primaryControlId) : [];
@@ -323,16 +329,25 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
     if (!entity || !observedAt) continue;
     const observedMs = Date.parse(observedAt);
     if (versionTwo && (interval.sourceGeneration !== generation || observedMs < Math.max(Date.parse(interval.validFrom), Date.parse(policy.analyticsStartAt || interval.validFrom)))) continue;
-    if (observedMs > nowMs || nowMs - observedMs > 30 * 60 * 1000) continue;
-    const validUntil = new Date(observationDeadline(entity, observedMs, control.maxStateValiditySeconds)).toISOString();
-    const scalar = currentEntityValue(entity);
+    if (observedMs > nowMs || !evidencePolicy && nowMs - observedMs > 30 * 60 * 1000) continue;
+    const admission = entity.admittedEvidence;
+    const evidence = evidencePolicy && admission?.quality === 'fresh' && admission.observedAt === observedAt
+      && admission.sourceGeneration === generation && admission.controlId === control.controlId
+      && admission.sourceKey === exactSource(device, entity, control, generation).sourceKey
+      ? admission : evidencePolicy ? resolveStateEvidence({ device, control, entity,
+      records: state.observationPolicy?.records || {}, sourceGeneration: generation,
+      authorityValid: true, clockTrusted: true, now: nowMs }) : null;
+    const validUntil = evidencePolicy ? evidence.validUntil || new Date(observedMs + 1).toISOString()
+      : new Date(observationDeadline(entity, observedMs, control.maxStateValiditySeconds)).toISOString();
+    const scalar = evidencePolicy && evidence?.quality === 'fresh' ? evidence.value : currentEntityValue(entity);
     const normalized = activityFor({ category: policy.analyticsCategory, role, value: scalar });
     const value = role === "brightness" ? scalar : normalized === "on" ? true : normalized === "off" ? false : null;
     // Generation admission above is supplied only while the caller's history clock is trusted.
-    const activity = projectActivity({ binding, sample: { controlId: control.controlId, value, observedAt, validUntil, quality: "fresh" },
-      nowMs, authorityValid: true, clockTrusted: true, deviceAvailable: device.available });
+    const activity = projectActivity({ binding, sample: { controlId: control.controlId, value, observedAt, validUntil, quality: evidencePolicy ? evidence.quality : "fresh" },
+      nowMs: evidencePolicy && evidence?.quality === 'fresh' ? observedMs : nowMs,
+      authorityValid: true, clockTrusted: true, deviceAvailable: device.available });
     // Expiry advances through existing accounting; never rewrite an old timestamp as Unknown.
-    if (Date.parse(validUntil) <= nowMs) continue;
+    if (!evidencePolicy && Date.parse(validUntil) <= nowMs) continue;
     if (!observedAt || !validUntil || !activity) continue;
     if (Number.isSafeInteger(options.ignoreThroughMs) && Date.parse(observedAt) <= options.ignoreThroughMs) continue;
     const prior = usage.sources[[deviceId, policy.analyticsCategory, String(control.controlId), generation, ...(versionTwo ? [interval.revision] : [])].join("|")];
@@ -348,7 +363,7 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
       category: policy.analyticsCategory,
       controlId: String(control.controlId),
       sourceGeneration: generation,
-      ...(versionTwo ? { bindingRevision: interval.revision, analyticsIntervalId: interval.id, analyticsPolicyVersion: 2 } : {}),
+      ...(versionTwo ? { bindingRevision: interval.revision, analyticsIntervalId: interval.id, analyticsPolicyVersion: evidencePolicy ? 3 : 2 } : {}),
       activity,
       observedAt,
       validUntil,
@@ -370,7 +385,13 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
       const value = currentEntityValue(entity);
       if (!observedAt || typeof value !== "number" || !Number.isFinite(value) || value < -50 || value > 80) continue;
       const observedMs = Date.parse(observedAt);
-      const validUntil = observedMs + Math.min(30 * 60 * 1000, control.maxStateValiditySeconds * 1000);
+      const admission = entity.admittedEvidence;
+      const checked = evidencePolicy && admission?.policyRevision === 3 && admission.sourceGeneration === generation
+        && admission.observedAt === observedAt && admission.controlId === control.controlId
+        && admission.sourceKey === exactSource(device, entity, control, generation).sourceKey
+        && admission.quality === 'fresh' && Number.isFinite(Date.parse(admission.validUntil));
+      const validUntil = evidencePolicy ? checked ? Date.parse(admission.validUntil) : observedMs
+        : observedMs + Math.min(30 * 60 * 1000, control.maxStateValiditySeconds * 1000);
       // Current freshness expires at validUntil, but a delayed signed sync may
       // still carry legitimate historical evidence for the bounded retention
       // period. Do not replace source time with queue/delivery time.
@@ -382,7 +403,8 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
       const sample = enqueueSyncEventInState(state, "temperature.sample", sourceEventKey, {
         osDeviceId: deviceId, osAreaId: String(device.areaId || ""), controlId: String(control.controlId),
         sourceGeneration: generation, sourceEventKey, temperature: Math.round(value * 100) / 100,
-        sourceObservedAt: observedAt, validUntil: new Date(validUntil).toISOString(), quality: "fresh",
+        sourceObservedAt: observedAt, validUntil: new Date(validUntil).toISOString(), quality: evidencePolicy && !checked ? "unknown" : "fresh",
+        ...(evidencePolicy ? { analyticsPolicyVersion: 3 } : {}),
       }, { now: nowMs });
       if (sample) {
         usage.temperatureQueuedKeys = [...usage.temperatureQueuedKeys, sourceEventKey].slice(-1024);
@@ -1154,6 +1176,14 @@ function mergeEntities(existing, incoming, deviceId, state, options = {}) {
       id: entityId,
       sourceId: String(entity.sourceId || previous.sourceId || entityId),
       sourceLifetimeSeconds: candidateIsNewer ? options.sourceLifetimeSecondsByStateKey?.[mappedObservationKey] ?? null : previous.sourceLifetimeSeconds ?? null,
+      sourceGeneration: candidateIsNewer ? options.sourceGeneration ?? null : previous.sourceGeneration ?? null,
+      stateEvidenceTiming: previous.stateEvidenceTiming || null,
+      lastReported: candidateIsNewer ? {
+        value: clone(nextState), observedAt: candidateSourceObservedAt, receivedAt: candidateSourceReceivedAt || null,
+        sourceGeneration: options.sourceGeneration ?? null,
+        revision: Math.max(0, Number(previous.stateRevision) || 0) + 1,
+        provenance: 'device_report',
+      } : previous.lastReported || null,
       deviceId: String(entity.deviceId || previous.deviceId || deviceId),
       stateKey,
       endpointId,
@@ -1217,6 +1247,7 @@ class Store {
     this.durabilityUncertain = false;
     this.state = this.load();
     this.syncSourceGeneration = null;
+    this.observationSessionId = crypto.randomUUID();
     // Offline history: the last moment this Hub recorded itself running (written every minute and
     // at shutdown). Time after it, until the next trusted reading, is Unknown.
     this.usageAliveFile = `${filePath}.alive.json`;
@@ -1621,6 +1652,7 @@ class Store {
       areaId: device.areaId === undefined ? (existing.areaId || null) : (device.areaId ? String(device.areaId) : null),
       entities: mergeEntities(existing.entities, device.entities, id, { ...(existing.state || {}), ...(device.state || {}) }, {
         ...options,
+        sourceGeneration: this.syncSourceGeneration,
         protectedControlIds,
         reportedStateKeys: options.reportedStateKeys || Object.keys(device.state || {}),
         adapterReport: Array.isArray(options.reportedStateKeys),
@@ -1628,6 +1660,9 @@ class Store {
       available: device.available === undefined ? existing.available !== false : Boolean(device.available),
       updatedAt: new Date().toISOString(),
     };
+    // Assigned only by the Store. Re-pairing the same radio identity cannot
+    // inherit proof or late callbacks from a removed device lifecycle.
+    next.stateEvidenceLifecycleId = existing.stateEvidenceLifecycleId || crypto.randomUUID();
     next.setup = normalizeSetup(device.setup || existing.setup, { status: "needs_setup", reason: "area_and_label_required" });
     const canonicalRestoreRevision = options.canonicalPropertyRestore === true && !existing.id
       && this.state.platform?.devicePolicies?.[id]?.managementClass === "PROPERTY_DEVICE"
@@ -1641,9 +1676,88 @@ class Store {
       descriptorRevision: canonicalRestoreRevision,
       sourceFingerprint: sourceFingerprint(next),
     } : null);
+    // Value typing is universal, not gated by property analytics enrollment.
+    // The synthetic validation scope is internal only and grants no API access.
+    const validationArea = String(next.areaId || 'state-validation');
+    const validationPolicy = options.devicePolicy || this.state.platform?.devicePolicies?.[id];
+    const privateOwner = validationPolicy?.managementClass === 'TENANT_DEVICE'
+      ? validationPolicy.ownerMembershipId : next.tenantOwnerMembershipId;
+    const validationDevice = { ...next, areaId: validationArea,
+      ...(privateOwner ? { managementClass: 'tenant_device', tenantOwnerMembershipId: privateOwner } : {}) };
+    const retainedControls = serializeDevice({ device: validationDevice, homeId: String(this.state.platform?.homeId || 'state-validation'),
+      homeMembershipId: String(privateOwner || 'state-validation'), role: 'TENANT', areaIds: [validationArea],
+      surfaces: Object.values(next.entities || {}).slice(0, 64).map((entity, index) => ({ id: `state-validation-${index}`,
+        sourceEntityIds: [entity.id], name: entity.name || 'Reported value' })),
+      revision: Number(validationDevice.presentation?.descriptorRevision || 1) })?.controls || [];
+    for (const entity of Object.values(next.entities || {})) {
+      const prior = Object.values(existing.entities || {}).find(item => item.id === entity.id);
+      const retainedControl = retainedControls.find(item => item.controlId === entity.capability?.controlId);
+      if (entity.lastReported && entity.sourceObservedAt && entity.sourceObservedAt !== prior?.sourceObservedAt
+        && retainedControl && scalarFor(retainedControl, entity.lastReported.value) === null) {
+        entity.lastReported = prior?.lastReported || null;
+        entity.sourceObservedAt = null; entity.sourceReceivedAt = null; entity.sourceKey = null;
+        entity.admittedEvidence = { quality: 'unknown', observedAt: null, validUntil: null, policyRevision: 3 };
+      }
+      if (['matter', 'hive', 'google_nest'].includes(next.protocol) && !entity.sourceObservedAt) {
+        const sourceKey = exactSource(next, entity, {
+          controlId: entity.capability?.controlId, semanticRole: entity.capability?.semanticRole,
+        }, this.syncSourceGeneration).sourceKey;
+        const oldSnapshot = prior?.integrationSnapshot;
+        // Retain provider-supplied values without pretending snapshot receipt is
+        // a physical report time. A changed binding cannot inherit old values.
+        entity.integrationSnapshot = oldSnapshot && oldSnapshot.sourceKey !== sourceKey && isDeepStrictEqual(entity.state, prior?.state)
+          ? null : { value: currentEntityValue(entity) === undefined ? null : clone(currentEntityValue(entity)), observedAt: null, receivedAt: null,
+            sourceKey, sourceGeneration: this.syncSourceGeneration, provenance: 'integration_snapshot' };
+      }
+      if (entity.lastReported && entity.sourceObservedAt && entity.sourceObservedAt !== prior?.sourceObservedAt) {
+        entity.lastReported.sourceKey = exactSource(next, entity, {
+          controlId: entity.capability?.controlId, semanticRole: entity.capability?.semanticRole,
+        }, this.syncSourceGeneration).sourceKey;
+        entity.sourceKey = entity.lastReported.sourceKey;
+      }
+    }
+    // A newly received sample can establish a wider descriptor ceiling only
+    // using the exact checked proof. Existing samples retain their frozen deadline.
+    const priorControls = nativeSyncControlCatalogProjection(this.state, next)?.controls || [];
+    for (const entity of Object.values(next.entities || {})) {
+      const prior = Object.values(existing.entities || {}).find(item => item.id === entity.id);
+      if (!entity.sourceObservedAt || entity.sourceObservedAt === prior?.sourceObservedAt) continue;
+      const control = priorControls.find(item => item.controlId === entity.capability?.controlId);
+      if (!control) continue;
+      const timingProof = resolveStateEvidence({ device: next, control: { ...control, maxStateValiditySeconds: 65595 },
+        entity: { ...entity, admittedEvidence: undefined, sourceValidUntil: new Date(Date.parse(entity.sourceObservedAt) + 65595000).toISOString(),
+          lastReported: entity.lastReported ? { ...entity.lastReported, validUntil: new Date(Date.parse(entity.sourceObservedAt) + 65595000).toISOString() } : null },
+        records: this.state.observationPolicy?.records || {}, sourceGeneration: this.syncSourceGeneration,
+        authorityValid: true, clockTrusted: this.isUsageClockTrusted(Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now()),
+        runtimeSessionId: this.observationSessionId, now: Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now() });
+      if (timingProof.quality === 'fresh') entity.stateEvidenceTiming = { version: 2,
+        maximumReportInterval: Math.round((Date.parse(timingProof.validUntil) - Date.parse(entity.sourceObservedAt)) / 1000) - 60 };
+      if (entity.lastReported) entity.lastReported.sourceKey = exactSource(next, entity, control, this.syncSourceGeneration).sourceKey;
+    }
     next.presentation = buildPresentation({ ...next, presentation: previousPresentation });
     freezeObservationDeadlines(existing, next);
     const observationNow = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
+    const admissionControls = nativeSyncControlCatalogProjection(this.state, next)?.controls || [];
+    // Admit only a newly received genuine observation. Later proof or upload time cannot
+    // retrospectively lengthen/promote it; the frozen admission survives original-hour replay.
+    for (const entity of Object.values(next.entities || {})) {
+      const previous = Object.values(existing.entities || {}).find(item => item.id === entity.id);
+      if (next.available === false || next.online === false || next.availability === 'offline') {
+        entity.admittedEvidence = { quality: 'unavailable', observedAt: entity.sourceObservedAt || null,
+          validUntil: null, policyRevision: 3 };
+        continue;
+      }
+      if (!entity.sourceObservedAt || previous?.sourceObservedAt === entity.sourceObservedAt) continue;
+      const control = admissionControls.find(item => item.controlId === entity.capability?.controlId);
+      if (!control) { entity.admittedEvidence = null; continue; }
+      const admitted = resolveStateEvidence({ device: next, control, entity: { ...entity, admittedEvidence: undefined },
+        records: this.state.observationPolicy?.records || {}, sourceGeneration: this.syncSourceGeneration,
+        authorityValid: true, clockTrusted: this.isUsageClockTrusted(observationNow), runtimeSessionId: this.observationSessionId, now: observationNow });
+      entity.admittedEvidence = { quality: admitted.quality, value: admitted.value,
+        observedAt: entity.sourceObservedAt, validUntil: admitted.validUntil, sourceGeneration: this.syncSourceGeneration,
+        controlId: entity.capability?.controlId, sourceKey: admitted.lastReported?.sourceKey || null,
+        guaranteeId: admitted.evidence.guaranteeId, policyRevision: 3 };
+    }
     if (options.devicePolicy && typeof options.devicePolicy === "object" && !Array.isArray(options.devicePolicy)) {
       this.state.platform = this.state.platform || initialState().platform;
       this.state.platform.devicePolicies = { ...(this.state.platform.devicePolicies || {}), [id]: clone(options.devicePolicy) };
@@ -1804,6 +1918,9 @@ class Store {
     }
     const before = this.snapshot();
     delete this.state.devices[resolvedId];
+    for (const [key, record] of Object.entries(this.state.observationPolicy?.records || {})) {
+      if (record.deviceId === resolvedId) delete this.state.observationPolicy.records[key];
+    }
     for (const [alias, target] of Object.entries(this.state.aliases || {})) {
       if (references.has(String(alias)) || references.has(String(target))) delete this.state.aliases[alias];
     }
