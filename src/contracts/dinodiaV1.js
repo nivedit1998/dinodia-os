@@ -187,7 +187,8 @@ function serializeDevice({ device, homeId, homeMembershipId, role, areaIds, surf
       const valueType = protocolType === 'numeric' ? 'number' : protocolType === 'binary' ? 'boolean'
         : protocolType === 'enum' ? 'option' : protocolType === 'button' ? 'invoke'
           : protocolType === 'text' ? 'text'
-            : kind === 'binary' ? 'boolean' : kind === 'number' ? 'number' : kind === 'enum' ? 'option' : kind === 'button' || kind === 'event' ? 'invoke' : 'text';
+            : kind === 'binary' ? 'boolean' : kind === 'number' || kind === 'sensor' && nativeRole === 'ambient_temperature' ? 'number'
+              : kind === 'enum' ? 'option' : kind === 'button' || kind === 'event' ? 'invoke' : 'text';
       const rawConstraints = isObject(capability.constraints) ? capability.constraints : {};
       const rawOptions = Array.isArray(rawConstraints.options) ? rawConstraints.options : Array.isArray(source.expose?.values) ? source.expose.values : [];
       const options = rawOptions.map((option) => isObject(option) && Object.hasOwn(option, 'value')

@@ -27,7 +27,7 @@ function scalarFor(control, raw) {
     return (Number.isFinite(bounds.minimum) && raw < bounds.minimum) || (Number.isFinite(bounds.maximum) && raw > bounds.maximum) ? null : raw;
   }
   if (control.valueType === 'option') return control.constraints?.options?.some(option => Object.is(option.value, raw)) ? raw : null;
-  if (control.valueType === 'text') return typeof raw === 'string' && Array.from(raw).length <= 128 ? raw : null;
+  if (control.valueType === 'text') return typeof raw === 'string' && Array.from(raw).length <= 128 && !/[\u0000-\u001f\u007f]/.test(raw) ? raw : null;
   return null;
 }
 function exactSource(device, entity, control, generation) {
@@ -37,7 +37,7 @@ function exactSource(device, entity, control, generation) {
   const endpoint = cluster ? resolvedEndpoint(device, entity, cluster) : String(entity.endpointId ?? entity.binding?.endpoint ?? '');
   const property = String(entity.stateKey || entity.binding?.property || '');
   const sourceKey = crypto.createHash('sha256').update(JSON.stringify([
-    generation, device.protocol, device.id, control.controlId, endpoint, property, cluster || null, attribute || null,
+    generation, device.stateEvidenceLifecycleId || null, device.protocol, device.id, control.controlId, endpoint, property, cluster || null, attribute || null,
   ])).digest('hex');
   return { endpoint, property, cluster, attribute, sourceKey };
 }
@@ -51,7 +51,7 @@ function resolveStateEvidence({ device, control, entity, records = [], sourceGen
   if (!authorityValid || !device || !control || !entity) return output;
   if (!Number.isSafeInteger(sourceGeneration) || sourceGeneration < 1) return output;
   const source = exactSource(device, entity, control, sourceGeneration);
-  const saved = entity.lastReported;
+  const saved = entity.lastReported || entity.integrationSnapshot;
   if (saved && !saved.sourceKey) return output; // legacy unbound data cannot be rebound to today's source
   const observation = saved && (saved.sourceGeneration == null || saved.sourceGeneration === sourceGeneration)
     ? saved : { value: entity.state, observedAt: entity.sourceObservedAt, receivedAt: entity.sourceReceivedAt,
@@ -88,6 +88,7 @@ function resolveStateEvidence({ device, control, entity, records = [], sourceGen
     && record.controlId === control.controlId && String(record.endpoint) === String(source.endpoint)
     && record.property === source.property && record.cluster === source.cluster && record.attribute === source.attribute
     && record.sourceGeneration === sourceGeneration && record.state === 'cadence_verified'
+    && record.deviceLifecycleId === device.stateEvidenceLifecycleId
     && typeof runtimeSessionId === 'string' && record.runtimeSessionId === runtimeSessionId
     && record.evidenceVersion === 2 && Number.isFinite(instant(record.evidenceVerifiedAt)) && instant(record.evidenceVerifiedAt) <= observed
     && record.readBack?.status === 0 && Number.isFinite(instant(record.readBack.at))

@@ -7,8 +7,8 @@ const { ObservationReconciler } = require('../../src/observation/reconciler');
 const { normalizeZigbeeDevice } = require('../../src/integrations/zigbee/exposeNormalizer');
 
 async function checkedStateFixture({ store, directory, generation = 3, now = Date.now(), onDeviceChanged,
-  registryDeviceId, areaId = 'fixture-area', controlId }) {
-  let clock = now - 1500000;
+  registryDeviceId, areaId = 'fixture-area', controlId, reportingIntervalSeconds = 300 }) {
+  let clock = now - reportingIntervalSeconds * 5000;
   const raw = { ieee_address: '0x00124b00aabbccdd', friendly_name: 'synthetic-checked-light', type: 'Router', supported: true,
     power_source: 'Mains (single phase)', endpoints: { 1: { clusters: { input: ['genOnOff'] }, configured_reportings: [] } },
     definition: { vendor: 'Previously unseen', model: 'synthetic-only', exposes: [{ type: 'light', endpoint: 1,
@@ -48,9 +48,9 @@ async function checkedStateFixture({ store, directory, generation = 3, now = Dat
   if (!request) throw new Error('Real reporting-read path was not reached');
   await bridge.handleMessage('zigbee2mqtt/bridge/response/device/reporting/read', Buffer.from(JSON.stringify({
     status: 'ok', transaction: request.value.transaction, data: { endpoint: 1, cluster: 'genOnOff',
-      configs: [{ attrId: 0, status: 0, minRepIntval: 0, maxRepIntval: 300, repChange: 0 }] },
+      configs: [{ attrId: 0, status: 0, minRepIntval: 0, maxRepIntval: reportingIntervalSeconds, repChange: 0 }] },
   })));
-  const report = async (value = 'ON', { retain = false, advance = 300000 } = {}) => {
+  const report = async (value = 'ON', { retain = false, advance = reportingIntervalSeconds * 1000 } = {}) => {
     clock += advance;
     await bridge.handleMessage(`zigbee2mqtt/${raw.friendly_name}`, Buffer.from(JSON.stringify({ state: value,
       last_seen: new Date(clock).toISOString() })), { retain });

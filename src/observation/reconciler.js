@@ -104,8 +104,11 @@ class ObservationReconciler {
   }
 
   async save(record) {
+    const device = this.store.getDevice?.(record.deviceId);
+    if (this.store.getDevice && (!device || record.deviceLifecycleId !== device.stateEvidenceLifecycleId)) return false;
     await this.store.putObservationPolicyRecord(record.key, record);
     this.records.set(record.key, record);
+    return true;
   }
 
   async remove(key) {
@@ -164,6 +167,27 @@ class ObservationReconciler {
         seen.add(key);
         const cached = cachedReportingFor(raw, profile, endpoint);
         const existing = this.records.get(key);
+        const generation = this.store.syncSourceGeneration;
+        if (existing && existing.deviceLifecycleId !== device.stateEvidenceLifecycleId) {
+          this.reportTimes.delete(key);
+          for (const [transaction, pending] of this.pending) if (pending.key === key) this.pending.delete(transaction);
+          await this.save({ ...existing, deviceLifecycleId: device.stateEvidenceLifecycleId,
+            state: STATES.UNKNOWN, readBack: null, cadence: null, cadenceEvidence: [], evidenceVerifiedAt: null,
+            pendingRequest: null, lastTransaction: null, lastRequestKind: null,
+            nextAttemptAt: now, lastError: 'device_lifecycle_changed', updatedAt: now });
+          continue;
+        }
+        if (existing?.readBack && Number.isSafeInteger(generation) && generation > 0
+          && (existing.evidenceVersion !== 2 || existing.sourceGeneration !== generation)) {
+          // Re-verify the already approved exact configuration; never reinterpret
+          // a legacy cadence flag as new evidence or reset its radio/write budget.
+          this.reportTimes.delete(key);
+          for (const [transaction, pending] of this.pending) if (pending.key === key) this.pending.delete(transaction);
+          await this.save({ ...existing, state: STATES.UNKNOWN, readBack: null, cadence: null,
+            cadenceEvidence: [], evidenceVerifiedAt: null, pendingRequest: null, lastTransaction: null, lastRequestKind: null,
+            nextAttemptAt: now, lastError: 'evidence_generation_changed', updatedAt: now });
+          continue;
+        }
         if (existing?.suspended && sameFingerprint(existing.fingerprint, fingerprint)) {
           await this.save({ ...existing, suspended: false, state: STATES.UNKNOWN, cadence: null, nextAttemptAt: Math.max(now, existing.nextAttemptAt || 0), updatedAt: now });
           continue;
@@ -174,7 +198,7 @@ class ObservationReconciler {
           this.interrupted.delete(key);
           this.reportTimes.delete(key);
           for (const [transaction, pending] of this.pending) if (pending.key === key) this.pending.delete(transaction);
-          await this.save({ key, deviceId, ieee: fingerprint.ieee, friendlyName: String(raw.friendly_name || raw.ieee_address),
+          await this.save({ key, deviceId, deviceLifecycleId: device.stateEvidenceLifecycleId, ieee: fingerprint.ieee, friendlyName: String(raw.friendly_name || raw.ieee_address),
             profileId: profile.id, profileVersion: profile.version, endpoint, cluster: profile.cluster, attribute: profile.attribute,
             desired: profile.desired, property: entity.stateKey, controlId: entity.capability?.controlId || entity.id,
             approvedForAutomaticConfiguration: profile.approvedForAutomaticConfiguration === true,
@@ -203,8 +227,17 @@ class ObservationReconciler {
     }
   }
 
-  onAvailability(deviceId, online) {
+  async onAvailability(deviceId, online) {
     this.availability.set(String(deviceId), online === true);
+    if (online === true) return;
+    for (const record of this.records.values()) {
+      if (record.deviceId !== String(deviceId)) continue;
+      this.reportTimes.delete(record.key);
+      for (const [transaction, pending] of this.pending) if (pending.key === record.key) this.pending.delete(transaction);
+      await this.save({ ...record, state: record.readBack?.status === 0 ? STATES.CADENCE_PENDING : STATES.UNKNOWN,
+        evidenceVerifiedAt: null, cadence: null, cadenceEvidence: [], pendingRequest: null, lastTransaction: null, lastRequestKind: null,
+        coverageInterruptedAt: new Date(this.clock()).toISOString(), updatedAt: this.clock() });
+    }
   }
 
   isAvailable(deviceId) {
@@ -323,6 +356,8 @@ class ObservationReconciler {
   }
 
   async send(record, kind, now) {
+    const device = this.store.getDevice?.(record.deviceId);
+    if (this.store.getDevice && (!device || record.deviceLifecycleId !== device.stateEvidenceLifecycleId)) return null;
     // Recheck ownership at dispatch, not only inventory time: a queued property
     // approval must never survive reassignment to a tenant-private device.
     const policy = this.store.getPlatform?.()?.devicePolicies?.[record.deviceId];
@@ -337,10 +372,11 @@ class ObservationReconciler {
         reportable_change: record.desired.reportableChange, transaction }
       : { id: record.ieee || record.friendlyName, endpoint: Number(record.endpoint), cluster: record.cluster, configs: [{ attribute: record.attribute }], transaction };
     const windowExpired = now - Number(record.attemptsWindowStartAt || 0) > 24 * 3_600_000;
-    await this.save({ ...record, state: kind === "configure" ? STATES.CONFIGURING : STATES.READ_PENDING, lastTransaction: transaction,
+    const saved = await this.save({ ...record, state: kind === "configure" ? STATES.CONFIGURING : STATES.READ_PENDING, lastTransaction: transaction,
       lastRequestKind: kind, lastCommandAt: now, pendingRequest: { kind, transaction, sentAt: now },
       attempts: kind === "configure" ? (windowExpired ? 1 : Number(record.attempts || 0) + 1) : Number(record.attempts || 0),
       attemptsWindowStartAt: kind === "configure" && windowExpired ? now : record.attemptsWindowStartAt, updatedAt: now });
+    if (!saved) return null;
     this.lastCommandAt = now;
     this.pending.set(transaction, { key: record.key, kind, sentAt: now });
     try {
@@ -420,12 +456,13 @@ class ObservationReconciler {
       return this.deliveryFailed(record, "invalid_reporting_reply");
     }
     const genericGuarantee = record.profileId.startsWith('generic.') && status === ZCL_SUCCESS && readBack.maximumReportInterval > 0
-      && readBack.maximumReportInterval <= record.desired.maximumReportInterval && readBack.minimumReportInterval <= readBack.maximumReportInterval;
+      && readBack.maximumReportInterval < 65535 && readBack.minimumReportInterval <= readBack.maximumReportInterval;
     if (status === ZCL_SUCCESS && (reportingMatches(readBack, record.desired) || genericGuarantee)) {
       // Read-back verifies configuration only. Recovery from a failed cadence
       // needs a new sequence of genuine value reports after this verification.
       this.reportTimes.delete(record.key);
       return this.save({ ...record, state: STATES.CADENCE_PENDING, readBack, pendingRequest: null,
+        ...(genericGuarantee ? { desired: { ...record.desired, maximumReportInterval: readBack.maximumReportInterval } } : {}),
         sourceGeneration: this.store.syncSourceGeneration ?? null, evidenceVersion: 2,
         proofRevision: Math.max(0, Number(record.proofRevision) || 0) + 1,
         cadence: null, cadenceEvidence: [], evidenceVerifiedAt: null, lastError: null, updatedAt: now });

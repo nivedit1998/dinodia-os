@@ -360,6 +360,7 @@ test('OS executes every indexed direct-device fixture through its Native V1 vali
     ],
     'tenant.device.detail': [
       'fixtures/multi-control-device.json',
+      'fixtures/state-evidence-retained.json',
       'fixtures/control-catalog-change.json',
       'fixtures/invalid/device-invalid-step-up-policy.json',
       'fixtures/invalid/duplicate-device-control-id.json',
@@ -419,6 +420,14 @@ test('OS executes every indexed direct-device fixture through its Native V1 vali
   };
   const execute = (screen, reference) => {
     if (reference === 'fixtures/prototype-scenarios.json') return 'swift-rendered-prototype-owned';
+    if (reference === 'fixtures/state-evidence-retained.json') {
+      const state = read(reference);
+      assert.equal(c.validateControlState(state, sourceDevice, sourceDevice.controls.find(control => control.controlId === state.controlId)), false,
+        'negotiated v2 must never be accepted by a strict legacy state reader');
+      assert.equal(state.stateEvidenceVersion, 2);
+      assert.equal(state.lastReported.value, false, 'retained Off is a real value, not a missing observation');
+      return 'negotiated-v2-writer-covered-by-authenticated-runtime-test';
+    }
     if (reference === 'fixtures/selected-tenant-property-device.json' ||
         reference === 'fixtures/selected-tenant-private-device.json') {
       const fixture = read(reference);

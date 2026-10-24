@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const { resolveStateEvidence, exactSource } = require('./observation/stateEvidence');
+const { resolveStateEvidence, exactSource, scalarFor } = require('./observation/stateEvidence');
 const { AsyncLocalStorage } = require("node:async_hooks");
 const { isDeepStrictEqual } = require("node:util");
 const { resolveCategoryBinding } = require("./analytics/resolveBinding");
@@ -1660,6 +1660,9 @@ class Store {
       available: device.available === undefined ? existing.available !== false : Boolean(device.available),
       updatedAt: new Date().toISOString(),
     };
+    // Assigned only by the Store. Re-pairing the same radio identity cannot
+    // inherit proof or late callbacks from a removed device lifecycle.
+    next.stateEvidenceLifecycleId = existing.stateEvidenceLifecycleId || crypto.randomUUID();
     next.setup = normalizeSetup(device.setup || existing.setup, { status: "needs_setup", reason: "area_and_label_required" });
     const canonicalRestoreRevision = options.canonicalPropertyRestore === true && !existing.id
       && this.state.platform?.devicePolicies?.[id]?.managementClass === "PROPERTY_DEVICE"
@@ -1673,8 +1676,39 @@ class Store {
       descriptorRevision: canonicalRestoreRevision,
       sourceFingerprint: sourceFingerprint(next),
     } : null);
+    // Value typing is universal, not gated by property analytics enrollment.
+    // The synthetic validation scope is internal only and grants no API access.
+    const validationArea = String(next.areaId || 'state-validation');
+    const validationPolicy = options.devicePolicy || this.state.platform?.devicePolicies?.[id];
+    const privateOwner = validationPolicy?.managementClass === 'TENANT_DEVICE'
+      ? validationPolicy.ownerMembershipId : next.tenantOwnerMembershipId;
+    const validationDevice = { ...next, areaId: validationArea,
+      ...(privateOwner ? { managementClass: 'tenant_device', tenantOwnerMembershipId: privateOwner } : {}) };
+    const retainedControls = serializeDevice({ device: validationDevice, homeId: String(this.state.platform?.homeId || 'state-validation'),
+      homeMembershipId: String(privateOwner || 'state-validation'), role: 'TENANT', areaIds: [validationArea],
+      surfaces: Object.values(next.entities || {}).slice(0, 64).map((entity, index) => ({ id: `state-validation-${index}`,
+        sourceEntityIds: [entity.id], name: entity.name || 'Reported value' })),
+      revision: Number(validationDevice.presentation?.descriptorRevision || 1) })?.controls || [];
     for (const entity of Object.values(next.entities || {})) {
       const prior = Object.values(existing.entities || {}).find(item => item.id === entity.id);
+      const retainedControl = retainedControls.find(item => item.controlId === entity.capability?.controlId);
+      if (entity.lastReported && entity.sourceObservedAt && entity.sourceObservedAt !== prior?.sourceObservedAt
+        && retainedControl && scalarFor(retainedControl, entity.lastReported.value) === null) {
+        entity.lastReported = prior?.lastReported || null;
+        entity.sourceObservedAt = null; entity.sourceReceivedAt = null; entity.sourceKey = null;
+        entity.admittedEvidence = { quality: 'unknown', observedAt: null, validUntil: null, policyRevision: 3 };
+      }
+      if (['matter', 'hive', 'google_nest'].includes(next.protocol) && !entity.sourceObservedAt) {
+        const sourceKey = exactSource(next, entity, {
+          controlId: entity.capability?.controlId, semanticRole: entity.capability?.semanticRole,
+        }, this.syncSourceGeneration).sourceKey;
+        const oldSnapshot = prior?.integrationSnapshot;
+        // Retain provider-supplied values without pretending snapshot receipt is
+        // a physical report time. A changed binding cannot inherit old values.
+        entity.integrationSnapshot = oldSnapshot && oldSnapshot.sourceKey !== sourceKey && isDeepStrictEqual(entity.state, prior?.state)
+          ? null : { value: currentEntityValue(entity) === undefined ? null : clone(currentEntityValue(entity)), observedAt: null, receivedAt: null,
+            sourceKey, sourceGeneration: this.syncSourceGeneration, provenance: 'integration_snapshot' };
+      }
       if (entity.lastReported && entity.sourceObservedAt && entity.sourceObservedAt !== prior?.sourceObservedAt) {
         entity.lastReported.sourceKey = exactSource(next, entity, {
           controlId: entity.capability?.controlId, semanticRole: entity.capability?.semanticRole,
@@ -1708,6 +1742,11 @@ class Store {
     // retrospectively lengthen/promote it; the frozen admission survives original-hour replay.
     for (const entity of Object.values(next.entities || {})) {
       const previous = Object.values(existing.entities || {}).find(item => item.id === entity.id);
+      if (next.available === false || next.online === false || next.availability === 'offline') {
+        entity.admittedEvidence = { quality: 'unavailable', observedAt: entity.sourceObservedAt || null,
+          validUntil: null, policyRevision: 3 };
+        continue;
+      }
       if (!entity.sourceObservedAt || previous?.sourceObservedAt === entity.sourceObservedAt) continue;
       const control = admissionControls.find(item => item.controlId === entity.capability?.controlId);
       if (!control) { entity.admittedEvidence = null; continue; }
@@ -1879,6 +1918,9 @@ class Store {
     }
     const before = this.snapshot();
     delete this.state.devices[resolvedId];
+    for (const [key, record] of Object.entries(this.state.observationPolicy?.records || {})) {
+      if (record.deviceId === resolvedId) delete this.state.observationPolicy.records[key];
+    }
     for (const [alias, target] of Object.entries(this.state.aliases || {})) {
       if (references.has(String(alias)) || references.has(String(target))) delete this.state.aliases[alias];
     }

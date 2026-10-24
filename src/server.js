@@ -670,11 +670,13 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       notifyDeviceChanged(...args),
       "MQTT device projection",
     ),
+    clock,
     logger,
   });
   // Hub-managed observation policy: keeps approved devices' reporting configured and verified.
   const observationPolicy = new ObservationReconciler({
     store: hubStore,
+    clock,
     publishBridgeRequest: (requestPath, payload) => mqtt.bridgeRequest(requestPath, payload),
     resolveDeviceId: (value) => mqtt.resolveDeviceId(value),
     logger,
@@ -1474,7 +1476,7 @@ function nativeDeviceView(principal, device) {
         if (isExpired) value = null;
         const activityRole = ["power", "active_heat_demand", "active_heat_production"].includes(control.semanticRole);
         const analyticsActivity = activityRole && typeof value === "boolean" ? (value ? "on" : "off") : "unknown";
-        const availability = source.availability === "offline" || source.online === false ? "offline" : value === null ? "unknown" : "online";
+        const availability = source.available === false || source.availability === "offline" || source.online === false ? "offline" : value === null ? "unknown" : "online";
         const state = {
           deviceId: dto.id, controlId: control.controlId, homeId: dto.homeId,
           descriptorRevision: dto.descriptorRevision,

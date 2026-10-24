@@ -12,8 +12,13 @@ function analyticsReadiness(store, device, policy) {
   if (device.protocol !== 'zigbee') return { ...base, state: 'limited', reason: device.protocol === 'matter' ? 'matter_report_provenance_unavailable' : 'provider_observation_unverified' };
   const records = Object.values(store.getObservationPolicyRecords?.() || {}).filter(record => record.deviceId === device.id && record.controlId === binding.primaryControlId);
   const record = records.length === 1 ? records[0] : null;
+  const verified = record?.state === 'cadence_verified' && record.evidenceVersion === 2
+    && record.deviceLifecycleId === device.stateEvidenceLifecycleId
+    && record.sourceGeneration === store.syncSourceGeneration && Number.isSafeInteger(record.sourceGeneration)
+    && record.sourceGeneration > 0 && record.runtimeSessionId === store.observationSessionId
+    && Boolean(record.evidenceVerifiedAt) && record.readBack?.status === 0;
   return { ...base, collection: record ? 'periodic_reporting' : 'report_on_change',
-    state: record?.state === 'cadence_verified' ? 'ready' : record && !['unsupported', 'failed', 'cadence_failed'].includes(record.state) ? 'verifying' : 'limited',
-    reason: record?.lastError || (record ? null : 'periodic_collection_not_verified'), maximumReportInterval: record?.readBack?.maximumReportInterval ?? null };
+    state: verified ? 'ready' : record && !['unsupported', 'failed', 'cadence_failed'].includes(record.state) ? 'verifying' : 'limited',
+    reason: record?.lastError || (record ? verified ? null : 'state_evidence_verification_pending' : 'periodic_collection_not_verified'), maximumReportInterval: record?.readBack?.maximumReportInterval ?? null };
 }
 module.exports = { analyticsReadiness };
