@@ -89,14 +89,20 @@ function assignInState(state, physicalId, input) {
     const channel = manifest.channels.find(c => c.channelKey === assignment.channelKey);
     if (!channel || !state.areas[assignment.areaId]) fail('logical_assignment_invalid', 'Select a supported channel and existing Area');
     if (!state.labels[assignment.labelId]) fail('logical_label_invalid', 'Select an existing label');
-    const existing = Object.values(current.children).find(c => c.physicalDeviceId === physicalId && c.channelKey === channel.channelKey);
-    if (existing?.suppressed === true) fail('logical_channel_retired', 'This channel requires explicit recommissioning');
-    const id = existing?.id || logicalId(physicalId, channel.channelKey);
+    const prior = Object.values(current.children).filter(c => c.physicalDeviceId === physicalId && c.channelKey === channel.channelKey)
+      .sort((a, b) => (b.channelGeneration || 1) - (a.channelGeneration || 1));
+    const latest = prior[0];
+    const retired = latest && (latest.suppressed === true || current.tombstones[latest.id]);
+    if (retired && assignment.recommission !== true) fail('logical_channel_retired', 'This channel requires explicit recommissioning');
+    // Recommissioning mints a new generation and identity; retired history is never resurrected.
+    const generation = retired ? (latest.channelGeneration || 1) + 1 : (latest?.channelGeneration || 1);
+    const existing = retired ? null : latest;
+    const id = existing?.id || logicalId(physicalId, channel.channelKey, generation);
     if (current.tombstones[id]) fail('logical_channel_retired', 'This channel was removed');
     const name = String(assignment.name || `${parent.name} ${channel.channelKey}`).trim();
     if (!name || [...name].length > 120 || /[\u0000-\u001f\u007f]/.test(name)) fail('logical_name_invalid', 'Enter a valid device name');
     children.push({ id, physicalDeviceId: physicalId, channelKey: channel.channelKey,
-      channelGeneration: existing?.channelGeneration || 1,
+      channelGeneration: generation,
       mappingRevision: existing && existing.areaId === assignment.areaId && existing.name === name
         && existing.labelIds?.[0] === assignment.labelId && existing.sourceDigest === channel.sourceDigest
         ? existing.mappingRevision : (existing?.mappingRevision || 0) + 1,
@@ -131,7 +137,7 @@ function projectChild(state, id) {
   }
   const sourceProperties = new Set(Object.values(entities).map(entity => entity.stateKey).filter(Boolean));
   const result = { ...copy(parent), id: child.id, physicalDeviceId: parent.id,
-    channelKey: child.channelKey, mappingRevision: child.mappingRevision,
+    channelKey: child.channelKey, channelGeneration: child.channelGeneration || 1, mappingRevision: child.mappingRevision,
     name: child.name, areaId: child.areaId, labelIds: child.labelIds,
     legacyIds: [], haDeviceId: undefined, entities,
     state: Object.fromEntries(Object.entries(parent.state || {}).filter(([key]) => sourceProperties.has(key))),

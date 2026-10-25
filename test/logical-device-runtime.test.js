@@ -110,3 +110,19 @@ test('deleted child reports cannot refill raw parent telemetry through normal St
   assert.equal(Object.values(parent.entities).find(e => e.stateKey === 'state_l1').lastReported, undefined);
   assert.equal(Object.values(parent.entities).find(e => e.stateKey === 'state_l2').state, 'OFF');
 });
+
+test('LD09 retired channel needs explicit recommission and gets a new generation identity', async (t) => {
+  const f = await fixture(t);
+  const children = await assign(f);
+  await f.store.suppressLogicalDevice(children[0].id);
+  const request = recommission => f.store.assignLogicalDevices(f.parent.id, {
+    expectedManifestDigest: f.store.logicalDeviceManifest(f.parent.id).digest,
+    assignments: [{ channelKey: 'l1', areaId: 'room-2', name: 'New light', labelId: 'light', recommission }] });
+  await assert.rejects(request(false), /recommission/i);
+  const [fresh] = await request(true);
+  assert.notEqual(fresh.id, children[0].id);
+  assert.equal(fresh.channelGeneration, 2);
+  assert.equal(f.store.getManagedDevice(children[0].id) ?? null, null, 'retired identity is never resurrected');
+  assert.ok(f.store.getManagedDevice(fresh.id));
+  assert.ok(f.store.getManagedDevice(children[1].id), 'sibling unaffected');
+});

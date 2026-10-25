@@ -171,3 +171,32 @@ test('unacknowledged last-parent removal remains pending; exact retry finishes w
   assert.equal(finishes, 1);
   assert.equal(store.getDevice(parent.id), null);
 });
+
+test('LD09 Hub restart after fencing keeps the fence durable and exact retry completes', async t => {
+  const { store, children, file } = await fixture(t);
+  await store.savePlatform({ areaBindings: [{ areaId: crypto.randomUUID(), hubAreaId: 'r1' }] });
+  let failCommit = true;
+  const platform = async (url, body) => {
+    if (body.action === 'preview') return { osAreaId: 'r1', osDeviceIds: [children[0].id], digest: 'e'.repeat(64), state: 'PREVIEW' };
+    if (body.action === 'reserve') return { state: 'RESERVED' };
+    if (body.action === 'commit' && failCommit) throw new Error('Synthetic lost response');
+    return { state: body.action === 'commit' ? 'WAITING_HUB' : 'COMPLETE' };
+  };
+  const removePhysical = async () => { throw new Error('Shared hardware must not be removed'); };
+  const principal = { scope: ['os:admin'], handoffId: crypto.randomUUID(), jti: crypto.randomUUID() };
+  const service = new AreaDeletionService({ store, removePhysical, platform });
+  const preview = await service.preview(principal, 'r1');
+  const input = { ...preview, confirmationName: 'Room 1' };
+  await assert.rejects(service.confirm(principal, input), /lost response/);
+  await store.flushPersist();
+  const restarted = new Store(file);
+  assert.equal(restarted.areaDeletionJob(preview.operationId).state, 'FENCED');
+  assert.equal(restarted.getManagedDevice(children[0].id), null, 'fence survives restart');
+  assert.ok(restarted.getManagedDevice(children[1].id));
+  failCommit = false;
+  const resumed = new AreaDeletionService({ store: restarted, removePhysical, platform });
+  assert.equal((await resumed.confirm(principal, input)).state, 'COMPLETE');
+  assert.equal(restarted.getManagedDevice(children[0].id), null);
+  assert.ok(restarted.getManagedDevice(children[1].id), 'sibling room survives');
+  await restarted.flushPersist();
+});
