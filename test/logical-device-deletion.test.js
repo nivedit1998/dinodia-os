@@ -71,8 +71,10 @@ test('changed assignment inventory or wrong typed confirmation cannot fence an A
 });
 
 test('connected coordinator commits and purges one child without any radio removal', async t => {
-  const { store, parent, children } = await fixture(t);
+  const { store, parent, children, file } = await fixture(t);
+  await store.commit(state => { state.events.push({ deviceId: children[0].id, value: 'private erased record' }); });
   await store.savePlatform({ areaBindings: [{ areaId: crypto.randomUUID(), hubAreaId: 'r1' }] });
+  const backup = await fs.readFile(file);
   const calls = [], removals = [];
   const service = new AreaDeletionService({ store, removePhysical: async device => { removals.push(device.id); return { acknowledged: true }; },
     platform: async (url, body) => {
@@ -96,6 +98,12 @@ test('connected coordinator commits and purges one child without any radio remov
   const receipt = store.areaDeletionJob(preview.operationId);
   assert.equal(JSON.stringify(receipt).includes('r1'), false, 'completed receipt contains no room identity');
   assert.equal(JSON.stringify(receipt).includes(children[0].id), false);
+  await fs.writeFile(file, backup);
+  const restored = new Store(file);
+  assert.equal(restored.state.logicalDevices.children[children[0].id], undefined, 'restore purges the erased child registry, not merely the tile');
+  assert.equal(restored.state.events.some(event => event.deviceId === children[0].id), false, 'old private records are erased on restore');
+  assert.ok(restored.getManagedDevice(children[1].id));
+  await restored.flushPersist();
 });
 
 test('cloud failure after fencing stays visibly pending and a retry does not remove shared hardware', async t => {

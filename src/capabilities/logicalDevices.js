@@ -197,6 +197,7 @@ function applyLogicalPolicies(state, policies) {
     const binding = policy.logicalBinding;
     if (!binding) continue;
     if (!validBinding(id, binding)) fail('logical_policy_invalid', 'The signed channel mapping is malformed');
+    if (state.deletionLedger?.devices?.[hash(['devices', id])]) continue;
     if (!['INSTALLED', 'VIEW_ONLY'].includes(policy.lifecycle)) continue;
     const owner = JSON.stringify([policy.managementClass, policy.ownerMembershipId]);
     if (owners.has(binding.physicalDeviceId) && owners.get(binding.physicalDeviceId) !== owner)

@@ -90,6 +90,17 @@ function reconcile(state, authoritativeLedger, { purgeRestored = false } = {}) {
     // Never rewrite signed uploads: the cloud owns their erased-target acknowledgement.
     for (const [key, value] of Object.entries(state)) if (!['syncOutbox', 'deletionLedger'].includes(key)) visit(value);
     purgeReferences(state, references);
+    const pendingParents = new Set(Object.values(authoritativeLedger.jobs).flatMap(job =>
+      Object.entries(job.physical || {}).filter(([, status]) => status === 'REMOVAL_PENDING').map(([id]) => id)));
+    for (const id of Object.keys(state.devices || {})) {
+      if (!blocked(state, 'devices', id) || pendingParents.has(id)) continue;
+      delete state.devices[id];
+      delete state.logicalDevices?.parents?.[id];
+    }
+    for (const id of Object.keys(state.logicalDevices?.children || {})) {
+      if (blocked(state, 'devices', id)) delete state.logicalDevices.children[id];
+    }
+    for (const id of Object.keys(state.areas || {})) if (blocked(state, 'areas', id)) delete state.areas[id];
   }
   for (const child of Object.values(logical.registry(state).children)) {
     if (blocked(state, 'devices', child.id) && !child.suppressed) logical.suppressInState(state, child.id);
