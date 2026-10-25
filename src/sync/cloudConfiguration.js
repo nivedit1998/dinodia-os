@@ -116,9 +116,13 @@ function validateCloudConfiguration(value, current = {}) {
   const keys = ["revision", "policyRevision", "areas", "memberships", "devicePolicies", "automations", "releasePolicy", "checksum"];
   const projectionKey = Object.hasOwn(value, "tenantAutomationProjection");
   const securityKey = Object.hasOwn(value, 'logicalSecurity');
+  const historyKey = Object.hasOwn(value, 'analyticsHistory');
+  if (historyKey) keys.push('analyticsHistory');
   if (securityKey) keys.push('logicalSecurity');
   if (projectionKey) keys.push('tenantAutomationProjection');
   if (Object.keys(value).sort().join('\n') !== keys.sort().join('\n')
+    || historyKey && (!require('./dailyAnalytics').settings(value.analyticsHistory)
+      || Object.keys(value.analyticsHistory).sort().join('|') !== 'enabled|timezone|version|writerFrom')
     || securityKey && (!value.logicalSecurity || value.logicalSecurity.version !== 1
       || Object.keys(value.logicalSecurity).sort().join('|') !== 'deletedReferences|version'
       || !Array.isArray(value.logicalSecurity.deletedReferences) || value.logicalSecurity.deletedReferences.length > 8192
