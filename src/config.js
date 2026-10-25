@@ -53,6 +53,7 @@ module.exports = {
   setupInterfaceName,
   setupAllowedHosts: stringEnv("DINODIA_SETUP_ALLOWED_HOSTS", ""),
   pairingTtlMs: Math.max(60_000, Math.min(numberEnv("DINODIA_PAIRING_TTL_MS", 900_000), 900_000)),
+  nativeLogicalDevicesEnabled: stringEnv('DINODIA_LOGICAL_DEVICES_ENABLED', 'false') === 'true',
   nativeCommissioningCapabilities: Object.freeze({
     // These remain explicit operational holds. A model-catalogue marker is
     // not protocol authority and must not be required to discover a device.

@@ -1,0 +1,345 @@
+'use strict';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { Store } = require('../src/store');
+const { normalizeZigbeeDevice } = require('../src/integrations/zigbee/exposeNormalizer');
+const twoGang = require('./fixtures/zigbee/two-gang-light.json');
+const { AreaDeletionService } = require('../src/lifecycle/areaDeletionService');
+
+async function fixture(t) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dinodia-area-fence-'));
+  const file = path.join(dir, 'store.json');
+  const store = new Store(file);
+  t.after(async () => { await store.flushPersist(); await fs.rm(dir, { recursive: true, force: true }); });
+  await store.saveArea({ name: 'Room 1' }, 'r1');
+  await store.saveArea({ name: 'Room 2' }, 'r2');
+  const parent = normalizeZigbeeDevice(twoGang);
+  await store.upsertDevice(parent);
+  const children = await store.assignLogicalDevices(parent.id, {
+    expectedManifestDigest: store.logicalDeviceManifest(parent.id).digest,
+    assignments: ['l1', 'l2'].map((channelKey, i) => ({ channelKey, areaId: `r${i + 1}`, name: `Light ${i + 1}`, labelId: 'light' })) });
+  return { store, parent, children, file };
+}
+
+test('Area fence preserves another room on shared physical hardware and is idempotent', async t => {
+  const { store, parent, children } = await fixture(t);
+  const preview = store.areaDeletionPlan('r1');
+  assert.deepEqual(preview.parents[0].preservedChildren, [children[1].id]);
+  const input = { areaId: 'r1', digest: preview.digest, cloudDigest: 'a'.repeat(64), confirmationName: 'Room 1' };
+  const id = crypto.randomUUID();
+  const job = await store.fenceAreaDeletion(id, input);
+  assert.equal(job.physical[parent.id], 'PRESERVED_SHARED_PARENT');
+  assert.equal(store.getArea('r1'), null);
+  assert.equal(store.getManagedDevice(children[0].id), null);
+  assert.ok(store.getManagedDevice(children[1].id));
+  assert.ok(store.getDevice(parent.id));
+  assert.equal(store.deletionBlocksSource(parent.id, preview.targets[0].sourceIds[0]), true);
+  assert.deepEqual(await store.fenceAreaDeletion(id, input), job);
+  await assert.rejects(store.fenceAreaDeletion(id, { ...input, cloudDigest: 'b'.repeat(64) }), /changed/);
+});
+
+test('restoring a pre-deletion Store cannot resurrect a room or child', async t => {
+  const { store, children, file } = await fixture(t);
+  const oldStore = await fs.readFile(file);
+  const preview = store.areaDeletionPlan('r1');
+  await store.fenceAreaDeletion(crypto.randomUUID(), { areaId: 'r1', digest: preview.digest,
+    cloudDigest: 'c'.repeat(64), confirmationName: 'Room 1' });
+  await fs.writeFile(file, oldStore); // Synthetic restore only, private temporary directory.
+  const restored = new Store(file);
+  assert.equal(restored.getArea('r1'), null);
+  assert.equal(restored.getManagedDevice(children[0].id), null);
+  assert.ok(restored.getManagedDevice(children[1].id));
+  await restored.flushPersist();
+  await fs.unlink(`${file}.deletion-ledger.json`);
+  assert.throws(() => new Store(file), /security ledger is missing/);
+});
+
+test('changed assignment inventory or wrong typed confirmation cannot fence an Area', async t => {
+  const { store } = await fixture(t);
+  const preview = store.areaDeletionPlan('r1');
+  await assert.rejects(store.fenceAreaDeletion(crypto.randomUUID(), { areaId: 'r1', digest: preview.digest,
+    cloudDigest: 'd'.repeat(64), confirmationName: 'Room 2' }), /changed/);
+  assert.ok(store.getArea('r1'));
+  await store.saveArea({ name: 'Renamed' }, 'r1');
+  await assert.rejects(store.fenceAreaDeletion(crypto.randomUUID(), { areaId: 'r1', digest: preview.digest,
+    cloudDigest: 'd'.repeat(64), confirmationName: 'Renamed' }), /changed/);
+  assert.ok(store.getArea('r1'));
+});
+
+test('purged channel requires explicit recommission and never reuses its deleted identity', async t => {
+  const { store, parent, children } = await fixture(t);
+  const preview = store.areaDeletionPlan('r1'), operationId = crypto.randomUUID();
+  await store.fenceAreaDeletion(operationId, { areaId: 'r1', digest: preview.digest,
+    cloudDigest: 'a'.repeat(64), confirmationName: 'Room 1' });
+  await store.progressAreaDeletion(operationId, { cloudCommitted: true });
+  await store.progressAreaDeletion(operationId, { purge: true });
+  const { buildLogicalCommissioningProposal } = require('../src/commissioning/logicalDeviceCatalogue');
+  const proposalInput = { device: store.getDevice(parent.id), homeId: crypto.randomUUID(),
+    membershipId: crypto.randomUUID(), managementClass: 'PROPERTY_DEVICE', areaId: crypto.randomUUID(),
+    hubAreaId: 'r2', name: 'Explicit new installation', customerLabel: 'Light', labels: store.listLabels(),
+    now: new Date(), retirementEvidence: store.snapshot() };
+  assert.throws(() => buildLogicalCommissioningProposal(proposalInput), /recommission/i);
+  const proposed = buildLogicalCommissioningProposal({ ...proposalInput, allowRecommission: true });
+  assert.ok(proposed);
+  assert.equal(proposed.channels.find(channel => channel.binding.channelKey === 'l1').binding.channelGeneration, 2);
+  assert.notEqual(proposed.channels.find(channel => channel.binding.channelKey === 'l1').catalogue.osDeviceId, children[0].id);
+  const input = { expectedManifestDigest: store.logicalDeviceManifest(parent.id).digest,
+    assignments: [{ channelKey: 'l1', areaId: 'r2', labelId: 'light', name: 'Replacement channel' }] };
+  await assert.rejects(store.assignLogicalDevices(parent.id, input), /explicit recommissioning/);
+  const renewed = await store.assignLogicalDevices(parent.id, { ...input,
+    assignments: [{ ...input.assignments[0], recommission: true }] });
+  assert.notEqual(renewed[0].id, children[0].id);
+  assert.equal(renewed[0].channelGeneration, 2);
+  assert.ok(store.getManagedDevice(children[1].id));
+});
+
+test('purged reports remain erased until a new canonical generation receives its own observation', async t => {
+  const { store, parent, children, file } = await fixture(t);
+  const preview = store.areaDeletionPlan('r1'), operationId = crypto.randomUUID();
+  await store.fenceAreaDeletion(operationId, { areaId: 'r1', digest: preview.digest,
+    cloudDigest: 'a'.repeat(64), confirmationName: 'Room 1' });
+  await store.progressAreaDeletion(operationId, { cloudCommitted: true });
+  await store.progressAreaDeletion(operationId, { purge: true });
+  const report = async value => {
+    const at = new Date().toISOString();
+    await store.updateDeviceState(parent.id, { state_l1: value, state_l2: 'OFF' }, {
+      protocol: 'zigbee', reportedStateKeys: ['state_l1', 'state_l2'],
+      sourceObservedAtByStateKey: { state_l1: at, state_l2: at },
+      sourceReceivedAtByStateKey: { state_l1: at, state_l2: at } });
+  };
+  await report('ON');
+  assert.equal(store.getDevice(parent.id).state.state_l1, undefined, 'purged registry absence cannot admit erased telemetry');
+  const [fresh] = await store.assignLogicalDevices(parent.id, {
+    expectedManifestDigest: store.logicalDeviceManifest(parent.id).digest,
+    assignments: [{ channelKey: 'l1', areaId: 'r2', labelId: 'light', name: 'New lifecycle', recommission: true }] });
+  const bindings = [children[1], fresh].map(child => store.snapshot().logicalDevices.children[child.id]);
+  const policies = Object.fromEntries(bindings.map(child => [child.id, {
+    managementClass: 'PROPERTY_DEVICE', ownerMembershipId: null, lifecycle: 'INSTALLED',
+    analyticsCategory: 'LIGHT', osAreaIds: [child.areaId], canonicalAreaIds: [crypto.randomUUID()],
+    platformDeviceId: crypto.randomUUID(), installationRequestId: crypto.randomUUID(),
+    catalogueStatus: 'ready', usefulReadings: true, descriptorRevision: 1, descriptorDigest: 'b'.repeat(64),
+    logicalBinding: Object.fromEntries(['physicalDeviceId', 'channelKey', 'channelGeneration',
+      'mappingRevision', 'manifestDigest', 'sourceDigest', 'sourceEntityIds'].map(key => [key, child[key]])) }]));
+  await store.activateLogicalDevicePolicies(policies);
+  assert.equal(store.getManagedDevice(fresh.id).state.state_l1, undefined, 'activation is not an observation');
+  const sourceId = bindings.find(child => child.id === fresh.id).sourceEntityIds[0];
+  assert.equal(store.deletionBlocksSource(parent.id, sourceId, children[0].id), true);
+  assert.equal(store.deletionBlocksSource(parent.id, sourceId, fresh.id), false);
+  await report('ON');
+  assert.equal(store.getManagedDevice(fresh.id).state.state_l1, 'ON');
+  assert.equal(store.getManagedDevice(children[0].id), null);
+  await store.flushPersist();
+  const restarted = new Store(file);
+  assert.equal(restarted.deletionBlocksSource(parent.id, sourceId, fresh.id), false, 'restarted canonical generation remains authorized');
+  assert.equal(restarted.getManagedDevice(fresh.id).state.state_l1, 'ON');
+  assert.equal(restarted.getManagedDevice(children[0].id), null);
+  await restarted.flushPersist();
+});
+
+test('quarantined target remains in the exact deletion inventory while its sibling stays protected', async t => {
+  const { store, parent, children } = await fixture(t);
+  await store.commit(state => {
+    const key = Object.keys(state.devices[parent.id].entities).find(id => id.includes('l1'));
+    delete state.devices[parent.id].entities[key];
+  });
+  assert.equal(store.getManagedDevice(children[0].id), null);
+  const preview = store.areaDeletionPlan('r1');
+  assert.deepEqual(preview.targets.map(row => row.id), [children[0].id]);
+  assert.ok(preview.parents[0].preservedChildren.includes(children[1].id));
+});
+
+test('sequential room deletion treats an erased generation as retired, not an unassigned surviving channel', async t => {
+  const { store, parent } = await fixture(t);
+  const preview = store.areaDeletionPlan('r1'), operationId = crypto.randomUUID();
+  await store.fenceAreaDeletion(operationId, { areaId: 'r1', digest: preview.digest,
+    cloudDigest: 'a'.repeat(64), confirmationName: 'Room 1' });
+  await store.progressAreaDeletion(operationId, { cloudCommitted: true });
+  await store.progressAreaDeletion(operationId, { purge: true });
+  assert.deepEqual(store.areaDeletionPlan('r2').parents.find(row => row.id === parent.id).preservedChildren, []);
+});
+
+test('lost reservation response before local fencing remains discoverable and resumes after restart', async t => {
+  const { store, children, file } = await fixture(t);
+  await store.savePlatform({ areaBindings: [{ areaId: crypto.randomUUID(), hubAreaId: 'r1' }] });
+  let loseResponse = true;
+  const platform = async (_path, body) => {
+    if (body.action === 'preview') return { osAreaId: 'r1', osDeviceIds: [children[0].id], digest: 'c'.repeat(64) };
+    if (body.action === 'reserve' && loseResponse) { loseResponse = false; throw new Error('Lost reservation response'); }
+    return { state: { reserve: 'RESERVED', commit: 'WAITING_HUB', finish: 'COMPLETE' }[body.action] };
+  };
+  const principal = { scope: ['os:admin'], handoffId: crypto.randomUUID(), jti: crypto.randomUUID() };
+  const service = new AreaDeletionService({ store, platform, removePhysical: async () => { throw new Error('Shared parent'); } });
+  const preview = await service.preview(principal, 'r1'), input = { ...preview, confirmationName: 'Room 1' };
+  await assert.rejects(service.confirm(principal, input), /Lost reservation/);
+  assert.equal(store.areaDeletionJob(preview.operationId), null);
+  assert.ok(store.snapshot().areaDeletionIntents[preview.operationId]);
+  const restarted = new Store(file);
+  const resumed = new AreaDeletionService({ store: restarted, platform, removePhysical: async () => { throw new Error('Shared parent'); } });
+  assert.equal((await resumed.confirm({ ...principal, jti: crypto.randomUUID() }, input)).state, 'COMPLETE');
+  assert.equal(restarted.snapshot().areaDeletionIntents[preview.operationId], undefined);
+  await restarted.flushPersist();
+});
+
+test('all revoked private siblings are erased before the final parent cleanup context is discarded', async t => {
+  const { store, parent, children } = await fixture(t);
+  const owner = crypto.randomUUID();
+  await store.commit(state => {
+    state.devices[parent.id].tenantOwnerMembershipId = owner;
+    for (const child of children) {
+      state.logicalDevices.children[child.id].suppressed = true;
+      state.events.push({ deviceId: child.id, privateReading: 21 });
+    }
+  });
+  assert.equal(store.retainedLogicalRemoval(children[0].id, owner).shared, true);
+  await store.purgePrivateLogicalDevice(children[0].id, owner);
+  assert.equal(store.retainedLogicalRemoval(children[1].id, owner).shared, false);
+  await store.purgePrivateLogicalDevice(children[1].id, owner);
+  assert.equal(store.snapshot().events.some(row => children.some(child => child.id === row.deviceId)), false);
+});
+
+test('connected coordinator commits and purges one child without any radio removal', async t => {
+  const { store, parent, children, file } = await fixture(t);
+  await store.commit(state => { state.events.push({ deviceId: children[0].id, value: 'private erased record' }); });
+  await store.savePlatform({ areaBindings: [{ areaId: crypto.randomUUID(), hubAreaId: 'r1' }] });
+  const backup = await fs.readFile(file);
+  const calls = [], removals = [];
+  const service = new AreaDeletionService({ store, removePhysical: async device => { removals.push(device.id); return { acknowledged: true }; },
+    platform: async (url, body) => {
+      calls.push(body.action);
+      if (body.action === 'preview') return { osAreaId: 'r1', osDeviceIds: [children[0].id], digest: 'e'.repeat(64), state: 'PREVIEW' };
+      if (body.action === 'reserve') return { state: 'RESERVED' };
+      if (body.action === 'commit') return { state: 'WAITING_HUB' };
+      return { state: 'COMPLETE' };
+    } });
+  const principal = { scope: ['os:admin'], handoffId: crypto.randomUUID(), jti: crypto.randomUUID(), credentialVersion: 1 };
+  const preview = await service.preview(principal, 'r1');
+  assert.equal(preview.sharedHardwarePreserved, 1);
+  assert.equal(JSON.stringify(preview).includes(children[0].id), false, 'operator preview reveals no private identity');
+  const result = await service.confirm(principal, { ...preview, confirmationName: 'Room 1' });
+  assert.equal(result.state, 'COMPLETE');
+  assert.deepEqual(calls, ['preview', 'reserve', 'commit', 'finish']);
+  assert.deepEqual(removals, []);
+  assert.ok(store.getDevice(parent.id));
+  assert.ok(store.getManagedDevice(children[1].id));
+  assert.equal(store.getManagedDevice(children[0].id), null);
+  const receipt = store.areaDeletionJob(preview.operationId);
+  assert.equal(JSON.stringify(receipt).includes('r1'), false, 'completed receipt contains no room identity');
+  assert.equal(JSON.stringify(receipt).includes(children[0].id), false);
+  await fs.writeFile(file, backup);
+  const restored = new Store(file);
+  assert.equal(restored.state.logicalDevices.children[children[0].id], undefined, 'restore purges the erased child registry, not merely the tile');
+  assert.equal(restored.state.events.some(event => event.deviceId === children[0].id), false, 'old private records are erased on restore');
+  assert.ok(restored.getManagedDevice(children[1].id));
+  await restored.flushPersist();
+});
+
+test('cloud failure after fencing stays visibly pending and a retry does not remove shared hardware', async t => {
+  const { store, children } = await fixture(t);
+  await store.savePlatform({ areaBindings: [{ areaId: crypto.randomUUID(), hubAreaId: 'r1' }] });
+  let failCommit = true;
+  const service = new AreaDeletionService({ store, removePhysical: async () => { throw new Error('Shared hardware must not be removed'); },
+    platform: async (url, body) => {
+      if (body.action === 'preview') return { osAreaId: 'r1', osDeviceIds: [children[0].id], digest: 'f'.repeat(64), state: 'PREVIEW' };
+      if (body.action === 'reserve') return { state: 'RESERVED' };
+      if (body.action === 'commit' && failCommit) throw new Error('Synthetic network outage');
+      return { state: body.action === 'commit' ? 'WAITING_HUB' : 'COMPLETE' };
+    } });
+  const principal = { scope: ['os:admin'], handoffId: crypto.randomUUID(), jti: crypto.randomUUID() };
+  const preview = await service.preview(principal, 'r1');
+  const input = { ...preview, confirmationName: 'Room 1' };
+  await assert.rejects(service.confirm(principal, input), /network outage/);
+  assert.equal(store.areaDeletionJob(preview.operationId).state, 'FENCED');
+  assert.equal(store.getManagedDevice(children[0].id), null);
+  assert.ok(store.getManagedDevice(children[1].id));
+  failCommit = false;
+  assert.equal((await service.confirm(principal, input)).state, 'COMPLETE');
+});
+
+test('cloud reservation failure leaves local access and transport completely unchanged', async t => {
+  const { store, children } = await fixture(t);
+  await store.savePlatform({ areaBindings: [{ areaId: crypto.randomUUID(), hubAreaId: 'r1' }] });
+  const service = new AreaDeletionService({ store, removePhysical: async () => { throw new Error('Must not run'); },
+    platform: async (url, body) => {
+      if (body.action === 'preview') return { osAreaId: 'r1', osDeviceIds: [children[0].id], digest: 'a'.repeat(64), state: 'PREVIEW' };
+      throw new Error('Synthetic reservation outage');
+    } });
+  const principal = { scope: ['os:admin'], handoffId: crypto.randomUUID(), jti: crypto.randomUUID() };
+  const preview = await service.preview(principal, 'r1');
+  await assert.rejects(service.confirm(principal, { ...preview, confirmationName: 'Room 1' }), /reservation outage/);
+  assert.equal(store.areaDeletionJob(preview.operationId), null);
+  assert.ok(store.getArea('r1'));
+  assert.ok(store.getManagedDevice(children[0].id));
+});
+
+test('unacknowledged last-parent removal remains pending; exact retry finishes without affecting another room', async t => {
+  const { store, children, parent } = await fixture(t);
+  await store.assignLogicalDevices(parent.id, { expectedManifestDigest: store.logicalDeviceManifest(parent.id).digest,
+    assignments: [{ channelKey: 'l2', areaId: 'r1', name: 'Light 2', labelId: 'light' }] });
+  await store.savePlatform({ areaBindings: [{ areaId: crypto.randomUUID(), hubAreaId: 'r1' }] });
+  let acknowledged = false, removals = 0, finishes = 0;
+  const service = new AreaDeletionService({ store,
+    removePhysical: async device => { assert.equal(device.id, parent.id); removals++; return { acknowledged }; },
+    platform: async (url, body) => {
+      if (body.action === 'preview') return { osAreaId: 'r1', osDeviceIds: children.map(child => child.id), digest: 'b'.repeat(64), state: 'PREVIEW' };
+      if (body.action === 'reserve') return { state: 'RESERVED' };
+      if (body.action === 'commit') return { state: 'WAITING_HUB' };
+      finishes++; return { state: 'COMPLETE' };
+    } });
+  const principal = { scope: ['os:admin'], handoffId: crypto.randomUUID(), jti: crypto.randomUUID() };
+  const preview = await service.preview(principal, 'r1');
+  const input = { ...preview, confirmationName: 'Room 1' };
+  await assert.rejects(service.confirm(principal, input), /not acknowledged/);
+  assert.equal(store.areaDeletionJob(preview.operationId).state, 'CLOUD_COMMITTED');
+  assert.equal(finishes, 0, 'cloud purge cannot be falsely completed after an adapter timeout');
+  assert.ok(store.getArea('r2'));
+  acknowledged = true;
+  assert.equal((await service.confirm(principal, input)).state, 'COMPLETE');
+  assert.equal(removals, 2);
+  assert.equal(finishes, 1);
+  assert.equal(store.getDevice(parent.id), null);
+});
+
+test('quarantined or unassigned sibling channels preserve the physical parent during Area deletion', async t => {
+  const { store, children, parent } = await fixture(t);
+  // An adapter temporarily omits l2. It no longer projects, but is still an extant child.
+  await store.commit(state => {
+    for (const [id, entity] of Object.entries(state.devices[parent.id].entities))
+      if (entity.endpointId === 'l2') delete state.devices[parent.id].entities[id];
+  });
+  assert.equal(store.getManagedDevice(children[1].id), null);
+  const plan = store.areaDeletionPlan('r1');
+  assert.ok(plan.parents[0].preservedChildren.includes(children[1].id), 'quarantine is not permission to unpair');
+});
+
+test('LD09 Hub restart after fencing keeps the fence durable and exact retry completes', async t => {
+  const { store, children, file } = await fixture(t);
+  await store.savePlatform({ areaBindings: [{ areaId: crypto.randomUUID(), hubAreaId: 'r1' }] });
+  let failCommit = true;
+  const platform = async (url, body) => {
+    if (body.action === 'preview') return { osAreaId: 'r1', osDeviceIds: [children[0].id], digest: 'e'.repeat(64), state: 'PREVIEW' };
+    if (body.action === 'reserve') return { state: 'RESERVED' };
+    if (body.action === 'commit' && failCommit) throw new Error('Synthetic lost response');
+    return { state: body.action === 'commit' ? 'WAITING_HUB' : 'COMPLETE' };
+  };
+  const removePhysical = async () => { throw new Error('Shared hardware must not be removed'); };
+  const principal = { scope: ['os:admin'], handoffId: crypto.randomUUID(), jti: crypto.randomUUID() };
+  const service = new AreaDeletionService({ store, removePhysical, platform });
+  const preview = await service.preview(principal, 'r1');
+  const input = { ...preview, confirmationName: 'Room 1' };
+  await assert.rejects(service.confirm(principal, input), /lost response/);
+  await store.flushPersist();
+  const restarted = new Store(file);
+  assert.equal(restarted.areaDeletionJob(preview.operationId).state, 'FENCED');
+  assert.equal(restarted.getManagedDevice(children[0].id), null, 'fence survives restart');
+  assert.ok(restarted.getManagedDevice(children[1].id));
+  failCommit = false;
+  const resumed = new AreaDeletionService({ store: restarted, removePhysical, platform });
+  assert.equal((await resumed.confirm(principal, input)).state, 'COMPLETE');
+  assert.equal(restarted.getManagedDevice(children[0].id), null);
+  assert.ok(restarted.getManagedDevice(children[1].id), 'sibling room survives');
+  await restarted.flushPersist();
+});

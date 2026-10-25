@@ -10,6 +10,38 @@ function runtimeMock() {
   return { starts: 0, start() { this.starts += 1; }, close() {}, status() { return { configured: false, connected: false }; } };
 }
 
+test("an ordinary offline restart does not require guarded-restore cloud reconciliation", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-offline-reboot-"));
+  const file = path.join(directory, "dinodia.json");
+  const original = new Store(file);
+  await original.saveArea({ name: "Synthetic room" }, "offline-room");
+  await original.flushPersist();
+  const store = new Store(file);
+  const mqtt = runtimeMock(), matter = runtimeMock();
+  const hub = createHub({
+    store,
+    config: { nodeEnv: "development", nativeApiHost: "127.0.0.1", nativeApiPort: 0,
+      dataDir: directory, dataFile: file, backupDir: path.join(directory, "backups"),
+      staticDir: path.join(__dirname, "..", "public"), otbrUrl: "", v2Environment: "test" },
+    mqttBridge: mqtt, matterBridge: matter,
+    cloudflareTunnel: { start() {}, async stop() {}, status() { return { configured: false }; } },
+    logger: { log() {}, warn() {}, error() {} },
+  });
+  try {
+    await hub.start();
+    const response = await fetch(`http://127.0.0.1:${hub.server.address().port}/api/health`);
+    const health = await response.json();
+    assert.equal(response.status, 200);
+    assert.notEqual(health.storeRecovery?.pending, true);
+    assert.equal(mqtt.starts, 1, "ordinary restart starts the local Zigbee runtime without cloud reconciliation");
+    assert.equal(matter.starts, 1, "ordinary restart starts the local Matter runtime without cloud reconciliation");
+    assert.ok(store.getArea("offline-room"));
+  } finally {
+    await hub.stop();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("a restored Store is readable for health but all HTTP mutations and radio runtime stay held", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-store-recovery-gate-"));
   const store = new Store(path.join(directory, "dinodia.json"));

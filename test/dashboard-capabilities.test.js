@@ -74,7 +74,7 @@ test("full Home dashboard edits optional analytics category only for signed perm
   assert.match(server, /updateAnalyticsCategory\(assignedPrincipal/);
   assert.match(server, /managementClass === "PROPERTY_DEVICE"/);
   assert.match(server, /requested === "index\.html" \|\| requested\.endsWith\("\.js"\)/);
-  assert.match(html, /app\.js\?v=0\.18\.0/);
+  assert.match(html, /app\.js\?v=0\.19\.0/);
   assert.match(deviceProjection, /analyticsInventoryRevision = Number\(policy\.inventoryRevision\)/);
 });
 
@@ -399,4 +399,13 @@ test("radio tiles expose a selected-dongle removal action", () => {
   assert.match(app, /this does not remove or change the dongle/);
   assert.match(app, /back in the scan list/);
   assert.doesNotMatch(app, /data-remove-radio="\$\{escapeHtml\(key\)\}"[^>]*disabled/);
+});
+
+test("LD09 full Home dashboard deletes a room only through reviewed preview, typed name and flag", () => {
+  assert.match(app, /state\.status\?\.features\?\.areaDeletion \? `<button type="button" class="chip-delete"/);
+  assert.match(app, /\/deletion`;/); assert.match(app, /api\(`\$\{path\}\/preview`, \{ method: "POST"/);
+  assert.match(app, /confirm\.disabled = input\.value !== preview\.areaName/);
+  assert.match(app, /JSON\.stringify\(\{ operationId: preview\.operationId, digest: preview\.digest, confirmationName: input\.value \}\)/);
+  assert.doesNotMatch(app, /method: "DELETE"[^\n]*\/api\/areas/);
+  assert.match(css, /\.area-deletion-dialog/);
 });

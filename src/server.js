@@ -31,6 +31,9 @@ const { commandForBinding: commandForZigbeeBinding } = require("./integrations/z
 const { commandForBinding: commandForMatterBinding } = require("./integrations/matter/commandAdapter");
 const { MatterPairingSession } = require("./integrations/matter/pairingSession");
 const { NativeCommissioningService } = require("./commissioning/nativeCommissioningService");
+const { AreaDeletionService } = require('./lifecycle/areaDeletionService');
+const { removePhysical } = require('./lifecycle/physicalRemoval');
+const { LogicalDeviceConversion } = require('./commissioning/logicalDeviceConversion');
 const { publicCapability } = require("./capabilities/schema");
 const { allProjectedSurfaces } = require("./capabilities/controlSurfaceProjection");
 const { rawEntityById } = require("./capabilities/devicePresentation");
@@ -643,7 +646,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     eventBus.emit("dinodia_dashboard_updated", { kind: "device", deviceId: device?.id || null, at: new Date().toISOString() });
     if (alexaIntegration) alexaIntegration.handleDeviceChanged().catch((error) => logger.error(`[alexa] ${error.message}`));
     if (haModel) {
-      const items = haModel.entities().filter((item) => item.device.id === device.id);
+      const items = haModel.entities().filter((item) => item.device.id === device.id || item.device.physicalDeviceId === device.id);
       for (const item of items) {
         const state = haModel.stateFor(item);
         const oldEntity = previous && Object.values(previous.entities || {}).find((candidate) => candidate.sourceId === item.rawId || candidate.id === item.rawId || candidate.stateKey === item.entity.stateKey);
@@ -821,6 +824,9 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     if (storeRecoveryPending()) throw Object.assign(new Error("Device commands are disabled while the recovered Home inventory is being reconciled"), { statusCode: 503, code: "store_backup_recovery_pending" });
     const device = hubStore.getDevice(id);
     if (!device) throw Object.assign(new Error("Device not found"), { statusCode: 404 });
+    if (device.physicalDeviceId || hubStore.snapshot().logicalDevices?.parents?.[device.id]
+      || Object.values(hubStore.snapshot().logicalConversions || {}).some(job => job.physicalId === device.id && job.state === 'FENCED')
+      || hubStore.deletionBlocksSource(device.id)) throw Object.assign(new Error('Use the current logical channel control descriptor'), { statusCode: 409, code: 'logical_descriptor_required' });
     const selected = protocol || device.protocol;
     if (selected === "zigbee") {
       await mqtt.command(device.id, command);
@@ -869,8 +875,20 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     return hubStore.getDevice(id);
   }
 
-  async function commandEntity(device, entity, serviceId, data = {}, fallbackCommand = {}, observationCause = null) {
+  async function commandEntity(device, entity, serviceId, data = {}, fallbackCommand = {}, observationCause = null, logicalContext = null) {
     if (storeRecoveryPending()) throw Object.assign(new Error("Device commands are disabled while the recovered Home inventory is being reconciled"), { statusCode: 503, code: "store_backup_recovery_pending" });
+    const logicalId = logicalContext?.deviceId || (device.physicalDeviceId ? device.id : null);
+    if (device.physicalDeviceId || logicalContext) {
+      const current = hubStore.getManagedDevice(logicalContext?.deviceId || device.id);
+      if (!current || current.mappingRevision !== (logicalContext?.mappingRevision || device.mappingRevision) || !current.entities?.[entity.id]) {
+        throw Object.assign(new Error('The channel mapping or authority changed'), { statusCode: 409, code: 'logical_mapping_changed' });
+      }
+      device = hubStore.getDevice(current.physicalDeviceId);
+      entity = device?.entities?.[entity.id];
+      if (!device || !entity) throw Object.assign(new Error('The physical source is unavailable'), { statusCode: 409, code: 'logical_source_missing' });
+    }
+    if (hubStore.deletionBlocksSource(device.id, entity.id, logicalId))
+      throw Object.assign(new Error('This device is being deleted'), { statusCode: 409, code: 'device_deletion_fenced' });
     if (device.protocol === "zigbee" && entity.capability?.bindings?.length) {
       return mqtt.command(device.id, commandForZigbeeBinding(entity, serviceId, data));
     }
@@ -977,7 +995,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
 
   nativeAutomationService = new AutomationService({
     store: hubStore,
-    getDevices: () => hubStore.listDevices(),
+    getDevices: () => hubStore.listManagedDevices(),
     getAreas: () => hubStore.listAreas(),
     getLabels: () => hubStore.listLabels(),
     activity,
@@ -1008,7 +1026,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     store: hubStore,
     eventBus,
     activity,
-    getDevices: () => hubStore.listDevices(),
+    getDevices: () => hubStore.listManagedDevices(),
     getIntegrations: () => integrationStatus(),
     commandResolver: ({ device, serviceId, data }) => {
       const surface = climateSurface(device);
@@ -1038,7 +1056,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     pairing,
     serial,
     config: runtimeConfig,
-    getDevices: () => hubStore.listDevices(),
+    getDevices: () => hubStore.listManagedDevices(),
     getAreas: () => hubStore.listAreas(),
     executeControl: async ({ deviceId, surfaceId, serviceId, data }) => {
       const device = hubStore.getDevice(deviceId);
@@ -1124,6 +1142,18 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       }
     },
     reconcileTenantDeviceRemoval: async ({ osDeviceId, ownerMembershipId }) => runNativeCommandSerial(async () => {
+      const retained = hubStore.retainedLogicalRemoval(String(osDeviceId || ''), ownerMembershipId);
+      if (retained) {
+        const policy = hubStore.getPlatform().devicePolicies?.[osDeviceId];
+        if (policy?.managementClass === 'TENANT_DEVICE' && policy.ownerMembershipId === ownerMembershipId
+          && ['INSTALLED', 'VIEW_ONLY'].includes(policy.lifecycle)) return false;
+        if (!retained.shared) {
+          await removePhysical({ device: retained.parent, mqtt, matter, matterPairing, hive, googleNest });
+        }
+        await hubStore.purgePrivateLogicalDevice(osDeviceId, ownerMembershipId);
+        if (!retained.shared) await hubStore.deleteDevice(retained.parent.id);
+        return true;
+      }
       const device = hubStore.getDevice(String(osDeviceId || ""));
       if (!device) return true;
       const localOwner = String(device.tenantOwnerMembershipId || device.metadata?.tenantOwnerMembershipId || "");
@@ -1141,6 +1171,9 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       kind: "dinodia_os",
       version: VERSION,
       capabilities: { managedAreaProvisioningV1: true, managedDevicePresentationV1: true, activityIncidentReportingV1: true, alexaNativeProjectionV1: true, alexaNativeDirectiveV1: true, nativeTenantAutomationProjectionV1: true, nativeUniversalAnalyticsV2: true, nativeStateEvidenceV2: true,
+        // Disabling new commissioning must never disable existing channel fences
+        // or signed deletion reconciliation.
+        nativeLogicalDevicesV1: true,
         ...runtimeConfig.nativeCommissioningCapabilities },
     },
     getAreaSnapshot: () => ({ schemaVersion: 1, capturedAt: new Date().toISOString(), areas: hubStore.listAreas().map((area) => ({ areaId: area.id, name: area.name })) }),
@@ -1194,7 +1227,14 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   alexaIntegration.pairing = pairing;
   if (alexaIntegration.platformSync) alexaIntegration.platformSync.pairing = pairing;
   nativeCommissioningService = new NativeCommissioningService({ store: hubStore, mqtt, matter, pairing, vault, eventBus,
-    commissioningCapabilities: runtimeConfig.nativeCommissioningCapabilities, identityBrokerRequired: runtimeConfig.nodeEnv === "production", clock, logger });
+    commissioningCapabilities: runtimeConfig.nativeCommissioningCapabilities, logicalDevicesEnabled: runtimeConfig.nativeLogicalDevicesEnabled,
+    identityBrokerRequired: runtimeConfig.nodeEnv === "production", clock, logger });
+  const areaDeletionService = new AreaDeletionService({ store: hubStore,
+    platform: (endpoint, body) => pairing.requestWithHubIdentity(endpoint, body),
+    removePhysical: device => removePhysical({ device, mqtt, matter, matterPairing, hive, googleNest }) });
+  const logicalDeviceConversion = new LogicalDeviceConversion({ store: hubStore,
+    platform: (endpoint, body) => pairing.requestWithHubIdentity(endpoint, body),
+    protocolIdentity: device => nativeCommissioningService.protocolIdentity(device) });
   eventBus.on("registry_updated", (event) => {
     if (event?.registry === "area") pairing.syncNow().catch(() => {});
   });
@@ -1280,6 +1320,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   }
 
   function appCanReadDevice(principal, device) {
+    if (device && hubStore.getManagedDevice?.(device.id) === null) return false;
+    if (device?.physicalDeviceId && !hubStore.getPlatform?.()?.devicePolicies?.[device.id]) return false;
     if (!principal || !["app", "offline", "alexa", "alexa_state", "alexa_observation"].includes(principal.principalType) || !device) return false;
     const platformHomeId = String(hubStore.getPlatform?.()?.homeId || "");
     if (platformHomeId && String(principal.homeId || "") !== platformHomeId) return false;
@@ -1391,7 +1433,7 @@ function nativeDeviceView(principal, device) {
   function nativeDevicesFor(principal) {
     const homeId = String(principal.homeId || "");
     const areaIds = (principal.areaIds || []).map(String);
-    return hubStore.listDevices()
+    return (hubStore.listManagedDevices?.() || hubStore.listDevices())
       .filter((device) => !nativeDeviceIsRetired(device) && !nativeCommissioningService?.isQuarantinedDevice(device.id)
         && !["needs_setup", "interviewing", "commissioning"].includes(String(device.setup?.status || "").toLowerCase())
         && appCanReadDevice(principal, device))
@@ -1808,7 +1850,7 @@ function nativeDeviceView(principal, device) {
     // A projected surface with no current source entity is stale. Do not
     // synthesize a control identity from its display/Home Assistant ID.
     if (!entity) return;
-    const controlId = String(modelEntity?.surface?.capability?.controlId
+    const controlId = String((device.physicalDeviceId ? entity.capability?.controlId : null) || modelEntity?.surface?.capability?.controlId
       || modelEntity?.surface?.controlId
       || entity.capability?.controlId || entity.controlId || entity.id || "");
     if (!controlId) return;
@@ -2029,6 +2071,90 @@ function nativeDeviceView(principal, device) {
     }
     if (!operatorPrincipal && !appPrincipal && !offlinePrincipal && !alexaPrincipal && !alexaStatePrincipal) {
       return json(res, 401, { error: "Authentication required" });
+    }
+    const operatorDevicePath = pathname.match(/^\/api\/devices\/([^/]+)/);
+    if (operatorDevicePath && operatorPrincipal?.scope?.length === 1 && operatorPrincipal.scope[0] === 'os:admin') {
+      const targetId = decodeURIComponent(operatorDevicePath[1]);
+      const policy = hubStore.getPlatform().devicePolicies?.[targetId];
+      const target = hubStore.getDevice(targetId);
+      if (policy?.managementClass === 'TENANT_DEVICE' || target?.tenantOwnerMembershipId || target?.metadata?.tenantOwnerMembershipId)
+        return nativeContractError(res, 404, 'NOT_FOUND', 'This device is unavailable in the property dashboard');
+    }
+    const conversionRoute = pathname.match(/^\/api\/devices\/([^/]+)\/logical-conversion\/(preview|confirm)$/);
+    if (conversionRoute) {
+      if (runtimeConfig.nativeLogicalDevicesEnabled !== true && conversionRoute[2] === 'preview')
+        return nativeContractError(res, 503, 'FEATURE_NOT_ACTIVE', 'Logical device management is not active');
+      const principal = await currentAssignedDashboardPrincipal(req);
+      if (!principal) return nativeContractError(res, 403, 'SCOPE_DENIED', 'Current assigned full Home access is required');
+      if (req.method !== 'POST') return nativeContractError(res, 405, 'METHOD_NOT_ALLOWED', 'Use a confirmed conversion');
+      if (conversionRoute[2] === 'preview') {
+        const options = await readBody(req);
+        if (!options || Object.keys(options).some(key => key !== 'channelKey')
+          || (options.channelKey !== undefined && (typeof options.channelKey !== 'string' || !/^[A-Za-z0-9_.:-]{1,120}$/.test(options.channelKey))))
+          return nativeContractError(res, 400, 'INVALID_ARGUMENT', 'Review an exact functional channel');
+        return json(res, 200, await logicalDeviceConversion.preview(principal, decodeURIComponent(conversionRoute[1]), options));
+      }
+      const input = await readBody(req);
+      if (!input || Object.keys(input).sort().join('|') !== 'confirmationName|digest|operationId')
+        return nativeContractError(res, 400, 'INVALID_ARGUMENT', 'Review the exact channel conversion');
+      if (runtimeConfig.nativeLogicalDevicesEnabled !== true
+        && !hubStore.snapshot().logicalConversions?.[input.operationId])
+        return nativeContractError(res, 503, 'FEATURE_NOT_ACTIVE', 'New conversion is not active');
+      const result = await runNativeCommandSerial(() => logicalDeviceConversion.confirm(principal, input));
+      setImmediate(() => pairing.syncNow().catch(() => {}));
+      return json(res, 200, result);
+    }
+    if (pathname === '/api/devices/logical-conversion-operations' && req.method === 'GET') {
+      const principal = await currentAssignedDashboardPrincipal(req);
+      if (!principal) return nativeContractError(res, 403, 'SCOPE_DENIED', 'Current assigned full Home access is required');
+      const operations = Object.values(hubStore.snapshot().logicalConversions || {})
+        .filter(job => ['RESERVING', 'FENCED'].includes(job.state)).map(job => ({ operationId: job.operationId,
+          physicalId: job.anchorId || job.physicalId, digest: job.digest, confirmationName: job.confirmationName,
+          recommission: job.recommission === true,
+          channelCount: job.proposal?.channels?.length || 0 }));
+      return json(res, 200, { operations });
+    }
+    if (pathname === '/api/areas/deletion-operations' && req.method === 'GET') {
+      const principal = await currentAssignedDashboardPrincipal(req);
+      if (!principal) return nativeContractError(res, 403, 'SCOPE_DENIED', 'Current assigned full Home access is required');
+      const operations = Object.values(hubStore.snapshot().deletionLedger?.jobs || {})
+        .filter(job => job.state !== 'COMPLETE' && job.inventory?.areaId).map(job => ({ operationId: job.operationId,
+          digest: job.digest, areaId: job.inventory.areaId, areaName: job.inventory.name, state: job.state }));
+      for (const [operationId, intent] of Object.entries(hubStore.snapshot().areaDeletionIntents || {})) {
+        if (operations.some(row => row.operationId === operationId)) continue;
+        operations.push({ operationId, digest: intent.local.digest, areaId: intent.areaId,
+          areaName: intent.local.name, state: 'RESERVING' });
+      }
+      return json(res, 200, { operations });
+    }
+    const deletionRoute = pathname.match(/^\/api\/areas\/([^/]+)\/deletion\/(preview|confirm|status)$/);
+    if (deletionRoute) {
+      if (runtimeConfig.nativeLogicalDevicesEnabled !== true && deletionRoute[2] === 'preview')
+        return nativeContractError(res, 503, 'FEATURE_NOT_ACTIVE', 'Logical device management is not active');
+      const principal = await currentAssignedDashboardPrincipal(req);
+      if (!principal) return nativeContractError(res, 403, 'SCOPE_DENIED', 'Current assigned full Home access is required');
+      const areaId = decodeURIComponent(deletionRoute[1]), action = deletionRoute[2];
+      if (action === 'preview' && req.method === 'POST') return json(res, 200, await areaDeletionService.preview(principal, areaId));
+      if (action === 'confirm' && req.method === 'POST') {
+        const input = await readBody(req);
+        if (!input || Object.keys(input).sort().join('|') !== 'confirmationName|digest|operationId'
+          || !/^[0-9a-f-]{36}$/i.test(String(input.operationId)) || !/^[a-f0-9]{64}$/.test(String(input.digest))
+          || typeof input.confirmationName !== 'string' || input.confirmationName.length > 160)
+          return nativeContractError(res, 400, 'INVALID_ARGUMENT', 'Review and confirm the exact deletion preview');
+        if (runtimeConfig.nativeLogicalDevicesEnabled !== true && !hubStore.areaDeletionJob(input.operationId)
+          && !hubStore.snapshot().areaDeletionIntents?.[input.operationId])
+          return nativeContractError(res, 503, 'FEATURE_NOT_ACTIVE', 'New room deletion is not active');
+        const result = await runNativeCommandSerial(() => areaDeletionService.confirm(principal, { ...input, areaId }));
+        eventBus.emit('dinodia_dashboard_updated', { kind: 'registry', registry: 'area', id: areaId, at: new Date().toISOString() });
+        return json(res, 200, result);
+      }
+      if (action === 'status' && req.method === 'GET') {
+        const job = hubStore.areaDeletionJob(url.searchParams.get('operationId'));
+        return job ? json(res, 200, { operationId: job.operationId, state: job.state,
+          pendingPhysical: Object.values(job.physical || {}).filter(state => state === 'REMOVAL_PENDING').length })
+          : nativeContractError(res, 404, 'NOT_FOUND', 'Deletion operation not found');
+      }
+      return nativeContractError(res, 405, 'METHOD_NOT_ALLOWED', 'This deletion method is not allowed');
     }
     if (pathname === "/api/commissioning/unregistered-devices" && req.method === "GET") {
       if (!operatorPrincipal || operatorPrincipal.scope?.length !== 1 || operatorPrincipal.scope[0] !== "os:admin" || !nativeCommissioningService) {
@@ -2874,6 +3000,10 @@ function nativeDeviceView(principal, device) {
         ok: true,
         version: VERSION,
         hubId: serial,
+        features: { areaDeletion: runtimeConfig.nativeLogicalDevicesEnabled === true,
+          areaDeletionRecovery: Boolean(Object.keys(hubStore.snapshot().areaDeletionIntents || {}).length
+            || Object.values(hubStore.snapshot().deletionLedger?.jobs || {}).some(job => job.state !== 'COMPLETE')
+            || Object.values(hubStore.snapshot().logicalConversions || {}).some(job => job.state !== 'COMPLETE')) },
         devices: hubStore.listDevices().length,
         automations: integrations.nativeAutomations,
         integrations,
@@ -3114,6 +3244,8 @@ function nativeDeviceView(principal, device) {
       return json(res, 200, area);
     }
     if (resource === "areas" && id && req.method === "DELETE") {
+      if (runtimeConfig.nodeEnv === 'production' || runtimeConfig.nativeLogicalDevicesEnabled === true)
+        return json(res, 409, { error: 'Use the reviewed Area deletion preview and confirmation workflow', errorCode: 'area_delete_confirmation_required' });
       const removal = await hubStore.removeArea(id);
       if (removal.removed) {
         await activity.record({ type: "area_removed", area: { id, name: removal.areaName }, detail: `Area ${removal.areaName || id} was removed.`, change: { deviceAssignmentsCleared: removal.deviceAssignmentsCleared, entityAssignmentsCleared: removal.entityAssignmentsCleared } });
@@ -3145,7 +3277,10 @@ function nativeDeviceView(principal, device) {
       return json(res, deleted ? 204 : 404, {});
     }
     if (resource === "devices" && req.method === "GET" && !id) {
-      const devices = hubStore.listDevices()
+      const devices = hubStore.listManagedDevices()
+        .filter(device => !(operatorPrincipal?.scope?.length === 1 && operatorPrincipal.scope[0] === 'os:admin')
+          || !(device.tenantOwnerMembershipId || device.metadata?.tenantOwnerMembershipId
+            || hubStore.getPlatform().devicePolicies?.[device.id]?.managementClass === 'TENANT_DEVICE'))
         .filter((device) => supportOperator ? supportCanReadDevice(operatorPrincipal, device) : (!scopedPrincipal || appCanReadDevice(scopedPrincipal, device)))
         .map((device) => dashboardDevice(device, operatorPrincipal?.scope?.length === 1 && operatorPrincipal.scope[0] === "os:admin" ? hubStore.getPlatform?.() : null, hubStore));
       return json(res, 200, { devices });
@@ -3206,6 +3341,16 @@ function nativeDeviceView(principal, device) {
     if (resource === "devices" && id && parts[3] === "setup" && req.method === "PUT") {
       const existing = hubStore.getDevice(id);
       if (!existing) return json(res, 404, { error: "Device not found" });
+      if (existing.physicalDeviceId) {
+        const principal = await currentAssignedDashboardPrincipal(req);
+        if (!principal) return nativeContractError(res, 403, 'SCOPE_DENIED', 'Current full Home authority is required');
+        const body = await readBody(req);
+        if (!body || Object.keys(body).some(key => !['operationId', 'name', 'areaId', 'labelId'].includes(key)))
+          return nativeContractError(res, 400, 'INVALID_ARGUMENT', 'Select one exact channel assignment');
+        const updated = await runNativeCommandSerial(() => logicalDeviceConversion.assign(principal, id, body));
+        setImmediate(() => pairing.syncNow().catch(() => {}));
+        return json(res, 200, { device: dashboardDevice(updated), setup: updated.setup });
+      }
       if (!hubStore.listDevices().some((device) => device.id === existing.id)) return json(res, 400, { error: "Radio infrastructure cannot be assigned as a household device" });
       const body = await readBody(req);
       if (Object.prototype.hasOwnProperty.call(body, "entities") || Object.prototype.hasOwnProperty.call(body, "entityAssignments")) return json(res, 400, { error: "Assign the area and label at device level only" });
@@ -3295,6 +3440,9 @@ function nativeDeviceView(principal, device) {
     if (resource === "devices" && id && !parts[3] && req.method === "DELETE") {
       const device = hubStore.getDevice(id);
       if (!device) return json(res, 404, { error: "Device not found" });
+      if (device.physicalDeviceId || hubStore.snapshot().logicalDevices?.parents?.[id])
+        return nativeContractError(res, 409, 'LOGICAL_DELETION_REQUIRES_REVIEW',
+          'Use the reviewed room deletion workflow; shared hardware cannot be removed by the legacy device endpoint');
       if (!hubStore.listDevices().some((candidate) => candidate.id === device.id)) return json(res, 400, { error: "Radio infrastructure cannot be removed as a household device" });
       const body = await readBody(req);
       try {

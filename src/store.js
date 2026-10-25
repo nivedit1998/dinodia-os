@@ -2,6 +2,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { resolveStateEvidence, exactSource, scalarFor } = require('./observation/stateEvidence');
+const logicalDevices = require('./capabilities/logicalDevices');
+const areaDeletion = require('./lifecycle/areaDeletion');
 const { AsyncLocalStorage } = require("node:async_hooks");
 const { isDeepStrictEqual } = require("node:util");
 const { resolveCategoryBinding } = require("./analytics/resolveBinding");
@@ -17,11 +19,11 @@ const { observationTiming, serializeDevice } = require("./contracts/dinodiaV1");
 const { SYNC_BATCH_MAX_EVENTS, compactUnregisteredPropertyDeviceEvents, enqueueSyncEventInState, initialSyncOutbox, nextSyncBatch, normalizeSyncOutbox } = require("./sync/syncOutbox");
 const { validateCloudConfiguration, projectCloudDevicePolicies } = require("./sync/cloudConfiguration");
 const { activityFor, advanceUsage, capUsageAtLastAlive, endUsageAssignment, endUsageDeviceAvailability, initialUsageState, observeUsage, usageClockTrusted } = require("./sync/usageBuckets");
-const { assertNoRestorePendingSync, ensureInitializedMarkerSync, hasInitializedMarkerSync, persistStoreJson } = require("./durableStoreFile");
+const { assertNoRestorePendingSync, ensureInitializedMarkerSync, hasInitializedMarkerSync, persistStoreJson, writeBytesAtomically } = require("./durableStoreFile");
 
 const STORE_MUTATION_CONTEXT = new AsyncLocalStorage();
 const SERIALIZED_STORE_MUTATIONS = Object.freeze([
-  "commit", "mutateAtomically", "persist", "acknowledgeTenantDeviceRemoval", "upsertDevice", "migrateDeviceIdentity",
+  "commit", "mutateAtomically", "persist", "fenceAreaDeletion", "progressAreaDeletion", "assignLogicalDevices", "activateLogicalDevicePolicies", "suppressLogicalDevice", "purgePrivateLogicalDevice", "acknowledgeTenantDeviceRemoval", "upsertDevice", "migrateDeviceIdentity",
   "updateDeviceState", "deleteDevice", "deleteDevicesByProtocol", "saveArea", "ensureAreaByName", "removeArea", "deleteArea",
   "saveLabel", "deleteLabel", "saveZigbee", "clearZigbee", "markZigbeeAdapterRemoved", "saveThread", "clearThread",
   "updateDevice", "completeDeviceSetup", "clearDeviceSetup", "rebuildPresentation", "updateEntity", "removeEntity",
@@ -98,12 +100,16 @@ function normalizePendingPropertyDevicePolicies(value) {
       || typeof policy.usefulReadings !== "boolean"
       || !Number.isSafeInteger(Number(policy.descriptorRevision)) || Number(policy.descriptorRevision) < 1
       || !/^[a-f0-9]{64}$/i.test(String(policy.descriptorDigest || ""))) continue;
+    if (policy.logicalBinding && (!logicalDevices.validBinding(osDeviceId, policy.logicalBinding)
+      || !Array.isArray(policy.osAreaIds) || policy.osAreaIds.length !== 1
+      || typeof policy.osAreaIds[0] !== 'string' || policy.osAreaIds[0].length > 160)) continue;
     result[osDeviceId] = {
       managementClass: "PROPERTY_DEVICE", ownerMembershipId: null, lifecycle: String(policy.lifecycle),
       platformDeviceId: String(policy.platformDeviceId), installationRequestId: String(policy.installationRequestId),
       canonicalAreaIds: policy.canonicalAreaIds.map(String), catalogueStatus: String(policy.catalogueStatus), usefulReadings: policy.usefulReadings,
       descriptorRevision: Number(policy.descriptorRevision), descriptorDigest: String(policy.descriptorDigest),
       overrideName: typeof policy.overrideName === "string" ? policy.overrideName.slice(0, 80) : null,
+      ...(policy.logicalBinding ? { logicalBinding: clone(policy.logicalBinding), osAreaIds: [...policy.osAreaIds] } : {}),
     };
   }
   return result;
@@ -141,7 +147,8 @@ function nativeSyncControlCatalogProjection(state, device) {
   const policy = state.platform?.devicePolicies?.[String(device?.id || "")];
   const homeId = String(state.platform?.homeId || "");
   const areaId = String(device?.areaId || "");
-  if (policy?.managementClass !== "PROPERTY_DEVICE" || !homeId || !areaId || device?.retired === true) return null;
+  if (policy?.managementClass !== "PROPERTY_DEVICE" || !homeId || !areaId || device?.retired === true
+    || ['RETIRED', 'REMOVED', 'REMOVAL_PENDING', 'RECOMMISSION_REQUIRED'].includes(policy.lifecycle)) return null;
   const dto = serializeDevice({
     device,
     homeId,
@@ -1246,6 +1253,17 @@ class Store {
     this.filePath = filePath;
     this.durabilityUncertain = false;
     this.state = this.load();
+    this.deletionLedgerFile = `${filePath}.deletion-ledger.json`;
+    this.durableDeletionLedger = null;
+    try {
+      const stat = fs.lstatSync(this.deletionLedgerFile);
+      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Invalid deletion ledger file type');
+      this.durableDeletionLedger = JSON.parse(fs.readFileSync(this.deletionLedgerFile, 'utf8'));
+      areaDeletion.reconcile(this.state, this.durableDeletionLedger, { purgeRestored: true });
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw Object.assign(new Error('The deletion security ledger cannot be read safely', { cause: error }), { code: 'area_delete_ledger_unavailable' });
+      if (this.state.deletionLedger?.revision > 0) throw Object.assign(new Error('The deletion security ledger is missing'), { code: 'area_delete_ledger_missing' });
+    }
     this.syncSourceGeneration = null;
     this.observationSessionId = crypto.randomUUID();
     // Offline history: the last moment this Hub recorded itself running (written every minute and
@@ -1373,6 +1391,7 @@ class Store {
       return;
     }
     this.state = before;
+    areaDeletion.reconcile(this.state, this.durableDeletionLedger);
   }
 
   snapshot() {
@@ -1403,13 +1422,16 @@ class Store {
   }
 
   async applyCloudConfigurationSnapshot(platformPatch, runtimeAutomations = [], options = {}) {
-    return this.withAutomationPolicyLock(() => this.mutateAtomically((state) => {
+    return this.withAutomationPolicyLock(() => this.mutateAtomically(async (state) => {
       const acceptedConfiguration = platformPatch?.cloudConfiguration
         && validateCloudConfiguration(platformPatch.cloudConfiguration, state.platform || {})
         ? platformPatch.cloudConfiguration : null;
       state.areas = restoreMissingCloudAreas(state.areas, acceptedConfiguration, state.updatedAt);
       const previousPolicies = state.platform?.devicePolicies || {};
       const incomingPolicies = clone(platformPatch.devicePolicies || {});
+      if (Object.values(incomingPolicies).some(policy => policy.logicalBinding) || this.state.logicalDevices) {
+        state.logicalDeviceReconciliation = logicalDevices.applyLogicalPolicies(state, incomingPolicies);
+      }
       // Stop old accounting at receipt of a changed signed policy. Already
       // generated coverage crossing its earlier cloud effective time is kept
       // intact; the Platform preserves it as unallocated (D11).
@@ -1445,7 +1467,8 @@ class Store {
         if (previous?.managementClass === "TENANT_DEVICE" && previousOwner
           && (!next || next.managementClass !== "TENANT_DEVICE" || String(next.ownerMembershipId || "") !== previousOwner
             || ["REMOVAL_PENDING", "REMOVED", "RETIRED", "RECOMMISSION_REQUIRED"].includes(String(next.lifecycle)))) {
-          const local = state.devices?.[osDeviceId];
+          const logicalChild = logicalDevices.registry(state).children[osDeviceId];
+          const local = state.devices?.[logicalChild?.physicalDeviceId || osDeviceId];
           const localOwner = String(local?.tenantOwnerMembershipId || local?.metadata?.tenantOwnerMembershipId || "");
           if (local && localOwner === previousOwner) pendingRemovals.set(osDeviceId, {
             osDeviceId, ownerMembershipId: previousOwner, cloudRevision: Number(platformPatch.cloudRevision || 0),
@@ -1514,6 +1537,35 @@ class Store {
         state.automationTriggers[trigger.id] = trigger;
         for (const action of record.actions) state.automationActions[action.id] = clone(action);
       }
+      const security = acceptedConfiguration?.logicalSecurity;
+      if (security) {
+        const hubId = String(platformPatch.hubInstallId || state.platform.hubInstallId || '');
+        const prefix = `ld:${crypto.createHash('sha256').update(hubId).digest('hex').slice(0, 10)}:`;
+        if (!hubId || security.deletedReferences.some(reference => !reference.startsWith(prefix)))
+          throw new Error('Deletion security references belong to another Hub');
+        const cloud = new Set(security.deletedReferences);
+        const next = clone(areaDeletion.ledger(state));
+        let changed = false;
+        const cloudRef = (kind, id) => `${prefix}${kind[0]}:${crypto.createHash('sha256')
+          .update(JSON.stringify([hubId, kind, id])).digest('hex')}`;
+        const add = (kind, id) => {
+          const ref = areaDeletion.ref(kind, id);
+          if (!next[kind][ref]) { next[kind][ref] = next.revision + 1; changed = true; }
+        };
+        for (const id of Object.keys(state.areas || {})) if (cloud.has(cloudRef('area', id))) add('areas', id);
+        const children = logicalDevices.registry(state).children;
+        for (const id of new Set([...Object.keys(state.devices || {}), ...Object.keys(children)])) {
+          if (!cloud.has(cloudRef('device', id))) continue;
+          add('devices', id);
+          for (const source of children[id]?.sourceEntityIds || Object.keys(state.devices[id]?.entities || {})) add('sources', source);
+        }
+        if (changed) {
+          next.revision++;
+          await writeBytesAtomically(this.deletionLedgerFile, Buffer.from(JSON.stringify(next)), { mode: 0o600 });
+          this.durableDeletionLedger = next;
+          areaDeletion.reconcile(state, next, { purgeRestored: true });
+        }
+      }
       return { revision: Number(platformPatch.cloudRevision), activeAutomationCount: incoming.size };
     }));
   }
@@ -1557,6 +1609,7 @@ class Store {
         throw Object.assign(new Error("Store writes are blocked because the previous commit's directory durability is uncertain"), { code: "store_durability_uncertain" });
       }
       this.state.updatedAt = new Date().toISOString();
+      areaDeletion.reconcile(this.state, this.durableDeletionLedger);
       const serialized = JSON.stringify(this.state, null, 2);
       try {
         await persistStoreJson(this.filePath, serialized);
@@ -1576,8 +1629,140 @@ class Store {
     return Object.values(this.state.devices).filter((device) => !isInfrastructureDevice(device)).map(clone).sort((a, b) => String(a.name || a.id).localeCompare(String(b.name || b.id)));
   }
 
+  logicalDeviceManifest(physicalId) {
+    return logicalDevices.channelManifest(this.getDevice(physicalId));
+  }
+
+  listManagedDevices() {
+    return logicalDevices.managedDevices(this.state).filter(device => !isInfrastructureDevice(device)
+      && !areaDeletion.blocked(this.state, 'devices', device.id) && !areaDeletion.blocked(this.state, 'areas', device.areaId));
+  }
+
+  getManagedDevice(id) {
+    if (areaDeletion.blocked(this.state, 'devices', id)) return null;
+    const child = logicalDevices.projectChild(this.state, String(id));
+    if (child) return child;
+    if (logicalDevices.registry(this.state).parents[String(id)]) return null;
+    return this.getDevice(id);
+  }
+
+  areaDeletionPlan(areaId) { return areaDeletion.plan(this.state, String(areaId)); }
+
+  deletionBlocksSource(deviceId, entityId = '', logicalId = null) {
+    const fenced = areaDeletion.blocked(this.state, 'devices', deviceId)
+      || Boolean(entityId && areaDeletion.blocked(this.state, 'sources', entityId));
+    return fenced && !(logicalId && entityId
+      && areaDeletion.recommissionedSource(this.state, deviceId, entityId, logicalId));
+  }
+
+  async fenceAreaDeletion(operationId, input) {
+    if (!/^[0-9a-f-]{36}$/i.test(operationId)) throw new Error('Invalid deletion operation ID');
+    // Write security state BEFORE household state. A crash/Store restore cannot undo revocation.
+    const candidate = this.snapshot();
+    const job = areaDeletion.fence(candidate, operationId, input);
+    const next = clone(areaDeletion.ledger(candidate));
+    await fs.promises.mkdir(path.dirname(this.deletionLedgerFile), { recursive: true });
+    await writeBytesAtomically(this.deletionLedgerFile, Buffer.from(JSON.stringify(next)), { mode: 0o600 });
+    this.durableDeletionLedger = next;
+    this.state = candidate;
+    await this.persist();
+    return job;
+  }
+
+  areaDeletionJob(operationId) { return clone(areaDeletion.ledger(this.state).jobs[operationId] || null); }
+
+  async progressAreaDeletion(operationId, change) {
+    const candidate = this.snapshot();
+    const job = areaDeletion.ledger(candidate).jobs[operationId];
+    if (!job) throw new Error('Deletion operation unavailable');
+    if (change.cloudCommitted === true && job.state === 'FENCED') job.state = 'CLOUD_COMMITTED';
+    if (change.physicalAcknowledged) {
+      if (job.state !== 'CLOUD_COMMITTED' || !Object.hasOwn(job.physical, change.physicalAcknowledged)) throw new Error('Invalid removal acknowledgement');
+      job.physical[change.physicalAcknowledged] = 'REMOVAL_ACKNOWLEDGED';
+      if (change.removalKind === 'local_provider_detachment') job.providerDetachments = (job.providerDetachments || 0) + 1;
+    }
+    if (change.purge === true) areaDeletion.purge(candidate, operationId);
+    if (change.complete === true) {
+      if (job.state !== 'LOCAL_PURGED') throw new Error('Local purge is incomplete');
+      candidate.deletionLedger.jobs[operationId] = { version: 1, operationId, state: 'COMPLETE',
+        digest: job.digest, cloudDigest: job.cloudDigest, fenceDigest: job.fenceDigest,
+        providerDetachments: job.providerDetachments || 0 };
+    }
+    candidate.deletionLedger.revision += 1;
+    const next = clone(candidate.deletionLedger);
+    await writeBytesAtomically(this.deletionLedgerFile, Buffer.from(JSON.stringify(next)), { mode: 0o600 });
+    this.durableDeletionLedger = next;
+    this.state = candidate;
+    await this.persist();
+    return this.areaDeletionJob(operationId);
+  }
+
+  async assignLogicalDevices(physicalId, input) {
+    const ids = await this.commit(state => logicalDevices.assignInState(state, String(physicalId), input).map(child => child.id));
+    return ids.map(id => this.getManagedDevice(id));
+  }
+
+  async suppressLogicalDevice(id) {
+    return this.commit(state => logicalDevices.suppressInState(state, String(id)));
+  }
+
+  retainedLogicalRemoval(id, ownerMembershipId) {
+    const child = logicalDevices.registry(this.state).children[String(id)];
+    if (!child) return null;
+    const parent = this.state.devices[child.physicalDeviceId];
+    if (!parent) {
+      if (child.privateErased === true) return null;
+      throw new Error('Private logical cleanup is missing its retained parent context');
+    }
+    const owner = String(parent?.tenantOwnerMembershipId || parent?.metadata?.tenantOwnerMembershipId || '');
+    if (!owner || owner !== String(ownerMembershipId)) throw new Error('Private logical owner changed');
+    const siblings = Object.values(logicalDevices.registry(this.state).children)
+      .filter(row => row.physicalDeviceId === child.physicalDeviceId && row.id !== id && row.privateErased !== true);
+    let unproven = false;
+    try {
+      const manifest = logicalDevices.channelManifest(parent);
+      unproven = manifest.unresolvedSourceIds.length > 0 || manifest.channels.some(channel =>
+        !Object.values(logicalDevices.registry(this.state).children).some(row =>
+          row.physicalDeviceId === parent.id && row.channelKey === channel.channelKey));
+    } catch { unproven = true; }
+    return { child: clone(child), parent: clone(parent), shared: siblings.length > 0 || unproven };
+  }
+
+  async purgePrivateLogicalDevice(id, ownerMembershipId) {
+    const removal = this.retainedLogicalRemoval(id, ownerMembershipId);
+    if (!removal) return;
+    await this.commit(state => {
+      const child = logicalDevices.registry(state).children[id];
+      logicalDevices.suppressInState(state, id);
+      areaDeletion.purgeReferences(state, new Set([id, ...child.sourceEntityIds]));
+      delete state.platform.devicePolicies[id];
+      delete state.platform.pendingPropertyDevicePolicies?.[id];
+      state.logicalDevices.children[id] = { id, physicalDeviceId: child.physicalDeviceId,
+        channelKey: child.channelKey, channelGeneration: child.channelGeneration,
+        sourceEntityIds: child.sourceEntityIds, suppressed: true, privateErased: true };
+    });
+  }
+
+  async activateLogicalDevicePolicies(policies) {
+    return this.commit(state => {
+      const next = { ...(state.platform.devicePolicies || {}), ...clone(policies) };
+      const result = logicalDevices.applyLogicalPolicies(state, next);
+      if (result.pending.some(id => Object.hasOwn(policies, id))) {
+        throw Object.assign(new Error('The physical channel inventory changed before activation'), { code: 'logical_manifest_changed' });
+      }
+      state.platform.devicePolicies = next;
+      for (const [id, policy] of Object.entries(policies)) {
+        if (policy.managementClass === 'PROPERTY_DEVICE') {
+          state.platform.pendingPropertyDevicePolicies = { ...(state.platform.pendingPropertyDevicePolicies || {}), [id]: clone(policy) };
+        }
+      }
+      return Object.keys(policies);
+    });
+  }
+
   getDevice(id) {
     const requested = String(id || "");
+    if (requested.startsWith('logical:v1:')) return logicalDevices.projectChild(this.state, requested);
     const resolved = this.state.aliases?.[requested] || requested;
     const device = this.state.devices[resolved] || Object.values(this.state.devices).find((candidate) => String(candidate.metadata?.friendly_name || "") === requested || String(candidate.protocolIdentity?.ieeeAddress || "") === requested);
     if (!device) return null;
@@ -1776,12 +1961,29 @@ class Store {
       this.state.syncUsage = ended.state;
       for (const key of ended.changedBuckets) queueUsageBucket(this.state, key, assignmentEndMs);
     }
+    const admissionState = { ...this.state, devices: { ...this.state.devices, [id]: next } };
+    const suppressedSources = new Set([...logicalDevices.suppressedSourceIds(this.state, id),
+      ...Object.keys(next.entities || {}).filter(sourceId => areaDeletion.blocked(this.state, 'devices', id)
+        || areaDeletion.blocked(this.state, 'sources', sourceId))]);
+    for (const sourceId of suppressedSources) {
+      if (areaDeletion.recommissionedSource(admissionState, id, sourceId)) continue;
+      const source = next.entities?.[sourceId];
+      if (!source) continue;
+      if (source.stateKey) delete next.state[source.stateKey];
+      for (const key of ['state', 'lastReported', 'lastReportedAt', 'lastChanged', 'sourceObservedAt',
+        'sourceReceivedAt', 'admittedEvidence', 'pendingState', 'pendingValue']) delete source[key];
+    }
     this.state.devices[id] = next;
+    if (logicalDevices.registry(this.state).parents[id]) {
+      next.areaId = null;
+      next.metadata.areaId = null;
+      next.setup = { ...next.setup, status: 'needs_setup', reason: 'logical_channels_managed_separately' };
+    }
     const devicePolicy = this.state.platform?.devicePolicies?.[id];
     const previousProjection = existing.id ? nativeSyncDeviceProjection(existing, devicePolicy) : null;
     const syncProjection = nativeSyncDeviceProjection(next, devicePolicy);
     let syncEnqueued = false;
-    if (this.state.platform?.devicePolicies?.[id] && (!previousProjection || JSON.stringify(previousProjection) !== JSON.stringify(syncProjection)
+    if (!logicalDevices.registry(this.state).parents[id] && this.state.platform?.devicePolicies?.[id] && (!previousProjection || JSON.stringify(previousProjection) !== JSON.stringify(syncProjection)
       || JSON.stringify(nativeSyncControlCatalogProjection(this.state, existing)?.controls || []) !== JSON.stringify(nativeSyncControlCatalogProjection(this.state, next)?.controls || []))) {
       enqueueNativeDeviceSync(this.state, existing.id ? existing : null, next, { critical: !previousProjection, now: observationNow });
       syncEnqueued = true;
@@ -1791,10 +1993,24 @@ class Store {
     const historyClockTrusted = this.isUsageClockTrusted(observationNow);
     const ignoreThroughMs = Math.max(areaChanged ? observationNow : -1,
       this.usageClockTrustedSinceMs === null ? -1 : this.usageClockTrustedSinceMs - 1);
-    const durableSyncMutation = recordDeviceSyncObservations(this.state, next, observationNow, {
+    let durableSyncMutation = recordDeviceSyncObservations(this.state, next, observationNow, {
       ...(ignoreThroughMs >= 0 ? { ignoreThroughMs } : {}),
       sourceGeneration: historyClockTrusted ? this.syncSourceGeneration : null,
     });
+    for (const child of Object.values(logicalDevices.registry(this.state).children)
+      .filter(row => row.physicalDeviceId === id).map(row => logicalDevices.projectChild(this.state, row.id)).filter(Boolean)) {
+      const prior = logicalDevices.projectChild(before, child.id);
+      const policy = this.state.platform?.devicePolicies?.[child.id];
+      if (policy?.managementClass === 'PROPERTY_DEVICE' && (!prior
+        || prior.presentation?.sourceFingerprint !== child.presentation?.sourceFingerprint)) {
+        enqueueNativeDeviceSync(this.state, prior, child, { now: observationNow, critical: true });
+        syncEnqueued = true;
+      }
+      durableSyncMutation = recordDeviceSyncObservations(this.state, child, observationNow, {
+        ...(ignoreThroughMs >= 0 ? { ignoreThroughMs } : {}),
+        sourceGeneration: historyClockTrusted ? this.syncSourceGeneration : null,
+      }) || durableSyncMutation;
+    }
     for (const legacyId of this.state.devices[id].legacyIds) this.state.aliases[String(legacyId)] = id;
     if (device.metadata?.friendly_name && String(device.metadata.friendly_name) !== id) this.state.aliases[String(device.metadata.friendly_name)] = id;
     // Routine bridge state and local diagnostics may share a deferred write.
@@ -1961,10 +2177,11 @@ class Store {
   }
 
   listAreas() {
-    return Object.values(this.state.areas).map(clone).sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    return Object.values(this.state.areas).filter(area => !areaDeletion.blocked(this.state, 'areas', area.id)).map(clone).sort((a, b) => String(a.name).localeCompare(String(b.name)));
   }
 
   getArea(id) {
+    if (areaDeletion.blocked(this.state, 'areas', id)) return null;
     const area = this.state.areas[id];
     return area ? clone(area) : null;
   }
@@ -3146,7 +3363,7 @@ class Store {
         this.state.syncOutbox.snapshotCreatedAt = new Date(now).toISOString();
         changed = true;
       }
-      for (const device of Object.values(this.state.devices || {})) {
+      for (const device of this.listManagedDevices()) {
         const deviceId = String(device.id);
         if (this.state.platform?.devicePolicies?.[deviceId]?.managementClass === "PROPERTY_DEVICE"
           && !this.state.syncOutbox.snapshotDeviceIds.includes(deviceId)) {
@@ -3265,7 +3482,7 @@ class Store {
       const outbox = this.state.syncOutbox = normalizeSyncOutbox(this.state.syncOutbox);
       const published = this.state.platform.controlCatalogPublications = { ...(this.state.platform.controlCatalogPublications || {}) };
       let queued = 0;
-      for (const device of Object.values(this.state.devices || {})) {
+      for (const device of this.listManagedDevices()) {
         const catalog = nativeSyncControlCatalogProjection(this.state, device);
         if (!catalog) continue;
         const digest = crypto.createHash("sha256").update(JSON.stringify({ r: catalog.catalogRevision, d: catalog.descriptorDigest, c: catalog.controls }), "utf8").digest("hex");

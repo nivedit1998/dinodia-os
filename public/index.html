@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#f7f8fa">
     <title>Dinodia OS</title>
-    <link rel="stylesheet" href="/styles.css?v=0.13.0">
+    <link rel="stylesheet" href="/styles.css?v=0.14.0">
   </head>
   <body>
     <div class="app-shell">
@@ -47,7 +47,7 @@
 
         <dialog id="hive-auth-dialog" class="hive-auth-dialog"><div class="dialog-card"><button id="hive-auth-close" class="dialog-close" type="button" aria-label="Close Hive setup">×</button><p class="overline">HIVE ACCOUNT</p><h2 id="hive-auth-title">Connect Hive account</h2><p id="hive-auth-copy" class="subtle">Use the homeowner's Hive account owner credentials.</p><form id="hive-credentials-form" class="stack-form"><label><span>Hive account email</span><input id="hive-email" name="username" type="email" autocomplete="username" required></label><label><span>Hive account password</span><input id="hive-password" name="password" type="password" autocomplete="current-password" required></label><div class="dialog-actions"><button id="hive-auth-cancel" class="secondary" type="button">Cancel</button><button class="primary" type="submit">Continue</button></div></form><form id="hive-mfa-form" class="stack-form hidden"><label><span>SMS verification code</span><input id="hive-mfa-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{4,8}" minlength="4" maxlength="8" required></label><p class="helper">Enter the code sent by Hive. This code is used once and never stored.</p><div class="dialog-actions"><button id="hive-mfa-cancel" class="secondary" type="button">Start again</button><button class="primary" type="submit">Verify and continue</button></div></form><p id="hive-auth-error" class="dialog-error hidden" role="alert"></p></div></dialog>
 
-        <section id="devices-section" class="section-block"><div class="section-heading"><div><p class="overline">ALL DEVICES</p><h2>Devices & entities</h2><p class="subtle">Each physical device is one card. Assign its area and label once; Dinodia OS derives the useful controls and keeps technical entities in diagnostics.</p></div><div class="section-actions"><select id="device-filter" aria-label="Filter devices"><option value="all">All devices</option></select></div></div><div id="devices" class="device-grid"><div class="empty-state">Loading your devices…</div></div></section>
+        <section id="devices-section" class="section-block"><div class="section-heading"><div><p class="overline">ALL DEVICES</p><h2>Devices & entities</h2><p class="subtle">Each household device or independent channel has its own card, area and label. Related controls stay together; shared hardware remains paired.</p></div><div class="section-actions"><select id="device-filter" aria-label="Filter devices"><option value="all">All devices</option></select></div></div><div id="devices" class="device-grid"><div class="empty-state">Loading your devices…</div></div></section>
 
         <section class="panel diagnostics-panel" id="diagnostics-section"><details><summary>Advanced diagnostics</summary><div id="diagnostics" class="diagnostics-grid"><p class="subtle">Diagnostics are loaded only when requested.</p></div></details></section>
 
@@ -65,6 +65,6 @@
     <script src="/js/devices.js?v=0.9.0"></script>
     <script src="/js/capabilityControls.js?v=0.9.1"></script>
     <script src="/js/automations.js?v=1.1.0"></script>
-    <script src="/app.js?v=0.18.0"></script>
+    <script src="/app.js?v=0.19.0"></script>
   </body>
 </html>

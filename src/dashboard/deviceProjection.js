@@ -1,8 +1,25 @@
 const { analyticsReadiness } = require('../analytics/readiness');
+const { channelManifest } = require('../capabilities/logicalDevices');
 function dashboardDevice(device, platform = null, store = null) {
   if (!device || typeof device !== "object") return device;
   const result = JSON.parse(JSON.stringify(device));
   const policy = platform?.devicePolicies?.[String(result.id || "")];
+  result.logicalConversionAvailable = false;
+  result.recommissionChannels = [];
+  if (device.physicalDeviceId && policy?.managementClass === 'PROPERTY_DEVICE' && !policy.ownerMembershipId
+    && ['INSTALLED', 'VIEW_ONLY'].includes(policy.lifecycle) && store?.snapshot) {
+    const registry = store.snapshot().logicalDevices;
+    const retired = registry?.parents?.[device.physicalDeviceId]?.retiredGenerations || {};
+    result.recommissionChannels = Object.keys(retired).filter(key => !Object.values(registry.children || {}).some(child =>
+      child.physicalDeviceId === device.physicalDeviceId && child.channelKey === key && !child.suppressed));
+  }
+  if (policy?.managementClass === 'PROPERTY_DEVICE' && !policy.ownerMembershipId
+    && !device.physicalDeviceId && ['INSTALLED', 'VIEW_ONLY'].includes(policy.lifecycle)) {
+    try {
+      const manifest = channelManifest(device);
+      result.logicalConversionAvailable = manifest.channels.length > 1 && !manifest.unresolvedSourceIds.length;
+    } catch { /* Unsupported mappings remain unavailable. */ }
+  }
   const managementRevision = Number(platform?.cloudRevision);
   if (policy?.managementClass === "PROPERTY_DEVICE" && policy.ownerMembershipId == null
     && ["INSTALLED", "VIEW_ONLY"].includes(String(policy.lifecycle || ""))

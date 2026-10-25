@@ -25,7 +25,9 @@ test("Dinodia OS exposes assigned Area creation but keeps labels fixed", async (
   assert.match(html, /Available labels for devices and entities: Light, Boiler, Radiator and Tenant Device/);
   assert.doesNotMatch(html, /id="area-form"/);
   assert.doesNotMatch(html, /id="label-form"/);
-  assert.doesNotMatch(app, /data-delete-area/);
+  // Area deletion exists only through the reviewed preview/typed-name workflow, never a direct DELETE.
+  assert.match(app, /data-delete-area[^\n]*openAreaDeletion/);
+  assert.doesNotMatch(app, /\/api\/areas\/[^`"]*`, \{ method: "DELETE"/);
   assert.doesNotMatch(app, /data-delete-label/);
   assert.match(app, /api\("\/api\/areas",\s*\{\s*method:\s*"POST"/);
   assert.doesNotMatch(app, /method:\s*["'](?:POST|PUT|DELETE)["'][^}]*\/api\/labels/);

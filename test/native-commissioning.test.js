@@ -105,6 +105,47 @@ function fixture({ dropFirstCreateResponse = false, matterCommission = async () 
   return { service, principal, store, devices, events, platformRequests, radioEffects, areaId, homeId, hubInstallId, vaultValues, mqtt, matter, close: () => service.close() };
 }
 
+test('real commissioning completion activates two private channel records under one physical pairing', async (t) => {
+  const fs = require('node:fs/promises'), os = require('node:os'), path = require('node:path');
+  const { Store } = require('../src/store');
+  const f = fixture();
+  t.after(f.close);
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'dinodia-logical-commissioning-'));
+  const store = new Store(path.join(directory, 'store.json'));
+  t.after(async () => { await store.persist(); await fs.rm(directory, { recursive: true, force: true }); });
+  await store.saveArea({ name: 'Living Room' }, 'os-area-1');
+  await store.saveIdentity({ generation: 7, serial: 'DIN-HUB-1' });
+  await store.savePlatform({ homeId: f.homeId, hubInstallId: f.hubInstallId,
+    areaBindings: [{ areaId: f.areaId, hubAreaId: 'os-area-1' }] });
+  await store.saveZigbee({ adapterPath: '/dev/zigbee-test' });
+  f.service.store = store;
+  f.service.logicalDevicesEnabled = true;
+  const previous = f.service.pairing.requestWithHubIdentity;
+  f.service.pairing.requestWithHubIdentity = async (route, body) => {
+    if (body.action !== 'finalize' || !body.device.channels) return previous(route, body);
+    const logicalDevices = body.device.channels.map(channel => ({ id: uuid(), osDeviceId: channel.catalogue.osDeviceId,
+      managementClass: 'TENANT_DEVICE', ownerMembershipId: f.principal.membershipId, lifecycle: 'INSTALLED',
+      analyticsCategory: 'NONE', descriptorRevision: channel.catalogue.descriptorRevision,
+      descriptorDigest: channel.catalogue.descriptorDigest, inventoryRevision: 1, binding: channel.binding }));
+    return { ok: true, revision: body.expectedRevision + 1, state: 'COMPLETED', device: logicalDevices[0], logicalDevices };
+  };
+  const session = await f.service.start(f.principal, { protocol: 'zigbee' }, uuid());
+  const parent = normalizeZigbeeDevice(require('./fixtures/zigbee/two-gang-light.json'));
+  await store.upsertDevice(parent);
+  f.mqtt.pairingStatus = () => ({ active: true, found: [parent.id] });
+  await f.service.status(session.sessionId, f.principal);
+  const current = f.service.sessions()[session.sessionId];
+  await f.service.select(session.sessionId, f.principal, { schemaVersion: 'dinodia.v1', expectedRevision: current.revision,
+    candidateRef: current.candidates[0].candidateRef, areaId: f.areaId, name: 'My switches', customerLabel: 'Lights' });
+  const completed = await f.service.complete(session.sessionId, f.principal, 'install');
+  assert.equal(completed.status, 'completed');
+  assert.equal(store.listDevices().length, 1);
+  assert.equal(store.listManagedDevices().length, 2);
+  assert.ok(store.listManagedDevices().every(child => store.getPlatform().devicePolicies[child.id].ownerMembershipId === f.principal.membershipId));
+  assert.equal(store.getDevice(parent.id).areaId, null, 'an older binary cannot expose broad parent authority');
+  assert.equal(f.radioEffects.zigbeeRemove, 0);
+});
+
 function interruptedZigbeeCleanup(f, { ieee = "0xf044d3fffe1242f6" } = {}) {
   const sessionId = uuid();
   const candidate = normalizeZigbeeDevice({ friendly_name: ieee, ieee_address: ieee, interview_completed: true,
