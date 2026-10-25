@@ -37,7 +37,7 @@ function exactSource(device, entity, control, generation) {
   const endpoint = cluster ? resolvedEndpoint(device, entity, cluster) : String(entity.endpointId ?? entity.binding?.endpoint ?? '');
   const property = String(entity.stateKey || entity.binding?.property || '');
   const sourceKey = crypto.createHash('sha256').update(JSON.stringify([
-    generation, device.stateEvidenceLifecycleId || null, device.protocol, device.id, control.controlId, endpoint, property, cluster || null, attribute || null,
+    generation, device.stateEvidenceLifecycleId || null, device.protocol, device.physicalDeviceId || device.id, control.controlId, endpoint, property, cluster || null, attribute || null,
   ])).digest('hex');
   return { endpoint, property, cluster, attribute, sourceKey };
 }
@@ -84,7 +84,7 @@ function resolveStateEvidence({ device, control, entity, records = [], sourceGen
     || entity.admittedEvidence.quality !== 'fresh')) return limited('no_verified_guarantee');
   if (device.protocol !== 'zigbee') return limited('unsupported_guarantee');
   const candidates = (Array.isArray(records) ? records : Object.values(records)).filter(record =>
-    record && !record.suspended && !record.invalidatedAt && record.deviceId === device.id
+    record && !record.suspended && !record.invalidatedAt && record.deviceId === (device.physicalDeviceId || device.id)
     && record.controlId === control.controlId && String(record.endpoint) === String(source.endpoint)
     && record.property === source.property && record.cluster === source.cluster && record.attribute === source.attribute
     && record.sourceGeneration === sourceGeneration && record.state === 'cadence_verified'

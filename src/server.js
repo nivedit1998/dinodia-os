@@ -871,6 +871,15 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
 
   async function commandEntity(device, entity, serviceId, data = {}, fallbackCommand = {}, observationCause = null) {
     if (storeRecoveryPending()) throw Object.assign(new Error("Device commands are disabled while the recovered Home inventory is being reconciled"), { statusCode: 503, code: "store_backup_recovery_pending" });
+    if (device.physicalDeviceId) {
+      const current = hubStore.getManagedDevice(device.id);
+      if (!current || current.mappingRevision !== device.mappingRevision || !current.entities?.[entity.id]) {
+        throw Object.assign(new Error('The channel mapping or authority changed'), { statusCode: 409, code: 'logical_mapping_changed' });
+      }
+      device = hubStore.getDevice(current.physicalDeviceId);
+      entity = device?.entities?.[entity.id];
+      if (!device || !entity) throw Object.assign(new Error('The physical source is unavailable'), { statusCode: 409, code: 'logical_source_missing' });
+    }
     if (device.protocol === "zigbee" && entity.capability?.bindings?.length) {
       return mqtt.command(device.id, commandForZigbeeBinding(entity, serviceId, data));
     }
@@ -1280,6 +1289,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   }
 
   function appCanReadDevice(principal, device) {
+    if (device && hubStore.getManagedDevice?.(device.id) === null) return false;
+    if (device?.physicalDeviceId && !hubStore.getPlatform?.()?.devicePolicies?.[device.id]) return false;
     if (!principal || !["app", "offline", "alexa", "alexa_state", "alexa_observation"].includes(principal.principalType) || !device) return false;
     const platformHomeId = String(hubStore.getPlatform?.()?.homeId || "");
     if (platformHomeId && String(principal.homeId || "") !== platformHomeId) return false;
@@ -1391,7 +1402,7 @@ function nativeDeviceView(principal, device) {
   function nativeDevicesFor(principal) {
     const homeId = String(principal.homeId || "");
     const areaIds = (principal.areaIds || []).map(String);
-    return hubStore.listDevices()
+    return (hubStore.listManagedDevices?.() || hubStore.listDevices())
       .filter((device) => !nativeDeviceIsRetired(device) && !nativeCommissioningService?.isQuarantinedDevice(device.id)
         && !["needs_setup", "interviewing", "commissioning"].includes(String(device.setup?.status || "").toLowerCase())
         && appCanReadDevice(principal, device))

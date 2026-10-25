@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { resolveStateEvidence, exactSource, scalarFor } = require('./observation/stateEvidence');
+const logicalDevices = require('./capabilities/logicalDevices');
 const { AsyncLocalStorage } = require("node:async_hooks");
 const { isDeepStrictEqual } = require("node:util");
 const { resolveCategoryBinding } = require("./analytics/resolveBinding");
@@ -21,7 +22,7 @@ const { assertNoRestorePendingSync, ensureInitializedMarkerSync, hasInitializedM
 
 const STORE_MUTATION_CONTEXT = new AsyncLocalStorage();
 const SERIALIZED_STORE_MUTATIONS = Object.freeze([
-  "commit", "mutateAtomically", "persist", "acknowledgeTenantDeviceRemoval", "upsertDevice", "migrateDeviceIdentity",
+  "commit", "mutateAtomically", "persist", "assignLogicalDevices", "suppressLogicalDevice", "acknowledgeTenantDeviceRemoval", "upsertDevice", "migrateDeviceIdentity",
   "updateDeviceState", "deleteDevice", "deleteDevicesByProtocol", "saveArea", "ensureAreaByName", "removeArea", "deleteArea",
   "saveLabel", "deleteLabel", "saveZigbee", "clearZigbee", "markZigbeeAdapterRemoved", "saveThread", "clearThread",
   "updateDevice", "completeDeviceSetup", "clearDeviceSetup", "rebuildPresentation", "updateEntity", "removeEntity",
@@ -1576,8 +1577,33 @@ class Store {
     return Object.values(this.state.devices).filter((device) => !isInfrastructureDevice(device)).map(clone).sort((a, b) => String(a.name || a.id).localeCompare(String(b.name || b.id)));
   }
 
+  logicalDeviceManifest(physicalId) {
+    return logicalDevices.channelManifest(this.getDevice(physicalId));
+  }
+
+  listManagedDevices() {
+    return logicalDevices.managedDevices(this.state).filter(device => !isInfrastructureDevice(device));
+  }
+
+  getManagedDevice(id) {
+    const child = logicalDevices.projectChild(this.state, String(id));
+    if (child) return child;
+    if (logicalDevices.registry(this.state).parents[String(id)]) return null;
+    return this.getDevice(id);
+  }
+
+  async assignLogicalDevices(physicalId, input) {
+    const ids = await this.commit(state => logicalDevices.assignInState(state, String(physicalId), input).map(child => child.id));
+    return ids.map(id => this.getManagedDevice(id));
+  }
+
+  async suppressLogicalDevice(id) {
+    return this.commit(state => logicalDevices.suppressInState(state, String(id)));
+  }
+
   getDevice(id) {
     const requested = String(id || "");
+    if (requested.startsWith('logical:v1:')) return logicalDevices.projectChild(this.state, requested);
     const resolved = this.state.aliases?.[requested] || requested;
     const device = this.state.devices[resolved] || Object.values(this.state.devices).find((candidate) => String(candidate.metadata?.friendly_name || "") === requested || String(candidate.protocolIdentity?.ieeeAddress || "") === requested);
     if (!device) return null;
@@ -1775,6 +1801,13 @@ class Store {
       const ended = endUsageAssignment(usage, { osDeviceId: id, osAreaId: String(existing.areaId), endedAtMs: assignmentEndMs });
       this.state.syncUsage = ended.state;
       for (const key of ended.changedBuckets) queueUsageBucket(this.state, key, assignmentEndMs);
+    }
+    for (const sourceId of logicalDevices.suppressedSourceIds(this.state, id)) {
+      const source = next.entities?.[sourceId];
+      if (!source) continue;
+      if (source.stateKey) delete next.state[source.stateKey];
+      for (const key of ['state', 'lastReported', 'lastReportedAt', 'lastChanged', 'sourceObservedAt',
+        'sourceReceivedAt', 'admittedEvidence', 'pendingState', 'pendingValue']) delete source[key];
     }
     this.state.devices[id] = next;
     const devicePolicy = this.state.platform?.devicePolicies?.[id];

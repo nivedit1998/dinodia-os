@@ -146,12 +146,12 @@ class HomeAssistantModel {
   }
 
   devices() {
-    return this.store.listDevices().map((device) => ({ device, haId: deviceHaId(device) }));
+    return (this.store.listManagedDevices?.() || this.store.listDevices()).map((device) => ({ device, haId: deviceHaId(device) }));
   }
 
   entities() {
     const list = [];
-    for (const device of this.store.listDevices()) {
+    for (const device of (this.store.listManagedDevices?.() || this.store.listDevices())) {
       const surfaces = allProjectedSurfaces(device);
       const managedProtocolDevice = ["zigbee", "matter", "hive", "google_nest"].includes(String(device.protocol || "").toLowerCase()) && device.setup && typeof device.setup === "object";
       const source = surfaces.length ? surfaces.map((surface) => [surface.id, surface]) : managedProtocolDevice ? [] : Object.entries(device.entities || {});
@@ -379,9 +379,14 @@ class HomeAssistantModel {
       const commandEntity = route?.entity || item.entity;
       const commandService = route?.serviceId || requestedService;
       const commandData = route ? sourceCommandData(requestedService, commandService, normalizedData) : normalizedData;
+      const physicalDevice = device.physicalDeviceId ? this.store.getDevice(device.physicalDeviceId) : device;
+      if (!physicalDevice || device.physicalDeviceId && !this.store.getManagedDevice(device.id)) {
+        throw Object.assign(new Error('The logical device mapping changed'), { statusCode: 409, code: 'logical_mapping_changed' });
+      }
       if (this.commandEntity && bindingFor(commandEntity, commandService)) {
-        await this.commandEntity(device, commandEntity, commandService, commandData, command);
+        await this.commandEntity(physicalDevice, commandEntity, commandService, commandData, command);
       } else {
+        if (device.physicalDeviceId) throw Object.assign(new Error('A logical device requires an exact source binding'), { statusCode: 409, code: 'logical_binding_required' });
         await this.commandDevice(device.id, device.protocol, command);
       }
       // A composite surface can combine a primary on/off source with one or
@@ -402,7 +407,7 @@ class HomeAssistantModel {
           if (parameterService === "select.select_option") parameterData.option = parameterValue;
           const parameterDomain = parameterService.split(".", 1)[0];
           const parameterCommand = this.commandFor(parameterDomain, parameterService.split(".", 2)[1], parameterData, { entity: parameterEntity, domain: parameterDomain });
-          await this.commandEntity(device, parameterEntity, parameterService, sourceCommandData(requestedService, parameterService, parameterData), parameterCommand);
+          await this.commandEntity(physicalDevice, parameterEntity, parameterService, sourceCommandData(requestedService, parameterService, parameterData), parameterCommand);
         }
       }
       const next = this.state(item.haId);
@@ -550,6 +555,11 @@ class HomeAssistantModel {
 
   async removeDevice(input = {}) {
     const device = this.findDevice(input.device_id || input.id);
+    if (device?.physicalDeviceId) {
+      const removed = await this.store.suppressLogicalDevice(device.id);
+      if (removed) this.eventBus?.emit('registry_removed', { registry: 'device', id: deviceHaId(device) });
+      return removed;
+    }
     if (device && this.removeProtocolDevice && ["zigbee", "matter", "hive", "google_nest"].includes(String(device.protocol || "").toLowerCase())) {
       const isZigbee = String(device.protocol || "").toLowerCase() === "zigbee";
       // A confirmed hub-level Zigbee deletion must work for sleeping devices
