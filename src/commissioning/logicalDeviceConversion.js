@@ -114,7 +114,18 @@ class LogicalDeviceConversion {
         await this.store.commit(state => {
           state.logicalConversions = { ...(state.logicalConversions || {}), [entry.operationId]: { ...entry, state: 'RESERVING' } };
         });
-        const reserved = await this.platform(endpoint, { ...body, action: 'reserve' });
+        let reserved;
+        try { reserved = await this.platform(endpoint, { ...body, action: 'reserve' }); }
+        catch (error) {
+          // This exact conflict is an authoritative refusal before reservation,
+          // not an ambiguous network timeout. Leave no forever-pending local
+          // intent when another anchor already owns the parent lifecycle.
+          if (error.code === 'logical_recommission_scope_reserved') {
+            await this.store.commit(state => { delete state.logicalConversions[entry.operationId]; });
+            this.previews.delete(entry.operationId);
+          }
+          throw error;
+        }
         if (reserved.state !== 'RESERVED') fail('logical_conversion_reservation_missing', 'The reviewed conversion is not reserved');
         await this.store.commit(state => {
           state.logicalConversions = { ...(state.logicalConversions || {}), [entry.operationId]: { ...entry, state: 'FENCED' } };
