@@ -550,3 +550,12 @@ body.operator-authority-ended .sidebar .nav { pointer-events: none; opacity: .45
   .controller-switch input::after { width: 16px; height: 16px; }
   .controller-switch input:checked::after { transform: translateX(18px); }
 }
+.chip-delete{margin-left:6px;border:0;background:transparent;color:inherit;opacity:.6;cursor:pointer;font-size:.8em}
+.chip-delete:hover,.chip-delete:focus-visible{opacity:1;color:#c0392b}
+.area-deletion-dialog{max-width:440px;border:0;border-radius:16px;padding:24px}
+.area-deletion-dialog::backdrop{background:rgba(0,0,0,.45)}
+.area-deletion-dialog input{display:block;width:100%;margin-top:6px;padding:8px}
+.area-deletion-dialog .dialog-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+.area-deletion-dialog .danger{background:#c0392b;color:#fff;border:0;padding:8px 14px;border-radius:8px}
+.area-deletion-dialog .danger:disabled{opacity:.5}
+.error-text{color:#c0392b}

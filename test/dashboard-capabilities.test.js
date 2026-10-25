@@ -400,3 +400,12 @@ test("radio tiles expose a selected-dongle removal action", () => {
   assert.match(app, /back in the scan list/);
   assert.doesNotMatch(app, /data-remove-radio="\$\{escapeHtml\(key\)\}"[^>]*disabled/);
 });
+
+test("LD09 full Home dashboard deletes a room only through reviewed preview, typed name and flag", () => {
+  assert.match(app, /state\.status\?\.features\?\.areaDeletion \? `<button type="button" class="chip-delete"/);
+  assert.match(app, /\/deletion`;/); assert.match(app, /api\(`\$\{path\}\/preview`, \{ method: "POST"/);
+  assert.match(app, /confirm\.disabled = input\.value !== preview\.areaName/);
+  assert.match(app, /JSON\.stringify\(\{ operationId: preview\.operationId, digest: preview\.digest, confirmationName: input\.value \}\)/);
+  assert.doesNotMatch(app, /method: "DELETE"[^\n]*\/api\/areas/);
+  assert.match(css, /\.area-deletion-dialog/);
+});

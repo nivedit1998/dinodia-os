@@ -41,7 +41,24 @@ function renderAreasDashboard() {
   document.querySelectorAll("[data-filter-area]").forEach((button) => button.addEventListener("click", () => { state.selectedArea = button.dataset.filterArea; $("#device-filter").value = state.selectedArea || "unassigned"; renderAreasDashboard(); renderDevices(); $("#devices-section").scrollIntoView({ behavior: "smooth", block: "start" }); }));
 }
 function renderAreaControls() { const filter = $("#device-filter"); const current = filter.value; filter.innerHTML = `<option value="all">All devices</option>${state.areas.map((area) => `<option value="${escapeHtml(area.id)}">${escapeHtml(area.name)}</option>`).join("")}<option value="unassigned">Unassigned</option>`; filter.value = [...state.areas.map((area) => area.id), "unassigned", "all"].includes(current) ? current : "all"; state.selectedArea = filter.value === "unassigned" ? "" : filter.value; filter.onchange = () => { state.selectedArea = filter.value === "unassigned" ? "" : filter.value; renderAreasDashboard(); renderDevices(); }; }
-function renderAreas() { $("#areas").innerHTML = state.areas.length ? state.areas.map((area) => `<span class="chip">${escapeHtml(area.name)}</span>`).join("") : `<p class="subtle small">No areas have been provisioned yet.</p>`; }
+function renderAreas() { $("#areas").innerHTML = state.areas.length ? state.areas.map((area) => `<span class="chip">${escapeHtml(area.name)}${state.status?.features?.areaDeletion ? `<button type="button" class="chip-delete" data-delete-area="${escapeHtml(area.id)}" aria-label="Delete room ${escapeHtml(area.name)}">✕</button>` : ""}</span>`).join("") : `<p class="subtle small">No areas have been provisioned yet.</p>`; document.querySelectorAll("[data-delete-area]").forEach((button) => button.addEventListener("click", () => openAreaDeletion(button.dataset.deleteArea))); }
+function areaDeletionDialog() { let dialog = $("#area-deletion-dialog"); if (!dialog) { dialog = document.createElement("dialog"); dialog.id = "area-deletion-dialog"; dialog.className = "area-deletion-dialog"; document.body.append(dialog); } return dialog; }
+async function openAreaDeletion(areaId) {
+  const area = state.areas.find((row) => String(row.id) === String(areaId)); if (!area) return;
+  const dialog = areaDeletionDialog(); const path = `/api/areas/${encodeURIComponent(areaId)}/deletion`;
+  dialog.innerHTML = `<h2>Delete ${escapeHtml(area.name)}?</h2><p class="subtle">Preparing a deletion preview…</p>`; dialog.showModal();
+  let preview; try { preview = await api(`${path}/preview`, { method: "POST", body: "{}" }); }
+  catch (error) { dialog.innerHTML = `<h2>Cannot delete ${escapeHtml(area.name)}</h2><p class="error-text">${escapeHtml(error.message)}</p><div class="dialog-actions"><button type="button" data-close>Close</button></div>`; dialog.querySelector("[data-close]").onclick = () => dialog.close(); return; }
+  dialog.innerHTML = `<h2>Delete ${escapeHtml(preview.areaName)}?</h2><p>${escapeHtml(preview.warning)}</p><ul><li>${preview.deviceCount} device${preview.deviceCount === 1 ? "" : "s"} will be removed</li>${preview.sharedHardwarePreserved ? `<li>${preview.sharedHardwarePreserved} shared switch${preview.sharedHardwarePreserved === 1 ? "" : "es"} stay paired for other rooms</li>` : ""}</ul><label>Type <strong>${escapeHtml(preview.areaName)}</strong> to confirm<input id="area-delete-name" autocomplete="off"></label><p class="error-text" id="area-delete-error"></p><div class="dialog-actions"><button type="button" data-close>Cancel</button><button type="button" class="danger" id="area-delete-confirm" disabled>Delete room permanently</button></div>`;
+  const input = dialog.querySelector("#area-delete-name"), confirm = dialog.querySelector("#area-delete-confirm");
+  dialog.querySelector("[data-close]").onclick = () => dialog.close();
+  input.oninput = () => { confirm.disabled = input.value !== preview.areaName; };
+  confirm.onclick = async () => { confirm.disabled = true; confirm.textContent = "Deleting…";
+    try { let result = await api(`${path}/confirm`, { method: "POST", body: JSON.stringify({ operationId: preview.operationId, digest: preview.digest, confirmationName: input.value }) });
+      dialog.innerHTML = `<h2>${result.state === "COMPLETE" ? "Room deleted" : "Deletion in progress"}</h2><p class="subtle">${result.state === "COMPLETE" ? "The room and its data were removed." : "Access is already removed. Cleanup continues automatically; you can retry from this room if it stays pending."}</p><div class="dialog-actions"><button type="button" data-close>Done</button></div>`;
+      dialog.querySelector("[data-close]").onclick = () => { dialog.close(); loadDashboard(); };
+    } catch (error) { dialog.querySelector("#area-delete-error").textContent = `${error.message}. Nothing more was changed; you can retry.`; confirm.textContent = "Retry deletion"; confirm.disabled = input.value !== preview.areaName; } };
+}
 
 let pendingAreaCreateOperation = null;
 function createAreaOperationId() {

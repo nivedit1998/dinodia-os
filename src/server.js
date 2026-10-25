@@ -2938,6 +2938,7 @@ function nativeDeviceView(principal, device) {
         ok: true,
         version: VERSION,
         hubId: serial,
+        features: { areaDeletion: runtimeConfig.nativeLogicalDevicesEnabled === true },
         devices: hubStore.listDevices().length,
         automations: integrations.nativeAutomations,
         integrations,
