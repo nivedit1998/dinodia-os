@@ -60,4 +60,43 @@ test('real authenticated native HTTP catalog isolates channel rooms and rejects 
     const denied = await fetch(`${base}/api/dinodia/v1/devices/${encodeURIComponent(forbidden)}`, { headers });
     assert.equal(denied.status, 404);
   }
+  const preview = hub.store.areaDeletionPlan('room-1'), operationId = crypto.randomUUID();
+  await hub.store.fenceAreaDeletion(operationId, { areaId: 'room-1', digest: preview.digest,
+    cloudDigest: 'a'.repeat(64), confirmationName: 'Room 1' });
+  await hub.store.progressAreaDeletion(operationId, { cloudCommitted: true });
+  await hub.store.progressAreaDeletion(operationId, { purge: true });
+  const [renewed] = await hub.store.assignLogicalDevices(parent.id, {
+    expectedManifestDigest: hub.store.logicalDeviceManifest(parent.id).digest,
+    assignments: [{ channelKey: 'l1', areaId: 'room-2', name: 'New lifecycle', labelId: 'light', recommission: true }] });
+  const registry = hub.store.snapshot().logicalDevices.children;
+  const policies = Object.fromEntries([children[1].id, renewed.id].map(id => {
+    const child = registry[id];
+    return [id, { managementClass: 'PROPERTY_DEVICE', ownerMembershipId: null, lifecycle: 'INSTALLED',
+      osAreaIds: ['room-2'], canonicalAreaIds: [publicAreas[1]],
+      logicalBinding: Object.fromEntries(['physicalDeviceId','channelKey','channelGeneration','mappingRevision',
+        'manifestDigest','sourceDigest','sourceEntityIds'].map(key => [key, child[key]])) }];
+  }));
+  await hub.store.activateLogicalDevicePolicies(policies);
+  const secondAuth = token({ iss: 'dinodia-platform-v2', aud: `dinodia-hub:${hubId}`, sub: 'tenant-account',
+    sid: 'tenant-session', jti: crypto.randomUUID(), membershipId, trustedDeviceId: 'fixture-phone',
+    hubInstallationId: hubId, homeId, iat: now, exp: now + 300, householdRole: 'TENANT',
+    areaIds: [publicAreas[1]], policyRevision: 4, scope: ['tenant:device-command'] }, keys.privateKey);
+  const secondHeaders = { authorization: `Bearer ${secondAuth}` };
+  const catalogResponse = await fetch(`${base}/api/dinodia/v1/devices`, { headers: secondHeaders });
+  const catalog = await catalogResponse.json();
+  const dto = catalog.data.find(row => row.id === renewed.id);
+  assert.ok(dto);
+  const effects = [];
+  hub.mqtt.command = async (...args) => { effects.push(args); return { accepted: true }; };
+  const command = { commandId: 'recommission-native-command', idempotencyKey: 'recommission-native-key-0001',
+    homeId, homeMembershipId: membershipId, deviceId: dto.id, controlId: dto.controls[0].controlId,
+    descriptorRevision: dto.descriptorRevision, value: true, issuedAt: new Date().toISOString() };
+  const sent = await fetch(`${base}/api/dinodia/v1/commands`, { method: 'POST',
+    headers: { ...secondHeaders, 'content-type': 'application/json', 'idempotency-key': command.idempotencyKey },
+    body: JSON.stringify(command) });
+  const receipt = await sent.json();
+  assert.equal(sent.status, 202, JSON.stringify(receipt));
+  assert.equal(effects.length, 1, 'native dispatch resolves the authorized new generation to the actual physical source');
+  assert.equal(effects[0][0], parent.id);
+  assert.equal(hub.store.getManagedDevice(children[0].id), null, 'the retired identity remains fenced');
 });
