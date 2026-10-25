@@ -5,6 +5,14 @@ function dashboardDevice(device, platform = null, store = null) {
   const result = JSON.parse(JSON.stringify(device));
   const policy = platform?.devicePolicies?.[String(result.id || "")];
   result.logicalConversionAvailable = false;
+  result.recommissionChannels = [];
+  if (device.physicalDeviceId && policy?.managementClass === 'PROPERTY_DEVICE' && !policy.ownerMembershipId
+    && ['INSTALLED', 'VIEW_ONLY'].includes(policy.lifecycle) && store?.snapshot) {
+    const registry = store.snapshot().logicalDevices;
+    const retired = registry?.parents?.[device.physicalDeviceId]?.retiredGenerations || {};
+    result.recommissionChannels = Object.keys(retired).filter(key => !Object.values(registry.children || {}).some(child =>
+      child.physicalDeviceId === device.physicalDeviceId && child.channelKey === key && !child.suppressed));
+  }
   if (policy?.managementClass === 'PROPERTY_DEVICE' && !policy.ownerMembershipId
     && !device.physicalDeviceId && ['INSTALLED', 'VIEW_ONLY'].includes(policy.lifecycle)) {
     try {

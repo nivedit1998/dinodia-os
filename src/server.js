@@ -2087,7 +2087,13 @@ function nativeDeviceView(principal, device) {
       const principal = await currentAssignedDashboardPrincipal(req);
       if (!principal) return nativeContractError(res, 403, 'SCOPE_DENIED', 'Current assigned full Home access is required');
       if (req.method !== 'POST') return nativeContractError(res, 405, 'METHOD_NOT_ALLOWED', 'Use a confirmed conversion');
-      if (conversionRoute[2] === 'preview') return json(res, 200, await logicalDeviceConversion.preview(principal, decodeURIComponent(conversionRoute[1])));
+      if (conversionRoute[2] === 'preview') {
+        const options = await readBody(req);
+        if (!options || Object.keys(options).some(key => key !== 'channelKey')
+          || (options.channelKey !== undefined && (typeof options.channelKey !== 'string' || !/^[A-Za-z0-9_.:-]{1,120}$/.test(options.channelKey))))
+          return nativeContractError(res, 400, 'INVALID_ARGUMENT', 'Review an exact functional channel');
+        return json(res, 200, await logicalDeviceConversion.preview(principal, decodeURIComponent(conversionRoute[1]), options));
+      }
       const input = await readBody(req);
       if (!input || Object.keys(input).sort().join('|') !== 'confirmationName|digest|operationId')
         return nativeContractError(res, 400, 'INVALID_ARGUMENT', 'Review the exact channel conversion');
@@ -2103,7 +2109,8 @@ function nativeDeviceView(principal, device) {
       if (!principal) return nativeContractError(res, 403, 'SCOPE_DENIED', 'Current assigned full Home access is required');
       const operations = Object.values(hubStore.snapshot().logicalConversions || {})
         .filter(job => ['RESERVING', 'FENCED'].includes(job.state)).map(job => ({ operationId: job.operationId,
-          physicalId: job.physicalId, digest: job.digest, confirmationName: job.confirmationName,
+          physicalId: job.anchorId || job.physicalId, digest: job.digest, confirmationName: job.confirmationName,
+          recommission: job.recommission === true,
           channelCount: job.proposal?.channels?.length || 0 }));
       return json(res, 200, { operations });
     }

@@ -57,29 +57,45 @@ class LogicalDeviceConversion {
     await this.store.commit(state => { delete state.logicalAssignments[operationId]; });
     return this.store.getManagedDevice(id);
   }
-  async preview(principal, physicalId) {
+  async preview(principal, selectedId, options = {}) {
     const proof = this.proof(principal), platform = this.store.getPlatform();
-    const device = this.store.getManagedDevice(physicalId), policy = platform.devicePolicies?.[physicalId];
-    if (!device || device.physicalDeviceId || policy?.managementClass !== 'PROPERTY_DEVICE'
+    const anchor = this.store.getManagedDevice(selectedId), policy = platform.devicePolicies?.[selectedId];
+    const recommission = Boolean(options.channelKey);
+    const physicalId = recommission ? anchor?.physicalDeviceId : selectedId;
+    const device = recommission ? this.store.getDevice(physicalId) : anchor;
+    if (!device || Boolean(anchor?.physicalDeviceId) !== recommission || policy?.managementClass !== 'PROPERTY_DEVICE'
       || policy.ownerMembershipId || !['INSTALLED', 'VIEW_ONLY'].includes(policy.lifecycle))
       fail('logical_conversion_unavailable', 'Select an installed permanent physical device');
-    const area = platform.areaBindings?.find(row => row.hubAreaId === device.areaId);
+    const area = platform.areaBindings?.find(row => row.hubAreaId === anchor.areaId);
     const identity = this.protocolIdentity(device);
     if (!area || !identity) fail('logical_conversion_unproven', 'The current Area or protocol identity cannot be proven');
-    const proposal = buildLogicalCommissioningProposal({ device, homeId: platform.homeId,
+    let proposal = buildLogicalCommissioningProposal({ device, homeId: platform.homeId,
       membershipId: null, managementClass: 'property_device', areaId: area.areaId, hubAreaId: area.hubAreaId,
       name: device.name, customerLabel: policy.customerLabel || device.customerLabel || 'Device',
-      labels: this.store.listLabels(), now: Date.now() });
+      labels: this.store.listLabels(), now: Date.now(),
+      ...(recommission ? { retirementEvidence: this.store.snapshot(), allowRecommission: true } : {}) });
     if (!proposal) fail('logical_conversion_unproven', 'Independent functional channels cannot be proven');
+    if (recommission) {
+      const registry = logical.registry(this.store.snapshot());
+      const active = Object.values(registry.children).some(child => child.physicalDeviceId === physicalId
+        && child.channelKey === options.channelKey && !child.suppressed && !registry.tombstones[child.id]);
+      const channel = proposal.channels.find(row => row.binding.channelKey === options.channelKey);
+      if (active || !channel || channel.binding.channelGeneration < 2)
+        fail('logical_recommission_unavailable', 'Select a removed channel on this paired permanent device');
+      proposal = { ...proposal, channels: [channel], assignments: proposal.assignments.filter(row => row.channelKey === options.channelKey) };
+    }
     const operationId = crypto.randomUUID();
-    const cloud = await this.platform(endpoint, { action: 'preview', operationId, osDeviceId: physicalId,
-      channels: proposal.channels, protocolIdentityHash: identity.hash, ...proof });
+    const cloud = await this.platform(endpoint, { action: 'preview', operationId, osDeviceId: selectedId,
+      channels: proposal.channels, protocolIdentityHash: identity.hash,
+      ...(recommission ? { recommissionChannelKey: options.channelKey } : {}), ...proof });
     const entry = { operationId, physicalId, actor: principal.jti, digest: cloud.digest,
-      confirmationName: cloud.confirmationName, proposal, policy, area, identityHash: identity.hash };
+      confirmationName: cloud.confirmationName, proposal, policy, area, identityHash: identity.hash,
+      ...(recommission ? { anchorId: selectedId, recommission: true } : {}) };
     this.previews.set(operationId, entry);
     return { operationId, digest: cloud.digest, confirmationName: cloud.confirmationName,
-      channelCount: proposal.channels.length,
-      warning: 'This replaces the combined control with independent channels. Existing history stays with the original device; it is not copied. Existing automations need review. Nothing is paired or switched.' };
+      channelCount: proposal.channels.length, recommission,
+      warning: recommission ? 'Restore this removed channel as a new device in the surviving channel’s room. Existing channels and their history stay unchanged. Old data and access do not return. Nothing is paired or switched.'
+        : 'This replaces the combined control with independent channels. Existing history stays with the original device; it is not copied. Existing automations need review. Nothing is paired or switched.' };
   }
   confirm(principal, input) {
     const work = this.queue.then(async () => {
@@ -92,7 +108,7 @@ class LogicalDeviceConversion {
       if (!current || this.protocolIdentity(current)?.hash !== entry.identityHash
         || this.store.logicalDeviceManifest(entry.physicalId).digest !== entry.proposal.manifest.digest)
         fail('logical_conversion_changed', 'The physical mapping changed; conversion is paused');
-      const body = { operationId: entry.operationId, osDeviceId: entry.physicalId,
+      const body = { operationId: entry.operationId, osDeviceId: entry.anchorId || entry.physicalId,
         digest: entry.digest, confirmationName: entry.confirmationName, ...proof };
       if (entry.state !== 'FENCED') {
         await this.store.commit(state => {
@@ -104,10 +120,12 @@ class LogicalDeviceConversion {
           state.logicalConversions = { ...(state.logicalConversions || {}), [entry.operationId]: { ...entry, state: 'FENCED' } };
           // Existing policy/Area must cease authorizing the broad parent before
           // the canonical cutover. No child becomes authorized until cloud ACK.
-          state.devices[entry.physicalId].areaId = null;
-          state.devices[entry.physicalId].metadata = { ...(state.devices[entry.physicalId].metadata || {}), areaId: null };
-          state.devices[entry.physicalId].setup = { status: 'needs_setup', reason: 'logical_conversion_pending' };
-          state.platform.devicePolicies[entry.physicalId] = { ...entry.policy, lifecycle: 'RETIRED' };
+          if (!entry.recommission) {
+            state.devices[entry.physicalId].areaId = null;
+            state.devices[entry.physicalId].metadata = { ...(state.devices[entry.physicalId].metadata || {}), areaId: null };
+            state.devices[entry.physicalId].setup = { status: 'needs_setup', reason: 'logical_conversion_pending' };
+            state.platform.devicePolicies[entry.physicalId] = { ...entry.policy, lifecycle: 'RETIRED' };
+          }
         });
       }
       const result = await this.platform(endpoint, { ...body, action: 'commit' });
@@ -119,7 +137,10 @@ class LogicalDeviceConversion {
         if (!row || row.managementClass !== entry.policy.managementClass || row.ownerMembershipId !== null
           || row.descriptorDigest !== channel.catalogue.descriptorDigest || !isDeepStrictEqual(row.binding, channel.binding))
           fail('logical_conversion_ack_mismatch', 'The canonical channel binding changed');
-        policies[row.osDeviceId] = { ...entry.policy, platformDeviceId: row.id, overrideName: channel.catalogue.name,
+        const { analyticsInterval: _oldInterval, analyticsStartAt: _oldStart, ...basePolicy } = entry.policy;
+        policies[row.osDeviceId] = { ...basePolicy, analyticsCategory: row.analyticsCategory || 'NONE',
+          platformDeviceId: row.id, overrideName: channel.catalogue.name,
+          inventoryRevision: row.inventoryRevision,
           descriptorRevision: row.descriptorRevision, descriptorDigest: row.descriptorDigest,
           logicalBinding: row.binding, osAreaIds: [entry.area.hubAreaId], canonicalAreaIds: [entry.area.areaId] };
       }
