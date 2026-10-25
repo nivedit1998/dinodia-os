@@ -877,7 +877,8 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
 
   async function commandEntity(device, entity, serviceId, data = {}, fallbackCommand = {}, observationCause = null, logicalContext = null) {
     if (storeRecoveryPending()) throw Object.assign(new Error("Device commands are disabled while the recovered Home inventory is being reconciled"), { statusCode: 503, code: "store_backup_recovery_pending" });
-    if (hubStore.deletionBlocksSource(device.id, entity.id)) throw Object.assign(new Error('This device is being deleted'), { statusCode: 409, code: 'device_deletion_fenced' });
+    if (hubStore.deletionBlocksSource(device.id, entity.id, logicalContext?.deviceId || (device.physicalDeviceId ? device.id : null)))
+      throw Object.assign(new Error('This device is being deleted'), { statusCode: 409, code: 'device_deletion_fenced' });
     if (device.physicalDeviceId || logicalContext) {
       const current = hubStore.getManagedDevice(logicalContext?.deviceId || device.id);
       if (!current || current.mappingRevision !== (logicalContext?.mappingRevision || device.mappingRevision) || !current.entities?.[entity.id]) {

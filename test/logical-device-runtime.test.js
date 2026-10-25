@@ -9,17 +9,37 @@ const { HomeAssistantModel } = require('../src/haModel');
 const { normalizeZigbeeDevice } = require('../src/integrations/zigbee/exposeNormalizer');
 const twoGang = require('./fixtures/zigbee/two-gang-light.json');
 
-async function fixture(t) {
+async function fixture(t, overrideParent = null) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'dinodia-logical-runtime-'));
   const file = path.join(directory, 'store.json');
   const store = new Store(file);
   t.after(async () => { await store.persist(); await fs.rm(directory, { recursive: true, force: true }); });
   await store.saveArea({ name: 'Room 1' }, 'room-1');
   await store.saveArea({ name: 'Room 2' }, 'room-2');
-  const parent = normalizeZigbeeDevice(twoGang);
+  const parent = overrideParent || normalizeZigbeeDevice(twoGang);
   await store.upsertDevice(parent);
   return { store, parent, file };
 }
+
+test('Matter adapter-declared endpoints become separately authorized devices with exact physical command routing', async t => {
+  const { normalizeMatterNode } = require('../src/integrations/matter/nodeNormalizer');
+  const parent = normalizeMatterNode(require('./fixtures/matter/two-endpoint-switch-node.json'));
+  const f = await fixture(t, parent);
+  const manifest = f.store.logicalDeviceManifest(parent.id);
+  assert.deepEqual(manifest.channels.map(row => row.channelKey), ['1', '2']);
+  const children = await f.store.assignLogicalDevices(parent.id, {
+    expectedManifestDigest: manifest.digest, assignments: manifest.channels.map((channel, index) => ({
+      channelKey: channel.channelKey, areaId: `room-${index + 1}`, name: `Matter channel ${index + 1}`, labelId: 'light' })) });
+  const effects = [];
+  const model = new HomeAssistantModel({ store: f.store, commandEntity: async (...args) => effects.push(args) });
+  const first = model.entities().find(row => row.entity.attributes.area_id === 'room-1');
+  await model.callService('switch', 'turn_on', { entity_id: first.haId });
+  assert.equal(effects.length, 1);
+  assert.equal(effects[0][0].id, parent.id);
+  assert.equal(String(effects[0][1].endpointId), '1');
+  assert.equal(effects[0][6].deviceId, children[0].id);
+  assert.equal(f.store.getManagedDevice(children[1].id).areaId, 'room-2');
+});
 
 async function assign(f) {
   return f.store.assignLogicalDevices(f.parent.id, {

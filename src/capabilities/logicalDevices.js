@@ -230,6 +230,17 @@ function applyLogicalPolicies(state, policies) {
       || JSON.stringify(channel.sourceEntityIds) !== JSON.stringify([...binding.sourceEntityIds].sort())) { pending.push(id); continue; }
     const prior = r.children[id];
     if (prior && prior.mappingRevision > binding.mappingRevision) fail('logical_policy_stale', 'The logical mapping revision regressed');
+    if (binding.channelGeneration > 1 && (!prior || prior.suppressed
+      || !state.platform?.devicePolicies?.[id]?.logicalBinding)) {
+      // A new lifecycle may not inherit the former generation's cached state.
+      for (const sourceId of binding.sourceEntityIds) {
+        const entity = parent.entities?.[sourceId];
+        if (!entity) continue;
+        if (entity.stateKey && parent.state) delete parent.state[entity.stateKey];
+        for (const key of ['state','lastReported','lastReportedAt','lastChanged','sourceObservedAt',
+          'sourceReceivedAt','admittedEvidence','pendingState','pendingValue']) delete entity[key];
+      }
+    }
     r.parents[parent.id] = { ...r.parents[parent.id], manifest, manifestDigest: binding.manifestDigest,
       managementClass: policy.managementClass, ownerMembershipId: policy.ownerMembershipId };
     r.children[id] = { id, ...copy(binding), areaId: policy.osAreaIds[0],

@@ -1648,9 +1648,11 @@ class Store {
 
   areaDeletionPlan(areaId) { return areaDeletion.plan(this.state, String(areaId)); }
 
-  deletionBlocksSource(deviceId, entityId = '') {
-    return areaDeletion.blocked(this.state, 'devices', deviceId)
+  deletionBlocksSource(deviceId, entityId = '', logicalId = null) {
+    const fenced = areaDeletion.blocked(this.state, 'devices', deviceId)
       || Boolean(entityId && areaDeletion.blocked(this.state, 'sources', entityId));
+    return fenced && !(logicalId && entityId
+      && areaDeletion.recommissionedSource(this.state, deviceId, entityId, logicalId));
   }
 
   async fenceAreaDeletion(operationId, input) {
@@ -1959,7 +1961,12 @@ class Store {
       this.state.syncUsage = ended.state;
       for (const key of ended.changedBuckets) queueUsageBucket(this.state, key, assignmentEndMs);
     }
-    for (const sourceId of logicalDevices.suppressedSourceIds(this.state, id)) {
+    const admissionState = { ...this.state, devices: { ...this.state.devices, [id]: next } };
+    const suppressedSources = new Set([...logicalDevices.suppressedSourceIds(this.state, id),
+      ...Object.keys(next.entities || {}).filter(sourceId => areaDeletion.blocked(this.state, 'devices', id)
+        || areaDeletion.blocked(this.state, 'sources', sourceId))]);
+    for (const sourceId of suppressedSources) {
+      if (areaDeletion.recommissionedSource(admissionState, id, sourceId)) continue;
       const source = next.entities?.[sourceId];
       if (!source) continue;
       if (source.stateKey) delete next.state[source.stateKey];

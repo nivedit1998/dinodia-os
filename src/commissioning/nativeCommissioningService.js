@@ -982,7 +982,8 @@ class NativeCommissioningService {
         ? buildLogicalCommissioningProposal({ device, homeId: actor.homeId, membershipId: actor.membershipId,
           managementClass: actor.actorType === 'STAFF_INSTALLER' ? 'property_device' : 'tenant_device',
           areaId: session.selectedAreaId, hubAreaId: session.selectedHubAreaId, name: session.selectedName,
-          customerLabel: session.selectedCustomerLabel, labels: this.store.listLabels(), now: this.clock() }) : null;
+          customerLabel: session.selectedCustomerLabel, labels: this.store.listLabels(), now: this.clock(),
+          retirementEvidence: this.store.snapshot(), allowRecommission: session.operationKind === 'PAIR_NEW' }) : null;
       if (logicalProposal) deviceProjection.channels = logicalProposal.channels;
       const platformDisposition = disposition === "retain_unsupported" ? "view_only" : disposition;
       const cloud = await this.platform("finalize", session, { candidateRef: session.selectedCandidateRef, disposition: platformDisposition, device: deviceProjection });

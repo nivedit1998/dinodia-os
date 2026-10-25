@@ -77,6 +77,16 @@ test('purged channel requires explicit recommission and never reuses its deleted
     cloudDigest: 'a'.repeat(64), confirmationName: 'Room 1' });
   await store.progressAreaDeletion(operationId, { cloudCommitted: true });
   await store.progressAreaDeletion(operationId, { purge: true });
+  const { buildLogicalCommissioningProposal } = require('../src/commissioning/logicalDeviceCatalogue');
+  const proposalInput = { device: store.getDevice(parent.id), homeId: crypto.randomUUID(),
+    membershipId: crypto.randomUUID(), managementClass: 'PROPERTY_DEVICE', areaId: crypto.randomUUID(),
+    hubAreaId: 'r2', name: 'Explicit new installation', customerLabel: 'Light', labels: store.listLabels(),
+    now: new Date(), retirementEvidence: store.snapshot() };
+  assert.throws(() => buildLogicalCommissioningProposal(proposalInput), /recommission/i);
+  const proposed = buildLogicalCommissioningProposal({ ...proposalInput, allowRecommission: true });
+  assert.ok(proposed);
+  assert.equal(proposed.channels.find(channel => channel.binding.channelKey === 'l1').binding.channelGeneration, 2);
+  assert.notEqual(proposed.channels.find(channel => channel.binding.channelKey === 'l1').catalogue.osDeviceId, children[0].id);
   const input = { expectedManifestDigest: store.logicalDeviceManifest(parent.id).digest,
     assignments: [{ channelKey: 'l1', areaId: 'r2', labelId: 'light', name: 'Replacement channel' }] };
   await assert.rejects(store.assignLogicalDevices(parent.id, input), /explicit recommissioning/);
@@ -85,6 +95,49 @@ test('purged channel requires explicit recommission and never reuses its deleted
   assert.notEqual(renewed[0].id, children[0].id);
   assert.equal(renewed[0].channelGeneration, 2);
   assert.ok(store.getManagedDevice(children[1].id));
+});
+
+test('purged reports remain erased until a new canonical generation receives its own observation', async t => {
+  const { store, parent, children, file } = await fixture(t);
+  const preview = store.areaDeletionPlan('r1'), operationId = crypto.randomUUID();
+  await store.fenceAreaDeletion(operationId, { areaId: 'r1', digest: preview.digest,
+    cloudDigest: 'a'.repeat(64), confirmationName: 'Room 1' });
+  await store.progressAreaDeletion(operationId, { cloudCommitted: true });
+  await store.progressAreaDeletion(operationId, { purge: true });
+  const report = async value => {
+    const at = new Date().toISOString();
+    await store.updateDeviceState(parent.id, { state_l1: value, state_l2: 'OFF' }, {
+      protocol: 'zigbee', reportedStateKeys: ['state_l1', 'state_l2'],
+      sourceObservedAtByStateKey: { state_l1: at, state_l2: at },
+      sourceReceivedAtByStateKey: { state_l1: at, state_l2: at } });
+  };
+  await report('ON');
+  assert.equal(store.getDevice(parent.id).state.state_l1, undefined, 'purged registry absence cannot admit erased telemetry');
+  const [fresh] = await store.assignLogicalDevices(parent.id, {
+    expectedManifestDigest: store.logicalDeviceManifest(parent.id).digest,
+    assignments: [{ channelKey: 'l1', areaId: 'r2', labelId: 'light', name: 'New lifecycle', recommission: true }] });
+  const bindings = [children[1], fresh].map(child => store.snapshot().logicalDevices.children[child.id]);
+  const policies = Object.fromEntries(bindings.map(child => [child.id, {
+    managementClass: 'PROPERTY_DEVICE', ownerMembershipId: null, lifecycle: 'INSTALLED',
+    analyticsCategory: 'LIGHT', osAreaIds: [child.areaId], canonicalAreaIds: [crypto.randomUUID()],
+    platformDeviceId: crypto.randomUUID(), installationRequestId: crypto.randomUUID(),
+    catalogueStatus: 'ready', usefulReadings: true, descriptorRevision: 1, descriptorDigest: 'b'.repeat(64),
+    logicalBinding: Object.fromEntries(['physicalDeviceId', 'channelKey', 'channelGeneration',
+      'mappingRevision', 'manifestDigest', 'sourceDigest', 'sourceEntityIds'].map(key => [key, child[key]])) }]));
+  await store.activateLogicalDevicePolicies(policies);
+  assert.equal(store.getManagedDevice(fresh.id).state.state_l1, undefined, 'activation is not an observation');
+  const sourceId = bindings.find(child => child.id === fresh.id).sourceEntityIds[0];
+  assert.equal(store.deletionBlocksSource(parent.id, sourceId, children[0].id), true);
+  assert.equal(store.deletionBlocksSource(parent.id, sourceId, fresh.id), false);
+  await report('ON');
+  assert.equal(store.getManagedDevice(fresh.id).state.state_l1, 'ON');
+  assert.equal(store.getManagedDevice(children[0].id), null);
+  await store.flushPersist();
+  const restarted = new Store(file);
+  assert.equal(restarted.deletionBlocksSource(parent.id, sourceId, fresh.id), false, 'restarted canonical generation remains authorized');
+  assert.equal(restarted.getManagedDevice(fresh.id).state.state_l1, 'ON');
+  assert.equal(restarted.getManagedDevice(children[0].id), null);
+  await restarted.flushPersist();
 });
 
 test('quarantined target remains in the exact deletion inventory while its sibling stays protected', async t => {

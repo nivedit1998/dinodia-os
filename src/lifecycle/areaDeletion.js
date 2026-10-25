@@ -11,6 +11,34 @@ function ledger(state) {
 }
 function blocked(state, kind, id) { return Boolean(ledger(state)[kind]?.[ref(kind, String(id))]); }
 
+/** Old identities remain fenced; only a newer canonical generation can use
+ * that same exact physical source. A helper-only local assignment is not authority. */
+function recommissionedSource(state, physicalId, sourceId, logicalId = null) {
+  const r = logical.registry(state);
+  return Object.values(r.children).some(child => {
+    if (logicalId && child.id !== logicalId || child.physicalDeviceId !== physicalId
+      || child.channelGeneration < 2 || child.suppressed || r.tombstones[child.id]
+      || blocked(state, 'devices', child.id) || !child.sourceEntityIds?.includes(sourceId)
+      || blocked(state, 'areas', child.areaId)) return false;
+    const policy = state.platform?.devicePolicies?.[child.id];
+    if (!policy || !['INSTALLED','VIEW_ONLY'].includes(policy.lifecycle)
+      || !logical.validBinding(child.id, policy.logicalBinding)
+      || policy.logicalBinding.channelGeneration !== child.channelGeneration
+      || policy.logicalBinding.mappingRevision !== child.mappingRevision
+      || policy.logicalBinding.sourceDigest !== child.sourceDigest
+      || policy.osAreaIds?.[0] !== child.areaId
+      || !policy.logicalBinding.sourceEntityIds.includes(sourceId)) return false;
+    const previousId = logical.logicalId(physicalId, child.channelKey, child.channelGeneration - 1);
+    return Boolean((blocked(state, 'devices', previousId) || r.tombstones[previousId])
+      && logical.projectChild(state, child.id));
+  });
+}
+
+function retainedNewPhysicalLifecycle(state, physicalId) {
+  return Object.values(logical.registry(state).children).some(child => child.physicalDeviceId === physicalId
+    && child.channelGeneration > 1 && !child.privateErased && !blocked(state, 'devices', child.id));
+}
+
 /** Exact transport/source inventory, with no private values in the operator preview. */
 function plan(state, areaId) {
   const area = state.areas[areaId];
@@ -120,7 +148,7 @@ function reconcile(state, authoritativeLedger, { purgeRestored = false } = {}) {
     const pendingParents = new Set(Object.values(authoritativeLedger.jobs).flatMap(job =>
       Object.entries(job.physical || {}).filter(([, status]) => status === 'REMOVAL_PENDING').map(([id]) => id)));
     for (const id of Object.keys(state.devices || {})) {
-      if (!blocked(state, 'devices', id) || pendingParents.has(id)) continue;
+      if (!blocked(state, 'devices', id) || pendingParents.has(id) || retainedNewPhysicalLifecycle(state, id)) continue;
       delete state.devices[id];
       delete state.logicalDevices?.parents?.[id];
     }
@@ -135,6 +163,7 @@ function reconcile(state, authoritativeLedger, { purgeRestored = false } = {}) {
   for (const device of Object.values(state.devices || {})) {
     for (const [id, entity] of Object.entries(device.entities || {})) {
       if (!blocked(state, 'sources', id)) continue;
+      if (recommissionedSource(state, device.id, id)) continue;
       if (entity.stateKey && device.state) delete device.state[entity.stateKey];
       for (const key of ['state', 'lastReported', 'lastReportedAt', 'sourceObservedAt', 'sourceReceivedAt', 'admittedEvidence', 'pendingValue', 'pendingState']) delete entity[key];
     }
@@ -204,4 +233,4 @@ function purge(state, operationId) {
   return copy(job);
 }
 
-module.exports = { ledger, blocked, plan, fence, reconcile, purge, purgeReferences, ref };
+module.exports = { ledger, blocked, recommissionedSource, plan, fence, reconcile, purge, purgeReferences, ref };
