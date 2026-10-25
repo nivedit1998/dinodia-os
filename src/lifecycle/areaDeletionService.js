@@ -47,6 +47,8 @@ class AreaDeletionService {
           || preview.local.digest !== input.digest || input.confirmationName !== preview.local.name)
           fail('area_delete_preview_expired', 'Review a new deletion preview');
         if (input.areaId && input.areaId !== preview.areaId) fail('area_delete_operation_conflict', 'The selected Area changed');
+        if (this.store.areaDeletionPlan(preview.areaId).digest !== preview.local.digest)
+          fail('area_delete_preview_changed', 'The local room or shared hardware changed; review its current impact before reserving');
         // Persist confirmed intent BEFORE the network reservation. A process
         // crash can then rediscover and resume the exact same operation.
         await this.store.commit(state => {

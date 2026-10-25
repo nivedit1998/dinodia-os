@@ -46,10 +46,11 @@ function areaDeletionDialog() { let dialog = $("#area-deletion-dialog"); if (!di
 async function openAreaDeletion(areaId) {
   const area = state.areas.find((row) => String(row.id) === String(areaId)); if (!area) return;
   const dialog = areaDeletionDialog(); const path = `/api/areas/${encodeURIComponent(areaId)}/deletion`;
+  dialog.setAttribute("aria-label", `Delete room ${area.name}`);
   dialog.innerHTML = `<h2>Delete ${escapeHtml(area.name)}?</h2><p class="subtle">Preparing a deletion preview…</p>`; dialog.showModal();
   let preview; try { preview = await api(`${path}/preview`, { method: "POST", body: "{}" }); }
   catch (error) { dialog.innerHTML = `<h2>Cannot delete ${escapeHtml(area.name)}</h2><p class="error-text">${escapeHtml(error.message)}</p><div class="dialog-actions"><button type="button" data-close>Close</button></div>`; dialog.querySelector("[data-close]").onclick = () => dialog.close(); return; }
-  dialog.innerHTML = `<h2>Delete ${escapeHtml(preview.areaName)}?</h2><p>${escapeHtml(preview.warning)}</p><ul><li>${preview.deviceCount} device${preview.deviceCount === 1 ? "" : "s"} will be removed</li>${preview.sharedHardwarePreserved ? `<li>${preview.sharedHardwarePreserved} shared switch${preview.sharedHardwarePreserved === 1 ? "" : "es"} stay paired for other rooms</li>` : ""}</ul><label>Type <strong>${escapeHtml(preview.areaName)}</strong> to confirm<input id="area-delete-name" autocomplete="off"></label><p class="error-text" id="area-delete-error"></p><div class="dialog-actions"><button type="button" data-close>Cancel</button><button type="button" class="danger" id="area-delete-confirm" disabled>Delete room permanently</button></div>`;
+  dialog.innerHTML = `<h2>Delete ${escapeHtml(preview.areaName)}?</h2><p>${escapeHtml(preview.warning)}</p><ul><li>${preview.deviceCount} device${preview.deviceCount === 1 ? "" : "s"} will be removed</li>${preview.sharedHardwarePreserved ? `<li>${preview.sharedHardwarePreserved} shared switch${preview.sharedHardwarePreserved === 1 ? "" : "es"} stay paired for other rooms</li>` : ""}${preview.providerDetachments ? `<li>${preview.providerDetachments} provider-linked device${preview.providerDetachments === 1 ? "" : "s"} will be detached from Dinodia only. Their provider account is unchanged.</li>` : ""}</ul><label>Type <strong>${escapeHtml(preview.areaName)}</strong> to confirm<input id="area-delete-name" autocomplete="off"></label><p class="error-text" id="area-delete-error" role="alert"></p><div class="dialog-actions"><button type="button" data-close>Cancel</button><button type="button" class="danger" id="area-delete-confirm" disabled>Delete room permanently</button></div>`;
   const input = dialog.querySelector("#area-delete-name"), confirm = dialog.querySelector("#area-delete-confirm");
   dialog.querySelector("[data-close]").onclick = () => dialog.close();
   input.oninput = () => { confirm.disabled = input.value !== preview.areaName; };
@@ -95,6 +96,7 @@ async function renderPendingAreaDeletions() {
 let pendingAreaCreateOperation = null;
 async function openLogicalConversion(id, retainedPreview = null) {
   const dialog = areaDeletionDialog();
+  dialog.setAttribute("aria-label", "Separate device channels");
   dialog.innerHTML = '<h2>Separate device channels</h2><p>Checking the current channel mapping…</p>';
   dialog.showModal();
   try {

@@ -552,10 +552,16 @@ body.operator-authority-ended .sidebar .nav { pointer-events: none; opacity: .45
 }
 .chip-delete{margin-left:6px;border:0;background:transparent;color:inherit;opacity:.6;cursor:pointer;font-size:.8em}
 .chip-delete:hover,.chip-delete:focus-visible{opacity:1;color:#c0392b}
-.area-deletion-dialog{max-width:440px;border:0;border-radius:16px;padding:24px}
+.area-deletion-dialog{width:min(28rem,calc(100vw - 2rem));max-width:none;max-height:calc(100dvh - 2rem);overflow:auto;overflow-wrap:anywhere;border:0;border-radius:16px;padding:1.5rem;background:#fff;color:#1f2933;line-height:1.5}
 .area-deletion-dialog::backdrop{background:rgba(0,0,0,.45)}
 .area-deletion-dialog input{display:block;width:100%;margin-top:6px;padding:8px}
 .area-deletion-dialog .dialog-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
 .area-deletion-dialog .danger{background:#c0392b;color:#fff;border:0;padding:8px 14px;border-radius:8px}
 .area-deletion-dialog .danger:disabled{opacity:.5}
+.area-deletion-dialog .dialog-actions{flex-wrap:wrap}
+.area-deletion-dialog .dialog-actions button{min-height:44px;padding:.65rem 1rem}
+.area-deletion-dialog input{font-size:1rem}
+.area-deletion-dialog .subtle{color:#536171}
+.area-deletion-dialog :focus-visible{outline:3px solid #2563eb;outline-offset:3px}
+@media(prefers-color-scheme:dark){.area-deletion-dialog{color-scheme:dark;background:#20242b;color:#f5f7fa}.area-deletion-dialog .subtle{color:#b9c3cf}.area-deletion-dialog input{background:#11151a;color:#f5f7fa;border-color:#657386}}
 .error-text{color:#c0392b}
