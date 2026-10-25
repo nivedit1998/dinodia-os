@@ -91,7 +91,9 @@ function assignInState(state, physicalId, input) {
     if (!state.labels[assignment.labelId]) fail('logical_label_invalid', 'Select an existing label');
     const prior = Object.values(current.children).filter(c => c.physicalDeviceId === physicalId && c.channelKey === channel.channelKey)
       .sort((a, b) => (b.channelGeneration || 1) - (a.channelGeneration || 1));
-    const latest = prior[0];
+    const retiredGeneration = Number(current.parents[physicalId]?.retiredGenerations?.[channel.channelKey] || 0);
+    const latest = prior[0] || (retiredGeneration > 0
+      ? { channelGeneration: retiredGeneration, suppressed: true } : null);
     const retired = latest && (latest.suppressed === true || current.tombstones[latest.id]);
     if (retired && assignment.recommission !== true) fail('logical_channel_retired', 'This channel requires explicit recommissioning');
     // Recommissioning mints a new generation and identity; retired history is never resurrected.
@@ -112,7 +114,7 @@ function assignInState(state, physicalId, input) {
   }
   const next = copy(current);
   next.revision += 1;
-  next.parents[physicalId] = { manifestDigest: manifest.digest, manifest, revision: next.revision };
+  next.parents[physicalId] = { ...next.parents[physicalId], manifestDigest: manifest.digest, manifest, revision: next.revision };
   for (const child of children) next.children[child.id] = child;
   state.logicalDevices = next;
   fenceParent(parent);
@@ -164,20 +166,21 @@ function suppressInState(state, id) {
   const r = registry(state);
   const child = r.children[id];
   if (!child) fail('logical_child_missing', 'The logical device is unavailable');
-  if (child.suppressed) return false;
+  const alreadySuppressed = child.suppressed === true;
   child.suppressed = true;
-  r.revision += 1;
+  if (!alreadySuppressed) r.revision += 1;
   r.tombstones[id] = { physicalDeviceId: child.physicalDeviceId, channelKey: child.channelKey,
     channelGeneration: child.channelGeneration, revision: r.revision };
   const parent = state.devices[child.physicalDeviceId];
   for (const sourceId of child.sourceEntityIds) {
     const entity = parent?.entities?.[sourceId];
     if (!entity) continue;
+    if (entity.stateKey && parent.state) delete parent.state[entity.stateKey];
     for (const key of ['state', 'lastReported', 'lastReportedAt', 'lastChanged', 'sourceObservedAt',
       'sourceReceivedAt', 'admittedEvidence', 'pendingState', 'pendingValue']) delete entity[key];
   }
   state.logicalDevices = r;
-  return true;
+  return !alreadySuppressed;
 }
 
 function validBinding(id, binding) {
@@ -227,11 +230,14 @@ function applyLogicalPolicies(state, policies) {
       || JSON.stringify(channel.sourceEntityIds) !== JSON.stringify([...binding.sourceEntityIds].sort())) { pending.push(id); continue; }
     const prior = r.children[id];
     if (prior && prior.mappingRevision > binding.mappingRevision) fail('logical_policy_stale', 'The logical mapping revision regressed');
-    r.parents[parent.id] = { manifest, manifestDigest: binding.manifestDigest,
+    r.parents[parent.id] = { ...r.parents[parent.id], manifest, manifestDigest: binding.manifestDigest,
       managementClass: policy.managementClass, ownerMembershipId: policy.ownerMembershipId };
     r.children[id] = { id, ...copy(binding), areaId: policy.osAreaIds[0],
       name: policy.overrideName || prior?.name || `${parent.name} ${binding.channelKey}`,
-      labelIds: parent.labelIds?.length ? parent.labelIds : ['tenant_device'], suppressed: false };
+      labelIds: (() => {
+        const label = Object.values(state.labels || {}).find(row => row.name === policy.customerLabel);
+        return label ? [label.id] : prior?.labelIds || (parent.labelIds?.length ? parent.labelIds : ['tenant_device']);
+      })(), suppressed: false };
     parent.managementClass = policy.managementClass === 'TENANT_DEVICE' ? 'tenant_device' : 'property_device';
     parent.tenantOwnerMembershipId = policy.ownerMembershipId;
     fenceParent(parent);

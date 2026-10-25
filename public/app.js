@@ -41,7 +41,7 @@ function renderAreasDashboard() {
   document.querySelectorAll("[data-filter-area]").forEach((button) => button.addEventListener("click", () => { state.selectedArea = button.dataset.filterArea; $("#device-filter").value = state.selectedArea || "unassigned"; renderAreasDashboard(); renderDevices(); $("#devices-section").scrollIntoView({ behavior: "smooth", block: "start" }); }));
 }
 function renderAreaControls() { const filter = $("#device-filter"); const current = filter.value; filter.innerHTML = `<option value="all">All devices</option>${state.areas.map((area) => `<option value="${escapeHtml(area.id)}">${escapeHtml(area.name)}</option>`).join("")}<option value="unassigned">Unassigned</option>`; filter.value = [...state.areas.map((area) => area.id), "unassigned", "all"].includes(current) ? current : "all"; state.selectedArea = filter.value === "unassigned" ? "" : filter.value; filter.onchange = () => { state.selectedArea = filter.value === "unassigned" ? "" : filter.value; renderAreasDashboard(); renderDevices(); }; }
-function renderAreas() { $("#areas").innerHTML = state.areas.length ? state.areas.map((area) => `<span class="chip">${escapeHtml(area.name)}${state.status?.features?.areaDeletion ? `<button type="button" class="chip-delete" data-delete-area="${escapeHtml(area.id)}" aria-label="Delete room ${escapeHtml(area.name)}">✕</button>` : ""}</span>`).join("") : `<p class="subtle small">No areas have been provisioned yet.</p>`; document.querySelectorAll("[data-delete-area]").forEach((button) => button.addEventListener("click", () => openAreaDeletion(button.dataset.deleteArea))); }
+function renderAreas() { $("#areas").innerHTML = state.areas.length ? state.areas.map((area) => `<span class="chip">${escapeHtml(area.name)}${state.status?.features?.areaDeletion ? `<button type="button" class="chip-delete" data-delete-area="${escapeHtml(area.id)}" aria-label="Delete room ${escapeHtml(area.name)}">✕</button>` : ""}</span>`).join("") : `<p class="subtle small">No areas have been provisioned yet.</p>`; document.querySelectorAll("[data-delete-area]").forEach((button) => button.addEventListener("click", () => openAreaDeletion(button.dataset.deleteArea))); renderPendingAreaDeletions(); }
 function areaDeletionDialog() { let dialog = $("#area-deletion-dialog"); if (!dialog) { dialog = document.createElement("dialog"); dialog.id = "area-deletion-dialog"; dialog.className = "area-deletion-dialog"; document.body.append(dialog); } return dialog; }
 async function openAreaDeletion(areaId) {
   const area = state.areas.find((row) => String(row.id) === String(areaId)); if (!area) return;
@@ -55,12 +55,71 @@ async function openAreaDeletion(areaId) {
   input.oninput = () => { confirm.disabled = input.value !== preview.areaName; };
   confirm.onclick = async () => { confirm.disabled = true; confirm.textContent = "Deleting…";
     try { let result = await api(`${path}/confirm`, { method: "POST", body: JSON.stringify({ operationId: preview.operationId, digest: preview.digest, confirmationName: input.value }) });
-      dialog.innerHTML = `<h2>${result.state === "COMPLETE" ? "Room deleted" : "Deletion in progress"}</h2><p class="subtle">${result.state === "COMPLETE" ? "The room and its data were removed." : "Access is already removed. Cleanup continues automatically; you can retry from this room if it stays pending."}</p><div class="dialog-actions"><button type="button" data-close>Done</button></div>`;
+      dialog.innerHTML = `<h2>${result.state === "COMPLETE" ? "Room deleted" : "Deletion in progress"}</h2><p class="subtle">${result.state === "COMPLETE" ? "The room and its data were removed." : "Access is fenced. Cleanup is not yet complete; use Resume room cleanup to retry."}${result.providerDetachments ? " Provider-linked devices were detached from Dinodia; they remain in the provider account." : ""}</p><div class="dialog-actions"><button type="button" data-close>Done</button></div>`;
       dialog.querySelector("[data-close]").onclick = () => { dialog.close(); loadDashboard(); };
-    } catch (error) { dialog.querySelector("#area-delete-error").textContent = `${error.message}. Nothing more was changed; you can retry.`; confirm.textContent = "Retry deletion"; confirm.disabled = input.value !== preview.areaName; } };
+    } catch (error) { dialog.querySelector("#area-delete-error").textContent = `${error.message}. Deletion may already be fenced. Retry this operation; do not create a second request.`; confirm.textContent = "Retry deletion"; confirm.disabled = input.value !== preview.areaName; } };
+}
+
+async function renderPendingAreaDeletions() {
+  if (!state.status?.features?.areaDeletion && !state.status?.features?.areaDeletionRecovery) return;
+  try {
+    const response = await api("/api/areas/deletion-operations");
+    const pending = response.operations || [];
+    for (const operation of pending) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = `Resume room cleanup · ${operation.areaName || "Deleted room"}`;
+      button.onclick = async () => {
+        button.disabled = true;
+        try {
+          const result = await api(`/api/areas/${encodeURIComponent(operation.areaId)}/deletion/confirm`, {
+            method: "POST", body: JSON.stringify({ operationId: operation.operationId,
+              digest: operation.digest, confirmationName: operation.areaName }) });
+          showNotice(result.state === "COMPLETE" ? "Room cleanup completed." : "Cleanup remains pending.", "info");
+          await loadDashboard();
+        } catch (error) { button.disabled = false; showNotice(error.message, "error"); }
+      };
+      $("#areas").append(button);
+    }
+    const conversions = await api("/api/devices/logical-conversion-operations");
+    for (const operation of conversions.operations || []) {
+      const button = document.createElement("button");
+      button.type = "button"; button.textContent = "Resume channel conversion";
+      button.onclick = () => openLogicalConversion(operation.physicalId, { ...operation,
+        warning: "This previously confirmed conversion is fenced and not yet complete. Retry resumes the same operation; it never pairs or switches hardware." });
+      $("#areas").append(button);
+    }
+  } catch (error) { showNotice(`Cannot check pending room cleanup: ${error.message}`, "error"); }
 }
 
 let pendingAreaCreateOperation = null;
+async function openLogicalConversion(id, retainedPreview = null) {
+  const dialog = areaDeletionDialog();
+  dialog.innerHTML = '<h2>Separate device channels</h2><p>Checking the current channel mapping…</p>';
+  dialog.showModal();
+  try {
+    const path = `/api/devices/${encodeURIComponent(id)}/logical-conversion`;
+    const preview = retainedPreview || await api(`${path}/preview`, { method: 'POST', body: '{}' });
+    dialog.innerHTML = `<h2>Separate ${preview.channelCount} channels?</h2><p>${escapeHtml(preview.warning)}</p><p>Each channel can then have its own room, label and analytics category.</p><label>Type ${escapeHtml(preview.confirmationName)}<input autocomplete="off"></label><p data-error role="alert"></p><div class="dialog-actions"><button data-close>Cancel</button><button data-confirm disabled>Separate channels</button></div>`;
+    const input = dialog.querySelector('input'), button = dialog.querySelector('[data-confirm]');
+    dialog.querySelector('[data-close]').onclick = () => dialog.close();
+    input.oninput = () => { button.disabled = input.value !== preview.confirmationName; };
+    button.onclick = async () => {
+      button.disabled = true;
+      try {
+        await api(`${path}/confirm`, { method: 'POST', body: JSON.stringify({
+          operationId: preview.operationId, digest: preview.digest, confirmationName: input.value }) });
+        dialog.close(); await loadDashboard(); showNotice('Channels separated. Existing history remains with the original device.');
+      } catch (error) {
+        dialog.querySelector('[data-error]').textContent = `${error.message}. Conversion may be pending; retry this same operation.`;
+        button.textContent = 'Retry conversion'; button.disabled = false;
+      }
+    };
+  } catch (error) {
+    dialog.innerHTML = `<h2>Cannot separate channels</h2><p role="alert">${escapeHtml(error.message)}</p><button data-close>Close</button>`;
+    dialog.querySelector('[data-close]').onclick = () => dialog.close();
+  }
+}
 function createAreaOperationId() {
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
   // randomUUID is restricted to secure contexts, while getRandomValues is
@@ -171,7 +230,7 @@ function setupForm(device) {
   const selectedLabel = (device.labelIds || device.labels || [])[0] || "";
   const suggestedLabel = !selectedLabel && ["hive", "google_nest"].includes(device.protocol) && device.definition?.kind === "heating" ? (device.definition?.suggestedLabelId || "boiler") : "";
   const previewCount = window.DinodiaDevices.surfaces(device).length;
-  return `<div class="device-setup-form" data-device-setup="${id}"><div class="setup-form-intro"><strong>${device.setup?.status === "ready" ? "Device assignment" : "Finish setting up this device"}</strong><span>${device.setup?.status === "ready" ? "One area and one label apply to all of this device's controls." : "Choose these once. Dinodia OS will derive the useful controls automatically."}</span></div><span class="setup-preview" data-device-preview="${id}">${previewCount ? `${previewCount} control${previewCount === 1 ? "" : "s"} will appear in the Dinodia apps.` : "Choose an area and label to preview the app-facing controls."}</span><div class="device-edit"><label><span>Name (optional)</span><input data-device-name="${id}" value="${escapeHtml(device.name)}" aria-label="Device name"></label><label><span>Area</span><select data-device-area="${id}" aria-label="Device area" required>${optionList(state.areas, device.areaId || "")}</select></label><label><span>Label</span><select data-device-labels="${id}" aria-label="Device label" required>${labelOptions(selectedLabel ? [selectedLabel] : [suggestedLabel])}</select></label><button class="primary" data-save-device="${id}" type="button">${device.setup?.status === "ready" ? "Save assignment" : "Save and show controls"}</button></div>${analyticsCategoryEditor(device)}<button class="danger device-remove-button" data-remove-device="${id}" type="button">Remove paired device</button></div>`;
+  return `<div class="device-setup-form" data-device-setup="${id}"><div class="setup-form-intro"><strong>${device.setup?.status === "ready" ? "Device assignment" : "Finish setting up this device"}</strong><span>${device.setup?.status === "ready" ? "One area and one label apply to all of this device's controls." : "Choose these once. Dinodia OS will derive the useful controls automatically."}</span></div><span class="setup-preview" data-device-preview="${id}">${previewCount ? `${previewCount} control${previewCount === 1 ? "" : "s"} will appear in the Dinodia apps.` : "Choose an area and label to preview the app-facing controls."}</span><div class="device-edit"><label><span>Name (optional)</span><input data-device-name="${id}" value="${escapeHtml(device.name)}" aria-label="Device name"></label><label><span>Area</span><select data-device-area="${id}" aria-label="Device area" required>${optionList(state.areas, device.areaId || "")}</select></label><label><span>Label</span><select data-device-labels="${id}" aria-label="Device label" required>${labelOptions(selectedLabel ? [selectedLabel] : [suggestedLabel])}</select></label><button class="primary" data-save-device="${id}" type="button">${device.setup?.status === "ready" ? "Save assignment" : "Save and show controls"}</button></div>${analyticsCategoryEditor(device)}${state.status?.features?.areaDeletion && device.logicalConversionAvailable ? `<button type="button" class="secondary" data-convert-device="${id}">Separate channels</button>` : ""}${!device.physicalDeviceId ? `<button class="danger device-remove-button" data-remove-device="${id}" type="button">Remove paired device</button>` : `<p class="subtle">This is one channel on shared hardware. Room deletion preserves channels assigned elsewhere.</p>`}</div>`;
 }
 async function sendEntityControl(control, serviceId, entityId) {
   const row = control.closest(".surface-row");
@@ -198,7 +257,8 @@ function renderDevices() {
   }).join("") : `<div class="empty-state">No devices in this view. Use Add devices above.</div>`;
   document.querySelectorAll("[data-toggle-device]").forEach((button) => button.addEventListener("click", () => { const card = button.closest("[data-device-card]"); const editor = card.querySelector(".device-editor"); const expanded = !card.classList.contains("expanded"); card.classList.toggle("expanded", expanded); button.setAttribute("aria-expanded", String(expanded)); button.querySelector(".device-tile-action > span:first-child").textContent = expanded ? "Close" : "Manage"; editor.inert = !expanded; if (expanded) state.expandedDevices.add(card.dataset.deviceCard); else state.expandedDevices.delete(card.dataset.deviceCard); }));
   document.querySelectorAll("[data-collapse-device]").forEach((button) => button.addEventListener("click", () => button.closest("[data-device-card]").querySelector("[data-toggle-device]").click()));
-  document.querySelectorAll("[data-save-device]").forEach((button) => button.addEventListener("click", async () => { const id = button.dataset.saveDevice; const card = button.closest(".device-card"); const name = card.querySelector(`[data-device-name="${CSS.escape(id)}"]`).value; const areaId = card.querySelector(`[data-device-area="${CSS.escape(id)}"]`).value; const labels = selectedLabelIds(card.querySelector(`[data-device-labels="${CSS.escape(id)}"]`)); if (!areaId) return showNotice("Choose an area before saving the device.", "error"); if (!labels.length) return showNotice("Choose one device label before saving the device.", "error"); button.disabled = true; try { await api(`/api/devices/${encodeURIComponent(id)}/setup`, { method: "PUT", body: JSON.stringify({ name, areaId, labelId: labels[0] }) }); await load(); showNotice("Device setup saved. Its app-facing controls are ready."); } catch (error) { button.disabled = false; showNotice(error.message, "error"); } }));
+  document.querySelectorAll("[data-convert-device]").forEach(button => button.addEventListener("click", () => openLogicalConversion(button.dataset.convertDevice)));
+  document.querySelectorAll("[data-save-device]").forEach((button) => button.addEventListener("click", async () => { const id = button.dataset.saveDevice; const card = button.closest(".device-card"); const name = card.querySelector(`[data-device-name="${CSS.escape(id)}"]`).value; const areaId = card.querySelector(`[data-device-area="${CSS.escape(id)}"]`).value; const labels = selectedLabelIds(card.querySelector(`[data-device-labels="${CSS.escape(id)}"]`)); if (!areaId) return showNotice("Choose an area before saving the device.", "error"); if (!labels.length) return showNotice("Choose one device label before saving the device.", "error"); button.disabled = true; try { await api(`/api/devices/${encodeURIComponent(id)}/setup`, { method: "PUT", body: JSON.stringify({ name, areaId, labelId: labels[0], ...(state.devices.find(row => row.id === id)?.physicalDeviceId ? { operationId: button.dataset.operationId ||= createAreaOperationId() } : {}) }) }); await load(); showNotice("Device setup saved. Its app-facing controls are ready."); } catch (error) { button.disabled = false; showNotice(error.message, "error"); } }));
   document.querySelectorAll("[data-analytics-category]").forEach((select) => select.addEventListener("change", () => state.analyticsCategoryDrafts.set(select.dataset.analyticsCategory, select.value)));
   document.querySelectorAll("[data-save-analytics-category]").forEach((button) => button.addEventListener("click", async () => {
     const id = button.dataset.saveAnalyticsCategory;

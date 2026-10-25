@@ -70,6 +70,84 @@ test('changed assignment inventory or wrong typed confirmation cannot fence an A
   assert.ok(store.getArea('r1'));
 });
 
+test('purged channel requires explicit recommission and never reuses its deleted identity', async t => {
+  const { store, parent, children } = await fixture(t);
+  const preview = store.areaDeletionPlan('r1'), operationId = crypto.randomUUID();
+  await store.fenceAreaDeletion(operationId, { areaId: 'r1', digest: preview.digest,
+    cloudDigest: 'a'.repeat(64), confirmationName: 'Room 1' });
+  await store.progressAreaDeletion(operationId, { cloudCommitted: true });
+  await store.progressAreaDeletion(operationId, { purge: true });
+  const input = { expectedManifestDigest: store.logicalDeviceManifest(parent.id).digest,
+    assignments: [{ channelKey: 'l1', areaId: 'r2', labelId: 'light', name: 'Replacement channel' }] };
+  await assert.rejects(store.assignLogicalDevices(parent.id, input), /explicit recommissioning/);
+  const renewed = await store.assignLogicalDevices(parent.id, { ...input,
+    assignments: [{ ...input.assignments[0], recommission: true }] });
+  assert.notEqual(renewed[0].id, children[0].id);
+  assert.equal(renewed[0].channelGeneration, 2);
+  assert.ok(store.getManagedDevice(children[1].id));
+});
+
+test('quarantined target remains in the exact deletion inventory while its sibling stays protected', async t => {
+  const { store, parent, children } = await fixture(t);
+  await store.commit(state => {
+    const key = Object.keys(state.devices[parent.id].entities).find(id => id.includes('l1'));
+    delete state.devices[parent.id].entities[key];
+  });
+  assert.equal(store.getManagedDevice(children[0].id), null);
+  const preview = store.areaDeletionPlan('r1');
+  assert.deepEqual(preview.targets.map(row => row.id), [children[0].id]);
+  assert.ok(preview.parents[0].preservedChildren.includes(children[1].id));
+});
+
+test('sequential room deletion treats an erased generation as retired, not an unassigned surviving channel', async t => {
+  const { store, parent } = await fixture(t);
+  const preview = store.areaDeletionPlan('r1'), operationId = crypto.randomUUID();
+  await store.fenceAreaDeletion(operationId, { areaId: 'r1', digest: preview.digest,
+    cloudDigest: 'a'.repeat(64), confirmationName: 'Room 1' });
+  await store.progressAreaDeletion(operationId, { cloudCommitted: true });
+  await store.progressAreaDeletion(operationId, { purge: true });
+  assert.deepEqual(store.areaDeletionPlan('r2').parents.find(row => row.id === parent.id).preservedChildren, []);
+});
+
+test('lost reservation response before local fencing remains discoverable and resumes after restart', async t => {
+  const { store, children, file } = await fixture(t);
+  await store.savePlatform({ areaBindings: [{ areaId: crypto.randomUUID(), hubAreaId: 'r1' }] });
+  let loseResponse = true;
+  const platform = async (_path, body) => {
+    if (body.action === 'preview') return { osAreaId: 'r1', osDeviceIds: [children[0].id], digest: 'c'.repeat(64) };
+    if (body.action === 'reserve' && loseResponse) { loseResponse = false; throw new Error('Lost reservation response'); }
+    return { state: { reserve: 'RESERVED', commit: 'WAITING_HUB', finish: 'COMPLETE' }[body.action] };
+  };
+  const principal = { scope: ['os:admin'], handoffId: crypto.randomUUID(), jti: crypto.randomUUID() };
+  const service = new AreaDeletionService({ store, platform, removePhysical: async () => { throw new Error('Shared parent'); } });
+  const preview = await service.preview(principal, 'r1'), input = { ...preview, confirmationName: 'Room 1' };
+  await assert.rejects(service.confirm(principal, input), /Lost reservation/);
+  assert.equal(store.areaDeletionJob(preview.operationId), null);
+  assert.ok(store.snapshot().areaDeletionIntents[preview.operationId]);
+  const restarted = new Store(file);
+  const resumed = new AreaDeletionService({ store: restarted, platform, removePhysical: async () => { throw new Error('Shared parent'); } });
+  assert.equal((await resumed.confirm({ ...principal, jti: crypto.randomUUID() }, input)).state, 'COMPLETE');
+  assert.equal(restarted.snapshot().areaDeletionIntents[preview.operationId], undefined);
+  await restarted.flushPersist();
+});
+
+test('all revoked private siblings are erased before the final parent cleanup context is discarded', async t => {
+  const { store, parent, children } = await fixture(t);
+  const owner = crypto.randomUUID();
+  await store.commit(state => {
+    state.devices[parent.id].tenantOwnerMembershipId = owner;
+    for (const child of children) {
+      state.logicalDevices.children[child.id].suppressed = true;
+      state.events.push({ deviceId: child.id, privateReading: 21 });
+    }
+  });
+  assert.equal(store.retainedLogicalRemoval(children[0].id, owner).shared, true);
+  await store.purgePrivateLogicalDevice(children[0].id, owner);
+  assert.equal(store.retainedLogicalRemoval(children[1].id, owner).shared, false);
+  await store.purgePrivateLogicalDevice(children[1].id, owner);
+  assert.equal(store.snapshot().events.some(row => children.some(child => child.id === row.deviceId)), false);
+});
+
 test('connected coordinator commits and purges one child without any radio removal', async t => {
   const { store, parent, children, file } = await fixture(t);
   await store.commit(state => { state.events.push({ deviceId: children[0].id, value: 'private erased record' }); });
@@ -170,6 +248,18 @@ test('unacknowledged last-parent removal remains pending; exact retry finishes w
   assert.equal(removals, 2);
   assert.equal(finishes, 1);
   assert.equal(store.getDevice(parent.id), null);
+});
+
+test('quarantined or unassigned sibling channels preserve the physical parent during Area deletion', async t => {
+  const { store, children, parent } = await fixture(t);
+  // An adapter temporarily omits l2. It no longer projects, but is still an extant child.
+  await store.commit(state => {
+    for (const [id, entity] of Object.entries(state.devices[parent.id].entities))
+      if (entity.endpointId === 'l2') delete state.devices[parent.id].entities[id];
+  });
+  assert.equal(store.getManagedDevice(children[1].id), null);
+  const plan = store.areaDeletionPlan('r1');
+  assert.ok(plan.parents[0].preservedChildren.includes(children[1].id), 'quarantine is not permission to unpair');
 });
 
 test('LD09 Hub restart after fencing keeps the fence durable and exact retry completes', async t => {

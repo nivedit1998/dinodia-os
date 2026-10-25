@@ -22,10 +22,37 @@ function plan(state, areaId) {
   const entries = targets.map(device => ({ id: device.id, physicalId: device.physicalDeviceId || device.id,
     protocol: device.protocol, sourceIds: Object.keys(device.entities || {}).sort(),
     mappingRevision: device.mappingRevision || 0 } )).sort((a, b) => a.id.localeCompare(b.id));
+  // Quarantine hides unsafe controls, not their retained room ownership.
+  // Include those identities in erasure without guessing a new physical map.
+  const retainedRegistry = logical.registry(state);
+  for (const child of Object.values(retainedRegistry.children)) {
+    if (child.areaId !== areaId || child.suppressed || retainedRegistry.tombstones[child.id]
+      || entries.some(entry => entry.id === child.id)) continue;
+    entries.push({ id: child.id, physicalId: child.physicalDeviceId,
+      protocol: state.devices[child.physicalDeviceId]?.protocol,
+      sourceIds: [...child.sourceEntityIds].sort(), mappingRevision: child.mappingRevision || 0 });
+  }
+  entries.sort((a, b) => a.id.localeCompare(b.id));
   const targetIds = new Set(entries.map(entry => entry.id));
-  const parents = [...new Set(entries.map(entry => entry.physicalId))].sort().map(id => ({ id,
-    preservedChildren: devices.filter(device => device.physicalDeviceId === id && !targetIds.has(device.id)).map(device => device.id).sort(),
-    protocol: state.devices[id]?.protocol }));
+  const parents = [...new Set(entries.map(entry => entry.physicalId))].sort().map(id => {
+    // Customer projections omit quarantined children. Absence from a projection is
+    // never proof that the physical endpoint is disposable.
+    const r = logical.registry(state);
+    const extant = Object.values(r.children).filter(child => child.physicalDeviceId === id
+      && !child.suppressed && !r.tombstones[child.id]);
+    const preserved = extant.filter(child => !targetIds.has(child.id)).map(child => child.id);
+    if (r.parents[id]) {
+      let manifest;
+      try { manifest = logical.channelManifest(state.devices[id]); } catch { manifest = null; }
+      if (!manifest || manifest.unresolvedSourceIds.length) preserved.push('quarantined:unproven-manifest');
+      for (const channel of manifest?.channels || []) {
+        if (!r.parents[id]?.retiredGenerations?.[channel.channelKey]
+          && !Object.values(r.children).some(child => child.physicalDeviceId === id && child.channelKey === channel.channelKey))
+          preserved.push(`unassigned:${channel.channelKey}`);
+      }
+    }
+    return { id, preservedChildren: [...new Set(preserved)].sort(), protocol: state.devices[id]?.protocol };
+  });
   const inventory = { areaId, name: area.name, targets: entries, parents };
   return { ...inventory, digest: hash(inventory) };
 }
@@ -158,6 +185,14 @@ function purge(state, operationId) {
     delete state.logicalDevices?.parents?.[parent.id];
   }
   for (const target of job.inventory.targets) {
+    const retired = state.logicalDevices?.children?.[target.id];
+    const parentRecord = retired && state.logicalDevices?.parents?.[retired.physicalDeviceId];
+    if (parentRecord) {
+      parentRecord.retiredGenerations ||= {};
+      parentRecord.retiredGenerations[retired.channelKey] = Math.max(
+        Number(parentRecord.retiredGenerations[retired.channelKey] || 0),
+        Number(retired.channelGeneration || 1));
+    }
     delete state.logicalDevices?.children?.[target.id];
     delete state.logicalDevices?.tombstones?.[target.id];
     delete state.platform?.devicePolicies?.[target.id];
@@ -169,4 +204,4 @@ function purge(state, operationId) {
   return copy(job);
 }
 
-module.exports = { ledger, blocked, plan, fence, reconcile, purge, ref };
+module.exports = { ledger, blocked, plan, fence, reconcile, purge, purgeReferences, ref };

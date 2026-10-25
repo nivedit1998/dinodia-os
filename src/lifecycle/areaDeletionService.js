@@ -29,6 +29,7 @@ class AreaDeletionService {
     // Counts only: private identity/state is never returned in the operator impact summary.
     return { operationId, digest: local.digest, areaName: local.name, deviceCount: local.targets.length,
       sharedHardwarePreserved: local.parents.filter(parent => parent.preservedChildren.length).length,
+      providerDetachments: local.parents.filter(parent => !parent.preservedChildren.length && ['hive', 'google_nest'].includes(parent.protocol)).length,
       warning: 'This permanently deletes this Area, its grants, QR codes, device controls and readings, including tenant-private devices. Shared hardware used in another Area remains paired.' };
   }
   serial(work) {
@@ -41,10 +42,17 @@ class AreaDeletionService {
       this.proof(principal);
       let job = this.store.areaDeletionJob(input.operationId);
       if (!job) {
-        const preview = this.previews.get(input.operationId);
-        if (!preview || preview.actor !== principal.jti || preview.expiresAt <= Date.now() || preview.local.digest !== input.digest)
+        const preview = this.store.snapshot().areaDeletionIntents?.[input.operationId] || this.previews.get(input.operationId);
+        if (!preview || (!preview.confirmed && (preview.actor !== principal.jti || preview.expiresAt <= Date.now()))
+          || preview.local.digest !== input.digest || input.confirmationName !== preview.local.name)
           fail('area_delete_preview_expired', 'Review a new deletion preview');
         if (input.areaId && input.areaId !== preview.areaId) fail('area_delete_operation_conflict', 'The selected Area changed');
+        // Persist confirmed intent BEFORE the network reservation. A process
+        // crash can then rediscover and resume the exact same operation.
+        await this.store.commit(state => {
+          state.areaDeletionIntents ||= {};
+          state.areaDeletionIntents[input.operationId] = { ...preview, confirmed: true };
+        });
         const reserved = await this.platform(endpoint, { action: 'reserve', operationId: input.operationId,
           ...this.proof(principal), digest: preview.cloudDigest, confirmationName: input.confirmationName });
         if (reserved.state !== 'RESERVED') fail('area_delete_cloud_reservation_missing', 'The cloud has not reserved this exact deletion intent');
@@ -56,7 +64,7 @@ class AreaDeletionService {
   }
   async resume(principal, job, confirmationName) {
     const proof = this.proof(principal);
-    if (job.state === 'COMPLETE') return { operationId: job.operationId, state: 'COMPLETE' };
+    if (job.state === 'COMPLETE') return { operationId: job.operationId, state: 'COMPLETE', providerDetachments: job.providerDetachments || 0 };
     if (job.state === 'FENCED') {
       const cloud = await this.platform(endpoint, { action: 'commit', operationId: job.operationId, ...proof,
         digest: job.cloudDigest, localFenceDigest: job.fenceDigest, confirmationName });
@@ -71,15 +79,16 @@ class AreaDeletionService {
         // Never force-remove or report timeout as successful unpairing. No call for shared parents.
         const acknowledgement = await this.removePhysical(parent);
         if (acknowledgement?.acknowledged !== true) fail('area_delete_physical_pending', 'The adapter has not acknowledged removal');
-        job = await this.store.progressAreaDeletion(job.operationId, { physicalAcknowledged: physicalId });
+        job = await this.store.progressAreaDeletion(job.operationId, { physicalAcknowledged: physicalId, removalKind: acknowledgement.kind });
       }
       job = await this.store.progressAreaDeletion(job.operationId, { purge: true });
     }
     const result = await this.platform(endpoint, { action: 'finish', operationId: job.operationId, localFenceDigest: job.fenceDigest });
     if (result.state !== 'COMPLETE') fail('area_delete_cloud_purge_pending', 'The cloud purge is not yet complete');
     await this.store.progressAreaDeletion(job.operationId, { complete: true });
+    await this.store.commit(state => { delete state.areaDeletionIntents?.[job.operationId]; });
     this.previews.delete(job.operationId);
-    return { operationId: job.operationId, state: 'COMPLETE' };
+    return { operationId: job.operationId, state: 'COMPLETE', providerDetachments: job.providerDetachments || 0 };
   }
 }
 module.exports = { AreaDeletionService };

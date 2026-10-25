@@ -115,8 +115,14 @@ function validateCloudConfiguration(value, current = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const keys = ["revision", "policyRevision", "areas", "memberships", "devicePolicies", "automations", "releasePolicy", "checksum"];
   const projectionKey = Object.hasOwn(value, "tenantAutomationProjection");
-  if (!(Object.keys(value).sort().join("\n") === keys.sort().join("\n")
-      || projectionKey && Object.keys(value).sort().join("\n") === [...keys, "tenantAutomationProjection"].sort().join("\n"))
+  const securityKey = Object.hasOwn(value, 'logicalSecurity');
+  if (securityKey) keys.push('logicalSecurity');
+  if (projectionKey) keys.push('tenantAutomationProjection');
+  if (Object.keys(value).sort().join('\n') !== keys.sort().join('\n')
+    || securityKey && (!value.logicalSecurity || value.logicalSecurity.version !== 1
+      || Object.keys(value.logicalSecurity).sort().join('|') !== 'deletedReferences|version'
+      || !Array.isArray(value.logicalSecurity.deletedReferences) || value.logicalSecurity.deletedReferences.length > 8192
+      || value.logicalSecurity.deletedReferences.some(ref => !/^ld:[a-f0-9]{10}:[ad]:[a-f0-9]{64}$/.test(ref)))
     || projectionKey && !validTenantAutomationProjection(value.tenantAutomationProjection)
     || !Number.isSafeInteger(value.revision) || value.revision < Number(current.cloudRevision || 0)
     || !Number.isSafeInteger(value.policyRevision) || value.policyRevision < Number(current.policyRevision || 0)
