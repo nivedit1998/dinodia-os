@@ -185,6 +185,14 @@ function prune(value, references) {
 }
 
 function purgeReferences(state, references) {
+  const daily = state.syncUsage?.dailyAnalytics;
+  if (daily) {
+    for (const [key, row] of Object.entries(daily.days || {})) if (contains(row, references)) {
+      delete daily.days[key]; delete daily.queuedRevisions[key]; delete daily.queuedSequences[key];
+    }
+    daily.temperatures = prune(daily.temperatures, references);
+    daily.assignmentEpochs = prune(daily.assignmentEpochs, references);
+  }
   for (const field of ['aliases', 'states', 'events', 'remoteBindings', 'legacyAutomations', 'automations',
     'automationTriggers', 'automationActions', 'automationExecutions', 'automationOccurrences', 'automationIdempotency', 'pairingSessions']) {
     if (state[field]) state[field] = prune(state[field], references);

@@ -19,6 +19,7 @@ const { observationTiming, serializeDevice } = require("./contracts/dinodiaV1");
 const { SYNC_BATCH_MAX_EVENTS, compactUnregisteredPropertyDeviceEvents, enqueueSyncEventInState, initialSyncOutbox, nextSyncBatch, normalizeSyncOutbox } = require("./sync/syncOutbox");
 const { validateCloudConfiguration, projectCloudDevicePolicies } = require("./sync/cloudConfiguration");
 const { activityFor, advanceUsage, capUsageAtLastAlive, endUsageAssignment, endUsageDeviceAvailability, initialUsageState, observeUsage, usageClockTrusted } = require("./sync/usageBuckets");
+const dailyAnalytics = require('./sync/dailyAnalytics');
 const { assertNoRestorePendingSync, ensureInitializedMarkerSync, hasInitializedMarkerSync, persistStoreJson, writeBytesAtomically } = require("./durableStoreFile");
 
 const STORE_MUTATION_CONTEXT = new AsyncLocalStorage();
@@ -302,7 +303,10 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
   let durableSyncMutation = false;
   const entities = Object.values(device.entities || {});
   const usage = state.syncUsage = initialUsageState(state.syncUsage);
+  dailyAnalytics.initialize(usage, state.platform?.cloudConfiguration?.analyticsHistory, nowMs);
+  const assignmentEpochAt = dailyAnalytics.assignmentStart(usage, device, policy);
   if (device.available === false) {
+    dailyAnalytics.endDevice(usage, deviceId, nowMs);
     const ended = endUsageDeviceAvailability(usage, deviceId, nowMs);
     state.syncUsage = ended.state;
     for (const key of ended.changedBuckets) queueUsageBucket(state, key, nowMs);
@@ -335,6 +339,8 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
     const observedAt = sourceTimestamp(entity?.sourceObservedAt || "");
     if (!entity || !observedAt) continue;
     const observedMs = Date.parse(observedAt);
+    if (assignmentEpochAt && Date.parse(assignmentEpochAt) > Date.parse(usage.dailyAnalytics.config.writerFrom)
+      && observedMs < Date.parse(assignmentEpochAt)) continue;
     if (versionTwo && (interval.sourceGeneration !== generation || observedMs < Math.max(Date.parse(interval.validFrom), Date.parse(policy.analyticsStartAt || interval.validFrom)))) continue;
     if (observedMs > nowMs || !evidencePolicy && nowMs - observedMs > 30 * 60 * 1000) continue;
     const admission = entity.admittedEvidence;
@@ -371,6 +377,7 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
       controlId: String(control.controlId),
       sourceGeneration: generation,
       ...(versionTwo ? { bindingRevision: interval.revision, analyticsIntervalId: interval.id, analyticsPolicyVersion: evidencePolicy ? 3 : 2 } : {}),
+      ...(assignmentEpochAt ? { assignmentEpochAt } : {}),
       activity,
       observedAt,
       validUntil,
@@ -405,6 +412,13 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
       if (observedMs > nowMs || nowMs - observedMs > 366 * 24 * 60 * 60 * 1000) continue;
       if (Number.isSafeInteger(options.ignoreThroughMs) && observedMs <= options.ignoreThroughMs) continue;
       const sourceEventKey = crypto.createHash("sha256").update([deviceId, control.controlId, generation, observedAt].join("\n"), "utf8").digest("hex");
+      if (!versionTwo || observedMs >= Math.max(Date.parse(interval.validFrom), Date.parse(policy.analyticsStartAt || interval.validFrom)))
+        dailyAnalytics.observeTemperature(usage, { osDeviceId: deviceId, osAreaId: String(device.areaId || ''),
+        category: 'RADIATOR', controlId: String(control.controlId), sourceGeneration: generation,
+        bindingRevision: interval?.revision || 0, analyticsIntervalId: interval?.id || null,
+        analyticsPolicyVersion: evidencePolicy ? 3 : 2, observedAt,
+        assignmentEpochAt,
+        validUntil: new Date(validUntil).toISOString(), value: Math.round(value * 100) / 100 }, nowMs);
       usage.temperatureQueuedKeys = usage.temperatureQueuedKeys || [];
       if (usage.temperatureQueuedKeys.includes(sourceEventKey)) continue;
       const sample = enqueueSyncEventInState(state, "temperature.sample", sourceEventKey, {
@@ -1270,7 +1284,10 @@ class Store {
     // at shutdown). Time after it, until the next trusted reading, is Unknown.
     this.usageAliveFile = `${filePath}.alive.json`;
     this.usageAliveThroughMs = readUsageAlive(this.usageAliveFile);
-    if (this.usageAliveThroughMs !== null) this.state.syncUsage = capUsageAtLastAlive(this.state.syncUsage, this.usageAliveThroughMs);
+    if (this.usageAliveThroughMs !== null) {
+      this.state.syncUsage = capUsageAtLastAlive(this.state.syncUsage, this.usageAliveThroughMs);
+      dailyAnalytics.capDailyAtLastAlive(this.state.syncUsage, this.usageAliveThroughMs);
+    }
     this.usageClockTrust = systemClockSynchronized;
     this.usageClockWasUntrusted = false;
     this.usageClockTrustedSinceMs = null;
@@ -1329,7 +1346,19 @@ class Store {
     let synchronized = false;
     try { synchronized = this.usageClockTrust() === true; } catch { synchronized = false; }
     const trusted = usageClockTrusted({ synchronized, nowMs, aliveThroughMs: this.usageAliveThroughMs });
-    if (!trusted) { this.usageClockWasUntrusted = true; this.usageClockTrustedSinceMs = null; }
+    if (!trusted) {
+      if (!this.usageClockWasUntrusted && this.state?.syncUsage) {
+        for (const source of Object.values(this.state.syncUsage.sources || {})) {
+          const boundary = Math.max(Date.parse(source.accountedThroughAt) || 0, this.usageAliveThroughMs || 0);
+          if (source.validUntil && Date.parse(source.validUntil) > boundary) {
+            source.observationValidUntil ||= source.validUntil; source.validUntil = new Date(boundary).toISOString();
+          }
+        }
+        for (const source of Object.values(this.state.syncUsage.dailyAnalytics?.temperatures || {}))
+          source.validUntil = new Date(Math.min(Date.parse(source.validUntil), Math.max(source.accountedThrough, this.usageAliveThroughMs || 0))).toISOString();
+      }
+      this.usageClockWasUntrusted = true; this.usageClockTrustedSinceMs = null;
+    }
     else if (this.usageClockWasUntrusted && this.usageClockTrustedSinceMs === null) this.usageClockTrustedSinceMs = nowMs;
     return trusted;
   }
@@ -1444,6 +1473,7 @@ class Store {
         const next = incomingPolicies[deviceId];
         const identity = value => JSON.stringify([value?.managementClass, value?.lifecycle, value?.analyticsCategory, value?.analyticsInterval?.id, value?.analyticsInterval?.selectedControlId, value?.analyticsInterval?.writerEnabled]);
         if (identity(previous) === identity(next)) continue;
+        dailyAnalytics.endDevice(state.syncUsage || {}, deviceId, this.isUsageClockTrusted(policyTime) ? policyTime : NaN);
         if (!this.isUsageClockTrusted(policyTime)) {
           // No trustworthy receipt time: stop at each source's last durably
           // accounted boundary. Never leave the former authority open across
@@ -1951,12 +1981,19 @@ class Store {
       }
     }
     const areaChanged = Boolean(existing.id) && String(existing.areaId || "") !== String(next.areaId || "");
+    if (areaChanged && this.state.syncUsage?.dailyAnalytics?.active)
+      this.state.syncUsage.dailyAnalytics.assignmentEpochs[id] = new Date(Math.floor(observationNow / 1000) * 1000).toISOString();
+    if (!existing.id && this.state.syncUsage?.dailyAnalytics?.active) {
+      this.state.syncUsage.dailyAnalytics.assignmentEpochs[id] = new Date(Math.floor(observationNow / 1000) * 1000).toISOString();
+    }
     if (areaChanged && existing.areaId) {
       const usage = this.state.syncUsage = initialUsageState(this.state.syncUsage);
       // Usage is recorded in integer seconds. Floor the assignment boundary
       // to that same precision so the serialized interval can never extend
       // past a millisecond-precision Area move.
       const assignmentEndMs = Math.floor(observationNow / 1000) * 1000;
+      dailyAnalytics.endDevice(usage, id, assignmentEndMs);
+      if (usage.dailyAnalytics) usage.dailyAnalytics.assignmentEpochs[id] = new Date(assignmentEndMs).toISOString();
       const ended = endUsageAssignment(usage, { osDeviceId: id, osAreaId: String(existing.areaId), endedAtMs: assignmentEndMs });
       this.state.syncUsage = ended.state;
       for (const key of ended.changedBuckets) queueUsageBucket(this.state, key, assignmentEndMs);
@@ -3149,6 +3186,13 @@ class Store {
       version: String(base.version || "0.0.0"),
       capabilities: {
         ...capabilities,
+        ...(this.state.syncUsage?.dailyAnalytics ? { nativeDailyHistory: {
+          writerFrom: this.state.syncUsage.dailyAnalytics.config.writerFrom,
+          preparedAt: this.state.syncUsage.dailyAnalytics.preparedAt || null,
+          active: this.state.syncUsage.dailyAnalytics.active === true,
+          barrierQueued: this.state.syncUsage.dailyAnalytics.barrierQueued === true,
+          notReadyReason: this.state.syncUsage.dailyAnalytics.notReadyReason || null,
+        } } : {}),
         nativeSyncOutbox: {
           queueDepth: remaining.length,
           gapDetected: outbox.gapDetected,
@@ -3390,7 +3434,14 @@ class Store {
     if (!this.isUsageClockTrusted(nowMs)) return { changedBuckets: 0, queued: 0 };
     const before = this.snapshot();
     try {
-      const usage = this.state.syncUsage = initialUsageState(this.state.syncUsage);
+      let usage = this.state.syncUsage = initialUsageState(this.state.syncUsage);
+      const daily = dailyAnalytics.initialize(usage, this.state.platform?.cloudConfiguration?.analyticsHistory, nowMs);
+      if (daily) {
+        for (const device of this.listManagedDevices()) recordDeviceSyncObservations(this.state, device, nowMs,
+          { sourceGeneration: this.syncSourceGeneration,
+            ...(this.usageClockTrustedSinceMs !== null ? { ignoreThroughMs: this.usageClockTrustedSinceMs - 1 } : {}) });
+        usage = this.state.syncUsage;
+      }
       const advanced = advanceUsage(usage, nowMs);
       this.state.syncUsage = advanced.state;
       let queued = 0;
@@ -3402,9 +3453,34 @@ class Store {
           if (queueUsageBucket(this.state, key, nowMs)) queued += 1;
         }
       }
+      if (daily) {
+        for (const source of Object.values(daily.temperatures)) {
+          const policy = this.state.platform?.devicePolicies?.[source.osDeviceId];
+          const device = this.getManagedDevice(source.osDeviceId);
+          if (!device || device.available === false || policy?.managementClass !== 'PROPERTY_DEVICE'
+            || policy.analyticsCategory !== 'RADIATOR' || ['REMOVED', 'RETIRED', 'REMOVAL_PENDING'].includes(policy.lifecycle))
+            dailyAnalytics.endDevice(this.state.syncUsage, source.osDeviceId, nowMs);
+        }
+        dailyAnalytics.advanceDaily(this.state.syncUsage, nowMs);
+        const outbox = this.state.syncOutbox;
+        const legacyPublished = Object.entries(this.state.syncUsage.buckets).every(([key, bucket]) =>
+          Date.parse(bucket.bucketStart) >= Date.parse(daily.config.writerFrom)
+          || Number(this.state.syncUsage.queuedRevisions[key] || 0) >= bucket.revision);
+        if (!daily.barrierQueued && legacyPublished && !outbox.gapDetected && !outbox.telemetryPaused && !outbox.criticalBacklog
+          && !outbox.droppedTelemetryCount && nowMs >= Date.parse(daily.config.writerFrom)) {
+          const event = enqueueSyncEventInState(this.state, 'analytics.daily.barrier', daily.config.writerFrom,
+            { version: 1, writerFrom: daily.config.writerFrom, timezone: daily.config.timezone }, { now: nowMs, critical: true });
+          if (event) { daily.barrierQueued = true; daily.barrierSequence = event.sequence; queued++; }
+        }
+        if (daily.barrierQueued) for (const event of dailyAnalytics.dailyEvents(this.state.syncUsage)) {
+          const queuedEvent = enqueueSyncEventInState(this.state, 'analytics.day', event.aggregateId, event.payload, { now: nowMs });
+          if (queuedEvent) { daily.queuedRevisions[event.key] = event.payload.revision; daily.queuedSequences[event.key] = queuedEvent.sequence; queued++; }
+        }
+      }
       const cutoff = nowMs - 366 * 24 * 60 * 60 * 1000;
       for (const [key, bucket] of Object.entries(this.state.syncUsage.buckets)) {
-        if (Date.parse(bucket.purgeAt) > nowMs) continue;
+        const compacted = Date.parse(bucket.bucketStart) + 3600000 <= dailyAnalytics.detailPruneBoundary(daily, nowMs);
+        if (!compacted && Date.parse(bucket.purgeAt) > nowMs) continue;
         const queuedRevision = Number(this.state.syncUsage.queuedRevisions[key] || 0);
         const pending = this.state.syncOutbox.events.some((event) => event.type === "usage.bucket" && event.aggregateId === crypto.createHash("sha256").update(key, "utf8").digest("hex"));
         if (!pending && queuedRevision >= bucket.revision) {

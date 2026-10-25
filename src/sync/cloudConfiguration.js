@@ -116,9 +116,13 @@ function validateCloudConfiguration(value, current = {}) {
   const keys = ["revision", "policyRevision", "areas", "memberships", "devicePolicies", "automations", "releasePolicy", "checksum"];
   const projectionKey = Object.hasOwn(value, "tenantAutomationProjection");
   const securityKey = Object.hasOwn(value, 'logicalSecurity');
+  const historyKey = Object.hasOwn(value, 'analyticsHistory');
+  if (historyKey) keys.push('analyticsHistory');
   if (securityKey) keys.push('logicalSecurity');
   if (projectionKey) keys.push('tenantAutomationProjection');
   if (Object.keys(value).sort().join('\n') !== keys.sort().join('\n')
+    || historyKey && (!require('./dailyAnalytics').settings(value.analyticsHistory)
+      || !['enabled|timezone|version|writerFrom', 'detailPruneBefore|enabled|timezone|version|writerFrom'].includes(Object.keys(value.analyticsHistory).sort().join('|')))
     || securityKey && (!value.logicalSecurity || value.logicalSecurity.version !== 1
       || Object.keys(value.logicalSecurity).sort().join('|') !== 'deletedReferences|version'
       || !Array.isArray(value.logicalSecurity.deletedReferences) || value.logicalSecurity.deletedReferences.length > 8192
@@ -138,6 +142,8 @@ function validateCloudConfiguration(value, current = {}) {
   if (new Set(value.memberships.map((membership) => membership?.id)).size !== value.memberships.length || value.memberships.some((membership) => !validText(membership?.id, 160) || !["OWNER", "PROPERTY_MANAGER", "TENANT"].includes(membership.role) || !Number.isSafeInteger(membership.accessRevision) || !Array.isArray(membership.areaIds) || membership.areaIds.some((id) => !value.areas.some((area) => area.id === id)))) return false;
   if (new Set(value.devicePolicies.map((device) => device?.osDeviceId)).size !== value.devicePolicies.length || value.devicePolicies.some((device) => !validText(device?.osDeviceId, 160) || !["PROPERTY_DEVICE", "TENANT_DEVICE"].includes(device.managementClass) || !(device.ownerMembershipId === null || validText(device.ownerMembershipId, 160)) || !["NONE", "LIGHT", "BOILER", "RADIATOR"].includes(device.analyticsCategory) || device.inventoryRevision !== undefined && (!Number.isSafeInteger(device.inventoryRevision) || device.inventoryRevision < 1) || !["DISCOVERED", "INSTALLED", "VIEW_ONLY", "RETIRED", "REMOVAL_PENDING", "REMOVED", "RECOMMISSION_REQUIRED"].includes(device.lifecycle) || !(device.customerLabel === null || validText(device.customerLabel, 40)) || !(device.overrideName === null || validText(device.overrideName, 160)) || !Number.isSafeInteger(device.descriptorRevision) || device.descriptorRevision < 1 || !(device.descriptorDigest === null || /^[a-f0-9]{64}$/i.test(device.descriptorDigest)) || !Array.isArray(device.osAreaIds) || device.osAreaIds.some((id) => !value.areas.some((area) => area.osAreaId === id)))) return false;
   for (const policy of value.devicePolicies) {
+    if (policy.analyticsAssignmentStartedAt !== undefined && (policy.managementClass !== 'PROPERTY_DEVICE'
+      || !UTC.test(String(policy.analyticsAssignmentStartedAt)) || !Number.isFinite(Date.parse(policy.analyticsAssignmentStartedAt)))) return false;
     if (policy.logicalBinding !== undefined && !validBinding(policy.osDeviceId, policy.logicalBinding)) return false;
     if (policy.analyticsInterval !== undefined) {
       const interval = policy.analyticsInterval;

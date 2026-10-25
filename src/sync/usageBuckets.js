@@ -1,3 +1,4 @@
+const { recordUsageInterval } = require('./dailyAnalytics');
 function validInstant(value) {
   const text = String(value || "");
   const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/.exec(text);
@@ -38,6 +39,7 @@ function initialUsageState(value) {
     buckets,
     queuedRevisions: input.queuedRevisions && typeof input.queuedRevisions === "object" ? input.queuedRevisions : {},
     temperatureQueuedKeys: Array.isArray(input.temperatureQueuedKeys) ? input.temperatureQueuedKeys.slice(-1024) : [],
+    ...(input.dailyAnalytics ? { dailyAnalytics: input.dailyAnalytics } : {}),
   };
 }
 
@@ -78,6 +80,7 @@ function addInterval(state, source, startMs, endMs, activity) {
     const key = bucketKey(source, start);
     const existingBucket = state.buckets[key];
     if (seconds > 0) {
+      recordUsageInterval(state, source, coveredStart, coveredEnd, activity);
       const bucket = existingBucket || (state.buckets[key] = {
         osDeviceId: source.osDeviceId,
         osAreaId: source.osAreaId,
@@ -231,6 +234,7 @@ function observeUsage(stateValue, input) {
   const source = {
     osDeviceId: String(input.osDeviceId), osAreaId: String(input.osAreaId), category: input.category,
     controlId: String(input.controlId), sourceGeneration: input.sourceGeneration,
+    ...(input.assignmentEpochAt ? { assignmentEpochAt: input.assignmentEpochAt } : {}),
     ...(input.bindingRevision > 0 ? { bindingRevision: input.bindingRevision, analyticsIntervalId: input.analyticsIntervalId, analyticsPolicyVersion: input.analyticsPolicyVersion || 2 } : {}),
     activity: input.activity, lastObservedAt: new Date(observedAt).toISOString(),
     accountedThroughAt: new Date(observedAt).toISOString(),

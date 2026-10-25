@@ -58,7 +58,7 @@ function validateLanEndpointObservation(value, serial, expectedPort = 80) {
 
 // Event types that may wait for the next scheduled sync instead of forcing an
 // immediate follow-up round trip to Platform.
-const ROUTINE_SYNC_EVENT_TYPES = new Set(["usage.bucket", "temperature.sample"]);
+const ROUTINE_SYNC_EVENT_TYPES = new Set(["usage.bucket", "temperature.sample", "analytics.day"]);
 // With nothing to send, an idle hub contacts Platform at most this often.
 const IDLE_SYNC_INTERVAL_MS = 120000;
 
