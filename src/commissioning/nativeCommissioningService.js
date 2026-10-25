@@ -1,6 +1,8 @@
 const crypto = require("node:crypto");
+const { isDeepStrictEqual } = require('node:util');
 const { QrPairingCodeCodec, isValidPasscode, MATTER_QR_CODE_SINGLE_PAYLOAD_MAX_LENGTH } = require("@matter/types");
 const { buildPublicCommissioningCatalogue } = require("./publicDeviceCatalogue");
+const { buildLogicalCommissioningProposal } = require('./logicalDeviceCatalogue');
 const digest = (value) => crypto.createHash("sha256").update(String(value), "utf8").digest("hex");
 
 const SESSION_MS = 15 * 60 * 1000;
@@ -58,9 +60,10 @@ function fixedSession(session, afterCandidateRef = null) {
 }
 
 class NativeCommissioningService {
-  constructor({ store, mqtt, matter, pairing, vault, eventBus, commissioningCapabilities = {}, identityBrokerRequired = false, clock = () => Date.now(), logger = console } = {}) {
+  constructor({ store, mqtt, matter, pairing, vault, eventBus, commissioningCapabilities = {}, logicalDevicesEnabled = false, identityBrokerRequired = false, clock = () => Date.now(), logger = console } = {}) {
     this.store = store; this.mqtt = mqtt; this.matter = matter; this.pairing = pairing; this.vault = vault; this.eventBus = eventBus;
     this.identityBrokerRequired = identityBrokerRequired === true;
+    this.logicalDevicesEnabled = logicalDevicesEnabled === true;
     this.commissioningCapabilities = commissioningCapabilities;
     this.clock = clock; this.logger = logger; this.lock = Promise.resolve(); this.stopped = false;
     this.adoptionCandidates = new Map();
@@ -975,6 +978,12 @@ class NativeCommissioningService {
         catalogueStatus: catalogue.capabilityStatus, usefulReadings: catalogue.usefulReadings,
         areaId: session.selectedAreaId, name: session.selectedName || null, customerLabel: session.selectedCustomerLabel,
         ...(actor.actorType === "STAFF_INSTALLER" ? { analyticsCategory: session.selectedAnalyticsCategory || "NONE" } : {}) };
+      const logicalProposal = this.logicalDevicesEnabled && session.operationKind !== 'REGISTER_EXISTING' && disposition === 'install'
+        ? buildLogicalCommissioningProposal({ device, homeId: actor.homeId, membershipId: actor.membershipId,
+          managementClass: actor.actorType === 'STAFF_INSTALLER' ? 'property_device' : 'tenant_device',
+          areaId: session.selectedAreaId, hubAreaId: session.selectedHubAreaId, name: session.selectedName,
+          customerLabel: session.selectedCustomerLabel, labels: this.store.listLabels(), now: this.clock() }) : null;
+      if (logicalProposal) deviceProjection.channels = logicalProposal.channels;
       const platformDisposition = disposition === "retain_unsupported" ? "view_only" : disposition;
       const cloud = await this.platform("finalize", session, { candidateRef: session.selectedCandidateRef, disposition: platformDisposition, device: deviceProjection });
       const expectedLifecycle = platformDisposition === "view_only" ? "VIEW_ONLY" : "INSTALLED";
@@ -1002,7 +1011,30 @@ class NativeCommissioningService {
         : null;
       const currentLabelIds = Array.isArray(device.labelIds) ? device.labelIds : Array.isArray(device.labels) ? device.labels : [];
       const labelIds = [...new Set([...currentLabelIds.map(String), ...(matchedLabel?.id ? [String(matchedLabel.id)] : [])])];
-      const updated = await this.store.upsertDevice({ ...device, name: session.selectedName || device.originalName || device.name, areaId: session.selectedHubAreaId,
+      let updated;
+      if (logicalProposal) {
+        if (!Array.isArray(cloud.logicalDevices) || cloud.logicalDevices.length !== logicalProposal.channels.length)
+          fail(SAFE_ERROR.unavailable, 503, 'Platform did not confirm every independent channel');
+        const policies = {};
+        for (const expected of logicalProposal.channels) {
+          const row = cloud.logicalDevices.find(candidate => candidate.osDeviceId === expected.catalogue.osDeviceId);
+          if (!row || row.managementClass !== expectedClass || row.ownerMembershipId !== actor.membershipId
+            || row.lifecycle !== expectedLifecycle || row.analyticsCategory !== expectedAnalyticsCategory
+            || row.descriptorDigest !== expected.catalogue.descriptorDigest
+            || !isDeepStrictEqual(row.binding, expected.binding))
+            fail(SAFE_ERROR.unavailable, 503, 'Platform returned a mismatched channel ownership or source binding');
+          policies[row.osDeviceId] = { ...policy, platformDeviceId: row.id, overrideName: expected.catalogue.name,
+            descriptorRevision: row.descriptorRevision, descriptorDigest: row.descriptorDigest,
+            logicalBinding: row.binding, osAreaIds: [session.selectedHubAreaId] };
+        }
+        await this.store.upsertDevice({ ...device, areaId: null, labelIds, labels: labelIds,
+          managementClass: propertyDevice ? 'property_device' : 'tenant_device',
+          tenantOwnerMembershipId: propertyDevice ? undefined : actor.membershipId,
+          setup: { ...(device.setup || {}), status: 'needs_setup', reason: 'logical_channels_managed_separately' } });
+        await this.store.activateLogicalDevicePolicies(policies);
+        updated = this.store.getManagedDevice(cloud.device.osDeviceId);
+        if (!updated) fail(SAFE_ERROR.unavailable, 503, 'The acknowledged logical device is not locally available');
+      } else updated = await this.store.upsertDevice({ ...device, name: session.selectedName || device.originalName || device.name, areaId: session.selectedHubAreaId,
         labelIds, labels: labelIds,
         managementClass: propertyDevice ? "property_device" : "tenant_device", tenantOwnerMembershipId: propertyDevice ? undefined : actor.membershipId,
         setup: { ...(device.setup || {}), status: "ready", viewOnly: platformDisposition === "view_only", unsupported: catalogue.capabilityStatus === "unsupported", commissionedAt: new Date(this.clock()).toISOString() },

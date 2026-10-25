@@ -46,6 +46,8 @@ test('LD01 real Store and command model independently assign and route two physi
   assert.equal(effects.length, 1);
   assert.equal(effects[0][0].id, f.parent.id, 'dispatch resolves to the single physical pairing');
   assert.equal(effects[0][1].stateKey, 'state_l1');
+  assert.deepEqual(effects[0][6], { deviceId: children[0].id, mappingRevision: children[0].mappingRevision },
+    'every feature write retains the logical authority revision until adapter dispatch');
 });
 
 test('LD01 restart and parent re-interview do not merge logical assignments', async (t) => {

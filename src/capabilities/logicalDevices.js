@@ -26,7 +26,8 @@ function channelManifest(device) {
   const unresolvedSourceIds = [];
   for (const entity of entities) {
     const cap = entity?.capability;
-    if (!entity?.id || !cap || cap.category === 'diagnostic' || cap.category === 'config'
+    const relatedMeasurement = ['ambient_temperature', 'active_heat_demand', 'active_heat_production'].includes(cap?.semanticRole);
+    if (!entity?.id || !cap || (cap.category === 'diagnostic' && !relatedMeasurement) || cap.category === 'config'
       || ['battery', 'linkquality', 'voltage'].includes(String(entity.stateKey))) continue;
     if (cap.readable !== true && cap.writable !== true) continue;
     const endpoint = String(entity.endpointId || '0');
@@ -65,6 +66,13 @@ function registry(state) {
     : { version: 1, revision: 0, parents: {}, children: {}, tombstones: {} };
 }
 
+function fenceParent(parent) {
+  // Pre-feature binaries also refuse native customer access to an unassigned parent.
+  parent.areaId = null;
+  parent.metadata = { ...(parent.metadata || {}), areaId: null };
+  parent.setup = { ...(parent.setup || {}), status: 'needs_setup', reason: 'logical_channels_managed_separately' };
+}
+
 function assignInState(state, physicalId, input) {
   const parent = state.devices[physicalId];
   const manifest = channelManifest(parent);
@@ -101,6 +109,7 @@ function assignInState(state, physicalId, input) {
   next.parents[physicalId] = { manifestDigest: manifest.digest, manifest, revision: next.revision };
   for (const child of children) next.children[child.id] = child;
   state.logicalDevices = next;
+  fenceParent(parent);
   return children;
 }
 
@@ -165,5 +174,68 @@ function suppressInState(state, id) {
   return true;
 }
 
+function validBinding(id, binding) {
+  return Boolean(binding && typeof binding === 'object' && !Array.isArray(binding)
+    && Object.keys(binding).sort().join('|') === ['physicalDeviceId', 'channelKey', 'channelGeneration', 'mappingRevision', 'manifestDigest', 'sourceDigest', 'sourceEntityIds'].sort().join('|')
+    && typeof binding.physicalDeviceId === 'string' && binding.physicalDeviceId.length <= 160
+    && typeof binding.channelKey === 'string' && /^[A-Za-z0-9_.:-]{1,120}$/.test(binding.channelKey)
+    && Number.isSafeInteger(binding.channelGeneration) && binding.channelGeneration >= 1
+    && Number.isSafeInteger(binding.mappingRevision) && binding.mappingRevision >= 1
+    && /^[a-f0-9]{64}$/.test(binding.manifestDigest) && /^[a-f0-9]{64}$/.test(binding.sourceDigest)
+    && Array.isArray(binding.sourceEntityIds) && binding.sourceEntityIds.length >= 1 && binding.sourceEntityIds.length <= MAX_SOURCES
+    && new Set(binding.sourceEntityIds).size === binding.sourceEntityIds.length
+    && binding.sourceEntityIds.every(source => typeof source === 'string' && source.length <= 160 && source.startsWith(`${binding.physicalDeviceId}:`))
+    && logicalId(binding.physicalDeviceId, binding.channelKey, binding.channelGeneration) === id);
+}
+
+/** A signed policy is authority; a matching local manifest is still required for physical routing. */
+function applyLogicalPolicies(state, policies) {
+  const r = registry(state);
+  const owners = new Map(), sources = new Set();
+  const pending = [];
+  for (const [id, policy] of Object.entries(policies)) {
+    const binding = policy.logicalBinding;
+    if (!binding) continue;
+    if (!validBinding(id, binding)) fail('logical_policy_invalid', 'The signed channel mapping is malformed');
+    if (!['INSTALLED', 'VIEW_ONLY'].includes(policy.lifecycle)) continue;
+    const owner = JSON.stringify([policy.managementClass, policy.ownerMembershipId]);
+    if (owners.has(binding.physicalDeviceId) && owners.get(binding.physicalDeviceId) !== owner)
+      fail('logical_parent_owner_conflict', 'One physical device cannot have different channel owners');
+    owners.set(binding.physicalDeviceId, owner);
+    for (const sourceId of binding.sourceEntityIds) {
+      if (sources.has(sourceId)) fail('logical_source_duplicate', 'A physical source cannot belong to multiple children');
+      sources.add(sourceId);
+    }
+    if (!Array.isArray(policy.osAreaIds) || policy.osAreaIds.length !== 1 || !state.areas[policy.osAreaIds[0]])
+      fail('logical_area_invalid', 'A logical device requires one current Area');
+    if (r.tombstones[id]) continue;
+    const parent = state.devices[binding.physicalDeviceId];
+    if (!parent) { pending.push(id); continue; }
+    const existingOwner = parent.tenantOwnerMembershipId || parent.metadata?.tenantOwnerMembershipId || null;
+    if (existingOwner && existingOwner !== policy.ownerMembershipId)
+      fail('logical_parent_owner_conflict', 'The channel owner differs from the physical device owner');
+    const manifest = channelManifest(parent);
+    const channel = manifest.channels.find(row => row.channelKey === binding.channelKey);
+    if (!channel || channel.sourceDigest !== binding.sourceDigest || manifest.unresolvedSourceIds.length
+      || JSON.stringify(channel.sourceEntityIds) !== JSON.stringify([...binding.sourceEntityIds].sort())) { pending.push(id); continue; }
+    const prior = r.children[id];
+    if (prior && prior.mappingRevision > binding.mappingRevision) fail('logical_policy_stale', 'The logical mapping revision regressed');
+    r.parents[parent.id] = { manifest, manifestDigest: binding.manifestDigest,
+      managementClass: policy.managementClass, ownerMembershipId: policy.ownerMembershipId };
+    r.children[id] = { id, ...copy(binding), areaId: policy.osAreaIds[0],
+      name: policy.overrideName || prior?.name || `${parent.name} ${binding.channelKey}`,
+      labelIds: parent.labelIds?.length ? parent.labelIds : ['tenant_device'], suppressed: false };
+    parent.managementClass = policy.managementClass === 'TENANT_DEVICE' ? 'tenant_device' : 'property_device';
+    parent.tenantOwnerMembershipId = policy.ownerMembershipId;
+    fenceParent(parent);
+  }
+  state.logicalDevices = r;
+  for (const [id, child] of Object.entries(r.children)) {
+    const policy = policies[id];
+    if (!child.suppressed && (!policy || !['INSTALLED', 'VIEW_ONLY'].includes(policy.lifecycle))) suppressInState(state, id);
+  }
+  return { pending };
+}
+
 module.exports = { channelManifest, logicalId, registry, assignInState, projectChild,
-  managedDevices, suppressedSourceIds, suppressInState, MAX_CHANNELS, MAX_SOURCES };
+  managedDevices, suppressedSourceIds, suppressInState, validBinding, applyLogicalPolicies, MAX_CHANNELS, MAX_SOURCES };

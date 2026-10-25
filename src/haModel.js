@@ -380,11 +380,12 @@ class HomeAssistantModel {
       const commandService = route?.serviceId || requestedService;
       const commandData = route ? sourceCommandData(requestedService, commandService, normalizedData) : normalizedData;
       const physicalDevice = device.physicalDeviceId ? this.store.getDevice(device.physicalDeviceId) : device;
+      const logicalContext = device.physicalDeviceId ? { deviceId: device.id, mappingRevision: device.mappingRevision } : null;
       if (!physicalDevice || device.physicalDeviceId && !this.store.getManagedDevice(device.id)) {
         throw Object.assign(new Error('The logical device mapping changed'), { statusCode: 409, code: 'logical_mapping_changed' });
       }
       if (this.commandEntity && bindingFor(commandEntity, commandService)) {
-        await this.commandEntity(physicalDevice, commandEntity, commandService, commandData, command);
+        await this.commandEntity(physicalDevice, commandEntity, commandService, commandData, command, null, logicalContext);
       } else {
         if (device.physicalDeviceId) throw Object.assign(new Error('A logical device requires an exact source binding'), { statusCode: 409, code: 'logical_binding_required' });
         await this.commandDevice(device.id, device.protocol, command);
@@ -407,7 +408,7 @@ class HomeAssistantModel {
           if (parameterService === "select.select_option") parameterData.option = parameterValue;
           const parameterDomain = parameterService.split(".", 1)[0];
           const parameterCommand = this.commandFor(parameterDomain, parameterService.split(".", 2)[1], parameterData, { entity: parameterEntity, domain: parameterDomain });
-          await this.commandEntity(physicalDevice, parameterEntity, parameterService, sourceCommandData(requestedService, parameterService, parameterData), parameterCommand);
+          await this.commandEntity(physicalDevice, parameterEntity, parameterService, sourceCommandData(requestedService, parameterService, parameterData), parameterCommand, null, logicalContext);
         }
       }
       const next = this.state(item.haId);
