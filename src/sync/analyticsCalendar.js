@@ -1,20 +1,27 @@
 function validTimezone(timezone) {
   try { new Intl.DateTimeFormat('en', { timeZone: timezone }).format(0); return typeof timezone === 'string'; } catch { return false; }
 }
+const formatters = new Map(), boundaries = new Map();
 function localParts(time, timezone) {
-  const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: timezone,
+  let formatter = formatters.get(timezone);
+  if (!formatter) { if (formatters.size >= 64) formatters.clear(); formatter = new Intl.DateTimeFormat('en-GB', { timeZone: timezone,
     year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
-  }).formatToParts(new Date(time)).filter(x => x.type !== 'literal').map(x => [x.type, Number(x.value)]));
+  }); formatters.set(timezone, formatter); }
+  const p = Object.fromEntries(formatter.formatToParts(new Date(time)).filter(x => x.type !== 'literal').map(x => [x.type, Number(x.value)]));
   return p;
 }
 function midnight(year, month, day, timezone) {
-  const target = Date.UTC(year, month - 1, day); let guess = target;
-  for (let i = 0; i < 6; i++) {
-    const p = localParts(guess, timezone);
-    const delta = target - Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
-    if (!delta) return guess; guess += delta;
+  const key = `${timezone}|${year}-${month}-${day}`;
+  if (boundaries.has(key)) return boundaries.get(key);
+  const target = Date.UTC(year, month - 1, day);
+  let low = target - 36 * 3600000, high = target + 36 * 3600000;
+  // First instant of the local date: midnight may be skipped or repeated.
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2), p = localParts(mid, timezone);
+    if (Date.UTC(p.year, p.month - 1, p.day) < target) low = mid + 1; else high = mid;
   }
-  throw new Error('Unresolvable analytics calendar boundary');
+  if (boundaries.size >= 512) boundaries.clear(); boundaries.set(key, low);
+  return low;
 }
 function calendarDay(time, timezone) {
   if (!Number.isFinite(Number(time)) || !validTimezone(timezone)) throw new Error('Invalid analytics calendar');

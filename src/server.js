@@ -1175,6 +1175,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         // or signed deletion reconciliation.
         nativeLogicalDevicesV1: true,
         nativeDailyAnalyticsV1: true,
+        nativeDailyAnalyticsBuildId: runtimeConfig.buildId || null,
         ...runtimeConfig.nativeCommissioningCapabilities },
     },
     getAreaSnapshot: () => ({ schemaVersion: 1, capturedAt: new Date().toISOString(), areas: hubStore.listAreas().map((area) => ({ areaId: area.id, name: area.name })) }),
