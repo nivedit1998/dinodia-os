@@ -441,6 +441,30 @@ test("stale discovery revision is refreshed and retried once for the same review
   assert.equal(page.elements.get("status").textContent.includes("selected"), true);
 });
 
+test('background polling preserves actionable review errors instead of erasing them', async () => {
+  const sessionId = '55555555-5555-4555-8555-555555555555';
+  const candidateRef = '66666666-6666-4666-8666-666666666666';
+  const session = { sessionId, protocol:'zigbee', operationKind:'PAIR_NEW', status:'searching', revision:4,
+    candidates:[{ candidateRef, name:'New device', interviewStatus:'successful' }] };
+  const page = harness({ context:validContext(), session, seededStorage:{
+    'dinodia-installation:22222222-2222-4222-8222-222222222222:session':sessionId,
+  }, requestHandler:async (url, options) => options.method === 'POST' && url.endsWith('/select')
+    ? response(409, { error:{ code:'COMMISSIONING_REVISION_CONFLICT', message:'Cloud review rejected; refresh this device' } }) : null });
+  await page.flush();
+  page.elements.get('candidate-list').children[0].children[2].listeners.get('click')();
+  page.elements.get('area').value = areaId;
+  page.elements.get('name').value = 'Room 2 device';
+  page.elements.get('label').value = 'Radiator';
+  await page.elements.get('select').listeners.get('click')();
+  assert.match(page.elements.get('error').textContent, /Cloud review rejected/);
+  const poll = [...page.timers].find(timer => timer.delay === 3000);
+  assert.ok(poll);
+  await poll.fn(); await page.flush();
+  assert.equal(page.elements.get('error').hidden, false);
+  assert.match(page.elements.get('error').textContent, /Cloud review rejected/);
+  assert.equal(page.elements.get('install').hidden, true);
+});
+
 test("cancelled Matter session hides the setup-code controls in the rendered production page", async () => {
   const sessionId = "77777777-7777-4777-8777-777777777777";
   const requestId = "22222222-2222-4222-8222-222222222222";

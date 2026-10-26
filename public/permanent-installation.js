@@ -226,6 +226,7 @@
     setBusy(true); clearError();
     try {
       const session = await post("/_dinodia/installer/commissioning/sessions", { schemaVersion: "dinodia.v1", operationKind: "PAIR_NEW", protocol }, `install-start-${operationId()}`);
+      state.selected = null; state.reviewStale = false;
       render(session); renderCandidates();
       if (state.poll) clearInterval(state.poll);
       scheduleSessionRefresh(3000);
@@ -250,14 +251,16 @@
   }
   async function refresh({ background = false } = {}) {
     if (state.busy) { if (state.session) scheduleSessionRefresh(1000); return; }
-    clearError();
+    if (!background) clearError();
     if (!background) setBusy(true);
     let nextPollDelay = null;
+    const requestedSessionId = state.session?.sessionId;
     try {
       await refreshContext({ preserveAuthority: background });
       await refreshExistingDevices();
-      if (!state.session) return;
-      const session = await get(`/_dinodia/installer/commissioning/sessions/${encodeURIComponent(state.session.sessionId)}`);
+      if (!requestedSessionId || state.session?.sessionId !== requestedSessionId) return;
+      const session = await get(`/_dinodia/installer/commissioning/sessions/${encodeURIComponent(requestedSessionId)}`);
+      if (state.session?.sessionId !== requestedSessionId) return;
       render(session); renderCandidates();
       if (terminal.has(session.status) || session.status.endsWith("_cleanup_pending")) { if (state.poll) clearTimeout(state.poll); state.poll = null; }
       else nextPollDelay = 3000;

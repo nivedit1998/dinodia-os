@@ -667,7 +667,12 @@ class NativeCommissioningService {
       }
       this.append(session, "session_started", { protocol: session.protocol });
       await this.save(session);
-      if (session.protocol === "zigbee") await this.platform("transition", session, { status: "ADVERTISING" });
+      if (session.protocol === "zigbee") {
+        await this.platform("transition", session, { status: "ADVERTISING" });
+        // Store snapshots are detached: the cloud revision changed by the
+        // acknowledgement must survive the next browser request/restart.
+        await this.save(session);
+      }
       return session;
     } catch (error) {
       // Keep the exact operation and fixed expiry so an identical retry can
@@ -813,6 +818,7 @@ class NativeCommissioningService {
       session.radioOperationInFlight = true;
       session.status = "commissioning"; this.append(session, "matter_payload_accepted"); await this.save(session);
       await this.platform("transition", session, { status: "ADVERTISING" });
+      await this.save(session);
       this.runMatterCommissioning(session.sessionId).catch(() => {});
       return this.publicStatus(session);
     });
@@ -894,18 +900,29 @@ class NativeCommissioningService {
       const catalogue = buildPublicCommissioningCatalogue({ device, homeId: actor.homeId, membershipId: actor.membershipId, managementClass: actor.actorType === "STAFF_INSTALLER" ? "property_device" : "tenant_device", areaId: area.areaId,
         name: name || undefined, customerLabel: label, now: this.clock() });
       if (!catalogue) fail(SAFE_ERROR.unavailable, 409, "The hub could not produce a safe device catalogue", "candidate_catalogue_unavailable");
-      Object.assign(session, { selectedCandidateRef: candidate.candidateRef, selectedDeviceId: device.id, selectedAreaId: area.areaId,
+      const reviewed = { ...session, events: [...session.events], selectedCandidateRef: candidate.candidateRef, selectedDeviceId: device.id, selectedAreaId: area.areaId,
         selectedHubAreaId: area.hubAreaId, selectedName: name, selectedCustomerLabel: label, selectedCatalogue: catalogue,
         selectedAnalyticsCategory: actor.actorType === "STAFF_INSTALLER" ? analyticsCategory : "NONE",
-        selectedDescriptorRevision: catalogue.descriptorRevision, selectedDescriptorDigest: catalogue.descriptorDigest, status: "selected" });
-      this.append(session, "device_selected"); await this.save(session);
-      await this.platform("transition", session, { status: "READY", selectedAreaId: area.areaId, candidateRef: candidate.candidateRef,
-        osDeviceId: String(device.id), requestedName: name || null, customerLabel: label,
-        ...(actor.actorType === "STAFF_INSTALLER" ? { analyticsCategory } : {}),
-        catalogueStatus: catalogue.capabilityStatus, catalogueRevision: catalogue.descriptorRevision, descriptorDigest: catalogue.descriptorDigest,
-        operationKind: session.operationKind || "PAIR_NEW", targetIdentityHash: session.operationKind === "REGISTER_EXISTING" ? session.targetIdentityHash : undefined }); await this.save(session);
-      return this.publicStatus(session);
+        selectedDescriptorRevision: catalogue.descriptorRevision, selectedDescriptorDigest: catalogue.descriptorDigest, status: "selected" };
+      await this.confirmSelectedReview(reviewed);
+      this.append(reviewed, "device_selected"); await this.save(reviewed);
+      return this.publicStatus(reviewed);
     });
+  }
+
+  async confirmSelectedReview(session) {
+    const catalogue = session.selectedCatalogue;
+    const expectedRevision = session.expectedPlatformRevision || 1;
+    const result = await this.platform('transition', session, { status: 'READY', selectedAreaId: session.selectedAreaId,
+      candidateRef: session.selectedCandidateRef, osDeviceId: String(session.selectedDeviceId), requestedName: session.selectedName || null,
+      customerLabel: session.selectedCustomerLabel,
+      ...(session.actorType === 'STAFF_INSTALLER' ? { analyticsCategory: session.selectedAnalyticsCategory || 'NONE' } : {}),
+      catalogueStatus: catalogue.capabilityStatus, catalogueRevision: session.selectedDescriptorRevision,
+      descriptorDigest: session.selectedDescriptorDigest, operationKind: session.operationKind || 'PAIR_NEW',
+      targetIdentityHash: session.operationKind === 'REGISTER_EXISTING' ? session.targetIdentityHash : undefined });
+    if (result?.ok !== true || result.state !== 'READY' || result.sessionId !== session.sessionId
+      || result.revision !== expectedRevision + 1) fail(SAFE_ERROR.unavailable, 503, 'Platform has not confirmed this device review; review it again before installing', 'review_acknowledgement_required');
+    session.selectedPlatformReady = true;
   }
 
   isCompleteRadioDevice(session, device, actor = null) {
@@ -949,6 +966,13 @@ class NativeCommissioningService {
         name: session.selectedName || undefined, customerLabel: session.selectedCustomerLabel, now: this.clock() });
       if (!currentCatalogue || currentCatalogue.descriptorRevision !== session.selectedDescriptorRevision
         || currentCatalogue.descriptorDigest !== session.selectedDescriptorDigest) fail(SAFE_ERROR.conflict, 409, "The device descriptor changed after review; refresh and review it again", "device_descriptor_changed_after_review");
+      // Older Hub versions could persist selection before cloud READY, or
+      // lose its revision. Never guess a canonical revision or replay READY
+      // with an ambiguous expectation. Retain the paired candidate; assigned
+      // staff can use the guarded existing-device recovery after expiry.
+      if (session.selectedPlatformReady !== true) {
+        fail(SAFE_ERROR.conflict, 409, 'This earlier device review needs a fresh assigned registration session. Keep the device paired; reopen its retained candidate after this session expires.', 'legacy_review_recovery_required');
+      }
       if (catalogue.capabilityStatus === "ready" ? disposition !== "install"
         : catalogue.capabilityStatus === "no_safe_controls"
           ? disposition !== "remove" && (disposition !== "view_only" || catalogue.usefulReadings !== true)

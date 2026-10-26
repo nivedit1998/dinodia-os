@@ -105,6 +105,116 @@ function fixture({ dropFirstCreateResponse = false, matterCommission = async () 
   return { service, principal, store, devices, events, platformRequests, radioEffects, areaId, homeId, hubInstallId, vaultValues, mqtt, matter, close: () => service.close() };
 }
 
+test('detached Store snapshots retain the acknowledged cloud revision before review and completion', async t => {
+  const f = fixture(); t.after(f.close);
+  const originalGet = f.store.getSecurity, originalSave = f.store.saveSecurity;
+  f.store.getSecurity = () => structuredClone(originalGet());
+  f.store.saveSecurity = patch => originalSave(structuredClone(patch));
+  const originalRequest = f.service.pairing.requestWithHubIdentity;
+  let cloudRevision = 1;
+  f.service.pairing.requestWithHubIdentity = async (route, body) => {
+    if (body.action !== 'create') {
+      assert.equal(body.expectedRevision, cloudRevision, 'request must use the last durable cloud acknowledgement');
+      cloudRevision += 1;
+    }
+    return originalRequest(route, body);
+  };
+  const started = await f.service.start(f.principal, { protocol: 'zigbee' }, uuid());
+  assert.equal(f.service.sessions()[started.sessionId].expectedPlatformRevision, 2);
+  const device = normalizeZigbeeDevice(require('./fixtures/zigbee/radiator-device.json'));
+  await f.store.upsertDevice(device); f.mqtt.pairingStatus = () => ({ active: true, found: [device.id] });
+  await f.service.status(started.sessionId, f.principal);
+  const current = f.service.sessions()[started.sessionId];
+  await f.service.select(started.sessionId, f.principal, { schemaVersion:'dinodia.v1', expectedRevision:current.revision,
+    candidateRef:current.candidates[0].candidateRef, areaId:f.areaId, name:'New radiator', customerLabel:'Radiator' });
+  const completed = await f.service.complete(started.sessionId, f.principal);
+  assert.equal(completed.status, 'completed');
+  assert.equal(cloudRevision, 4);
+  assert.equal(f.radioEffects.zigbeeStart, 1);
+  assert.equal(f.radioEffects.zigbeeRemove, 0);
+});
+
+for (const legacyRevision of [1, 3]) {
+test(`legacy selected review at revision ${legacyRevision} is quarantined without guessing cloud state or unpairing`, async t => {
+  const f = fixture(); t.after(f.close);
+  const started = await f.service.start(f.principal, { protocol:'zigbee' }, uuid());
+  const device = normalizeZigbeeDevice(require('./fixtures/zigbee/radiator-device.json'));
+  await f.store.upsertDevice(device); f.mqtt.pairingStatus = () => ({ active:true, found:[device.id] });
+  await f.service.status(started.sessionId, f.principal);
+  const current = f.service.sessions()[started.sessionId];
+  await f.service.select(started.sessionId, f.principal, { schemaVersion:'dinodia.v1', expectedRevision:current.revision,
+    candidateRef:current.candidates[0].candidateRef, areaId:f.areaId, name:'New radiator', customerLabel:'Radiator' });
+  const legacy = f.service.sessions()[started.sessionId];
+  delete legacy.selectedPlatformReady;
+  legacy.expectedPlatformRevision = legacyRevision;
+  await f.service.save(legacy);
+  const requestsBefore = f.platformRequests.length;
+  await assert.rejects(f.service.complete(started.sessionId, f.principal), { reason:'legacy_review_recovery_required' });
+  assert.equal(f.platformRequests.length, requestsBefore, 'no READY/finalize with guessed state');
+  assert.ok(f.store.getDevice(device.id), 'candidate pairing is preserved');
+  assert.equal(f.radioEffects.zigbeeRemove, 0);
+});
+}
+
+for (const outcome of ['reject', 'wrong_session', 'wrong_revision', 'lost_response']) {
+test(`cloud READY ${outcome} cannot claim review or finalize; exact response-loss retry is safe`, async t => {
+  const f = fixture(); t.after(f.close);
+  const originalGet = f.store.getSecurity, originalSave = f.store.saveSecurity;
+  f.store.getSecurity = () => structuredClone(originalGet());
+  f.store.saveSecurity = patch => originalSave(structuredClone(patch));
+  const started = await f.service.start(f.principal, { protocol: 'zigbee' }, uuid());
+  const device = normalizeZigbeeDevice(require('./fixtures/zigbee/radiator-device.json'));
+  await f.store.upsertDevice(device); f.mqtt.pairingStatus = () => ({ active: true, found: [device.id] });
+  await f.service.status(started.sessionId, f.principal);
+  const current = f.service.sessions()[started.sessionId];
+  const input = { schemaVersion:'dinodia.v1', expectedRevision:current.revision,
+    candidateRef:current.candidates[0].candidateRef, areaId:f.areaId, name:'New radiator', customerLabel:'Radiator' };
+  const originalRequest = f.service.pairing.requestWithHubIdentity;
+  let committedReview = null;
+  f.service.pairing.requestWithHubIdentity = async (route, body) => {
+    if (body.action !== 'transition' || body.status !== 'READY') return originalRequest(route, body);
+    if (outcome === 'reject') throw new Error('cloud rejected review');
+    const result = await originalRequest(route, body);
+    if (outcome === 'wrong_session') return { ...result, sessionId: uuid() };
+    if (outcome === 'wrong_revision') return { ...result, revision: 900 };
+    if (!committedReview) { committedReview = structuredClone(body); throw new Error('response lost'); }
+    assert.deepEqual(body, committedReview, 'lost acknowledgement replays the exact review, not a new registration');
+    return result;
+  };
+  await assert.rejects(f.service.select(started.sessionId, f.principal, input));
+  assert.notEqual(f.service.sessions()[started.sessionId].status, 'selected');
+  assert.equal(f.service.sessions()[started.sessionId].expectedPlatformRevision, 2);
+  await assert.rejects(f.service.complete(started.sessionId, f.principal), /Select a discovered device/);
+  if (outcome === 'lost_response') {
+    await f.service.select(started.sessionId, f.principal, input);
+    assert.equal((await f.service.complete(started.sessionId, f.principal)).status, 'completed');
+    assert.equal(f.platformRequests.filter(row => row.action === 'finalize').length, 1);
+  }
+  assert.equal(f.radioEffects.zigbeeStart, 1);
+  assert.equal(f.radioEffects.zigbeeRemove, 0);
+});
+}
+
+test('a rejected cloud READY never persists a locally completed review or allows finalization', async t => {
+  const f = fixture(); t.after(f.close);
+  const originalGet = f.store.getSecurity;
+  f.store.getSecurity = () => JSON.parse(JSON.stringify(originalGet()));
+  const started = await f.service.start(f.principal, { protocol: 'zigbee' }, uuid());
+  const device = normalizeZigbeeDevice(require('./fixtures/zigbee/radiator-device.json'));
+  await f.store.upsertDevice(device); f.mqtt.pairingStatus = () => ({ active: true, found: [device.id] });
+  await f.service.status(started.sessionId, f.principal);
+  const current = f.service.sessions()[started.sessionId];
+  const originalRequest = f.service.pairing.requestWithHubIdentity;
+  f.service.pairing.requestWithHubIdentity = async (route, body) => {
+    if (body.action === 'transition' && body.status === 'READY') throw Object.assign(new Error('READY rejected'), { code: 'commissioning_transition_invalid' });
+    return originalRequest(route, body);
+  };
+  await assert.rejects(f.service.select(started.sessionId, f.principal, { schemaVersion:'dinodia.v1', expectedRevision:current.revision,
+    candidateRef:current.candidates[0].candidateRef, areaId:f.areaId, name:'New radiator', customerLabel:'Radiator' }), /READY rejected/);
+  assert.notEqual(f.service.sessions()[started.sessionId].status, 'selected');
+  await assert.rejects(f.service.complete(started.sessionId, f.principal), /Select a discovered device/);
+});
+
 test('real commissioning completion activates two private channel records under one physical pairing', async (t) => {
   const fs = require('node:fs/promises'), os = require('node:os'), path = require('node:path');
   const { Store } = require('../src/store');
