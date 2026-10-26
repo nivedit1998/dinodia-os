@@ -2,7 +2,8 @@ const mqtt = require("mqtt");
 const crypto = require("node:crypto");
 const path = require("node:path");
 const { normalizeZigbeeDevice } = require("./integrations/zigbee/exposeNormalizer");
-const { TRACKED_PROPERTIES, readObservationConfiguration, strictUtcTimestamp } = require("./integrations/zigbee/observationContract");
+const { readObservationConfiguration, strictUtcTimestamp } = require("./integrations/zigbee/observationContract");
+const { PublisherObservationSetup, observationPropertiesForDevice } = require('./integrations/zigbee/observationPublisher');
 const { parseDiscovery, reconcileDiscovery } = require("./integrations/zigbee/discoveryRegistry");
 const { ZigbeeEventNormalizer } = require("./integrations/zigbee/eventNormalizer");
 const { ZigbeePairingSession } = require("./integrations/zigbee/pairingSession");
@@ -69,11 +70,16 @@ class MqttBridge {
     this.permitJoinUntil = null;
     this.remoteEventWindow = new Map();
     this.pendingRemovals = new Map();
+    this.deviceObservationQueue = new Map();
     // Hub-managed observation policy (src/observation/reconciler.js); set by the server.
     this.observationPolicy = null;
     this.discovery = {};
     this.events = new ZigbeeEventNormalizer({ logger, duplicateWindowMs: eventDedupeMs });
     this.pairingSession = new ZigbeePairingSession({ logger, ttlSeconds: pairingSeconds });
+    this.publisherObservation = new PublisherObservationSetup({ clock, logger,
+      devices: () => this.connected && this.deviceInventory?.connectionGeneration === this.connectionGeneration
+        ? this.deviceInventory.devices.map(item => this.store.getDevice(item.id)).filter(Boolean) : [],
+      publish: (requestPath, payload) => this.publishObservationOptions(requestPath, payload) });
   }
 
   start() {
@@ -91,6 +97,8 @@ class MqttBridge {
       // inventory across a broker outage and mistake it for current state.
       this.deviceInventory = null;
       this.rawDeviceInventory = null;
+      this.effectiveObservationOptions = null;
+      this.publisherObservation.reset();
       this.lastError = null;
       this.client.subscribe(`${this.baseTopic}/#`, (error) => {
         if (error) this.setError(error);
@@ -125,6 +133,7 @@ class MqttBridge {
       lastError: this.lastError,
       lastMessageAt: this.lastMessageAt,
       permitJoinUntil: this.permitJoinUntil,
+      observationSetup: this.publisherObservation.status(),
     };
   }
 
@@ -252,6 +261,20 @@ class MqttBridge {
   }
 
   async handleMessage(topic, payload, packet = null) {
+    const relative = topic.startsWith(`${this.baseTopic}/`) ? topic.slice(this.baseTopic.length + 1) : '';
+    const parts = relative.split('/');
+    if (parts[0] && parts[0] !== 'bridge' && (parts.length === 1 || parts.length === 2 && parts[1] === 'availability')) {
+      const id = this.resolveDeviceId(parts[0]);
+      const previous = this.deviceObservationQueue.get(id) || Promise.resolve();
+      const work = previous.catch(() => {}).then(() => this.handleMessageNow(topic, payload, packet));
+      this.deviceObservationQueue.set(id, work);
+      try { return await work; }
+      finally { if (this.deviceObservationQueue.get(id) === work) this.deviceObservationQueue.delete(id); }
+    }
+    return this.handleMessageNow(topic, payload, packet);
+  }
+
+  async handleMessageNow(topic, payload, packet = null) {
     const receivedMs = Number(this.clock());
     const receivedAt = new Date(receivedMs).toISOString();
     this.lastMessageAt = receivedAt;
@@ -282,6 +305,8 @@ class MqttBridge {
           filtered_cache: Array.isArray(options?.filtered_cache) ? options.filtered_cache.filter(property => /^[A-Za-z0-9_]+$/.test(property)).slice(0, 128) : [],
         }])),
       };
+      this.publisherObservation.onInfo(value);
+      await this.publisherObservation.reconcile();
       return;
     }
     if (relative === "bridge/devices" && Array.isArray(value)) {
@@ -363,6 +388,12 @@ class MqttBridge {
         }
       }
       await this.notifyObservationPolicy("onInventory", value);
+      // Inventory is paired identity/capability discovery. Publisher options do
+      // not configure the physical device or require a category/model mapping.
+      if (this.publisherObservation.hasInfo) {
+        this.publisherObservation.refresh();
+        await this.publisherObservation.reconcile();
+      }
       if (stopPairingAfterSync && this.pairingSession.status().active) {
         if (this.client && this.connected) await this.permitJoin(0);
         this.pairingSession.stop();
@@ -390,6 +421,11 @@ class MqttBridge {
         if (String(value.status || "").toLowerCase() === "error") removal.reject(new Error(value.error || "Zigbee2MQTT could not remove the device"));
         else removal.resolve(value);
       }
+      return;
+    }
+    if (['bridge/response/device/options', 'bridge/response/options'].includes(relative) && value && typeof value === 'object') {
+      this.publisherObservation.onResponse(relative === 'bridge/response/options' ? 'options' : 'device/options', value);
+      await this.publisherObservation.reconcile();
       return;
     }
     if ((relative === "bridge/response/device/reporting/read" || relative === "bridge/response/device/reporting/configure")
@@ -433,8 +469,14 @@ class MqttBridge {
         observationContract = await readObservationConfiguration(this.observationConfigPath, {
           friendlyName: existing.metadata?.friendly_name || existing.metadata?.friendlyName || parts[0],
           ieeeAddress: existing.metadata?.ieee_address || existing.protocolIdentity?.ieeeAddress,
-        }, { includeProperties: true, ...(this.observationPolicy?.selectedProperties?.(id)?.length
-          ? { properties: this.observationPolicy.selectedProperties(id) } : {}) });
+        }, { includeProperties: true, properties: null });
+      }
+      await this.publisherObservation.reconcile();
+      if (!sourceObservedAt || !this.publisherObservation.admit(id, sourceObservedAt)) {
+        observationContract = { ok: false, reason: 'publisher_setup_or_cache_flush_pending' };
+      } else if (observationContract.ok) {
+        const protectedProperties = this.publisherObservation.protectedProperties(id);
+        observationContract.properties = observationContract.properties.filter(property => protectedProperties.includes(property));
       }
       if (sourceObservedAt && observationContract.ok && existing) {
         const policy = this.store.getPlatform?.()?.devicePolicies?.[existing.id];
@@ -461,22 +503,25 @@ class MqttBridge {
         for (const property of observationContract.properties || []) {
           if (!Object.prototype.hasOwnProperty.call(reportedState, property)) continue;
           const matchingEntities = Object.values(existing.entities || {}).filter((entity) => String(entity.stateKey || entity.binding?.property || "") === property
-            && entity.capability?.readable === true && entity.capability?.observable === true
-            && (property !== "running_state" || entity.capability?.semanticRole === "active_heat_demand")
-            && (property !== "local_temperature" || entity.capability?.semanticRole === "ambient_temperature"));
+            && entity.capability?.readable === true && entity.capability?.observable === true);
           const endpoint = String(value.endpoint ?? value.endpoint_id ?? "").trim();
           const matches = matchingEntities.length === 1 ? matchingEntities
             : endpoint ? matchingEntities.filter((entity) => String(entity.endpointId || entity.binding?.endpoint || entity.expose?.endpoint || "") === endpoint) : [];
-          if (matches.length !== 1) continue;
+          if (matches.length !== 1) { delete reportedState[property]; continue; }
           // A replay (cache republish or redelivery after the bridge is online) carries the same
           // or an older last_seen. Only a strictly newer last_seen is a new observation of this
           // value; an identical value re-reported with a newer last_seen does refresh it.
           const previousObservedMs = Date.parse(String(matches[0].sourceObservedAt || ""));
-          if (Number.isFinite(previousObservedMs) && previousObservedMs >= Date.parse(sourceObservedAt)) continue;
+          if (Number.isFinite(previousObservedMs) && previousObservedMs >= Date.parse(sourceObservedAt)) { delete reportedState[property]; continue; }
           sourceObservedAtByStateKey[property] = sourceObservedAt;
           sourceReceivedAtByStateKey[property] = receivedAt;
           observedEndpointByStateKey[property] = String(matches[0].endpointId || matches[0].binding?.endpoint || matches[0].expose?.endpoint || "");
         }
+      }
+      // Unverified/cache/old values never replace the last genuine observation.
+      // Availability is handled separately; retaining its old time cannot renew it.
+      for (const property of observationPropertiesForDevice(existing)) {
+        if (!sourceObservedAtByStateKey[property]) delete reportedState[property];
       }
       const previousLastSeenAt = strictUtcTimestamp(existing?.lastSeenAt, receivedMs);
       const lastSeenAt = sourceObservedAt && observationContract.ok
@@ -542,6 +587,22 @@ class MqttBridge {
     await new Promise((resolve, reject) => {
       this.client.publish(topic, JSON.stringify(payload || {}), { qos: 0, retain: false }, (error) => error ? reject(error) : resolve());
     });
+  }
+
+  async publishObservationOptions(requestPath, payload) {
+    if (!['options', 'device/options'].includes(requestPath)) throw new Error('Publisher options request is invalid');
+    if (!this.client || !this.connected) throw new Error('Zigbee2MQTT is not connected');
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Publisher options delivery timed out')), 5000);
+      timer.unref?.();
+      this.client.publish(`${this.baseTopic}/bridge/request/${requestPath}`, JSON.stringify(payload), { qos: 0, retain: false }, error => {
+        clearTimeout(timer); error ? reject(error) : resolve();
+      });
+    });
+  }
+
+  async reconcilePublisherObservation() {
+    if (this.connected) await this.publisherObservation.reconcile();
   }
 
   resolveDeviceId(value) {

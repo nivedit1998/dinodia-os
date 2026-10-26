@@ -320,6 +320,7 @@ test("provenance: same-value genuine reports refresh; replays, retained and othe
     const configPath = path.join(directory, "configuration.yaml");
     fs.writeFileSync(configPath, `advanced:\n  last_seen: ISO_8601\ndevices:\n  '${raw.ieee_address}':\n    friendly_name: ${raw.friendly_name}\n    optimistic: false\n    filtered_cache: [running_state, local_temperature]\n`);
     const bridge = new MqttBridge({ url: "", store, observationConfigPath: configPath, logger: { log() {}, error() {}, warn() {} } });
+    await require('./helpers/publisher-ready-fixture').readyPublisher(bridge);
     const observed = [];
     bridge.observationPolicy = { onValueObserved: async (...args) => observed.push(args) };
     const send = (payload, retain = false) => bridge.handleMessage(`zigbee2mqtt/${raw.friendly_name}`, Buffer.from(JSON.stringify(payload)), { retain });

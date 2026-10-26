@@ -43,6 +43,7 @@ async function checkedStateFixture({ store, directory, generation = 3, now = Dat
     config: { advanced: { last_seen: 'ISO_8601' }, devices: { [raw.ieee_address]: { friendly_name: raw.friendly_name,
       optimistic: false, filtered_cache: ['state'] } } } })));
   if (!registryDeviceId) await bridge.handleMessage('zigbee2mqtt/bridge/devices', Buffer.from(JSON.stringify([raw])), { retain: true });
+  await require('./publisher-ready-fixture').readyPublisher(bridge);
   await runtime.onInventory([raw]); await runtime.tick();
   const request = requests.find(item => item.topic.endsWith('/device/reporting/read'));
   if (!request) throw new Error('Real reporting-read path was not reached');

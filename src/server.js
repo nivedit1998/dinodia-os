@@ -5191,7 +5191,7 @@ function nativeDeviceView(principal, device) {
     usageAliveTimer = setInterval(markUsageAlive, 60000);
     usageAliveTimer.unref?.();
     observationPolicyTimer = setInterval(async () => {
-      try { await observationPolicy.tick(); await collectionReads.tick(readTargets(hubStore)); }
+      try { await mqtt.reconcilePublisherObservation?.(); await observationPolicy.tick(); await collectionReads.tick(readTargets(hubStore)); }
       catch (error) { logger.warn(`[observation] step deferred (${String(error?.code || "error")})`); }
     }, 10000);
     observationPolicyTimer.unref?.();
