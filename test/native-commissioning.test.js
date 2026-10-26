@@ -410,6 +410,12 @@ test("fresh exact Zigbee inventory recovers an interrupted candidate for review 
   assert.equal(f.service.isQuarantinedDevice(candidate.id), true, "unregistered device stays private until canonical property registration");
   await f.store.savePlatform({ devicePolicies: { [candidate.id]: { managementClass: "PROPERTY_DEVICE", ownerMembershipId: null, lifecycle: "INSTALLED" } } });
   assert.equal(f.service.isQuarantinedDevice(candidate.id), false, "the preserved candidate becomes visible only after current canonical property ownership exists");
+  // The same device stays visible when its old settled attempt has finished cleanup and ownership came from a later session.
+  f.service.sessions()[session.sessionId].cleanup.state = "COMPLETE";
+  assert.equal(f.service.isQuarantinedDevice(candidate.id), false, "a settled session must not hide a canonically registered device");
+  await f.store.savePlatform({ devicePolicies: {} });
+  assert.equal(f.service.isQuarantinedDevice(candidate.id), true, "without canonical ownership the settled session still keeps it private");
+  await f.store.savePlatform({ devicePolicies: { [candidate.id]: { managementClass: "PROPERTY_DEVICE", ownerMembershipId: null, lifecycle: "INSTALLED" } } });
 
   const next = await f.service.start(f.principal, { protocol: "zigbee" }, "commission-after-recovered-cleanup-01");
   assert.equal(next.status, "searching");

@@ -778,6 +778,9 @@ class NativeCommissioningService {
       if (exactCandidate?.registrationProvenance?.kind === "expired_staff_pairing_v1"
         && Date.parse(exactCandidate.registrationProvenance.expiresAt) > this.clock()) return !hasCurrentCanonicalDevicePolicy(policy);
       if (session.cleanup?.state === "PRESERVED_FOR_REVIEW" && isExactCandidate) return !hasCurrentCanonicalDevicePolicy(policy);
+      // A settled (cancelled, expired or failed) session never hides a device that already has current canonical
+      // ownership: its registration was finished by a later session, so the old attempt is only history.
+      if (["cancelled", "expired", "failed"].includes(session.status) && !isPending && hasCurrentCanonicalDevicePolicy(policy)) return false;
       return session.status !== "completed" && (isExactCandidate || isPending
         || (device && String(device.protocol || "").toLowerCase() === session.protocol && !this.isBaselineDevice(session, device)));
     });
