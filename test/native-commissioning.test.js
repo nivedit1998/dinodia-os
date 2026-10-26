@@ -215,6 +215,121 @@ test('a rejected cloud READY never persists a locally completed review or allows
   await assert.rejects(f.service.complete(started.sessionId, f.principal), /Select a discovered device/);
 });
 
+for (const failurePoint of ['none', 'after_cloud', 'after_assignment', 'before_completed', 'legacy_receipt',
+  'new_category', 'new_assignment', 'removal', 'policy_race']) {
+test(`real Store resumes existing property registration after ${failurePoint} without re-pairing`, async t => {
+  const fs = require('node:fs/promises'), os = require('node:os'), path = require('node:path');
+  const { Store } = require('../src/store');
+  const f = fixture(); t.after(f.close);
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'dinodia-property-commissioning-'));
+  const store = new Store(path.join(directory, 'store.json'));
+  t.after(async () => { await store.persist(); await fs.rm(directory, { recursive:true, force:true }); });
+  await store.saveArea({ name:'Living Room' }, 'os-area-1');
+  await store.saveIdentity({ generation:7, serial:'DIN-HUB-1' });
+  await store.savePlatform({ homeId:f.homeId, hubInstallId:f.hubInstallId,
+    areaBindings:[{areaId:f.areaId, hubAreaId:'os-area-1'}] });
+  const device = normalizeZigbeeDevice(require('./fixtures/zigbee/radiator-device.json'));
+  await store.upsertDevice({...device, interviewStatus:'successful'});
+  await store.completeDeviceSetup(device.id, { areaId:'os-area-1', labelId:'radiator' });
+  await store.addEvent({type:'device_setup_completed', deviceId:device.id, areaId:'os-area-1'});
+  f.service.store = store;
+  const staff = { principalType:'operator', scope:['os:permanent-installation'], sub:uuid(), sid:uuid(), jti:uuid(),
+    handoffId:uuid(), homeId:f.homeId, workflow:uuid(), requestId:uuid(), employeeSessionId:uuid(), workRevision:4,
+    hubId:'DIN-HUB-1', verifiedHubInstallationId:f.hubInstallId, areaIds:[f.areaId],
+    areaOptions:[{id:f.areaId, name:'Living Room'}], identityGeneration:7 };
+  const listed = await f.service.listAdoptableDevices(staff);
+  assert.equal(listed.devices.length, 1);
+  const started = await f.service.start(staff, {protocol:'zigbee', operationKind:'REGISTER_EXISTING', candidateRef:listed.devices[0].candidateRef}, uuid());
+  const session = f.service.sessions()[started.sessionId];
+  await f.service.select(started.sessionId, staff, {schemaVersion:'dinodia.v1', expectedRevision:session.revision,
+    candidateRef:session.candidates[0].candidateRef, areaId:f.areaId, name:'Room 2 Radiator', customerLabel:'Radiator', analyticsCategory:'RADIATOR'});
+  const request = f.service.pairing.requestWithHubIdentity;
+  let canonicalReceipt = null, canonicalProjection = null;
+  f.service.pairing.requestWithHubIdentity = async (route, body) => {
+    if (body.action !== 'finalize') return request(route, body);
+    if (canonicalReceipt) {
+      assert.deepEqual(body.device, canonicalProjection, 'legacy replay must match the canonical request exactly');
+      f.platformRequests.push(body);
+      return structuredClone(canonicalReceipt);
+    }
+    canonicalProjection = structuredClone(body.device);
+    canonicalReceipt = await request(route, body);
+    return structuredClone(canonicalReceipt);
+  };
+  const originalUpsert = store.upsertDevice.bind(store), originalSaveSecurity = store.saveSecurity.bind(store);
+  let faultRaised = false;
+  let injectRace = false;
+  store.upsertDevice = async (...args) => {
+    if (['after_cloud','new_category','new_assignment','removal','policy_race'].includes(failurePoint) && args[1]?.devicePolicy && !faultRaised) {
+      faultRaised = true; throw new Error('simulated after cloud acknowledgement');
+    }
+    if (injectRace && Object.hasOwn(args[1] || {}, 'expectedDevicePolicy')) {
+      injectRace = false;
+      await originalUpsert(store.getDevice(device.id), {devicePolicy:{...store.getPlatform().devicePolicies[device.id], analyticsCategory:'LIGHT', managementRevision:99}});
+    }
+    const result = await originalUpsert(...args);
+    if (['after_assignment', 'legacy_receipt'].includes(failurePoint) && args[1]?.devicePolicy && !faultRaised) {
+      faultRaised = true; throw new Error('simulated after durable assignment');
+    }
+    return result;
+  };
+  store.saveSecurity = async patch => {
+    if (failurePoint === 'before_completed' && patch.nativeCommissioningSessions?.[started.sessionId]?.status === 'completed' && !faultRaised) {
+      faultRaised = true; throw new Error('simulated before completion checkpoint');
+    }
+    return originalSaveSecurity(patch);
+  };
+  if (failurePoint !== 'none') {
+    await assert.rejects(f.service.complete(started.sessionId, staff), /simulated/);
+    // Model signed policy delivery after the canonical acknowledgement. It
+    // can change presentation while a valid local recovery is still pending.
+    const checkpoint = f.service.sessions()[started.sessionId].platformFinalization;
+    const registered = { ...store.getDevice(device.id), metadata:{...store.getDevice(device.id).metadata,
+      cloudDeviceId:checkpoint.platformDeviceId, installationRequestId:staff.requestId} };
+    await originalUpsert(registered, {devicePolicy:{managementClass:'PROPERTY_DEVICE', ownerMembershipId:null,
+      lifecycle:'INSTALLED', platformDeviceId:checkpoint.platformDeviceId, installationRequestId:staff.requestId,
+      analyticsCategory:'RADIATOR', canonicalAreaIds:[f.areaId], overrideName:'Room 2 Radiator'} });
+    const saved = f.service.sessions()[started.sessionId];
+    await assert.rejects(f.service.select(started.sessionId, staff, {}), {reason:'registration_completion_pending'});
+    const validCheckpoint = structuredClone(saved.platformFinalization);
+    saved.platformFinalization.actorBinding = 'wrong-actor'; await f.service.save(saved);
+    await assert.rejects(f.service.complete(started.sessionId, staff), {reason:'registration_receipt_binding_changed'});
+    saved.platformFinalization = validCheckpoint;
+    if (failurePoint === 'legacy_receipt') {
+      delete saved.platformFinalization.receipt;
+      delete saved.platformFinalization.deviceProjection;
+      delete saved.platformFinalization.disposition;
+      delete saved.selectedPlatformReady;
+    }
+    await f.service.save(saved);
+  }
+  if (['new_category','new_assignment','removal','policy_race'].includes(failurePoint)) {
+    const policy = store.getPlatform().devicePolicies[device.id];
+    if (failurePoint !== 'policy_race') await originalUpsert(store.getDevice(device.id), {devicePolicy:{...policy, managementRevision:99,
+      ...(failurePoint === 'new_category' ? {analyticsCategory:'LIGHT'} : failurePoint === 'new_assignment'
+        ? {canonicalAreaIds:[uuid()]} : {lifecycle:'REMOVAL_PENDING'}) }});
+    else injectRace = true;
+    await assert.rejects(f.service.complete(started.sessionId, staff), {reason:'registration_policy_changed'});
+    const preserved = store.getPlatform().devicePolicies[device.id];
+    assert.equal(preserved.managementRevision, 99);
+    if (['new_category','policy_race'].includes(failurePoint)) assert.equal(preserved.analyticsCategory, 'LIGHT');
+    if (failurePoint === 'removal') assert.equal(preserved.lifecycle, 'REMOVAL_PENDING');
+    if (failurePoint === 'new_assignment') assert.notDeepEqual(preserved.canonicalAreaIds, [f.areaId]);
+    assert.equal(f.radioEffects.zigbeeRemove, 0);
+    return;
+  }
+  const policyBeforeRetry = store.getPlatform().devicePolicies[device.id];
+  assert.equal((await f.service.complete(started.sessionId, staff)).status, 'completed');
+  assert.equal(f.service.sessions()[started.sessionId].status, 'completed');
+  assert.equal(store.getPlatform().devicePolicies[device.id].analyticsCategory, 'RADIATOR');
+  if (policyBeforeRetry) assert.deepEqual(store.getPlatform().devicePolicies[device.id], policyBeforeRetry, 'newer signed fields are preserved exactly');
+  assert.equal(f.radioEffects.zigbeeStart, 0);
+  assert.equal(f.radioEffects.zigbeeRemove, 0);
+  assert.equal(f.platformRequests.filter(row => row.action === 'finalize').length, failurePoint === 'legacy_receipt' ? 2 : 1,
+    'new receipts are reused; older checkpoints require only an exact canonical receipt replay');
+});
+}
+
 test('real commissioning completion activates two private channel records under one physical pairing', async (t) => {
   const fs = require('node:fs/promises'), os = require('node:os'), path = require('node:path');
   const { Store } = require('../src/store');

@@ -881,6 +881,7 @@ class NativeCommissioningService {
   async select(sessionId, principal, input) {
     return this.exclusive(async () => {
       const { session, actor } = await this.requireSession(sessionId, principal);
+      if (session.platformFinalization) fail(SAFE_ERROR.conflict, 409, 'This device is already registered; finish its pending local confirmation instead of changing the review', 'registration_completion_pending');
       const requiredKeys = ["areaId", "candidateRef", "customerLabel", "expectedRevision", "name", "schemaVersion"];
       const keys = Object.keys(input || {}).sort().join("\n");
       const legacyKeys = [...requiredKeys].sort().join("\n");
@@ -961,16 +962,22 @@ class NativeCommissioningService {
       const device = this.store.getDevice(session.selectedDeviceId);
       if (!this.isCompleteRadioDevice(session, device, actor)) fail(SAFE_ERROR.unavailable, 409, "The selected device is not fully discovered, currently owned, and usable yet", "candidate_not_ready");
       const catalogue = session.selectedCatalogue;
+      const checkpoint = session.platformFinalization;
+      const resumingFinalization = session.operationKind === 'REGISTER_EXISTING' && checkpoint
+        && checkpoint.actorBinding === this.actorBinding(actor) && checkpoint.requestId === actor.requestId
+        && checkpoint.homeId === actor.homeId && checkpoint.protocolIdentityHash === this.protocolIdentity(device)?.hash
+        && typeof checkpoint.platformDeviceId === 'string' && checkpoint.platformDeviceId.length > 0;
+      if (checkpoint && !resumingFinalization) fail(SAFE_ERROR.denied, 403, 'The registered device receipt does not belong to this current installation authority', 'registration_receipt_binding_changed');
       const currentCatalogue = buildPublicCommissioningCatalogue({ device, homeId: actor.homeId, membershipId: actor.membershipId,
         managementClass: actor.actorType === "STAFF_INSTALLER" ? "property_device" : "tenant_device", areaId: session.selectedAreaId,
         name: session.selectedName || undefined, customerLabel: session.selectedCustomerLabel, now: this.clock() });
-      if (!currentCatalogue || currentCatalogue.descriptorRevision !== session.selectedDescriptorRevision
-        || currentCatalogue.descriptorDigest !== session.selectedDescriptorDigest) fail(SAFE_ERROR.conflict, 409, "The device descriptor changed after review; refresh and review it again", "device_descriptor_changed_after_review");
+      if (!resumingFinalization && (!currentCatalogue || currentCatalogue.descriptorRevision !== session.selectedDescriptorRevision
+        || currentCatalogue.descriptorDigest !== session.selectedDescriptorDigest)) fail(SAFE_ERROR.conflict, 409, "The device descriptor changed after review; refresh and review it again", "device_descriptor_changed_after_review");
       // Older Hub versions could persist selection before cloud READY, or
       // lose its revision. Never guess a canonical revision or replay READY
       // with an ambiguous expectation. Retain the paired candidate; assigned
       // staff can use the guarded existing-device recovery after expiry.
-      if (session.selectedPlatformReady !== true) {
+      if (!resumingFinalization && session.selectedPlatformReady !== true) {
         fail(SAFE_ERROR.conflict, 409, 'This earlier device review needs a fresh assigned registration session. Keep the device paired; reopen its retained candidate after this session expires.', 'legacy_review_recovery_required');
       }
       if (catalogue.capabilityStatus === "ready" ? disposition !== "install"
@@ -1010,15 +1017,24 @@ class NativeCommissioningService {
           retirementEvidence: this.store.snapshot(), allowRecommission: session.operationKind === 'PAIR_NEW' }) : null;
       if (logicalProposal) deviceProjection.channels = logicalProposal.channels;
       const platformDisposition = disposition === "retain_unsupported" ? "view_only" : disposition;
-      const cloud = await this.platform("finalize", session, { candidateRef: session.selectedCandidateRef, disposition: platformDisposition, device: deviceProjection });
+      if (resumingFinalization && checkpoint.receipt
+        && (checkpoint.disposition !== platformDisposition || !isDeepStrictEqual(checkpoint.deviceProjection, deviceProjection)))
+        fail(SAFE_ERROR.conflict, 409, 'The registered device result cannot be changed during recovery', 'registration_receipt_payload_changed');
+      // New receipts are reused only after current authority/identity and exact
+      // reviewed-payload checks. Older checkpoints lack the full receipt: the
+      // authenticated Platform exact-finalization replay must confirm it first.
+      const cloud = resumingFinalization && checkpoint.receipt ? checkpoint.receipt
+        : await this.platform("finalize", session, { candidateRef: session.selectedCandidateRef, disposition: platformDisposition, device: deviceProjection });
       const expectedLifecycle = platformDisposition === "view_only" ? "VIEW_ONLY" : "INSTALLED";
       const expectedClass = actor.actorType === "STAFF_INSTALLER" ? "PROPERTY_DEVICE" : "TENANT_DEVICE";
       const expectedAnalyticsCategory = actor.actorType === "STAFF_INSTALLER" ? (session.selectedAnalyticsCategory || "NONE") : "NONE";
       if (!cloud?.ok || !cloud.device?.id || cloud.device.managementClass !== expectedClass || (cloud.device.ownerMembershipId ?? null) !== actor.membershipId
-        || cloud.device.lifecycle !== expectedLifecycle || cloud.device.analyticsCategory !== expectedAnalyticsCategory) fail(SAFE_ERROR.unavailable, 503, "Platform did not confirm the correctly scoped canonical device record, analytics category and catalogue result");
+        || cloud.device.lifecycle !== expectedLifecycle || cloud.device.analyticsCategory !== expectedAnalyticsCategory
+        || resumingFinalization && cloud.device.id !== checkpoint.platformDeviceId) fail(SAFE_ERROR.unavailable, 503, "Platform did not confirm the correctly scoped canonical device record, analytics category and catalogue result");
       if (session.operationKind === "REGISTER_EXISTING") {
         session.platformFinalization = { platformDeviceId: String(cloud.device.id), actorBinding: this.actorBinding(actor), requestId: actor.requestId,
-          homeId: actor.homeId, protocolIdentityHash: this.protocolIdentity(device)?.hash || null, confirmedAt: new Date(this.clock()).toISOString() };
+          homeId: actor.homeId, protocolIdentityHash: this.protocolIdentity(device)?.hash || null, confirmedAt: new Date(this.clock()).toISOString(),
+          disposition: platformDisposition, deviceProjection, receipt: cloud };
         await this.save(session);
       }
       if (session.operationKind !== "REGISTER_EXISTING") await this.mqtt.stopPairing?.().catch(() => {});
@@ -1059,11 +1075,28 @@ class NativeCommissioningService {
         await this.store.activateLogicalDevicePolicies(policies);
         updated = this.store.getManagedDevice(cloud.device.osDeviceId);
         if (!updated) fail(SAFE_ERROR.unavailable, 503, 'The acknowledged logical device is not locally available');
-      } else updated = await this.store.upsertDevice({ ...device, name: session.selectedName || device.originalName || device.name, areaId: session.selectedHubAreaId,
+      } else {
+        const currentPolicy = session.operationKind === 'REGISTER_EXISTING'
+          ? this.store.getPlatform?.()?.devicePolicies?.[device.id] || null : null;
+        if (session.operationKind === 'REGISTER_EXISTING') {
+          if (this.store.deletionBlocksSource?.(device.id)
+            || typeof this.store.getArea === 'function' && !this.store.getArea(session.selectedHubAreaId))
+            fail(SAFE_ERROR.denied, 403, 'Deletion or Area access prevents registration recovery', 'registration_policy_changed');
+          if (currentPolicy && (currentPolicy.platformDeviceId !== cloud.device.id
+            || currentPolicy.managementClass !== expectedClass || (currentPolicy.ownerMembershipId ?? null) !== actor.membershipId
+            || currentPolicy.lifecycle !== expectedLifecycle || currentPolicy.installationRequestId !== actor.requestId
+            || String(currentPolicy.analyticsCategory || 'NONE') !== expectedAnalyticsCategory
+            || !isDeepStrictEqual(currentPolicy.canonicalAreaIds, [session.selectedAreaId])
+            || currentPolicy.overrideName != null && currentPolicy.overrideName !== session.selectedName))
+            fail(SAFE_ERROR.conflict, 409, 'The signed device policy changed after registration; its newer settings have been preserved', 'registration_policy_changed');
+        }
+        updated = await this.store.upsertDevice({ ...device, name: session.selectedName || device.originalName || device.name, areaId: session.selectedHubAreaId,
         labelIds, labels: labelIds,
         managementClass: propertyDevice ? "property_device" : "tenant_device", tenantOwnerMembershipId: propertyDevice ? undefined : actor.membershipId,
         setup: { ...(device.setup || {}), status: "ready", viewOnly: platformDisposition === "view_only", unsupported: catalogue.capabilityStatus === "unsupported", commissionedAt: new Date(this.clock()).toISOString() },
-        metadata: { ...(device.metadata || {}), managementClass: propertyDevice ? "property_device" : "tenant_device", ...(propertyDevice ? { tenantOwnerMembershipId: undefined, installationRequestId: actor.requestId } : { tenantOwnerMembershipId: actor.membershipId }), cloudDeviceId: cloud.device.id } }, { devicePolicy: policy });
+        metadata: { ...(device.metadata || {}), managementClass: propertyDevice ? "property_device" : "tenant_device", ...(propertyDevice ? { tenantOwnerMembershipId: undefined, installationRequestId: actor.requestId } : { tenantOwnerMembershipId: actor.membershipId }), cloudDeviceId: cloud.device.id } },
+        { devicePolicy: currentPolicy || policy, ...(session.operationKind === 'REGISTER_EXISTING' ? {expectedDevicePolicy:currentPolicy} : {}) });
+      }
       const outbox = this.store.getSyncOutbox?.();
       session.localSyncState = outbox && Array.isArray(outbox.events)
         ? (outbox.events.some((event) => Number(event.sequence) > Number(outbox.acknowledgedSequence || 0)

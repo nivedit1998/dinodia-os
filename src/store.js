@@ -1815,6 +1815,12 @@ class Store {
   async upsertDevice(device, options = {}) {
     if (!device || !device.id) throw new Error("device.id is required");
     const id = String(device.id);
+    if (Object.hasOwn(options, 'expectedDevicePolicy')) {
+      if (!isDeepStrictEqual(this.state.platform?.devicePolicies?.[id] || null, options.expectedDevicePolicy)
+        || areaDeletion.blocked(this.state, 'devices', id) || areaDeletion.blocked(this.state, 'areas', device.areaId))
+        throw Object.assign(new Error('The canonical device policy changed before registration could finish'),
+          { code:'commissioning_revision_conflict', statusCode:409, reason:'registration_policy_changed' });
+    }
     const before = this.snapshot();
     try {
     const existing = this.state.devices[id] || {};
