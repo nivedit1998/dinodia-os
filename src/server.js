@@ -1468,7 +1468,7 @@ function nativeDeviceView(principal, device) {
           controlIds: dto.controls.map((control) => control.controlId),
         });
       }
-      await hubStore.saveSecurity({ ...security, nativeCatalogIndex: [...byId.values()].slice(-512) });
+      await hubStore.saveSecurity({ nativeCatalogIndex: [...byId.values()].slice(-512) });
     }).catch((error) => logger.warn(`[native-events] catalogue cursor write failed (${String(error?.code || "storage_unavailable")})`));
     return nativeEventQueue;
   }
@@ -1619,7 +1619,7 @@ function nativeDeviceView(principal, device) {
       const security = hubStore.getSecurity?.() || {};
       const sequence = Math.max(0, Number(security.nativeEventSequence || 0)) + 1;
       const events = [...(Array.isArray(security.nativeEvents) ? security.nativeEvents : []), { ...record, sequence, generatedAt: new Date(clock()).toISOString() }].slice(-1024);
-      await hubStore.saveSecurity({ ...security, nativeEventSequence: sequence, nativeEvents: events });
+      await hubStore.saveSecurity({ nativeEventSequence: sequence, nativeEvents: events });
       const item = events[events.length - 1];
       for (const client of [...nativeEventClients]) sendNativeEvent(client, item).catch(() => client.socket.close(1011, "Event unavailable"));
     }).catch((error) => logger.warn(`[native-events] event journal write failed (${String(error?.code || "storage_unavailable")})`));
@@ -1721,18 +1721,20 @@ function nativeDeviceView(principal, device) {
   }
 
   async function saveNativeCommandOutcome(idempotencyHash, status, errorCode = null) {
-    const security = hubStore.getSecurity?.() || {};
-    const entries = { ...(security.nativeCommandResults || {}) };
-    const entry = entries[idempotencyHash];
-    if (!entry || !entry.result || !["dispatching", "accepted", "uncertain", "timed_out"].includes(String(entry.status))) return null;
-    const result = nativeCommandOutcome(entry.result, status, errorCode);
-    entries[idempotencyHash] = {
-      ...entry,
-      status,
-      result,
-      ...(status === "applied" || status === "failed" || status === "timed_out" ? { retentionExpiresAt: new Date(Number(clock()) + nativeCommandReceiptTtlMs).toISOString() } : {}),
-    };
-    await hubStore.saveSecurity({ ...security, nativeCommandResults: entries });
+    // Store mutations are queued. Read the entry inside that queue, never from
+    // a pre-queue snapshot which could undo another command's terminal outcome.
+    const settled = await hubStore.mutateAtomically((state) => {
+      const entry = state.security?.nativeCommandResults?.[idempotencyHash];
+      if (!entry || !entry.result || !["dispatching", "accepted", "uncertain", "timed_out"].includes(String(entry.status))) return null;
+      const result = nativeCommandOutcome(entry.result, status, errorCode);
+      state.security.nativeCommandResults[idempotencyHash] = {
+        ...entry, status, result,
+        ...(status === "applied" || status === "failed" || status === "timed_out" ? { retentionExpiresAt: new Date(Number(clock()) + nativeCommandReceiptTtlMs).toISOString() } : {}),
+      };
+      return { entry, result };
+    });
+    if (!settled) return null;
+    const { entry, result } = settled;
     const timer = nativeCommandOutcomeTimers.get(idempotencyHash);
     if (timer) clearTimeout(timer);
     nativeCommandOutcomeTimers.delete(idempotencyHash);
@@ -1760,15 +1762,13 @@ function nativeDeviceView(principal, device) {
   }
 
   async function recoverInterruptedNativeCommands() {
-    const security = hubStore.getSecurity?.() || {};
-    const entries = { ...(security.nativeCommandResults || {}) };
-    let changed = false;
-    for (const [key, entry] of Object.entries(entries)) {
-      if (entry?.status !== "dispatching") continue;
-      entries[key] = { ...entry, status: "uncertain", result: nativeCommandOutcome(entry.result || {}, "uncertain", "COMMAND_INTERRUPTED") };
-      changed = true;
-    }
-    if (changed) await hubStore.saveSecurity({ ...security, nativeCommandResults: entries });
+    if (!Object.values(hubStore.getSecurity?.()?.nativeCommandResults || {}).some(entry => entry?.status === "dispatching")) return;
+    await hubStore.mutateAtomically((state) => {
+      for (const [key, entry] of Object.entries(state.security?.nativeCommandResults || {})) {
+        if (entry?.status !== "dispatching") continue;
+        state.security.nativeCommandResults[key] = { ...entry, status: "uncertain", result: nativeCommandOutcome(entry.result || {}, "uncertain", "COMMAND_INTERRUPTED") };
+      }
+    });
   }
 
   function scheduleNativeCommandTimeout(idempotencyHash) {
@@ -2798,7 +2798,12 @@ function nativeDeviceView(principal, device) {
           status: "dispatching", result,
         };
         commandIdIndex[commandIdKey] = idempotencyHash;
-        await hubStore.saveSecurity({ nativeCommandResults: commandResults, nativeCommandIdIndex: commandIdIndex });
+        await hubStore.mutateAtomically((state) => {
+          const current = state.security || (state.security = {});
+          const live = pruneNativeCommandReceipts(current.nativeCommandResults || {}, current.nativeCommandIdIndex || {}, nowMs);
+          current.nativeCommandResults = { ...live.results, [idempotencyHash]: commandResults[idempotencyHash] };
+          current.nativeCommandIdIndex = { ...live.commandIdIndex, [commandIdKey]: idempotencyHash };
+        });
         // The confirmation window starts at the claim, so a stalled dispatch still settles.
         scheduleNativeCommandTimeout(idempotencyHash);
         try {
@@ -2864,7 +2869,9 @@ function nativeDeviceView(principal, device) {
               retentionExpiresAt: new Date(Number(clock()) + nativeCommandReceiptTtlMs).toISOString(),
               result: { commandId: command.commandId, homeId: command.homeId, status: "denied", acceptedAt: null, completedAt: null, errorCode: "AUTHORITY_CHANGED_BEFORE_DISPATCH" },
             };
-            await hubStore.saveSecurity({ nativeCommandResults: commandResults, nativeCommandIdIndex: commandIdIndex });
+            await hubStore.mutateAtomically((state) => {
+              state.security.nativeCommandResults[idempotencyHash] = commandResults[idempotencyHash];
+            });
             return nativeContractError(res, 409, "CATALOG_REVISION_MISMATCH", "The current session or control authority changed before dispatch; refresh and confirm again");
           }
           const dispatched = await boundedNativeDispatch(() => dispatchNativeCommand(currentPrincipal, dispatchDevice, dispatchControl, command.value));
@@ -2894,12 +2901,10 @@ function nativeDeviceView(principal, device) {
           const finalCode = String(error?.code || (definiteFailure ? "COMMAND_REJECTED" : "COMMAND_OUTCOME_UNCERTAIN"));
           console.error(`[native-command] dispatch ended ${finalStatus}: ${finalCode}`);
           const settled = await saveNativeCommandOutcome(idempotencyHash, finalStatus, finalCode).catch(() => null);
-          if (!settled) {
-            commandResults[idempotencyHash] = { ...commandResults[idempotencyHash], status: finalStatus, result: nativeCommandOutcome(result, finalStatus, finalCode) };
-            await hubStore.saveSecurity({ nativeCommandResults: commandResults, nativeCommandIdIndex: commandIdIndex }).catch(() => {});
-            queueNativeEvent({ kind: "command", deviceId: String(command.deviceId), commandId: String(command.commandId), membershipFingerprint });
-          }
-          return json(res, 202, settled || commandResults[idempotencyHash].result);
+          // A genuine observation may already have settled this receipt while
+          // dispatch failed or timed out. Never replace it from the old claim.
+          const currentResult = hubStore.getSecurity?.()?.nativeCommandResults?.[idempotencyHash]?.result;
+          return json(res, 202, settled || currentResult || nativeCommandOutcome(result, "uncertain", "COMMAND_OUTCOME_UNCERTAIN"));
         }
       });
     }

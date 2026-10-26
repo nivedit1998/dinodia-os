@@ -1047,14 +1047,14 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     const beforeReadOnlyProbe = hub.store.listEvents(500).filter((event) => event.type === "device_command" && event.deviceId === deviceId).length;
     const currentDevice = hub.store.getDevice(deviceId);
     const readOnlyEntity = currentDevice.entities[`${deviceId}:0:state`];
-    const originalSaveSecurity = hub.store.saveSecurity.bind(hub.store);
-    restoreSaveSecurity = () => { hub.store.saveSecurity = originalSaveSecurity; };
+    const originalMutateAtomically = hub.store.mutateAtomically.bind(hub.store);
+    restoreSaveSecurity = () => { hub.store.mutateAtomically = originalMutateAtomically; };
     let signalDispatchClaim;
     const dispatchClaimSaved = new Promise((resolve) => { signalDispatchClaim = resolve; });
     const dispatchClaimGate = new Promise((resolve) => { releaseQueuedCommand = resolve; });
-    hub.store.saveSecurity = async (patch) => {
-      const result = await originalSaveSecurity(patch);
-      if (Object.values(patch.nativeCommandResults || {}).some((entry) => entry?.status === "dispatching")) {
+    hub.store.mutateAtomically = async (mutator) => {
+      const result = await originalMutateAtomically(mutator);
+      if (Object.values(hub.store.getSecurity().nativeCommandResults || {}).some((entry) => entry?.status === "dispatching" && entry.result?.commandId === "command-native-queued-descriptor-change")) {
         signalDispatchClaim();
         await dispatchClaimGate;
       }
@@ -1121,9 +1121,9 @@ test("Native v1 command route enforces current DTO, tenant scope and durable ide
     let releaseRemovedControlGate = () => {};
     const removedControlGate = new Promise((resolve) => { releaseRemovedControlGate = resolve; });
     restoreSaveSecurity();
-    hub.store.saveSecurity = async (patch) => {
-      const result = await originalSaveSecurity(patch);
-      if (Object.values(patch.nativeCommandResults || {}).some((entry) => entry?.status === "dispatching" && entry?.commandDigest)) {
+    hub.store.mutateAtomically = async (mutator) => {
+      const result = await originalMutateAtomically(mutator);
+      if (Object.values(hub.store.getSecurity().nativeCommandResults || {}).some((entry) => entry?.status === "dispatching" && entry.result?.commandId === "command-native-queued-control-removed")) {
         signalRemovedControlClaim();
         await removedControlGate;
       }
