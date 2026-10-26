@@ -297,19 +297,24 @@ function renderDevices() {
       state.analyticsCategoryDrafts.delete(id);
     }
     button.disabled = true;
+    const analyticsEditor = button.closest('[data-analytics-editor]');
+    analyticsEditor.dataset.busy = 'true';
     if (status) status.textContent = "Saving category to the assigned Home's canonical record…";
     try {
       const result = await api(`/api/devices/${encodeURIComponent(id)}/analytics-category`, { method: "PATCH", body: JSON.stringify(pending.body) });
       pending = { ...pending, managementRevision: Number(result.managementRevision) };
       writeAnalyticsCategoryPending(id, pending);
       if (status) status.textContent = "Platform accepted the change. Waiting for the hub to receive and verify its next signed configuration; readings were not created.";
-      if (button.closest('.device-card').dataset.assignmentDirty !== 'true') button.closest('.device-card').dataset.refreshAfterSave = "true";
+      delete analyticsEditor.dataset.dirty;
+      analyticsEditor.dataset.refreshAfterSave = 'true';
       await load();
       showNotice("Analytics category saved in the canonical Home record. Signed hub configuration sync is pending; no readings or gas usage were fabricated.");
     } catch (error) {
       if (error.status === 409 && String(error.code || "").toLowerCase() === "analytics_category_revision_conflict") {
         clearAnalyticsCategoryPending(id);
         state.analyticsCategoryDrafts.delete(id);
+        delete analyticsEditor.dataset.dirty;
+        analyticsEditor.dataset.refreshAfterSave = 'true';
         if (status) status.textContent = "The Home or this device changed since it was loaded. Refreshing its signed category; review and save your choice again.";
         button.disabled = true;
         try { await load(); showNotice("The Home configuration changed. Review the refreshed category and save again; the rejected update made no change.", "error"); }
@@ -318,12 +323,12 @@ function renderDevices() {
       }
       if (status) status.textContent = `${error.message}. Retry uses the same operation ID and exact request.`;
       button.disabled = false;
-    }
+    } finally { delete analyticsEditor.dataset.busy; button.disabled = false; }
   }));
   unbound("[data-remove-device]").forEach((button) => button.addEventListener("click", async () => { const id = button.dataset.removeDevice; const device = state.devices.find((candidate) => candidate.id === id); const zigbee = String(device?.protocol || "").toLowerCase() === "zigbee"; const warning = zigbee ? " Keep the device awake so it can acknowledge leaving the Zigbee network. If it does not respond, its local record will be kept and you can retry after waking it." : " This unpairs it and deletes its household controls, history, automations, and remote bindings."; if (!confirm(`Remove ${device?.name || "this device"} completely from Dinodia OS? This deletes its local household controls, history, automations, and remote bindings.${warning}`)) return; button.disabled = true; const card = button.closest('.device-card'); card.dataset.busy = "true"; try { await api(`/api/devices/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ force: false }) }); state.expandedDevices.delete(id); await load(); showNotice(zigbee ? "The Zigbee network removal was acknowledged and the device was removed from Dinodia OS. You can pair it again when ready." : "Device completely removed. Pair it again if you want to add it back."); } catch (error) { button.disabled = false; showNotice(zigbee ? `${error.message}. Keep the device awake and retry; it has not been force-forgotten.` : error.message, "error"); } finally { delete card.dataset.busy; } }));
   unbound("[data-device-setup]").forEach((form) => {
     const id = form.dataset.deviceSetup, card = form.closest('.device-card');
-    const markDirty = event => { card.dataset.setupDirty = 'true'; if (event.target.closest('.device-edit')) card.dataset.assignmentDirty = 'true'; };
+    const markDirty = event => { card.dataset.setupDirty = 'true'; if (event.target.closest('.device-edit')) card.dataset.assignmentDirty = 'true'; const analytics = event.target.closest('[data-analytics-editor]'); if (analytics) analytics.dataset.dirty = 'true'; };
     form.addEventListener('input', markDirty); form.addEventListener('change', markDirty);
     const area = form.querySelector(`[data-device-area="${CSS.escape(id)}"]`);
     const label = form.querySelector(`[data-device-labels="${CSS.escape(id)}"]`);

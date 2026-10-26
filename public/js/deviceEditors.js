@@ -13,6 +13,16 @@
       const editing = old && (old.dataset.setupDirty === 'true' || old.dataset.busy === 'true'
         || old.contains(container.ownerDocument.activeElement));
       const node = editing && old.dataset.refreshAfterSave !== 'true' ? old : fresh;
+      if (node === old) {
+        // Analytics acknowledgements must still reconcile while a separate
+        // name/room draft keeps the surrounding form mounted.
+        const editor = old.querySelector?.('[data-analytics-editor]');
+        const nextEditor = fresh.querySelector?.('[data-analytics-editor]');
+        if (editor && !nextEditor) editor.remove();
+        else if (editor && nextEditor && (editor.dataset.refreshAfterSave === 'true'
+          || editor.dataset.dirty !== 'true' && editor.dataset.busy !== 'true'
+            && !editor.contains(container.ownerDocument.activeElement))) editor.replaceWith(nextEditor);
+      }
       retained.add(node);
       const current = container.children[index];
       if (current !== node) container.insertBefore(node, current || null);

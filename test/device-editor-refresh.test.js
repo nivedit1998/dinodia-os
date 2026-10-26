@@ -51,3 +51,17 @@ test('preserved setup elements get each listener once across repeated refreshes'
   assert.equal(f.api.unbound(root, '[data-save-device]').length, 0);
   assert.equal(f.api.unbound(root, '[data-device-setup]').length, 1);
 });
+
+test('a category acknowledgement updates its editor without discarding an unsaved room assignment', () => {
+  const f = fixture(), edited = f.card('valve'), incoming = f.card('valve');
+  edited.dataset.setupDirty = 'true'; edited.children.push({ value: 'Unsaved radiator name' });
+  const accepted = { dataset: { refreshAfterSave: 'true', busy: 'true' }, contains: () => true,
+    replaceWith(next) { edited.analytics = next; } };
+  const reconciled = { dataset: {}, saveButtonDisabled: false };
+  edited.analytics = accepted; edited.querySelector = () => edited.analytics;
+  incoming.querySelector = () => reconciled; f.container.children = [edited];
+  f.api.reconcile(f.container, [incoming]);
+  assert.equal(f.container.children[0], edited);
+  assert.equal(edited.children[0].value, 'Unsaved radiator name');
+  assert.equal(edited.analytics, reconciled); assert.equal(edited.analytics.saveButtonDisabled, false);
+});
