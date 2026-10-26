@@ -169,22 +169,25 @@ class ObservationReconciler {
         const cached = cachedReportingFor(raw, profile, endpoint);
         const existing = this.records.get(key);
         const generation = this.store.syncSourceGeneration;
+        const binding = { property: entity.stateKey, controlId: entity.capability?.controlId || entity.id,
+          sourceGeneration: generation ?? null, evidenceVersion: 2 };
         if (existing && existing.deviceLifecycleId !== device.stateEvidenceLifecycleId) {
           this.reportTimes.delete(key);
           for (const [transaction, pending] of this.pending) if (pending.key === key) this.pending.delete(transaction);
-          await this.save({ ...existing, deviceLifecycleId: device.stateEvidenceLifecycleId,
+          await this.save({ ...existing, ...binding, deviceLifecycleId: device.stateEvidenceLifecycleId,
             state: STATES.UNKNOWN, readBack: null, cadence: null, cadenceEvidence: [], evidenceVerifiedAt: null,
             pendingRequest: null, lastTransaction: null, lastRequestKind: null,
             nextAttemptAt: now, lastError: 'device_lifecycle_changed', updatedAt: now });
           continue;
         }
-        if (existing?.readBack && Number.isSafeInteger(generation) && generation > 0
-          && (existing.evidenceVersion !== 2 || existing.sourceGeneration !== generation)) {
+        if (existing && (existing.controlId !== binding.controlId || existing.property !== binding.property
+          || Number.isSafeInteger(generation) && generation > 0
+            && (existing.evidenceVersion !== 2 || existing.sourceGeneration !== generation))) {
           // Re-verify the already approved exact configuration; never reinterpret
           // a legacy cadence flag as new evidence or reset its radio/write budget.
           this.reportTimes.delete(key);
           for (const [transaction, pending] of this.pending) if (pending.key === key) this.pending.delete(transaction);
-          await this.save({ ...existing, state: STATES.UNKNOWN, readBack: null, cadence: null,
+          await this.save({ ...existing, ...binding, state: STATES.UNKNOWN, readBack: null, cadence: null,
             cadenceEvidence: [], evidenceVerifiedAt: null, pendingRequest: null, lastTransaction: null, lastRequestKind: null,
             nextAttemptAt: now, lastError: 'evidence_generation_changed', updatedAt: now });
           continue;
@@ -201,7 +204,7 @@ class ObservationReconciler {
           for (const [transaction, pending] of this.pending) if (pending.key === key) this.pending.delete(transaction);
           await this.save({ key, deviceId, deviceLifecycleId: device.stateEvidenceLifecycleId, ieee: fingerprint.ieee, friendlyName: String(raw.friendly_name || raw.ieee_address),
             profileId: profile.id, profileVersion: profile.version, endpoint, cluster: profile.cluster, attribute: profile.attribute,
-            desired: profile.desired, property: entity.stateKey, controlId: entity.capability?.controlId || entity.id,
+            desired: profile.desired, ...binding,
             approvedForAutomaticConfiguration: profile.approvedForAutomaticConfiguration === true,
             fingerprint, cached, readBack: null, cadence: null, state: STATES.UNKNOWN,
             attempts: 0, attemptsWindowStartAt: now, nextAttemptAt: now, lastError: null, updatedAt: now });
@@ -395,7 +398,11 @@ class ObservationReconciler {
         reportable_change: record.desired.reportableChange, transaction }
       : { id: record.ieee || record.friendlyName, endpoint: Number(record.endpoint), cluster: record.cluster, configs: [{ attribute: record.attribute }], transaction };
     const windowExpired = now - Number(record.attemptsWindowStartAt || 0) > 24 * 3_600_000;
-    const saved = await this.save({ ...record, state: kind === "configure" ? STATES.CONFIGURING : STATES.READ_PENDING, lastTransaction: transaction,
+    // Bind every request, including negative/unsupported replies, to its dispatch
+    // generation. Inventory must not discard a real 'not configured' result and
+    // repeatedly read instead of progressing to approved configuration.
+    const saved = await this.save({ ...record, sourceGeneration: this.store.syncSourceGeneration ?? null, evidenceVersion: 2,
+      state: kind === "configure" ? STATES.CONFIGURING : STATES.READ_PENDING, lastTransaction: transaction,
       lastRequestKind: kind, lastCommandAt: now, pendingRequest: { kind, transaction, sentAt: now },
       attempts: kind === "configure" ? (windowExpired ? 1 : Number(record.attempts || 0) + 1) : Number(record.attempts || 0),
       attemptsWindowStartAt: kind === "configure" && windowExpired ? now : record.attemptsWindowStartAt, updatedAt: now });
@@ -448,6 +455,14 @@ class ObservationReconciler {
     if (record.lastTransaction !== transaction || record.lastRequestKind && record.lastRequestKind !== kind) return;
     this.interrupted.delete(record.key);
     const now = this.clock();
+    if (record.sourceGeneration !== (this.store.syncSourceGeneration ?? null)) {
+      this.reportTimes.delete(record.key);
+      return this.save({ ...record, sourceGeneration: this.store.syncSourceGeneration ?? null,
+        evidenceVersion: 2, state: STATES.UNKNOWN, readBack: null, cadence: null,
+        cadenceEvidence: [], evidenceVerifiedAt: null, pendingRequest: null,
+        lastTransaction: null, lastRequestKind: null, nextAttemptAt: now,
+        lastError: 'evidence_generation_changed', updatedAt: now });
+    }
     if (String(message?.status || "").toLowerCase() !== "ok") {
       return this.deliveryFailed(record, 'bridge_request_rejected');
     }

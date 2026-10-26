@@ -312,6 +312,7 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
   const entities = Object.values(device.entities || {});
   const usage = state.syncUsage = initialUsageState(state.syncUsage);
   dailyAnalytics.initialize(usage, state.platform?.cloudConfiguration?.analyticsHistory, nowMs);
+  durableSyncMutation = dailyAnalytics.reconcileAssignment(usage, device, policy);
   const assignmentEpochAt = dailyAnalytics.assignmentStart(usage, device, policy);
   if (device.available === false) {
     dailyAnalytics.endDevice(usage, deviceId, nowMs);

@@ -81,8 +81,63 @@ function recordUsageInterval(usage, source, start, end, activity) {
 function assignmentStart(usage, device, policy) {
   const daily = usage.dailyAnalytics; if (!daily?.active) return undefined;
   const signed = policy?.osAreaIds?.includes(String(device.areaId)) ? Date.parse(policy.analyticsAssignmentStartedAt) : NaN;
+  // Cloud assignment identity and local receipt time have different meanings.
+  // Delayed registration must not invent a later epoch than the signed one.
+  if (Number.isFinite(signed)) return new Date(Math.max(Date.parse(daily.config.writerFrom), Math.floor(signed / 1000) * 1000)).toISOString();
   return new Date(Math.max(Date.parse(daily.config.writerFrom),
-    Date.parse(daily.assignmentEpochs[device.id]) || 0, Number.isFinite(signed) ? Math.floor(signed / 1000) * 1000 : 0)).toISOString();
+    Date.parse(daily.assignmentEpochs[device.id]) || 0)).toISOString();
+}
+function temperatureKey(source) {
+  return [source.osDeviceId, source.osAreaId, source.controlId, source.sourceGeneration,
+    source.bindingRevision || 0, source.assignmentEpochAt || ''].join('|');
+}
+
+// Correct only fragments wholly inside the CURRENT signed assignment. Earlier
+// room visits, different sources/authority and overlapping fragments stay intact.
+// Immutable outbox envelopes are untouched; corrected absolute snapshots travel
+// through the ordinary authenticated writer, which rechecks all cloud authority.
+function reconcileAssignment(usage, device, policy) {
+  const daily = usage.dailyAnalytics, interval = policy?.analyticsInterval;
+  if (!daily?.active || policy?.managementClass !== 'PROPERTY_DEVICE' || policy.ownerMembershipId
+    || policy.lifecycle !== 'INSTALLED' || !interval?.writerEnabled
+    || !policy.osAreaIds?.includes(String(device.areaId))) return false;
+  const signed = Date.parse(policy.analyticsAssignmentStartedAt);
+  if (!Number.isFinite(signed)) return false;
+  const canonical = assignmentStart(usage, device, policy), boundary = Math.max(signed, Date.parse(daily.config.writerFrom));
+  const matches = source => source.osDeviceId === device.id && source.osAreaId === String(device.areaId)
+    && source.sourceGeneration === interval.sourceGeneration && source.bindingRevision === interval.revision
+    && source.analyticsIntervalId === interval.id
+    && (source.category || source.analyticsCategory) === policy.analyticsCategory
+    && Date.parse(source.assignmentEpochAt) > Date.parse(canonical);
+  const moves = [];
+  const targets = new Set();
+  for (const [key, row] of Object.entries(daily.days)) {
+    if (!matches(row) || Date.parse(row.coverageStartAt) < boundary || !Number.isFinite(Date.parse(row.coverageStartAt))) continue;
+    const target = keyFor({ ...row, category: row.analyticsCategory, assignmentEpochAt: canonical }, row.kind, Date.parse(row.dayStartAt));
+    if (target !== key && daily.days[target] || targets.has(target)) return false; // never merge potentially overlapping absolute counters
+    targets.add(target);
+    moves.push({ key, target, row });
+  }
+  const temperatures = Object.entries(daily.temperatures).filter(([, source]) => matches(source) && Date.parse(source.observedAt) >= boundary);
+  if (temperatures.some(([key, source]) => {
+    const target = temperatureKey({ ...source, assignmentEpochAt: canonical });
+    return target !== key && daily.temperatures[target];
+  })) return false;
+  let changed = false;
+  const renamed = new Map();
+  for (const { key, target, row } of moves) {
+    delete daily.days[key]; delete daily.queuedRevisions[key]; delete daily.queuedSequences[key];
+    row.assignmentEpochAt = canonical; row.revision++;
+    daily.days[target] = row; renamed.set(key, target); changed = true;
+  }
+  for (const [key, source] of temperatures) {
+    delete daily.temperatures[key]; source.assignmentEpochAt = canonical;
+    for (const segment of source._integrations || []) if (renamed.has(segment.key)) segment.key = renamed.get(segment.key);
+    daily.temperatures[temperatureKey(source)] = source; changed = true;
+  }
+  for (const source of Object.values(usage.sources || {})) if (matches(source) && source.assignmentEndedAt == null
+    && Date.parse(source.lastObservedAt) >= boundary) { source.assignmentEpochAt = canonical; changed = true; }
+  return changed;
 }
 function advanceTemperature(daily, source, through) {
   const start = Math.max(source.accountedThrough, Date.parse(source.observedAt), Date.parse(daily.config.writerFrom));
@@ -93,7 +148,7 @@ function advanceTemperature(daily, source, through) {
 function observeTemperature(usage, source, now) {
   const daily = usage.dailyAnalytics; if (!daily?.active) return;
   source = { ...source, assignmentEpochAt: source.assignmentEpochAt || daily.config.writerFrom };
-  const key = [source.osDeviceId, source.osAreaId, source.controlId, source.sourceGeneration, source.bindingRevision || 0, source.assignmentEpochAt || ''].join('|');
+  const key = temperatureKey(source);
   const previous = daily.temperatures[key]; const observed = Date.parse(source.observedAt);
   if (!Number.isFinite(observed) || observed > now) return;
   // An existing genuine observation may seed the initial writer boundary, but
@@ -173,4 +228,4 @@ function detailPruneBoundary(daily, now) {
   if (!daily?.config.detailPruneBefore) return -Infinity;
   return Math.min(Date.parse(daily.config.detailPruneBefore), calendarWeek(now, daily.config.timezone).start);
 }
-module.exports = { settings, initialize, assignmentStart, recordUsageInterval, observeTemperature, advanceDaily, capDailyAtLastAlive, endDevice, dailyEvents, detailPruneBoundary };
+module.exports = { settings, initialize, assignmentStart, reconcileAssignment, recordUsageInterval, observeTemperature, advanceDaily, capDailyAtLastAlive, endDevice, dailyEvents, detailPruneBoundary };
