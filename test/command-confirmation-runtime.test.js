@@ -46,39 +46,48 @@ for (const competingWrite of ['state event','catalogue']) test(`genuine report c
     const security = hub.store.getSecurity();
     const accepted = {...security.nativeCommandResults.receipt,status:'accepted',result:{...security.nativeCommandResults.receipt.result,status:'accepted',completedAt:null}};
     await hub.store.saveSecurity({nativeCommandResults:{receipt:accepted}});
-    let journalQueued, catalogQueued;
+    let journalQueued, catalogQueued, outcomeQueued;
     const gate = new Promise(resolve=>{release=resolve;});
     const journalReady = new Promise(resolve=>{journalQueued=resolve;});
     const catalogReady = new Promise(resolve=>{catalogQueued=resolve;});
+    const outcomeReady = new Promise(resolve=>{outcomeQueued=resolve;});
     const originalSave = hub.store.saveSecurity.bind(hub.store);
     hub.store.saveSecurity = patch => {
       const result = originalSave(patch);
       if (patch.nativeEvents) journalQueued();
       if (patch.nativeCatalogIndex) catalogQueued();
+      if (patch.nativeCommandResults) outcomeQueued();
       return result;
     };
     const blocker = hub.store.mutateAtomically(async()=>{await gate;});
     await new Promise(resolve=>setImmediate(resolve));
-    const entity = Object.values(hub.store.getDevice(device.id).entities).find(e=>e.stateKey==='occupied_heating_setpoint');
-    hub.eventBus.emit('state_changed',{entity_id:entity.id});
     const bounded = promise => {
       let timer;
       return Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('queued writer not reached')),2000);})]).finally(()=>clearTimeout(timer));
     };
-    await bounded(journalReady);
-    let catalog;
+    let catalog, receiptRequest;
+    const originalMutate = hub.store.mutateAtomically;
     if (competingWrite === 'catalogue') {
+      hub.store.mutateAtomically = mutator => { const result=originalMutate(mutator); outcomeQueued(); return result; };
+      receiptRequest = get('/api/dinodia/v1/commands/test-command');
+      await bounded(outcomeReady);
       catalog = get('/api/dinodia/v1/devices');
       await bounded(catalogReady);
+    } else {
+      const entity = Object.values(hub.store.getDevice(device.id).entities).find(e=>e.stateKey==='occupied_heating_setpoint');
+      hub.eventBus.emit('state_changed',{entity_id:entity.id});
+      await bounded(journalReady);
     }
     release();
     await blocker;
     await catalog;
+    await receiptRequest;
     await hub.store.mutationQueue;
     await new Promise(resolve=>setTimeout(resolve,30));
     assert.equal(hub.store.getSecurity().nativeCommandResults.receipt.status,'applied',`queued ${competingWrite} persistence must not restore the accepted receipt`);
     const persisted = JSON.parse(await fs.readFile(path.join(directory,'dinodia.json')));
     assert.equal(persisted.security.nativeCommandResults.receipt.status,'applied','confirmation is durable, not just an in-memory result');
     hub.store.saveSecurity = originalSave;
+    hub.store.mutateAtomically = originalMutate;
   } finally {release();await hub.stop();await fs.rm(directory,{recursive:true,force:true});}
 });
