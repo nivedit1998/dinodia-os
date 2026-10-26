@@ -455,7 +455,7 @@ class ObservationReconciler {
     if (record.lastTransaction !== transaction || record.lastRequestKind && record.lastRequestKind !== kind) return;
     this.interrupted.delete(record.key);
     const now = this.clock();
-    if (record.sourceGeneration !== (this.store.syncSourceGeneration ?? null)) {
+    if ((record.sourceGeneration ?? null) !== (this.store.syncSourceGeneration ?? null)) {
       this.reportTimes.delete(record.key);
       return this.save({ ...record, sourceGeneration: this.store.syncSourceGeneration ?? null,
         evidenceVersion: 2, state: STATES.UNKNOWN, readBack: null, cadence: null,

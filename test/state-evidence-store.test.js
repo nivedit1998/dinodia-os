@@ -228,6 +228,7 @@ test('legacy approved evidence schedules read-back without inheriting verificati
     let runtime = create(); await runtime.onInventory([fixture]);
     const [record] = Object.values(store.getObservationPolicyRecords());
     await store.putObservationPolicyRecord(record.key, { ...record, state: 'cadence_verified', attempts: 2,
+      sourceGeneration: undefined, evidenceVersion: undefined, // actual pre-evidence-v2 persisted format
       readBack: { status: 0, at: new Date().toISOString(), maximumReportInterval: 600 } });
     runtime = create(); await runtime.onInventory([fixture]);
     assert.equal(runtime.status()[0].state, 'configuration_unknown');
