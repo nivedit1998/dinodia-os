@@ -116,9 +116,14 @@ function validateObservationConfiguration(contents, identity = {}, properties = 
 async function readObservationConfiguration(filePath, identity, { includeProperties = false, properties = TRACKED_PROPERTIES } = {}) {
   try {
     const contents = await fs.readFile(filePath, "utf8");
-    const validated = validateObservationConfiguration(contents, identity, properties);
+    // null requests per-value admission: accept only exact properties actually
+    // excluded from this publisher's cache, without imposing radiator fields on
+    // a light, sensor, boiler or tenant-private device.
+    const parsed = parseYamlSections(contents);
+    const device = parsed.devices.find(entry => matchesDevice(entry, identity));
+    const selected = properties === null ? (device?.filteredCache || []).filter(property => /^[A-Za-z0-9_]+$/.test(property)) : properties;
+    const validated = validateObservationConfiguration(contents, identity, selected);
     if (!validated.ok || !includeProperties) return validated;
-    const device = parseYamlSections(contents).devices.find(entry => matchesDevice(entry, identity));
     return { ...validated, properties: [...new Set(device.filteredCache)]
       .filter(property => /^[A-Za-z0-9_]+$/.test(property)) };
   } catch {

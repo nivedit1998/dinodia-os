@@ -53,7 +53,7 @@ function buildZigbee2MqttConfiguration({ adapterPath, adapterType = "", mqttUrl 
     `  port: ${yamlScalar(adapterPath || "/dev/ttyUSB0")}`,
   ];
   if (adapterType && adapterType !== "unknown") lines.push(`  adapter: ${yamlScalar(adapterType)}`);
-  lines.push("frontend:", "  port: 8080", "advanced:", "  log_level: info", "availability:", "  enabled: true", "");
+  lines.push("frontend:", "  port: 8080", "advanced:", "  log_level: info", "  last_seen: ISO_8601", "availability:", "  enabled: true", "");
   return lines.join("\n");
 }
 

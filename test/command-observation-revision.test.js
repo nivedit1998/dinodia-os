@@ -48,6 +48,7 @@ test('actual MQTT control evidence requires that exact control property to be ex
     const original=`advanced:\n  last_seen: ISO_8601\ndevices:\n  '${identity.ieeeAddress}':\n    friendly_name: ${identity.friendlyName}\n    optimistic: false\n    filtered_cache: [running_state, local_temperature]\n`;
     await fs.writeFile(configPath,original);
     const bridge=new MqttBridge({url:'',store,observationConfigPath:configPath,logger:{log(){},error(){}}});
+    await require('./helpers/publisher-ready-fixture').readyPublisher(bridge);
     const report=async(time,retain=false)=>bridge.handleMessage(`zigbee2mqtt/${identity.friendlyName}`,Buffer.from(JSON.stringify({[property]:21,last_seen:time})),{retain});
     const entity=()=>Object.values(store.getDevice(d.id).entities).find(e=>e.stateKey===property);
     await report(new Date(Date.now()-3000).toISOString());
@@ -55,6 +56,7 @@ test('actual MQTT control evidence requires that exact control property to be ex
     const merged=mergeObservationConfiguration(original,{...identity,additionalProperties:[property]});
     assert.equal(mergeObservationConfiguration(merged,{...identity,additionalProperties:[property]}),merged);
     await fs.writeFile(configPath,merged);
+    await require('./helpers/publisher-ready-fixture').readyPublisher(bridge);
     const at=new Date(Date.now()-2000).toISOString();await report(at);
     assert.equal(entity().sourceObservedAt,at);
     assert.equal(entity().stateRevision,1);
@@ -72,6 +74,7 @@ test('publisher null placeholders neither erase nor renew other report-only ther
     const configPath=path.join(directory,'configuration.yaml');
     await fs.writeFile(configPath,mergeObservationConfiguration(`advanced:\n  last_seen: ISO_8601\ndevices:\n  '${fixture.ieee_address}':\n    friendly_name: ${fixture.friendly_name}\n`,{friendlyName:fixture.friendly_name,ieeeAddress:fixture.ieee_address,additionalProperties:['occupied_heating_setpoint']}));
     const bridge=new MqttBridge({url:'',store,observationConfigPath:configPath,logger:{log(){},error(){}}});
+    await require('./helpers/publisher-ready-fixture').readyPublisher(bridge);
     const at=new Date(Date.now()-3000).toISOString(), later=new Date(Date.now()-1000).toISOString();
     const report=payload=>bridge.handleMessage(`zigbee2mqtt/${fixture.friendly_name}`,Buffer.from(JSON.stringify(payload)),{retain:false});
     const entity=key=>Object.values(store.getDevice(device.id).entities).find(e=>e.stateKey===key);

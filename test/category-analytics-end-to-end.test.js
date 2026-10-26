@@ -8,6 +8,7 @@ test('unknown-vendor light: genuine MQTT -> exact source -> epoch usage -> durab
   try {
     let now = Date.parse('2026-10-23T10:00:00Z');
     const raw = structuredClone(require('./fixtures/zigbee/dimmable-light.json'));
+    raw.ieee_address = '0x00124b00aabbccdd';
     raw.definition.vendor = 'New manufacturer'; raw.definition.model = 'New light';
     raw.endpoints = { 1: { clusters: { input: ['genOnOff'] }, configured_reportings: [] } };
     const store = new Store(path.join(dir, 'store.json')); store.setUsageClockTrust(() => true); store.setSyncSourceGeneration(1);
@@ -26,6 +27,7 @@ test('unknown-vendor light: genuine MQTT -> exact source -> epoch usage -> durab
       'a configuration file alone cannot prove the generic publisher runtime options');
     await bridge.handleMessage('zigbee2mqtt/bridge/info', Buffer.from(JSON.stringify({ restart_required: false, config: {
       advanced: { last_seen: 'ISO_8601' }, devices: { [raw.ieee_address]: { friendly_name: raw.friendly_name, optimistic: false, filtered_cache: ['state'] } } } })), { retain: true });
+    await require('./helpers/publisher-ready-fixture').readyPublisher(bridge);
     await send({ state: 'OFF', brightness: 128, last_seen: new Date(now).toISOString() });
     now += 60000; await store.advanceSyncUsage(now);
     const prior = Object.values(store.getDevice(device.id).entities).find(entity => entity.stateKey === 'state').sourceObservedAt;

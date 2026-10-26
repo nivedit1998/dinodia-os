@@ -363,6 +363,7 @@ test("actual MQTT state handling updates declared endpoint properties without fa
     bridge.start();
     mqttClient.emit("connect");
     await new Promise((resolve) => setImmediate(resolve));
+    await require('./helpers/publisher-ready-fixture').readyPublisher(bridge);
     const firstMessage = new Promise((resolve) => { messageHandled = resolve; });
     mqttClient.emit("message", "zigbee2mqtt/room-1-radiator", Buffer.from(JSON.stringify({
       local_temperature: 19.5,
@@ -414,22 +415,22 @@ test("actual MQTT state handling updates declared endpoint properties without fa
       last_seen: retainedAt,
     })), { retain: true, qos: 1, dup: false });
     device = store.getDevice(initial.id);
-    assert.equal(device.entities[`${initial.id}:1:running_state`].sourceObservedAt, null);
-    assert.equal(device.entities[`${initial.id}:1:local_temperature`].sourceObservedAt, null);
+    assert.equal(device.entities[`${initial.id}:1:running_state`].sourceObservedAt, heatSourceTime);
+    assert.equal(device.entities[`${initial.id}:1:local_temperature`].sourceObservedAt, temperatureSourceTime);
 
     await bridge.handleMessage("zigbee2mqtt/room-1-radiator", Buffer.from(JSON.stringify({
       running_state: "heat", local_temperature: 19.8,
     })), { retain: false, qos: 0, dup: false });
     device = store.getDevice(initial.id);
-    assert.equal(device.entities[`${initial.id}:1:running_state`].sourceObservedAt, null,
-      "a non-retained message with no validated source clock cannot establish freshness");
+    assert.equal(device.entities[`${initial.id}:1:running_state`].sourceObservedAt, heatSourceTime,
+      "a message without a source clock preserves the genuine value without renewing it");
     const futureAt = new Date(Date.now() + 60_000).toISOString();
     await bridge.handleMessage("zigbee2mqtt/room-1-radiator", Buffer.from(JSON.stringify({
       local_temperature: 19.9, last_seen: futureAt,
     })), { retain: false, qos: 0, dup: false });
     device = store.getDevice(initial.id);
-    assert.equal(device.entities[`${initial.id}:1:local_temperature`].sourceObservedAt, null,
-      "a future source timestamp cannot establish freshness");
+    assert.equal(device.entities[`${initial.id}:1:local_temperature`].sourceObservedAt, temperatureSourceTime,
+      "a future source timestamp cannot overwrite or renew the genuine observation");
 
     // A later Store metadata/snapshot merge must not turn local lastChanged
     // or updatedAt into a claimed publisher observation.

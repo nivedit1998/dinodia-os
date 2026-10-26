@@ -52,8 +52,12 @@ test("MQTT state and diagnostic event share one deferred durable Store write", a
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const file = path.join(directory, "dinodia.json");
   const store = new Store(file);
-  await store.upsertDevice({ id: "radiator-test", name: "Radiator test", protocol: "zigbee", state: { temperature: 20 } });
+  await store.upsertDevice({ id: "radiator-test", name: "Radiator test", protocol: "zigbee", metadata: { ieee_address: '0x0011223344556677' }, state: { temperature: 20 } });
   await store.saveConfigEntry({ entry_id: "ce_zigbee", domain: "zha", title: "Zigbee" });
+  const configPath=path.join(directory,'configuration.yaml');
+  await fs.writeFile(configPath,"advanced:\n  last_seen: ISO_8601\ndevices:\n  '0x0011223344556677':\n    optimistic: false\n    filtered_cache: [temperature]\n");
+  const bridge = new MqttBridge({ url: "", store, observationConfigPath: configPath, logger: {log(){},warn(){},error(){}} });
+  await require('./helpers/publisher-ready-fixture').readyPublisher(bridge);
 
   const originalPersist = store.persist.bind(store);
   let persistCalls = 0;
@@ -65,10 +69,9 @@ test("MQTT state and diagnostic event share one deferred durable Store write", a
     resolvePersisted();
     return result;
   };
-  const bridge = new MqttBridge({ url: "", store });
   t.mock.timers.enable({ apis: ["setTimeout"] });
 
-  await bridge.handleMessage("zigbee2mqtt/radiator-test", Buffer.from('{"temperature":21}'));
+  await bridge.handleMessage("zigbee2mqtt/radiator-test", Buffer.from(JSON.stringify({temperature:21,last_seen:new Date(Date.now()-1000).toISOString()})),{retain:false});
   assert.equal(store.getDevice("radiator-test").state.temperature, 21);
   assert.equal(store.listEvents(1)[0].type, "device_state");
   assert.equal(persistCalls, 0, "state and event should wait for the shared telemetry flush");
@@ -86,7 +89,7 @@ test("MQTT state and diagnostic event share one deferred durable Store write", a
   assert.equal(afterFlush.devices["radiator-test"].state.temperature, 21);
   assert.equal(afterFlush.events[0].type, "device_state");
 
-  await bridge.handleMessage("zigbee2mqtt/radiator-test", Buffer.from('{"temperature":22}'));
+  await bridge.handleMessage("zigbee2mqtt/radiator-test", Buffer.from(JSON.stringify({temperature:22,last_seen:new Date(Date.now()-500).toISOString()})),{retain:false});
   assert.equal(persistCalls, 1, "the next telemetry report starts a new deferred window");
   await store.saveArea({ name: "Kitchen" }, "kitchen");
   assert.equal(persistCalls, 2, "a normal configuration mutation flushes pending telemetry immediately");
