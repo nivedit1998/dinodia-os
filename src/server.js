@@ -4900,6 +4900,13 @@ function nativeDeviceView(principal, device) {
     const adminApiPath = pathname.startsWith("/_dinodia/admin/") ? pathname.slice("/_dinodia/admin".length) : "";
     const operatorReadRoute = req.method === "GET" && (installerReadRoutes.has(adminApiPath) || adminApiPath === "/api/operator-session");
     const operatorAreaCreateRoute = req.method === "POST" && adminApiPath === "/api/areas";
+    // The local full-Home dashboard uses the same reviewed deletion coordinator
+    // as the secure listener. Route only its exact methods; the shared handler
+    // still requires a currently revalidated assigned os:admin browser session.
+    // Do not expose legacy DELETE or the installation-only workspace here.
+    const operatorAreaDeletionRoute = req.method === "GET" && (adminApiPath === "/api/areas/deletion-operations"
+      || /^\/api\/areas\/[^/]+\/deletion\/status$/.test(adminApiPath))
+      || req.method === "POST" && /^\/api\/areas\/[^/]+\/deletion\/(preview|confirm)$/.test(adminApiPath);
     // Radio selection/probing is a full-Home admin operation. The local
     // listener must route the exact same actions as the secure dashboard;
     // handleUnifiedRequest still validates the selected signed operator
@@ -4928,11 +4935,11 @@ function nativeDeviceView(principal, device) {
       || /^\/_dinodia\/installer\/commissioning\/sessions(?:\/[^/]+(?:\/(?:matter-payload|select|complete|cancel|resume))?)?$/.test(pathname);
     const operatorWorkspaceRoute = req.method === "GET"
       && /^\/_dinodia\/operator\/[A-Za-z0-9_-]{24,64}(?:\/installation)?$/.test(pathname);
-    const recognizedPath = setupRoute || staticRoute || operatorReadRoute || operatorAreaCreateRoute
+    const recognizedPath = setupRoute || staticRoute || operatorReadRoute || operatorAreaCreateRoute || operatorAreaDeletionRoute
       || operatorRadioActionRoute || operatorDeviceDeleteRoute || operatorAnalyticsCategoryRoute || operatorCloudflareStatusRoute || operatorCloudflareRecoveryRoute || operatorEndRoute || permanentInstallationRoute || operatorWorkspaceRoute;
     if (!recognizedPath && ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(req.method)) return json(res, 404, { error: "Not found" });
     if (!recognizedPath) return text(res, 405, "Method not allowed");
-    if (!setupRoute && !staticRoute && !operatorReadRoute && !operatorAreaCreateRoute
+    if (!setupRoute && !staticRoute && !operatorReadRoute && !operatorAreaCreateRoute && !operatorAreaDeletionRoute
       && !operatorRadioActionRoute && !operatorDeviceDeleteRoute && !operatorAnalyticsCategoryRoute && !operatorCloudflareStatusRoute && !operatorCloudflareRecoveryRoute && !operatorEndRoute && !permanentInstallationRoute && !operatorWorkspaceRoute) return json(res, 404, { error: "Not found" });
     return handleUnifiedRequest(req, res);
   });
