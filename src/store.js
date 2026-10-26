@@ -101,6 +101,11 @@ function normalizePendingPropertyDevicePolicies(value) {
       || typeof policy.usefulReadings !== "boolean"
       || !Number.isSafeInteger(Number(policy.descriptorRevision)) || Number(policy.descriptorRevision) < 1
       || !/^[a-f0-9]{64}$/i.test(String(policy.descriptorDigest || ""))) continue;
+    const analyticsCategory = policy.analyticsCategory === undefined ? 'NONE' : policy.analyticsCategory;
+    if (!['NONE', 'LIGHT', 'BOILER', 'RADIATOR'].includes(analyticsCategory)
+      || policy.inventoryRevision !== undefined && (!Number.isSafeInteger(policy.inventoryRevision) || policy.inventoryRevision < 1)
+      || policy.customerLabel !== undefined && policy.customerLabel !== null
+        && (typeof policy.customerLabel !== 'string' || policy.customerLabel.length > 40)) continue;
     if (policy.logicalBinding && (!logicalDevices.validBinding(osDeviceId, policy.logicalBinding)
       || !Array.isArray(policy.osAreaIds) || policy.osAreaIds.length !== 1
       || typeof policy.osAreaIds[0] !== 'string' || policy.osAreaIds[0].length > 160)) continue;
@@ -108,6 +113,9 @@ function normalizePendingPropertyDevicePolicies(value) {
       managementClass: "PROPERTY_DEVICE", ownerMembershipId: null, lifecycle: String(policy.lifecycle),
       platformDeviceId: String(policy.platformDeviceId), installationRequestId: String(policy.installationRequestId),
       canonicalAreaIds: policy.canonicalAreaIds.map(String), catalogueStatus: String(policy.catalogueStatus), usefulReadings: policy.usefulReadings,
+      analyticsCategory,
+      ...(policy.inventoryRevision !== undefined ? { inventoryRevision: policy.inventoryRevision } : {}),
+      ...(policy.customerLabel !== undefined ? { customerLabel: policy.customerLabel } : {}),
       descriptorRevision: Number(policy.descriptorRevision), descriptorDigest: String(policy.descriptorDigest),
       overrideName: typeof policy.overrideName === "string" ? policy.overrideName.slice(0, 80) : null,
       ...(policy.logicalBinding ? { logicalBinding: clone(policy.logicalBinding), osAreaIds: [...policy.osAreaIds] } : {}),
