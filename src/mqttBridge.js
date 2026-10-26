@@ -70,6 +70,7 @@ class MqttBridge {
     this.permitJoinUntil = null;
     this.remoteEventWindow = new Map();
     this.pendingRemovals = new Map();
+    this.deviceObservationQueue = new Map();
     // Hub-managed observation policy (src/observation/reconciler.js); set by the server.
     this.observationPolicy = null;
     this.discovery = {};
@@ -260,6 +261,20 @@ class MqttBridge {
   }
 
   async handleMessage(topic, payload, packet = null) {
+    const relative = topic.startsWith(`${this.baseTopic}/`) ? topic.slice(this.baseTopic.length + 1) : '';
+    const parts = relative.split('/');
+    if (parts[0] && parts[0] !== 'bridge' && (parts.length === 1 || parts.length === 2 && parts[1] === 'availability')) {
+      const id = this.resolveDeviceId(parts[0]);
+      const previous = this.deviceObservationQueue.get(id) || Promise.resolve();
+      const work = previous.catch(() => {}).then(() => this.handleMessageNow(topic, payload, packet));
+      this.deviceObservationQueue.set(id, work);
+      try { return await work; }
+      finally { if (this.deviceObservationQueue.get(id) === work) this.deviceObservationQueue.delete(id); }
+    }
+    return this.handleMessageNow(topic, payload, packet);
+  }
+
+  async handleMessageNow(topic, payload, packet = null) {
     const receivedMs = Number(this.clock());
     const receivedAt = new Date(receivedMs).toISOString();
     this.lastMessageAt = receivedAt;

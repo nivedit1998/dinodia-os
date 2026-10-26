@@ -53,13 +53,30 @@ test('real MQTT inventory/options/report/Store path bootstraps a new unknown-bra
     await deliver(raw.friendly_name,{occupied_heating_setpoint:35,last_seen:new Date(now-1).toISOString()});
     assert.equal(Object.values(store.getDevice(d.id).entities).find(e=>e.stateKey==='occupied_heating_setpoint').lastReported.value,19,'an older differing report cannot replace the latest genuine value');
     assert.equal(Object.values(store.getDevice(d.id).entities).find(e=>e.stateKey==='occupied_heating_setpoint').sourceObservedAt,originalTime);
+    const update=store.updateDeviceState.bind(store);
+    let newerCommitted;
+    const committed=new Promise(resolve=>{newerCommitted=resolve;});
+    store.updateDeviceState=async(id,state,options)=>{
+      if(state.occupied_heating_setpoint===18)await committed;
+      const updated=await update(id,state,options);
+      if(state.occupied_heating_setpoint===20)newerCommitted();
+      return updated;
+    };
+    now+=3000;
+    await Promise.all([
+      deliver(raw.friendly_name,{occupied_heating_setpoint:20,last_seen:new Date(now).toISOString()}),
+      deliver(raw.friendly_name,{occupied_heating_setpoint:18,last_seen:new Date(now-1).toISOString()}),
+    ]);
+    store.updateDeviceState=update;
+    assert.equal(Object.values(store.getDevice(d.id).entities).find(e=>e.stateKey==='occupied_heating_setpoint').state,20,'overlapping handlers cannot apply an older differing value after a newer commit');
+    assert.equal(Object.values(store.getDevice(d.id).entities).find(e=>e.stateKey==='occupied_heating_setpoint').sourceObservedAt,new Date(now).toISOString());
     bridge.publisherObservation.reset();
     now+=1000;
     await deliver(raw.friendly_name,{occupied_heating_setpoint:30,last_seen:new Date(now).toISOString()});
-    assert.equal(Object.values(store.getDevice(d.id).entities).find(e=>e.stateKey==='occupied_heating_setpoint').lastReported.value,19,'local YAML alone after reconnect cannot admit new values');
+    assert.equal(Object.values(store.getDevice(d.id).entities).find(e=>e.stateKey==='occupied_heating_setpoint').lastReported.value,20,'local YAML alone after reconnect cannot admit new values');
     now+=1000;
     await deliver(raw.friendly_name,{occupied_heating_setpoint:35,last_seen:new Date(now).toISOString()},{retain:true});
-    assert.equal(Object.values(store.getDevice(d.id).entities).find(e=>e.stateKey==='occupied_heating_setpoint').lastReported.value,19);
+    assert.equal(Object.values(store.getDevice(d.id).entities).find(e=>e.stateKey==='occupied_heating_setpoint').lastReported.value,20);
     assert.equal(sent.length,1,'no actuator command, device read or reporting write is generated');
     await store.writeQueue;
   } finally {fs.rmSync(directory,{recursive:true,force:true});}
