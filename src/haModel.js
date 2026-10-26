@@ -563,12 +563,10 @@ class HomeAssistantModel {
     }
     if (device && this.removeProtocolDevice && ["zigbee", "matter", "hive", "google_nest"].includes(String(device.protocol || "").toLowerCase())) {
       const isZigbee = String(device.protocol || "").toLowerCase() === "zigbee";
-      // A confirmed hub-level Zigbee deletion must work for sleeping devices
-      // and prevent the stored coordinator entry from being silently restored.
-      // Zigbee2MQTT force-removes its database record; block asks it to make
-      // the device leave when it next rejoins. It cannot erase the key held by
-      // the powered-off device itself, so the UI must not claim a factory reset.
-      await this.removeProtocolDevice(device, isZigbee || Boolean(input.force), { block: isZigbee });
+      // Normal removal waits for a real network leave. Force only forgets the
+      // coordinator record and is reserved for an explicit owner choice.
+      const force = input.force === true;
+      await this.removeProtocolDevice(device, force, { block: isZigbee && force });
     }
     const removed = device ? await this.store.deleteDevice(device.id) : false;
     if (removed) {

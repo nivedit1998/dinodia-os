@@ -52,7 +52,7 @@ test("dashboard shell refreshes script assets instead of reusing an old cached a
   const page = await fetch(`${base}/`, { headers });
   assert.equal(page.status, 200);
   assert.equal(page.headers.get("cache-control"), "no-cache");
-  assert.match(await page.text(), /app\.js\?v=0\.19\.0/);
+  assert.match(await page.text(), /app\.js\?v=0\.20\.0/);
   const script = await fetch(`${base}/app.js?v=0.18.0`, { headers });
   assert.equal(script.status, 200);
   assert.equal(script.headers.get("cache-control"), "no-cache");

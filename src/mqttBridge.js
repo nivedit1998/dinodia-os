@@ -624,8 +624,8 @@ class MqttBridge {
     if (String(confirmed.id || "") !== String(removalId)) {
       throw new Error("Zigbee2MQTT acknowledged a different device removal");
     }
-    if (force && confirmed.force !== true) {
-      throw new Error("Zigbee2MQTT did not confirm force removal; the device is still registered");
+    if (Boolean(confirmed.force) !== Boolean(force)) {
+      throw new Error("Zigbee2MQTT confirmed a different removal mode; network leave was not confirmed");
     }
     if (options.block && confirmed.block !== true) {
       throw new Error("Zigbee2MQTT did not confirm the rejoin block; the device is still registered");
