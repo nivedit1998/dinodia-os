@@ -6,6 +6,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { createHub } = require('../src/server');
+const { normalizeZigbeeDevice } = require('../src/integrations/zigbee/exposeNormalizer');
 
 const mock = () => ({ start() {}, close() {}, status: () => ({ configured: false, connected: false }) });
 function signedToken(claims, key) {
@@ -81,6 +82,19 @@ for (const scope of ['os:admin', 'os:permanent-installation']) {
     const selected = await established.json();
     const sessionCookie = established.headers.getSetCookie().map(value => value.split(';', 1)[0]).find(value => value.startsWith('dinodia_os_operator_session_'));
     const auth = { ...headers, cookie: `${headers.cookie}; ${sessionCookie}`, 'x-dinodia-operator-session': selected.sessionSelector };
+    // Exercise the real physical listener, not just the secure/unified API.
+    const setupDevice = normalizeZigbeeDevice({ friendly_name: 'Fixture switch', ieee_address: '0xsetupfixture',
+      definition: { exposes: [{ type: 'switch', features: [{ type: 'binary', property: 'state', access: 7 }] }] } });
+    await hub.store.upsertDevice(setupDevice);
+    const setupRoute = `/_dinodia/admin/api/devices/${encodeURIComponent(setupDevice.id)}/setup`;
+    const setupPreview = await fetch(`${base}${setupRoute}?areaId=empty-b&labelId=light`, { headers: auth });
+    assert.equal(setupPreview.status, scope === 'os:admin' ? 200 : 403, 'local setup preview reaches existing scope enforcement');
+    assert.equal((await fetch(`${base}${setupRoute}`, { method: 'PUT', headers: auth,
+      body: JSON.stringify({ name: 'Fixture Room 2 light', areaId: 'empty-b', labelId: 'light' }) })).status,
+    scope === 'os:admin' ? 200 : 403, 'local setup save reaches existing scope enforcement');
+    assert.equal((await fetch(`${base}${setupRoute}`, { method: 'PUT', body: '{}' })).status, 401);
+    assert.equal((await fetch(`${base}${setupRoute}`, { method: 'POST', headers: auth, body: '{}' })).status, 404);
+    assert.equal(hub.store.getDevice(setupDevice.id).areaId, scope === 'os:admin' ? 'empty-b' : null);
     const route = '/_dinodia/admin/api/areas/empty-a/deletion';
     const list = await fetch(`${base}/_dinodia/admin/api/areas/deletion-operations`, { headers: auth });
     assert.equal(list.status, scope === 'os:admin' ? 200 : 403, 'local listener must reach shared scope enforcement, not return404');

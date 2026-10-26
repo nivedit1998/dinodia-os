@@ -252,7 +252,7 @@ test("physical full-Home dashboard allows scoped device removal only for os:admi
     assert.equal(failedRemoval.response.status, 502);
     assert.ok(hub.store.getDevice("zigbee:disposable-removal"), "keep local records when the radio bridge does not acknowledge removal");
     assert.deepEqual(adapterCalls, [
-      { operation: "remove", deviceId: "zigbee:disposable-removal", force: true, options: { block: true } },
+      { operation: "remove", deviceId: "zigbee:disposable-removal", force: false, options: { block: false } },
     ]);
     failRemoval = false;
 
@@ -261,8 +261,8 @@ test("physical full-Home dashboard allows scoped device removal only for os:admi
     assert.equal(removed.body.ok, true);
     assert.equal(hub.store.getDevice("zigbee:disposable-removal"), null);
     assert.deepEqual(adapterCalls, [
-      { operation: "remove", deviceId: "zigbee:disposable-removal", force: true, options: { block: true } },
-      { operation: "remove", deviceId: "zigbee:disposable-removal", force: true, options: { block: true } },
+      { operation: "remove", deviceId: "zigbee:disposable-removal", force: false, options: { block: false } },
+      { operation: "remove", deviceId: "zigbee:disposable-removal", force: false, options: { block: false } },
       { operation: "forget", deviceId: "zigbee:disposable-removal" },
     ]);
   } finally {

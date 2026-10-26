@@ -74,7 +74,9 @@ test("full Home dashboard edits optional analytics category only for signed perm
   assert.match(server, /updateAnalyticsCategory\(assignedPrincipal/);
   assert.match(server, /managementClass === "PROPERTY_DEVICE"/);
   assert.match(server, /requested === "index\.html" \|\| requested\.endsWith\("\.js"\)/);
-  assert.match(html, /app\.js\?v=0\.19\.0/);
+  assert.match(html, /app\.js\?v=0\.20\.0/);
+  assert.match(html, /js\/deviceEditors\.js/);
+  assert.match(app, /DinodiaDeviceEditors\.render\(\$\("#devices"\), markup\)/);
   assert.match(deviceProjection, /analyticsInventoryRevision = Number\(policy\.inventoryRevision\)/);
 });
 

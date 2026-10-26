@@ -249,9 +249,10 @@ async function sendEntityControl(control, serviceId, entityId) {
   try { await api(`/api/entities/${encodeURIComponent(entityId)}/service`, { method: "POST", body: JSON.stringify({ serviceId, data }) }); await load(); } catch (error) { showNotice(error.message, "error"); }
 }
 function renderDevices() {
+  const unbound = selector => window.DinodiaDeviceEditors.unbound(document, selector);
   const filter = $("#device-filter")?.value || "all";
   const devices = state.devices.filter((device) => filter === "all" || (filter === "unassigned" ? deviceAreaIds(device).length === 0 : deviceAreaIds(device).includes(filter))).map((device) => device.protocol === "google_nest" ? { ...device, protocolIdentity: {} } : device);
-  $("#devices").innerHTML = devices.length ? devices.map((device) => {
+  const markup = devices.length ? devices.map((device) => {
     const editorId = `device-editor-${encodeURIComponent(device.id)}`;
     const expanded = state.expandedDevices.has(device.id);
     const protocolMark = device.protocol === "zigbee" ? "Z" : device.protocol === "matter" ? "M" : device.protocol === "hive" ? "H" : device.protocol === "google_nest" ? "N" : "•";
@@ -264,13 +265,14 @@ function renderDevices() {
     const details = setupStatus === "ready" ? `<div class="entity-heading"><div><strong>Controls shown in apps</strong><span class="subtle small">${controls} control surface${controls === 1 ? "" : "s"} · all technical entities stay behind diagnostics</span></div></div><div class="surface-list">${surfaceRows(device) || `<p class="subtle small">No safe household controls were identified for this device.</p>`}</div>` : `<div class="needs-setup-callout"><strong>Choose the area and label to continue.</strong><span>After saving, only the useful controls will appear here and in the Dinodia apps.</span></div>`;
     return `<article class="device-card ${expanded ? "expanded" : ""}" data-device-card="${escapeHtml(device.id)}"><button class="device-tile" data-toggle-device="${escapeHtml(device.id)}" type="button" aria-expanded="${expanded}" aria-controls="${editorId}"><span class="device-orb ${device.available !== false ? "online-orb" : "offline-orb"}">${protocolMark}</span><span class="device-tile-copy"><span class="device-tile-area">${escapeHtml(deviceAreaSummary(device))}</span><strong class="device-tile-name">${escapeHtml(device.name)}</strong><span class="device-tile-meta"><span>${controls} control${controls === 1 ? "" : "s"}</span><span class="tile-status ${statusClass}">${statusLabel}</span></span></span><span class="device-tile-action"><span>${expanded ? "Close" : "Manage"}</span><span class="device-tile-chevron" aria-hidden="true">⌄</span></span></button><div class="device-editor" id="${editorId}" ${expanded ? "" : "inert"}><div class="device-editor-head"><div><strong>${setupStatus === "ready" ? "Manage device" : "Device setup"}</strong><span>${escapeHtml(device.protocol)} · ${diagnosticCount} technical entr${diagnosticCount === 1 ? "y" : "ies"} hidden</span></div><button class="text-button" data-collapse-device type="button">Done</button></div>${setupForm(device)}${recommissionButtons(device)}${details}<details class="device-diagnostics"><summary>Show technical diagnostics (${diagnosticCount})</summary><pre>${escapeHtml(JSON.stringify({ presentation: device.presentation, definition: { source: device.definition?.source, model: device.definition?.model, supported: device.definition?.supported }, identity: device.protocolIdentity }, null, 2))}</pre></details></div></article>`;
   }).join("") : `<div class="empty-state">No devices in this view. Use Add devices above.</div>`;
-  document.querySelectorAll("[data-toggle-device]").forEach((button) => button.addEventListener("click", () => { const card = button.closest("[data-device-card]"); const editor = card.querySelector(".device-editor"); const expanded = !card.classList.contains("expanded"); card.classList.toggle("expanded", expanded); button.setAttribute("aria-expanded", String(expanded)); button.querySelector(".device-tile-action > span:first-child").textContent = expanded ? "Close" : "Manage"; editor.inert = !expanded; if (expanded) state.expandedDevices.add(card.dataset.deviceCard); else state.expandedDevices.delete(card.dataset.deviceCard); }));
-  document.querySelectorAll("[data-collapse-device]").forEach((button) => button.addEventListener("click", () => button.closest("[data-device-card]").querySelector("[data-toggle-device]").click()));
-  document.querySelectorAll("[data-convert-device]").forEach(button => button.addEventListener("click", () => openLogicalConversion(button.dataset.convertDevice)));
-  document.querySelectorAll("[data-recommission-device]").forEach(button => button.addEventListener("click", () => openLogicalConversion(button.dataset.recommissionDevice, null, button.dataset.channelKey)));
-  document.querySelectorAll("[data-save-device]").forEach((button) => button.addEventListener("click", async () => { const id = button.dataset.saveDevice; const card = button.closest(".device-card"); const name = card.querySelector(`[data-device-name="${CSS.escape(id)}"]`).value; const areaId = card.querySelector(`[data-device-area="${CSS.escape(id)}"]`).value; const labels = selectedLabelIds(card.querySelector(`[data-device-labels="${CSS.escape(id)}"]`)); if (!areaId) return showNotice("Choose an area before saving the device.", "error"); if (!labels.length) return showNotice("Choose one device label before saving the device.", "error"); button.disabled = true; try { await api(`/api/devices/${encodeURIComponent(id)}/setup`, { method: "PUT", body: JSON.stringify({ name, areaId, labelId: labels[0], ...(state.devices.find(row => row.id === id)?.physicalDeviceId ? { operationId: button.dataset.operationId ||= createAreaOperationId() } : {}) }) }); await load(); showNotice("Device setup saved. Its app-facing controls are ready."); } catch (error) { button.disabled = false; showNotice(error.message, "error"); } }));
-  document.querySelectorAll("[data-analytics-category]").forEach((select) => select.addEventListener("change", () => state.analyticsCategoryDrafts.set(select.dataset.analyticsCategory, select.value)));
-  document.querySelectorAll("[data-save-analytics-category]").forEach((button) => button.addEventListener("click", async () => {
+  window.DinodiaDeviceEditors.render($("#devices"), markup);
+  unbound("[data-toggle-device]").forEach((button) => button.addEventListener("click", () => { const card = button.closest("[data-device-card]"); const editor = card.querySelector(".device-editor"); const expanded = !card.classList.contains("expanded"); card.classList.toggle("expanded", expanded); button.setAttribute("aria-expanded", String(expanded)); button.querySelector(".device-tile-action > span:first-child").textContent = expanded ? "Close" : "Manage"; editor.inert = !expanded; if (expanded) state.expandedDevices.add(card.dataset.deviceCard); else state.expandedDevices.delete(card.dataset.deviceCard); }));
+  unbound("[data-collapse-device]").forEach((button) => button.addEventListener("click", () => button.closest("[data-device-card]").querySelector("[data-toggle-device]").click()));
+  unbound("[data-convert-device]").forEach(button => button.addEventListener("click", () => openLogicalConversion(button.dataset.convertDevice)));
+  unbound("[data-recommission-device]").forEach(button => button.addEventListener("click", () => openLogicalConversion(button.dataset.recommissionDevice, null, button.dataset.channelKey)));
+  unbound("[data-save-device]").forEach((button) => button.addEventListener("click", async () => { const id = button.dataset.saveDevice; const card = button.closest(".device-card"); const name = card.querySelector(`[data-device-name="${CSS.escape(id)}"]`).value; const areaId = card.querySelector(`[data-device-area="${CSS.escape(id)}"]`).value; const labels = selectedLabelIds(card.querySelector(`[data-device-labels="${CSS.escape(id)}"]`)); if (!areaId) return showNotice("Choose an area before saving the device.", "error"); if (!labels.length) return showNotice("Choose one device label before saving the device.", "error"); button.disabled = true; card.dataset.busy = "true"; try { await api(`/api/devices/${encodeURIComponent(id)}/setup`, { method: "PUT", body: JSON.stringify({ name, areaId, labelId: labels[0], ...(state.devices.find(row => row.id === id)?.physicalDeviceId ? { operationId: button.dataset.operationId ||= createAreaOperationId() } : {}) }) }); card.dataset.refreshAfterSave = "true"; await load(); showNotice("Device setup saved. Its app-facing controls are ready."); } catch (error) { button.disabled = false; showNotice(error.message, "error"); } finally { delete card.dataset.busy; } }));
+  unbound("[data-analytics-category]").forEach((select) => select.addEventListener("change", () => state.analyticsCategoryDrafts.set(select.dataset.analyticsCategory, select.value)));
+  unbound("[data-save-analytics-category]").forEach((button) => button.addEventListener("click", async () => {
     const id = button.dataset.saveAnalyticsCategory;
     const device = state.devices.find((candidate) => String(candidate.id) === id);
     const status = button.closest("[data-analytics-editor]")?.querySelector(`[data-analytics-category-status="${CSS.escape(id)}"]`);
@@ -295,18 +297,24 @@ function renderDevices() {
       state.analyticsCategoryDrafts.delete(id);
     }
     button.disabled = true;
+    const analyticsEditor = button.closest('[data-analytics-editor]');
+    analyticsEditor.dataset.busy = 'true';
     if (status) status.textContent = "Saving category to the assigned Home's canonical record…";
     try {
       const result = await api(`/api/devices/${encodeURIComponent(id)}/analytics-category`, { method: "PATCH", body: JSON.stringify(pending.body) });
       pending = { ...pending, managementRevision: Number(result.managementRevision) };
       writeAnalyticsCategoryPending(id, pending);
       if (status) status.textContent = "Platform accepted the change. Waiting for the hub to receive and verify its next signed configuration; readings were not created.";
+      delete analyticsEditor.dataset.dirty;
+      analyticsEditor.dataset.refreshAfterSave = 'true';
       await load();
       showNotice("Analytics category saved in the canonical Home record. Signed hub configuration sync is pending; no readings or gas usage were fabricated.");
     } catch (error) {
       if (error.status === 409 && String(error.code || "").toLowerCase() === "analytics_category_revision_conflict") {
         clearAnalyticsCategoryPending(id);
         state.analyticsCategoryDrafts.delete(id);
+        delete analyticsEditor.dataset.dirty;
+        analyticsEditor.dataset.refreshAfterSave = 'true';
         if (status) status.textContent = "The Home or this device changed since it was loaded. Refreshing its signed category; review and save your choice again.";
         button.disabled = true;
         try { await load(); showNotice("The Home configuration changed. Review the refreshed category and save again; the rejected update made no change.", "error"); }
@@ -315,16 +323,36 @@ function renderDevices() {
       }
       if (status) status.textContent = `${error.message}. Retry uses the same operation ID and exact request.`;
       button.disabled = false;
-    }
+    } finally { delete analyticsEditor.dataset.busy; button.disabled = false; }
   }));
-  document.querySelectorAll("[data-remove-device]").forEach((button) => button.addEventListener("click", async () => { const id = button.dataset.removeDevice; const device = state.devices.find((candidate) => candidate.id === id); const zigbee = String(device?.protocol || "").toLowerCase() === "zigbee"; const warning = zigbee ? " The hub will forget and block this Zigbee device; if it reconnects later, Zigbee2MQTT will ask it to leave. This cannot erase network credentials stored inside a powered-off device; factory-reset it if you need those credentials erased." : " This unpairs it and deletes its household controls, history, automations, and remote bindings."; if (!confirm(`Remove ${device?.name || "this device"} completely from Dinodia OS? This deletes its local household controls, history, automations, and remote bindings.${warning}`)) return; button.disabled = true; try { await api(`/api/devices/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ force: false }) }); state.expandedDevices.delete(id); await load(); showNotice(zigbee ? "Zigbee device removed and blocked. The hub will request that it leave if it reconnects; factory reset is needed to erase credentials stored on the device." : "Device completely removed. Pair it again if you want to add it back."); } catch (error) { button.disabled = false; showNotice(error.message, "error"); } }));
-  document.querySelectorAll("[data-device-setup]").forEach((form) => { const id = form.dataset.deviceSetup; const area = form.querySelector(`[data-device-area="${CSS.escape(id)}"]`); const label = form.querySelector(`[data-device-labels="${CSS.escape(id)}"]`); const preview = form.querySelector(`[data-device-preview="${CSS.escape(id)}"]`); const refreshPreview = async () => { if (!area.value || !label.value || label.value === NONE_LABEL_VALUE) { preview.textContent = "Choose an area and label to preview the app-facing controls."; return; } try { const result = await api(`/api/devices/${encodeURIComponent(id)}/setup?areaId=${encodeURIComponent(area.value)}&labelId=${encodeURIComponent(label.value)}`); const surfaces = result.surfacePreview?.surfaces || []; preview.textContent = surfaces.length ? `${surfaces.length} control${surfaces.length === 1 ? "" : "s"} will appear in the Dinodia apps.` : "No safe household controls were identified yet."; } catch { preview.textContent = "Preview unavailable until discovery is complete."; } }; area.addEventListener("change", refreshPreview); label.addEventListener("change", refreshPreview); });
-  document.querySelectorAll(".entity-control[data-service]").forEach((control) => {
+  unbound("[data-remove-device]").forEach((button) => button.addEventListener("click", async () => { const id = button.dataset.removeDevice; const device = state.devices.find((candidate) => candidate.id === id); const zigbee = String(device?.protocol || "").toLowerCase() === "zigbee"; const warning = zigbee ? " Keep the device awake so it can acknowledge leaving the Zigbee network. If it does not respond, its local record will be kept and you can retry after waking it." : " This unpairs it and deletes its household controls, history, automations, and remote bindings."; if (!confirm(`Remove ${device?.name || "this device"} completely from Dinodia OS? This deletes its local household controls, history, automations, and remote bindings.${warning}`)) return; button.disabled = true; const card = button.closest('.device-card'); card.dataset.busy = "true"; try { await api(`/api/devices/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ force: false }) }); state.expandedDevices.delete(id); await load(); showNotice(zigbee ? "The Zigbee network removal was acknowledged and the device was removed from Dinodia OS. You can pair it again when ready." : "Device completely removed. Pair it again if you want to add it back."); } catch (error) { button.disabled = false; showNotice(zigbee ? `${error.message}. Keep the device awake and retry; it has not been force-forgotten.` : error.message, "error"); } finally { delete card.dataset.busy; } }));
+  unbound("[data-device-setup]").forEach((form) => {
+    const id = form.dataset.deviceSetup, card = form.closest('.device-card');
+    const markDirty = event => { card.dataset.setupDirty = 'true'; if (event.target.closest('.device-edit')) card.dataset.assignmentDirty = 'true'; const analytics = event.target.closest('[data-analytics-editor]'); if (analytics) analytics.dataset.dirty = 'true'; };
+    form.addEventListener('input', markDirty); form.addEventListener('change', markDirty);
+    const area = form.querySelector(`[data-device-area="${CSS.escape(id)}"]`);
+    const label = form.querySelector(`[data-device-labels="${CSS.escape(id)}"]`);
+    const preview = form.querySelector(`[data-device-preview="${CSS.escape(id)}"]`);
+    let previewRevision = 0;
+    const refreshPreview = async () => {
+      const revision = ++previewRevision, areaId = area.value, labelId = label.value;
+      if (!areaId || !labelId || labelId === NONE_LABEL_VALUE) { preview.textContent = "Choose an area and label to preview the app-facing controls."; return; }
+      const current = () => revision === previewRevision && area.value === areaId && label.value === labelId && form.isConnected;
+      try {
+        const result = await api(`/api/devices/${encodeURIComponent(id)}/setup?areaId=${encodeURIComponent(areaId)}&labelId=${encodeURIComponent(labelId)}`);
+        if (!current()) return;
+        const surfaces = result.surfacePreview?.surfaces || [];
+        preview.textContent = surfaces.length ? `${surfaces.length} control${surfaces.length === 1 ? "" : "s"} will appear in the Dinodia apps.` : "No safe household controls were identified yet.";
+      } catch { if (current()) preview.textContent = "Preview unavailable until discovery is complete."; }
+    };
+    area.addEventListener('change', refreshPreview); label.addEventListener('change', refreshPreview);
+  });
+  unbound(".entity-control[data-service]").forEach((control) => {
     if (control.dataset.submitControl) return;
     if (control.type === "range") control.addEventListener("change", () => sendEntityControl(control, control.dataset.service, control.dataset.entity));
     else if (control.tagName === "BUTTON") control.addEventListener("click", () => sendEntityControl(control, control.dataset.service, control.dataset.entity));
   });
-  document.querySelectorAll("[data-submit-control]").forEach((button) => button.addEventListener("click", () => sendEntityControl(button, button.dataset.service, button.dataset.entity)));
+  unbound("[data-submit-control]").forEach((button) => button.addEventListener("click", () => sendEntityControl(button, button.dataset.service, button.dataset.entity)));
 }
 
 document.addEventListener("input", (event) => {

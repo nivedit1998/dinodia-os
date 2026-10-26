@@ -4921,6 +4921,9 @@ function nativeDeviceView(principal, device) {
     // authenticate the selected operator session and enforce os:admin; this
     // listener allow-list must not turn the authorized DELETE into a 404.
     const operatorDeviceDeleteRoute = req.method === "DELETE" && /^\/_dinodia\/admin\/api\/devices\/[^/]+$/.test(pathname);
+    // Setup is local metadata only. Expose these exact existing handlers;
+    // the unified dashboard still enforces current full-Home authority.
+    const operatorDeviceSetupRoute = ["GET", "PUT"].includes(req.method) && /^\/api\/devices\/[^/]+\/setup$/.test(adminApiPath);
     const operatorAnalyticsCategoryRoute = req.method === "PATCH" && /^\/_dinodia\/admin\/api\/devices\/[^/]+\/analytics-category$/.test(pathname);
     // The local assigned full-Home dashboard must be able to read the
     // existing tunnel's recovery state and invoke its already-authorized
@@ -4936,11 +4939,11 @@ function nativeDeviceView(principal, device) {
     const operatorWorkspaceRoute = req.method === "GET"
       && /^\/_dinodia\/operator\/[A-Za-z0-9_-]{24,64}(?:\/installation)?$/.test(pathname);
     const recognizedPath = setupRoute || staticRoute || operatorReadRoute || operatorAreaCreateRoute || operatorAreaDeletionRoute
-      || operatorRadioActionRoute || operatorDeviceDeleteRoute || operatorAnalyticsCategoryRoute || operatorCloudflareStatusRoute || operatorCloudflareRecoveryRoute || operatorEndRoute || permanentInstallationRoute || operatorWorkspaceRoute;
+      || operatorRadioActionRoute || operatorDeviceDeleteRoute || operatorDeviceSetupRoute || operatorAnalyticsCategoryRoute || operatorCloudflareStatusRoute || operatorCloudflareRecoveryRoute || operatorEndRoute || permanentInstallationRoute || operatorWorkspaceRoute;
     if (!recognizedPath && ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(req.method)) return json(res, 404, { error: "Not found" });
     if (!recognizedPath) return text(res, 405, "Method not allowed");
     if (!setupRoute && !staticRoute && !operatorReadRoute && !operatorAreaCreateRoute && !operatorAreaDeletionRoute
-      && !operatorRadioActionRoute && !operatorDeviceDeleteRoute && !operatorAnalyticsCategoryRoute && !operatorCloudflareStatusRoute && !operatorCloudflareRecoveryRoute && !operatorEndRoute && !permanentInstallationRoute && !operatorWorkspaceRoute) return json(res, 404, { error: "Not found" });
+      && !operatorRadioActionRoute && !operatorDeviceDeleteRoute && !operatorDeviceSetupRoute && !operatorAnalyticsCategoryRoute && !operatorCloudflareStatusRoute && !operatorCloudflareRecoveryRoute && !operatorEndRoute && !permanentInstallationRoute && !operatorWorkspaceRoute) return json(res, 404, { error: "Not found" });
     return handleUnifiedRequest(req, res);
   });
   let httpsServer = null;
