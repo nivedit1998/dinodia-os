@@ -2,6 +2,7 @@
 const crypto = require('node:crypto');
 const { planBoundedReads } = require('./freshness');
 const { validateReadObservation } = require('./adapterContract');
+const { analyticsEligible } = require('../analytics/categoryPolicies');
 const KEY = '__read_budget__';
 class BoundedReadCoordinator {
   constructor({ store, adapters = {}, admit, clock = () => Date.now() }) {
@@ -16,8 +17,7 @@ class BoundedReadCoordinator {
     if (this.store.isUsageClockTrusted && !this.store.isUsageClockTrusted(now)) return { refused: true, reason: 'clock_not_trusted' };
     const eligible = targets.filter(target => {
       const policy = this.store.getPlatform?.()?.devicePolicies?.[target.deviceId];
-      return policy?.managementClass === 'PROPERTY_DEVICE' && policy.ownerMembershipId == null && ['INSTALLED', 'VIEW_ONLY'].includes(policy.lifecycle)
-        && policy.analyticsCategory !== 'NONE' && policy.analyticsInterval?.genericCollectionEnabled === true
+      return analyticsEligible(policy) && policy.analyticsInterval?.genericCollectionEnabled === true
         && this.adapters[target.integration]?.supports(target) === true;
     }).slice(0, 500);
     const attempts = Object.fromEntries(Object.entries(this.state.attempts).map(([id, times]) => [id, times.filter(at => now - at < 3600000)]).filter(([, times]) => times.length));
@@ -55,7 +55,7 @@ function readTargets(store) {
   const { resolveCategoryBinding } = require('../analytics/resolveBinding');
   return store.listDevices().flatMap(device => {
     const policy = store.getPlatform()?.devicePolicies?.[device.id];
-    if (!policy?.analyticsInterval?.genericCollectionEnabled) return [];
+    if (!analyticsEligible(policy) || !policy?.analyticsInterval?.genericCollectionEnabled) return [];
     const entities = Object.values(device.entities || {});
     const binding = resolveCategoryBinding({ signedPolicy: policy, controls: entities.map(entity => ({ ...entity.capability,
       controlId: entity.capability?.controlId || entity.id, endpointId: entity.endpointId || entity.binding?.endpoint })) });

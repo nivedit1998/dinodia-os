@@ -1,5 +1,6 @@
 'use strict';
 const { resolveCategoryBinding } = require('./resolveBinding');
+const { analyticsEligible } = require('./categoryPolicies');
 function analyticsReadiness(store, device, policy) {
   const binding = resolveCategoryBinding({ signedPolicy: policy, controls: Object.values(device.entities || {}).map(entity => ({ ...entity.capability,
     controlId: entity.capability?.controlId || entity.id, endpointId: entity.endpointId || entity.binding?.endpoint })) });
@@ -8,6 +9,7 @@ function analyticsReadiness(store, device, policy) {
   const base = { selectedControlId: policy?.analyticsInterval?.selectedControlId ?? null, candidates,
     signal: binding.semanticRole || null, collection: null, state: binding.status, reason: binding.reason };
   if (binding.status !== 'resolved') return base;
+  if (!analyticsEligible(policy)) return { ...base, state: 'limited', reason: 'compatible_analytics_writer_unavailable' };
   if (device.available === false) return { ...base, state: 'paused', reason: 'device_unreachable' };
   if (device.protocol !== 'zigbee') return { ...base, state: 'limited', reason: device.protocol === 'matter' ? 'matter_report_provenance_unavailable' : 'provider_observation_unverified' };
   const records = Object.values(store.getObservationPolicyRecords?.() || {}).filter(record => record.deviceId === device.id && record.controlId === binding.primaryControlId);
