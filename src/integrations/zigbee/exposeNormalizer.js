@@ -39,6 +39,7 @@ function domainFor(expose, parentDomain = "") {
 function kindFor(expose, domain, writable) {
   const type = String(expose.type || "").toLowerCase();
   if (type === "numeric") return writable && /(brightness|level|position|temperature|setpoint|percentage|color|colour)/.test(String(expose.property || expose.name || "").toLowerCase()) ? "number" : "sensor";
+  if (type === "enum" && domain === "cover") return "enum";
   if (type === "binary" || ["light", "switch", "cover", "lock", "fan", "humidifier"].includes(domain)) return "binary";
   if (type === "enum") return "enum";
   if (type === "text") return writable ? "text" : "sensor";

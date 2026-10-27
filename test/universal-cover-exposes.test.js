@@ -42,9 +42,37 @@ test('cover state exposes enable only explicitly advertised matching operations'
     definition:{exposes:[{type:'cover', features:[{type:'enum',property:'state',access:7,values:['OPEN','CLOSE']}]}]}});
   const state = Object.values(device.entities).find(entity => entity.stateKey === 'state');
   assert.ok(state);
+  assert.equal(state.capability.kind, 'enum', 'the exposed value type must not be replaced by the parent cover domain');
   assert.deepEqual(state.capability.bindings.map(binding => binding.serviceId), ['cover.open_cover','cover.close_cover']);
   assert.deepEqual(commandForBinding(state, 'cover.open_cover'), {state:'OPEN'});
   assert.throws(() => commandForBinding(state, 'cover.stop_cover'), /not supported/);
+});
+
+test('rediscovering an enum cover preserves identity, Area and reported state', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'dinodia-cover-enum-'));
+  try {
+    const input = {ieee_address:'0x00112233445566dd',friendly_name:'synthetic-cover',
+      definition:{exposes:[{type:'cover',features:[{type:'enum',property:'state',access:7,values:['OPEN','CLOSE']}]}]}};
+    const old = normalizeZigbeeDevice(input);
+    const oldState = Object.values(old.entities).find(entity => entity.stateKey === 'state');
+    oldState.capability.kind = 'binary';
+    oldState.state = 'CLOSE';
+    const store = new Store(path.join(directory,'dinodia.json'));
+    const area = await store.saveArea({name:'Test room'},'test-room');
+    await store.upsertDevice(old);
+    await store.completeDeviceSetup(old.id,{areaId:area.id,labelId:'none'});
+    const before = store.getDevice(old.id);
+    const beforeState = Object.values(before.entities).find(entity => entity.stateKey === 'state');
+    await store.upsertDevice(normalizeZigbeeDevice(input));
+    const after = store.getDevice(old.id);
+    const afterStates = Object.values(after.entities).filter(entity => entity.stateKey === 'state');
+    assert.equal(after.areaId, area.id);
+    assert.equal(afterStates.length,1);
+    assert.equal(afterStates[0].id,beforeState.id);
+    assert.equal(afterStates[0].capability.controlId,beforeState.capability.controlId);
+    assert.equal(afterStates[0].capability.kind,'enum');
+    assert.equal(afterStates[0].state,'CLOSE');
+  } finally {await fs.rm(directory,{recursive:true,force:true});}
 });
 
 test('position-only cover rejects unsupported stop through the runtime service router', async () => {

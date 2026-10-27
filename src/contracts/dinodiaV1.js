@@ -194,7 +194,17 @@ function serializeDevice({ device, homeId, homeMembershipId, role, areaIds, surf
       const options = rawOptions.map((option) => isObject(option) && Object.hasOwn(option, 'value')
         ? { value: option.value, label: String(option.label || option.value).slice(0, 80) }
         : { value: option, label: String(option).slice(0, 80) });
-      const writable = device.setup?.viewOnly !== true && capability.writable === true && bindings.length > 0 && !(valueType === 'option' && options.length === 0);
+      // V1 treats every option as an absolute set-value. Do not expose a
+      // mixed state/action control when even one option is a momentary or
+      // unsupported operation such as STOP or TOGGLE. Keep state readable.
+      const sourceDomain = String(source.domain || '').toLowerCase();
+      const sourceProperty = String(source.stateKey || '').toLowerCase();
+      const stateOptions = source.binding?.adapter === 'zigbee' && (sourceProperty === 'state' || sourceProperty === 'power' || sourceProperty.startsWith('state_')) && valueType === 'option';
+      const safeValues = sourceDomain === 'cover' ? ['OPEN', 'CLOSE'] : ['switch', 'light'].includes(sourceDomain) ? ['ON', 'OFF'] : null;
+      const mixedAction = stateOptions && safeValues && options.some(option => !safeValues.includes(option.value));
+      const conflictingSwitchEncoding = stateOptions && ['switch', 'light'].includes(sourceDomain)
+        && ((source.expose?.value_on != null && source.expose.value_on !== 'ON') || (source.expose?.value_off != null && source.expose.value_off !== 'OFF'));
+      const writable = device.setup?.viewOnly !== true && capability.writable === true && bindings.length > 0 && !(valueType === 'option' && options.length === 0) && !mixedAction && !conflictingSwitchEncoding;
       // The v1 contract cannot represent a writable-only capability. Do not
       // discard the entire device or pretend the action is safe to invoke;
       // a later explicitly negotiated contract may represent it honestly.
