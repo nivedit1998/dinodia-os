@@ -48,6 +48,10 @@ test('tenant descriptor routes explicitly advertised cover OPEN once to the exac
       definition:{exposes:[{type:'switch',features:[{type:'enum',property:'state_left_upper',access:7,values:['ON','OFF','TOGGLE']}]}]}});
     await hub.store.upsertDevice({...mixedNamedChannel,areaId:area.id,managementClass:'property_device'});
     await hub.store.completeDeviceSetup(mixedNamedChannel.id,{areaId:area.id,labelId:'none'});
+    const ordinaryChannel = normalizeZigbeeDevice({ieee_address:'0x00112233445566fa',friendly_name:'synthetic-channel',
+      definition:{exposes:[{type:'switch',features:[{type:'enum',property:'state_l1',access:7,values:['ON','OFF']}]}]}});
+    await hub.store.upsertDevice({...ordinaryChannel,areaId:area.id,managementClass:'property_device'});
+    await hub.store.completeDeviceSetup(ordinaryChannel.id,{areaId:area.id,labelId:'none'});
     const light = normalizeZigbeeDevice({ieee_address:'0x00112233445566ee',friendly_name:'synthetic-light',
       definition:{exposes:[{type:'light',features:[{type:'enum',property:'state',access:7,values:['ON','OFF']}]}]}});
     await hub.store.upsertDevice({...light,areaId:area.id,managementClass:'property_device'});
@@ -136,5 +140,14 @@ test('tenant descriptor routes explicitly advertised cover OPEN once to the exac
     assert.equal(offResponse.status,202);
     for (let i=0; i<20 && calls.length<4; i++) await new Promise(resolve=>setTimeout(resolve,10));
     assert.deepEqual(calls[3],{id:light.id,payload:{state:'OFF'}});
+    const channelDto = devices.find(item=>item.id===ordinaryChannel.id);
+    const channelState = channelDto?.controls.find(item=>item.valueType==='option');
+    assert.ok(channelState?.writable);
+    const channelOn = {...command,commandId:'command-channel-fixture',deviceId:ordinaryChannel.id,controlId:channelState.controlId,
+      descriptorRevision:channelDto.descriptorRevision,value:'ON',idempotencyKey:'channel-command-on-123456'};
+    const channelResponse = await fetch(`${base}/api/dinodia/v1/commands`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':channelOn.idempotencyKey},body:JSON.stringify(channelOn)});
+    assert.equal(channelResponse.status,202);
+    for (let i=0; i<20 && calls.length<5; i++) await new Promise(resolve=>setTimeout(resolve,10));
+    assert.deepEqual(calls[4],{id:ordinaryChannel.id,payload:{state_l1:'ON'}},'the channel is routed to its exact advertised source');
   } finally {await hub.stop();await fs.rm(directory,{recursive:true,force:true});}
 });
