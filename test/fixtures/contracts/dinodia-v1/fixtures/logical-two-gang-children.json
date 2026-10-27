@@ -1,0 +1,80 @@
+[
+  {
+    "id": "logical:v1:8b53a29dceb4337f0adb3ad5e467eefbbe7ae15b7107dd75bd6b9bcbbcb6a004",
+    "homeId": "00000000-0000-4000-8000-0000000000aa",
+    "managementClass": "property_device",
+    "ownerMembershipId": null,
+    "lifecycle": "installed",
+    "technicalLabel": "zigbee",
+    "customerLabel": "Light 1",
+    "areaIds": [
+      "43b5aac8-a321-415a-a97e-efb5f31fcace"
+    ],
+    "controls": [
+      {
+        "schemaVersion": 1,
+        "deviceId": "logical:v1:8b53a29dceb4337f0adb3ad5e467eefbbe7ae15b7107dd75bd6b9bcbbcb6a004",
+        "surfaceId": "logical:v1:8b53a29dceb4337f0adb3ad5e467eefbbe7ae15b7107dd75bd6b9bcbbcb6a004:surface:l1:switch",
+        "controlId": "ctrl_832b55384a85622c045d83adf04e2f1526a4a992",
+        "label": "State L1",
+        "group": "Light 1",
+        "sortOrder": 0,
+        "valueType": "boolean",
+        "interactionKind": "toggle",
+        "semanticRole": "power",
+        "readable": true,
+        "writable": true,
+        "automatable": true,
+        "observable": true,
+        "idempotency": "set_value",
+        "confirmationPolicy": "matching_observation",
+        "riskLevel": "normal",
+        "stepUpPolicy": "none",
+        "expectedReportingIntervalSeconds": 120,
+        "maxStateValiditySeconds": 420,
+        "unsupportedReason": null,
+        "catalogRevision": 1
+      }
+    ],
+    "descriptorRevision": 1
+  },
+  {
+    "id": "logical:v1:d520c48e97a64e31116de4cab12be1da5d72169071567afa355eb1a64b9fbf7b",
+    "homeId": "00000000-0000-4000-8000-0000000000aa",
+    "managementClass": "property_device",
+    "ownerMembershipId": null,
+    "lifecycle": "installed",
+    "technicalLabel": "zigbee",
+    "customerLabel": "Light 2",
+    "areaIds": [
+      "40738e6c-34ca-4a70-a59d-6052bb1defff"
+    ],
+    "controls": [
+      {
+        "schemaVersion": 1,
+        "deviceId": "logical:v1:d520c48e97a64e31116de4cab12be1da5d72169071567afa355eb1a64b9fbf7b",
+        "surfaceId": "logical:v1:d520c48e97a64e31116de4cab12be1da5d72169071567afa355eb1a64b9fbf7b:surface:l2:switch",
+        "controlId": "ctrl_603c51bd3e3864fb1e2de58ccdb1e9d2cfa0941e",
+        "label": "State L2",
+        "group": "Light 2",
+        "sortOrder": 0,
+        "valueType": "boolean",
+        "interactionKind": "toggle",
+        "semanticRole": "power",
+        "readable": true,
+        "writable": true,
+        "automatable": true,
+        "observable": true,
+        "idempotency": "set_value",
+        "confirmationPolicy": "matching_observation",
+        "riskLevel": "normal",
+        "stepUpPolicy": "none",
+        "expectedReportingIntervalSeconds": 120,
+        "maxStateValiditySeconds": 420,
+        "unsupportedReason": null,
+        "catalogRevision": 1
+      }
+    ],
+    "descriptorRevision": 1
+  }
+]
