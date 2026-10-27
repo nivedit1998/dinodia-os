@@ -6,6 +6,7 @@ const CATEGORY_POLICIES = Object.freeze({
 });
 function analyticsEligible(policy) {
   return policy?.managementClass === 'PROPERTY_DEVICE' && policy.ownerMembershipId == null &&
-    ['INSTALLED', 'VIEW_ONLY'].includes(policy.lifecycle) && Boolean(CATEGORY_POLICIES[policy.analyticsCategory]);
+    ['INSTALLED', 'VIEW_ONLY'].includes(policy.lifecycle) && typeof policy.analyticsCategory === 'string' &&
+    Object.hasOwn(CATEGORY_POLICIES, policy.analyticsCategory);
 }
 module.exports = { CATEGORY_POLICIES, analyticsEligible };

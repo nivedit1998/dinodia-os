@@ -10,6 +10,11 @@ test('category eligibility never admits private, NONE, retired or owner-bearing 
   for (const change of [{ managementClass: 'TENANT_DEVICE' }, { ownerMembershipId: 'tenant' },
     { analyticsCategory: 'NONE' }, { lifecycle: 'REMOVED' }]) assert.equal(resolve([power], { ...policy, ...change }).status, 'ineligible');
 });
+test('unknown category names including inherited object keys fail closed', () => {
+  for (const analyticsCategory of ['toString', 'constructor', '__proto__']) {
+    assert.equal(resolve([power], { ...policy, analyticsCategory }).status, 'ineligible');
+  }
+});
 test('power wins within one group; a missing value cannot rebind to brightness', () => {
   const controls = [power, { ...power, controlId: 'brightness', semanticRole: 'brightness' }];
   assert.equal(resolve(controls).primaryControlId, 'power');
