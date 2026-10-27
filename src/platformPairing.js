@@ -106,6 +106,7 @@ class PlatformPairing {
       version: String(runtime?.version || "0.0.0"),
       capabilities: { managedAreaProvisioningV1: true, managedDevicePresentationV1: true, activityIncidentReportingV1: true, alexaNativeProjectionV1: true, alexaNativeDirectiveV1: true, ...(runtime?.capabilities || {}) },
     };
+    this.analyticsRuntimeSessionId = crypto.randomUUID();
     this.getAreaSnapshot = getAreaSnapshot || (() => ({ schemaVersion: 1, capturedAt: new Date().toISOString(), areas: [] }));
     this.getHeatingUsage = getHeatingUsage || (() => null);
     this.getHeatingUsageResetAck = getHeatingUsageResetAck || (() => null);
@@ -300,6 +301,11 @@ class PlatformPairing {
     const signedBody = { serial: this.serial, identityGeneration: Number(identity.generation), ...(body || {}) };
     const timestamp = Date.now();
     const nonce = crypto.randomBytes(24).toString("base64url");
+    if (path === '/api/hub-agent/token-state' && this.runtime.capabilities.nativeUniversalStateAnalyticsV1 === true) {
+      signedBody.analyticsContract = {contractVersion:1,analyticsPolicyVersion:4,
+        appliedCloudRevision:Number(this.store.getSyncOutbox?.()?.configurationAppliedRevision || 0),
+        runtimeSessionId:this.analyticsRuntimeSessionId,requestNonce:nonce};
+    }
     const bodyHash = crypto.createHash("sha256").update(JSON.stringify(signedBody), "utf8").digest("hex");
     const platform = this.store.getPlatform?.() || {};
     const machineCredential = !forceManufacturingIdentity && platform.paired ? this.vault?.get?.("platform.machineCredential") : null;

@@ -245,7 +245,7 @@ function serializeDevice({ device, homeId, homeMembershipId, role, areaIds, surf
         stepUpPolicy,
         ...(Object.keys(constraints).length ? { constraints } : {}),
         ...(capability.observable !== false ? observationTiming(device, source, capability) : {}),
-        unsupportedReason: null,
+        unsupportedReason: typeof capability.unsupportedReason === 'string' ? capability.unsupportedReason.slice(0,120) : null,
         catalogRevision: revisionForControl,
       });
     }

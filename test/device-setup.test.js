@@ -97,7 +97,7 @@ test("radiator setup produces one climate surface from Matter thermostat capabil
       1: {
         device_types: [{ id: 769 }],
         clusters: {
-          513: { attributes: { 0: 2100, 18: 1950, 28: "heat", 41: "heat" } },
+          513: { attributes: { 0: 2100, 18: 1950, 21: 700, 22: 3500, 28: "heat", 41: "heat" } },
         },
       },
     },
@@ -108,19 +108,19 @@ test("radiator setup produces one climate surface from Matter thermostat capabil
   assert.equal(surfaces.length, 1);
   assert.equal(surfaces[0].domain, "climate");
   assert.ok(surfaces[0].serviceRoutes["climate.set_temperature"]);
-  assert.ok(surfaces[0].serviceRoutes["climate.set_hvac_mode"]);
-  assert.equal(surfaces[0].attributes.temperature, 1950);
-  assert.equal(surfaces[0].attributes.current_temperature, 2100);
+  assert.equal(surfaces[0].serviceRoutes["climate.set_hvac_mode"], undefined, 'an unsupported enum codec must not advertise a writable mode');
+  assert.equal(surfaces[0].attributes.temperature, 19.5);
+  assert.equal(surfaces[0].attributes.current_temperature, 21);
   assert.equal(Object.values(updated.entities).some((entity) => entity.stateKey === "ThermostatRunningState" && entity.capability.writable), false);
 
   const calls = [];
   const model = new HomeAssistantModel({ store, commandDevice: async () => {}, commandEntity: async (...args) => calls.push(args) });
   const [entity] = model.entities();
   assert.equal(entity.domain, "climate");
-  await model.callService("climate", "set_temperature", { entity_id: entity.haId, temperature: 2000 });
+  await model.callService("climate", "set_temperature", { entity_id: entity.haId, temperature: 20 });
   assert.equal(calls.length, 1);
   assert.equal(calls[0][2], "climate.set_temperature");
-  assert.equal(calls[0][3].temperature, 2000);
+  assert.equal(calls[0][3].temperature, 20);
 });
 
 test("legacy child assignments are preserved and conflicting assignments require device setup", async () => {

@@ -172,6 +172,8 @@ function normalizeExpose(expose, context, output) {
       observable: flags.readable,
       primary: ["state", "power", "position", "brightness"].includes(property.toLowerCase()) || property.toLowerCase().startsWith("state_") || property.toLowerCase().startsWith("brightness_"),
       semanticRole: semanticRoleFor(property, domain, expose, flags.readable, flags.writable),
+      ...(['current_position'].includes(property) && domain === 'cover' && flags.readable && !flags.writable
+        ? {observationMeaning:'actual_position'} : {}),
       stateKey: property,
       unit: expose.unit,
       deviceClass: expose.device_class,

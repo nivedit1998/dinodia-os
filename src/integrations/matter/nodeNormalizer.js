@@ -73,6 +73,11 @@ function serviceFor(clusterId, attributeId, descriptor, endpoint, rawDescriptor 
   }
   const domain = clusterKey === CLUSTERS.onoff ? "switch" : clusterKey === CLUSTERS.levelcontrol ? "number" : clusterKey === CLUSTERS.colorcontrol ? "light" : clusterKey === CLUSTERS.doorlock ? "lock" : clusterKey === CLUSTERS.windowcovering ? "cover" : clusterKey === CLUSTERS.thermostat ? (lower.includes("setpoint") || lower.includes("mode") ? "climate" : "sensor") : clusterKey === CLUSTERS.fancontrol ? "fan" : clusterKey === CLUSTERS.occupancysensing || clusterKey === CLUSTERS.booleanstate ? "binary_sensor" : "sensor";
   const enumType = descriptor?.type === "enum" || descriptor?.options || /enum$/i.test(String(descriptor?.type || ""));
+  // These attributes remain readable. Do not advertise writes until an exact
+  // attribute codec and supported-value proof exist in the real adapter.
+  if (clusterKey === CLUSTERS.thermostat && attributeKey === '28'
+    || clusterKey === CLUSTERS.fancontrol && attributeKey === '0'
+    || clusterKey === CLUSTERS.colorcontrol) writable = false;
   const kind = clusterInfo.attributes?.[attributeKey]?.type === 'temperature' ? 'number' : domain === "cover" && ['8', '9', '11', '12', '14', '15'].includes(attributeKey) ? 'number' : domain === "fan" ? (enumType || lower.includes("fanmode") ? "enum" : lower.includes("percent") || lower.includes("speed") ? "number" : "binary") : domain === "switch" || domain === "lock" ? "binary" : enumType ? "enum" : descriptor?.type === "boolean" ? "binary" : writable ? "number" : "sensor";
   const category = writable ? "control" : "diagnostic";
   const bindings = [];
@@ -104,6 +109,9 @@ function serviceFor(clusterId, attributeId, descriptor, endpoint, rawDescriptor 
       ...(typeof descriptor.min === 'number' ? { min: descriptor.min / 100 } : {}),
       ...(typeof descriptor.max === 'number' ? { max: descriptor.max / 100 } : {}) } : descriptor;
   const capability = normalizeCapability({ runtime: "dinodia_os", kind, category, readable: true, writable, observable: true, primary: clusterId === CLUSTERS.onoff || clusterId === CLUSTERS.levelcontrol || clusterId === CLUSTERS.thermostat && attributeId === "18", semanticRole: semanticRoleFor(clusterId, attributeId), stateKey: logicalKey, unit: clusterInfo.attributes?.[attributeKey]?.type === 'temperature' ? '°C' : unit, deviceClass: descriptor?.device_class, constraints, bindings });
+  if (!writable && (clusterKey === CLUSTERS.thermostat && attributeKey === '28'
+    || clusterKey === CLUSTERS.fancontrol && attributeKey === '0' || clusterKey === CLUSTERS.colorcontrol))
+    capability.unsupportedReason = 'This integration does not yet verify a supported write operation for this value';
   return {
     id: `${endpointId}:${logicalKey}`,
     sourceId: `${endpointId}:${clusterId}:${attributeId}`,

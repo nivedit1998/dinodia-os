@@ -1181,6 +1181,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         // or signed deletion reconciliation.
         nativeLogicalDevicesV1: true,
         nativeDailyAnalyticsV1: true,
+        nativeUniversalStateAnalyticsV1: true,
         nativeDailyAnalyticsBuildId: runtimeConfig.buildId || null,
         ...runtimeConfig.nativeCommissioningCapabilities },
     },

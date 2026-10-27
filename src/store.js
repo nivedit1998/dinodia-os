@@ -20,6 +20,7 @@ const { SYNC_BATCH_MAX_EVENTS, compactUnregisteredPropertyDeviceEvents, enqueueS
 const { validateCloudConfiguration, projectCloudDevicePolicies } = require("./sync/cloudConfiguration");
 const { activityFor, advanceUsage, capUsageAtLastAlive, endUsageAssignment, endUsageDeviceAvailability, initialUsageState, observeUsage, usageClockTrusted } = require("./sync/usageBuckets");
 const dailyAnalytics = require('./sync/dailyAnalytics');
+const stateAnalytics = require('./sync/stateAnalytics');
 const { assertNoRestorePendingSync, ensureInitializedMarkerSync, hasInitializedMarkerSync, persistStoreJson, writeBytesAtomically } = require("./durableStoreFile");
 
 const STORE_MUTATION_CONTEXT = new AsyncLocalStorage();
@@ -302,6 +303,39 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
   // the Store's local serial/instance identity record. It is supplied by the
   // runtime caller only after that broker has verified the current identity.
   const generation = Number(options.sourceGeneration);
+  if (!Object.hasOwn(stateAnalytics.POLICIES,String(policy?.analyticsCategory))) stateAnalytics.suspend(state.syncUsage || {},deviceId);
+  if (Object.hasOwn(stateAnalytics.POLICIES, String(policy?.analyticsCategory))) {
+    const usage = state.syncUsage = initialUsageState(state.syncUsage);
+    const daily = dailyAnalytics.initialize(usage, state.platform?.cloudConfiguration?.analyticsHistory, nowMs);
+    stateAnalytics.initialize(usage, daily);
+    const interval = policy.analyticsInterval;
+    const permitted = policy.managementClass === 'PROPERTY_DEVICE' && !policy.ownerMembershipId
+      && ['INSTALLED','VIEW_ONLY'].includes(policy.lifecycle) && policy.osAreaIds?.includes(String(device.areaId))
+      && interval?.writerEnabled === true && interval.analyticsPolicyVersion === 4 && interval.sourceGeneration === generation;
+    if (!permitted) {stateAnalytics.suspend(usage,deviceId);return false;}
+    if (device.available === false) {stateAnalytics.end(usage, deviceId, nowMs);return false;}
+    const catalog = nativeSyncControlCatalogProjection(state, device);
+    const entities = Object.values(device.entities || {});
+    const controls = (catalog?.controls || []).map(control => {
+      const entity = entities.find(e => String(e.capability?.controlId || e.controlId || e.id || e.sourceId || '') === control.controlId);
+      return {...control, endpointId:entity?.endpointId ?? entity?.binding?.endpoint,
+        observationMeaning:entity?.capability?.observationMeaning};
+    });
+    const binding = resolveCategoryBinding({signedPolicy:policy,controls});
+    const control = binding.status === 'resolved' ? controls.find(c => c.controlId === binding.primaryControlId) : null;
+    if (!control) {stateAnalytics.end(usage, deviceId, nowMs);return false;}
+    const entity = entities.find(e => String(e.capability?.controlId || e.controlId || e.id || e.sourceId || '') === control.controlId);
+    const admitted = entity?.admittedEvidence;
+    let evidence = entity && admitted?.quality === 'fresh' && admitted.observedAt === entity.sourceObservedAt
+      && admitted.sourceGeneration === generation && admitted.controlId === control.controlId
+      && admitted.sourceKey === exactSource(device,entity,control,generation).sourceKey
+      ? admitted : entity ? resolveStateEvidence({device,control,entity,records:state.observationPolicy?.records || {},
+        sourceGeneration:generation,authorityValid:true,clockTrusted:true,now:nowMs}) : null;
+    if (Number.isSafeInteger(options.ignoreThroughMs) && Date.parse(evidence?.observedAt) <= options.ignoreThroughMs) evidence = null;
+    return stateAnalytics.observe(usage,{osDeviceId:deviceId,osAreaId:String(device.areaId),analyticsCategory:policy.analyticsCategory,
+      controlId:control.controlId,sourceGeneration:generation,bindingRevision:interval.revision,analyticsIntervalId:interval.id,
+      analyticsPolicyVersion:4,assignmentEpochAt:dailyAnalytics.assignmentStart(usage,device,policy),validFrom:interval.validFrom,evidence},nowMs);
+  }
   if (!policy || policy.managementClass !== "PROPERTY_DEVICE" || policy.lifecycle === "RETIRED"
     || policy.lifecycle === "REMOVED" || policy.lifecycle === "REMOVAL_PENDING"
     || !["LIGHT", "BOILER", "RADIATOR"].includes(policy.analyticsCategory)
@@ -1296,6 +1330,7 @@ class Store {
     if (this.usageAliveThroughMs !== null) {
       this.state.syncUsage = capUsageAtLastAlive(this.state.syncUsage, this.usageAliveThroughMs);
       dailyAnalytics.capDailyAtLastAlive(this.state.syncUsage, this.usageAliveThroughMs);
+      stateAnalytics.capAtLastAlive(this.state.syncUsage, this.usageAliveThroughMs);
     }
     this.usageClockTrust = systemClockSynchronized;
     this.usageClockWasUntrusted = false;
@@ -1365,6 +1400,8 @@ class Store {
         }
         for (const source of Object.values(this.state.syncUsage.dailyAnalytics?.temperatures || {}))
           source.validUntil = new Date(Math.min(Date.parse(source.validUntil), Math.max(source.accountedThrough, this.usageAliveThroughMs || 0))).toISOString();
+        for (const source of Object.values(this.state.syncUsage.stateAnalytics?.sources || {}))
+          source.validUntil = Math.min(source.validUntil, Math.max(source.accountedThrough, this.usageAliveThroughMs || 0));
       }
       this.usageClockWasUntrusted = true; this.usageClockTrustedSinceMs = null;
     }
@@ -3517,6 +3554,10 @@ class Store {
         if (daily.barrierQueued) for (const event of dailyAnalytics.dailyEvents(this.state.syncUsage)) {
           const queuedEvent = enqueueSyncEventInState(this.state, 'analytics.day', event.aggregateId, event.payload, { now: nowMs });
           if (queuedEvent) { daily.queuedRevisions[event.key] = event.payload.revision; daily.queuedSequences[event.key] = queuedEvent.sequence; queued++; }
+        }
+        if (daily.barrierQueued) for (const event of stateAnalytics.events(this.state.syncUsage, nowMs)) {
+          const queuedEvent = enqueueSyncEventInState(this.state, 'analytics.state.day', event.aggregateId, event.payload, {now:nowMs});
+          if (queuedEvent) {this.state.syncUsage.stateAnalytics.queued[event.aggregateId]=event.payload.revision;queued++;}
         }
       }
       const cutoff = nowMs - 366 * 24 * 60 * 60 * 1000;

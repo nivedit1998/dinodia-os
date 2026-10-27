@@ -185,6 +185,13 @@ function prune(value, references) {
 }
 
 function purgeReferences(state, references) {
+  const multi = state.syncUsage?.stateAnalytics;
+  if (multi) {
+    for (const [key, row] of Object.entries(multi.days || {})) if (contains(row, references)) {
+      delete multi.days[key]; delete multi.queued[key];
+    }
+    multi.sources = prune(multi.sources, references);
+  }
   const daily = state.syncUsage?.dailyAnalytics;
   if (daily) {
     for (const [key, row] of Object.entries(daily.days || {})) if (contains(row, references)) {

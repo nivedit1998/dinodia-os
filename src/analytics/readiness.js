@@ -16,7 +16,8 @@ function analyticsReadiness(store, device, policy) {
   const base = { selectedControlId: policy?.analyticsInterval?.selectedControlId ?? null, candidates,
     signal: binding.semanticRole || null, collection: null, state: binding.status, reason: binding.reason };
   if (binding.status !== 'resolved') return base;
-  if (!analyticsEligible(policy)) return { ...base, state: 'limited', reason: 'compatible_analytics_writer_unavailable' };
+  if (!analyticsEligible(policy) && !(policy?.analyticsInterval?.analyticsPolicyVersion === 4 && policy.analyticsInterval.writerEnabled === true))
+    return { ...base, state: 'limited', reason: 'compatible_analytics_writer_unavailable' };
   if (device.available === false) return { ...base, state: 'paused', reason: 'device_unreachable' };
   if (device.protocol !== 'zigbee') return { ...base, state: 'limited', reason: device.protocol === 'matter' ? 'matter_report_provenance_unavailable' : 'provider_observation_unverified' };
   const records = Object.values(store.getObservationPolicyRecords?.() || {}).filter(record => record.deviceId === device.id && record.controlId === binding.primaryControlId);
