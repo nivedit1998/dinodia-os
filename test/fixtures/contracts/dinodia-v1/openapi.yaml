@@ -795,6 +795,11 @@ paths:
       parameters:
         - { $ref: "#/components/parameters/HomeId" }
         - in: header
+          name: X-Dinodia-Analytics-Contract
+          required: false
+          description: Opt in to bounded stateCategories metadata. Without this header the legacy bootstrap shape is unchanged.
+          schema: { type: string, enum: ["1"] }
+        - in: header
           name: X-Dinodia-Home-Id
           required: true
           description: Selected-home selector only; the server independently resolves current account membership and role.
