@@ -20,8 +20,24 @@ test("Matter endpoint and cluster data creates typed controls", () => {
   assert.equal(onoff.domain, "switch");
   assert.ok(onoff.capability.services.includes("switch.toggle"));
   assert.equal(level.domain, "number");
-  assert.deepEqual(commandForBinding(onoff, "switch.turn_on"), { endpoint_id: 1, cluster_id: 6, attribute_id: 0, command_name: "on", operation: "turn_on" });
-  assert.deepEqual(commandForBinding(level, "number.set_value", { value: 200 }), { endpoint_id: 1, cluster_id: 8, attribute_id: 0, command_name: "move_to_level", operation: "set_value", payload: { value: 200 } });
+  assert.deepEqual(commandForBinding(onoff, "switch.turn_on"), { endpoint_id: 1, cluster_id: 6, attribute_id: 0, command_name: "On", operation: "turn_on" });
+  assert.deepEqual(commandForBinding(level, "number.set_value", { value: 200 }), { endpoint_id: 1, cluster_id: 8, attribute_id: 0, command_name: "MoveToLevel", operation: "set_value", payload: { level: 200, transitionTime: 0 } });
+});
+
+test('Matter Server flat attribute paths produce exact endpoint cover command evidence', () => {
+  const device = normalizeMatterNode({ node_id: 44, fabric_id: 'f', endpoints: {}, attributes: {
+    '1/258/8': 30, '1/258/65529': [0, 1], '2/258/8': 70, '2/258/65529': [2], '1/513/0': 2150,
+  } });
+  const entities = Object.values(device.entities);
+  const cover = endpoint => entities.find(e => e.binding?.endpointId === endpoint && e.binding?.attributeId === '8');
+  assert.deepEqual(cover('1').capability.services, ['cover.open_cover', 'cover.close_cover']);
+  assert.deepEqual(cover('2').capability.services, ['cover.stop_cover']);
+  assert.equal(commandForBinding(cover('1'), 'cover.open_cover', {}, device).endpoint_id, 1);
+  assert.throws(() => commandForBinding(cover('2'), 'cover.open_cover', {}, device));
+  assert.equal(entities.find(e => e.binding?.clusterId === '513').state, 21.5, 'Matter temperatures use hundredths of a degree');
+  const oversized = Object.fromEntries(Array.from({ length: 4097 }, (_, i) => [`1/9/${i}`, i]));
+  oversized['1/258/8'] = 30;
+  assert.equal(Object.keys(normalizeMatterNode({ node_id: 45, attributes: oversized }).entities).length, 0);
 });
 
 test("Matter nodes without endpoint data still remain compatible and observable", () => {
@@ -46,8 +62,8 @@ test("Matter standard cover and fan clusters expose only typed controls", () => 
   assert.ok(cover.capability.services.includes("cover.open_cover"));
   assert.ok(cover.capability.services.includes("cover.set_cover_position"));
   assert.ok(fan.capability.services.includes("fan.set_percentage"));
-  assert.deepEqual(commandForBinding(cover, "cover.open_cover", {}, device), { endpoint_id: 1, cluster_id: 258, attribute_id: 8, command_name: "open", operation: "open_cover" });
-  assert.deepEqual(commandForBinding(fan, "fan.set_percentage", { percentage: 60 }), { endpoint_id: 2, cluster_id: 514, attribute_id: 2, command_name: "write_attribute", operation: "set_percentage", payload: { percentage: 60 } });
+  assert.deepEqual(commandForBinding(cover, "cover.open_cover", {}, device), { endpoint_id: 1, cluster_id: 258, attribute_id: 8, command_name: "UpOrOpen", operation: "open_cover" });
+  assert.deepEqual(commandForBinding(fan, "fan.set_percentage", { percentage: 60 }), { endpoint_id: 2, cluster_id: 514, attribute_id: 2, attribute_value:60, operation: "set_percentage" });
 });
 
 test('Matter cover commands require the exact endpoint accepted-command list, including persisted bindings', () => {
@@ -60,7 +76,7 @@ test('Matter cover commands require the exact endpoint accepted-command list, in
   const verifiedDevice = make([0, 2]);
   const verified = cover(verifiedDevice);
   assert.deepEqual(verified.capability.services, ['cover.open_cover', 'cover.stop_cover']);
-  assert.equal(commandForBinding(verified, 'cover.open_cover', {}, verifiedDevice).command_name, 'open');
+  assert.equal(commandForBinding(verified, 'cover.open_cover', {}, verifiedDevice).command_name, 'UpOrOpen');
   assert.throws(() => commandForBinding(verified, 'cover.close_cover', {}, verifiedDevice));
   const persisted = structuredClone(verified);
   delete persisted.attributes.acceptedCommandIds;
@@ -75,6 +91,8 @@ test('Matter cover commands require the exact endpoint accepted-command list, in
   assert.ok(cover(make({ value: [0] })).capability.services.includes('cover.open_cover'));
   const positionDevice = make([5]);
   const position = cover(positionDevice);
+  assert.deepEqual(commandForBinding(position, 'cover.set_cover_position', {position: 75}, positionDevice).payload, {liftPercent100thsValue: 2500});
+  assert.equal(position.state, 60, 'Matter closed percentage is inverted to opening percentage');
   for (const invalid of [null, '', '50', -1, 101, NaN])
     assert.throws(() => commandForBinding(position, 'cover.set_cover_position', { position: invalid }, positionDevice));
   const missing = structuredClone(position);
@@ -111,7 +129,7 @@ test('Matter bridge updates the authoritative accepted list before a subsequent 
     } }], { allowNew: true });
     let device = store.getDevice('matter:f:31');
     let position = Object.values(device.entities).find(e => e.binding?.attributeId === '8');
-    assert.equal(commandForBinding(position, 'cover.open_cover', {}, device).command_name, 'open');
+    assert.equal(commandForBinding(position, 'cover.open_cover', {}, device).command_name, 'UpOrOpen');
     const persist = store.persist.bind(store);
     let release;
     const held = new Promise(resolve => { release = resolve; });
@@ -132,7 +150,7 @@ test('Matter bridge updates the authoritative accepted list before a subsequent 
     position = Object.values(device.entities).find(e => e.binding?.attributeId === '8');
     assert.equal(position.capability.services.includes('cover.open_cover'), false);
     assert.throws(() => commandForBinding(position, 'cover.open_cover', {}, device));
-    assert.equal(commandForBinding(position, 'cover.close_cover', {}, device).command_name, 'close');
+    assert.equal(commandForBinding(position, 'cover.close_cover', {}, device).command_name, 'DownOrClose');
     const restarted = new Store(path.join(directory, 'dinodia.json')).getDevice('matter:f:31');
     const restartedPosition = Object.values(restarted.entities).find(e => e.binding?.attributeId === '8');
     assert.equal(restartedPosition.capability.services.includes('cover.open_cover'), false);
@@ -165,7 +183,7 @@ test('failed Matter command-list persistence does not discard a queued unrelated
     const restarted = new Store(file);
     assert.ok(restarted.listAreas().some(item => item.id === 'unrelated'));
     const restored = restarted.getDevice('matter:f:32');
-    assert.equal(commandForBinding(Object.values(restored.entities).find(e => e.binding?.attributeId === '8'), 'cover.open_cover', {}, restored).command_name, 'open');
+    assert.equal(commandForBinding(Object.values(restored.entities).find(e => e.binding?.attributeId === '8'), 'cover.open_cover', {}, restored).command_name, 'UpOrOpen');
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });
 
@@ -180,7 +198,7 @@ test('Matter cover dispatch is fenced until current-connection inventory is pers
     let release;
     const held = new Promise(resolve => { release = resolve; });
     bridge.request = async command => { if (command === 'start_listening') { await held; return [node]; } return { ok: true }; };
-    const command = { endpoint_id: 1, cluster_id: 258, command_name: 'open' };
+    const command = { endpoint_id: 1, cluster_id: 258, command_name: 'UpOrOpen' };
     const refresh = bridge.refresh();
     await assert.rejects(bridge.command('matter:f:33', command, { verifiedCoverBinding: true }), /current verified/);
     release();
@@ -222,6 +240,15 @@ test('Matter cover dispatch is fenced until current-connection inventory is pers
     await bridge.handleMessage(JSON.stringify({ event: 'node_updated', data: { node: { node_id: 33, fabric_id: 'f' } } }));
     await assert.rejects(bridge.command('matter:f:33', command, { verifiedCoverBinding: true }), /current verified/);
     await bridge.handleMessage(JSON.stringify({ event: 'node_updated', data: { node } }));
+    assert.deepEqual(await bridge.command('matter:f:33', command, { verifiedCoverBinding: true }), { ok: true });
+    let cachedReads = 0;
+    bridge.request = async (name, args) => {
+      if (name === 'get_node') { cachedReads++; assert.equal(args.node_id, 33); return node; }
+      if (name === 'start_listening') return [node];
+      return {ok:true};
+    };
+    await bridge.handleMessage(JSON.stringify({ event: 'node_updated', data: { node_id: 33, endpoints: {2:{clusters:{6:{attributes:{0:true}}}}} } }));
+    assert.equal(cachedReads, 1, 'partial updates reconcile once from controller cache');
     assert.deepEqual(await bridge.command('matter:f:33', command, { verifiedCoverBinding: true }), { ok: true });
     await bridge.handleMessage(JSON.stringify({ event: 'attribute_updated', data: [33, '1/258/65529', []] }));
     await assert.rejects(bridge.command('matter:f:33', command, { verifiedCoverBinding: true }), /current verified/);

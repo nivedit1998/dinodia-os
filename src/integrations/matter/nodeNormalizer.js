@@ -2,6 +2,7 @@ const { stableDeviceId, normalizeEndpoint, normalizeLogicalKey } = require("../.
 const { normalizeCapability } = require("../../capabilities/schema");
 const { matterName } = require("../../deviceNaming");
 const { cluster, deviceType } = require("./catalog");
+const { decodeMatterValue, endpointInventory } = require('./valueCodec');
 
 const CLUSTERS = {
   onoff: "6", levelcontrol: "8", colorcontrol: "768", doorlock: "257", windowcovering: "258", thermostat: "513", fancontrol: "514", booleanstate: "69", occupancysensing: "1030", temperaturemeasurement: "1026", relativehumiditymeasurement: "1029", illuminancemeasurement: "1024",
@@ -66,14 +67,18 @@ function serviceFor(clusterId, attributeId, descriptor, endpoint, rawDescriptor 
   // infer them from a current-position attribute or static cluster catalog.
   if (clusterKey === CLUSTERS.windowcovering) writable = attributeKey === '8'
     && Array.isArray(acceptedCommandIds) && acceptedCommandIds.some(id => [0, 1, 2, 5].includes(id));
+  if (clusterKey === '513' && clusterInfo.attributes?.[attributeKey]?.type === 'temperature') {
+    writable = writable && ['17','18','19','20'].includes(attributeKey)
+      && Number.isInteger(descriptor.min) && Number.isInteger(descriptor.max) && descriptor.min < descriptor.max;
+  }
   const domain = clusterKey === CLUSTERS.onoff ? "switch" : clusterKey === CLUSTERS.levelcontrol ? "number" : clusterKey === CLUSTERS.colorcontrol ? "light" : clusterKey === CLUSTERS.doorlock ? "lock" : clusterKey === CLUSTERS.windowcovering ? "cover" : clusterKey === CLUSTERS.thermostat ? (lower.includes("setpoint") || lower.includes("mode") ? "climate" : "sensor") : clusterKey === CLUSTERS.fancontrol ? "fan" : clusterKey === CLUSTERS.occupancysensing || clusterKey === CLUSTERS.booleanstate ? "binary_sensor" : "sensor";
   const enumType = descriptor?.type === "enum" || descriptor?.options || /enum$/i.test(String(descriptor?.type || ""));
-  const kind = domain === "fan" ? (enumType || lower.includes("fanmode") ? "enum" : lower.includes("percent") || lower.includes("speed") ? "number" : "binary") : domain === "switch" || domain === "lock" || domain === "cover" ? "binary" : enumType ? "enum" : descriptor?.type === "boolean" ? "binary" : writable ? "number" : "sensor";
+  const kind = clusterInfo.attributes?.[attributeKey]?.type === 'temperature' ? 'number' : domain === "cover" && ['8', '9', '11', '12', '14', '15'].includes(attributeKey) ? 'number' : domain === "fan" ? (enumType || lower.includes("fanmode") ? "enum" : lower.includes("percent") || lower.includes("speed") ? "number" : "binary") : domain === "switch" || domain === "lock" ? "binary" : enumType ? "enum" : descriptor?.type === "boolean" ? "binary" : writable ? "number" : "sensor";
   const category = writable ? "control" : "diagnostic";
   const bindings = [];
   if (writable && domain === "switch") bindings.push({ serviceId: "switch.turn_on", operation: "turn_on" }, { serviceId: "switch.turn_off", operation: "turn_off" }, { serviceId: "switch.toggle", operation: "toggle" });
   if (writable && domain === "number") bindings.push({ serviceId: "number.set_value", operation: "set_value", parameter: { key: "value", type: "number", ...(descriptor?.min !== undefined ? { min: descriptor.min } : {}), ...(descriptor?.max !== undefined ? { max: descriptor.max } : {}) } });
-  if (writable && domain === "climate" && kind === "number") bindings.push({ serviceId: "climate.set_temperature", operation: "set_temperature", parameter: { key: "temperature", type: "number", ...(descriptor?.min !== undefined ? { min: descriptor.min } : {}), ...(descriptor?.max !== undefined ? { max: descriptor.max } : {}) } });
+  if (writable && domain === "climate" && kind === "number") bindings.push({ serviceId: "climate.set_temperature", operation: "set_temperature", parameter: { key: "temperature", type: "number", ...(descriptor?.min !== undefined ? { min: descriptor.min / 100 } : {}), ...(descriptor?.max !== undefined ? { max: descriptor.max / 100 } : {}) } });
   if (writable && kind === "enum") bindings.push({ serviceId: "select.select_option", operation: "select_option", parameter: { key: "option", type: "string", options: descriptor.options || clusterInfo.attributes?.[String(attributeId)]?.options || [] } });
   if (writable && domain === "climate" && kind === "enum") bindings.splice(-1, 1, { serviceId: "climate.set_hvac_mode", operation: "set_hvac_mode", parameter: { key: "hvac_mode", type: "string", options: descriptor.options || clusterInfo.attributes?.[String(attributeId)]?.options || [] } });
   if (writable && domain === "lock") bindings.push({ serviceId: "lock.lock", operation: "lock" }, { serviceId: "lock.unlock", operation: "unlock" });
@@ -94,7 +99,11 @@ function serviceFor(clusterId, attributeId, descriptor, endpoint, rawDescriptor 
   const endpointId = normalizeEndpoint(endpoint?.endpoint_id ?? endpoint?.endpointId ?? endpoint?.id ?? "0");
   const logicalKey = normalizeLogicalKey(`${clusterInfo.name}_${name}`);
   const unit = descriptor?.unit || clusterInfo.attributes?.[String(attributeId)]?.unit;
-  const capability = normalizeCapability({ runtime: "dinodia_os", kind, category, readable: true, writable, observable: true, primary: clusterId === CLUSTERS.onoff || clusterId === CLUSTERS.levelcontrol || clusterId === CLUSTERS.thermostat && attributeId === "18", semanticRole: semanticRoleFor(clusterId, attributeId), stateKey: logicalKey, unit, deviceClass: descriptor?.device_class, constraints: descriptor, bindings });
+  const constraints = clusterKey === '258' && ['8','9','11','12','14','15'].includes(attributeKey) ? { min: 0, max: 100, step: 0.01 }
+    : clusterInfo.attributes?.[attributeKey]?.type === 'temperature' ? { ...descriptor,
+      ...(typeof descriptor.min === 'number' ? { min: descriptor.min / 100 } : {}),
+      ...(typeof descriptor.max === 'number' ? { max: descriptor.max / 100 } : {}) } : descriptor;
+  const capability = normalizeCapability({ runtime: "dinodia_os", kind, category, readable: true, writable, observable: true, primary: clusterId === CLUSTERS.onoff || clusterId === CLUSTERS.levelcontrol || clusterId === CLUSTERS.thermostat && attributeId === "18", semanticRole: semanticRoleFor(clusterId, attributeId), stateKey: logicalKey, unit: clusterInfo.attributes?.[attributeKey]?.type === 'temperature' ? '°C' : unit, deviceClass: descriptor?.device_class, constraints, bindings });
   return {
     id: `${endpointId}:${logicalKey}`,
     sourceId: `${endpointId}:${clusterId}:${attributeId}`,
@@ -105,11 +114,11 @@ function serviceFor(clusterId, attributeId, descriptor, endpoint, rawDescriptor 
     category,
     name: nameOf(descriptor, `${clusterInfo.name} ${name}`),
     original_name: nameOf(descriptor, `${clusterInfo.name} ${name}`),
-    state: descriptor?.value,
+    state: decodeMatterValue(clusterId, attributeId, descriptor?.value),
     attributes: { clusterId, attributeId, cluster: clusterInfo.name, commandIds: clusterInfo.commands.map((item) => String(item.id)).slice(0, 32), endpointDeviceTypes: clone(endpoint?.device_types || endpoint?.deviceTypes || []).slice(0, 16),
       ...(clusterKey === CLUSTERS.windowcovering && acceptedCommandIds ? { acceptedCommandIds, acceptedCommandEndpoint: endpointId, acceptedCommandCluster: clusterKey } : {}) },
     capability,
-    binding: { adapter: "matter", endpointId, clusterId: String(clusterId), attributeId: String(attributeId) },
+    binding: { adapter: "matter", endpointId, clusterId: String(clusterId), attributeId: String(attributeId), valueEncoding: 'matter-v1' },
   };
 }
 
@@ -135,7 +144,8 @@ function normalizeMatterNode(node = {}) {
   const fabricId = String(node.fabric_id ?? node.fabricId ?? node.fabric?.id ?? "default");
   const infrastructure = node.infrastructure === true || [node.type, node.role].some((value) => ["controller", "coordinator", "border_router", "border-router"].includes(String(value || "").trim().toLowerCase()));
   const id = stableDeviceId("matter", { nodeId, fabricId });
-  const endpointSource = node.endpoints || node.endpoint_data || node.endpointData || {};
+  const inventory = endpointInventory(node);
+  const endpointSource = inventory.endpoints;
   const endpointEntries = Array.isArray(endpointSource) ? endpointSource.map((item) => [String(item.endpoint_id ?? item.endpointId ?? item.id ?? "0"), item]) : Object.entries(endpointSource);
   const entities = {};
   for (const [endpointId, endpoint] of endpointEntries) {
@@ -149,6 +159,14 @@ function normalizeMatterNode(node = {}) {
         const model = cluster(String(clusterId));
         const rawDescriptor = typeof value === "object" && value !== null && !Array.isArray(value) ? value : { value };
         const descriptor = { ...(model.attributes?.[String(attributeId)] || {}), ...rawDescriptor };
+        if (String(clusterId) === '513' && ['17','18','19','20'].includes(String(attributeId))) {
+          const read = id => { const entry = attributes.find(([key]) => key === id)?.[1]; return typeof entry === 'number' ? entry : entry?.value; };
+          const heat = ['18','20'].includes(String(attributeId));
+          const lower = read(heat ? '21' : '23') ?? read(heat ? '3' : '5');
+          const upper = read(heat ? '22' : '24') ?? read(heat ? '4' : '6');
+          if (Number.isInteger(lower)) descriptor.min = lower;
+          if (Number.isInteger(upper)) descriptor.max = upper;
+        }
         const entity = serviceFor(String(clusterId), String(attributeId), descriptor, { ...endpoint, endpoint_id: endpointId }, rawDescriptor, acceptedCommandIds);
         entity.deviceId = id;
         entity.id = `${id}:${entity.id}`;
@@ -156,7 +174,7 @@ function normalizeMatterNode(node = {}) {
       }
     }
   }
-  if (!Object.keys(entities).length) Object.assign(entities, fallbackStateEntities(node, id));
+  if (!Object.keys(entities).length && !inventory.incomplete) Object.assign(entities, fallbackStateEntities(node, id));
   return {
     id,
     protocol: "matter",
