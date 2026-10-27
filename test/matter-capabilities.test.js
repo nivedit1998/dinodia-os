@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { normalizeMatterNode } = require("../src/integrations/matter/nodeNormalizer");
 const { commandForBinding } = require("../src/integrations/matter/commandAdapter");
+const { analyticsReadiness } = require("../src/analytics/readiness");
 
 test("Matter endpoint and cluster data creates typed controls", () => {
   const device = normalizeMatterNode({ node_id: 17, fabric_id: "fabric-a", name: "Matter lamp", endpoints: {
@@ -42,4 +43,23 @@ test("Matter standard cover and fan clusters expose only typed controls", () => 
   assert.ok(fan.capability.services.includes("fan.set_percentage"));
   assert.deepEqual(commandForBinding(cover, "cover.open_cover"), { endpoint_id: 1, cluster_id: 258, attribute_id: 8, command_name: "open", operation: "open_cover" });
   assert.deepEqual(commandForBinding(fan, "fan.set_percentage", { percentage: 60 }), { endpoint_id: 2, cluster_id: 514, attribute_id: 2, command_name: "write_attribute", operation: "set_percentage", payload: { percentage: 60 } });
+});
+
+test("Matter covering actual position and operational status are not conflated", () => {
+  const device = normalizeMatterNode({ node_id: 29, fabric_id: "fabric-a", endpoints: {
+    1: { clusters: { 258: { attributes: { 8: { value: 30, writable: false }, 10: 1, 11: 5000, 14: 3000 } } } },
+  } });
+  const byAttribute = Object.fromEntries(Object.values(device.entities).map(entity => [entity.binding.attributeId, entity]));
+  assert.equal(byAttribute["8"].capability.semanticRole, "opening_percentage");
+  assert.equal(byAttribute["8"].capability.writable, false);
+  // Hundredths require a dedicated conversion before percentage presentation.
+  assert.notEqual(byAttribute["14"].capability.semanticRole, "opening_percentage");
+  assert.notEqual(byAttribute["10"].capability.semanticRole, "opening_percentage");
+  assert.notEqual(byAttribute["11"].capability.semanticRole, "opening_percentage");
+  const readiness = analyticsReadiness({}, device, { managementClass: 'PROPERTY_DEVICE', ownerMembershipId: null,
+    lifecycle: 'INSTALLED', analyticsCategory: 'BLIND' });
+  assert.equal(readiness.state, 'limited');
+  assert.equal(readiness.reason, 'compatible_analytics_writer_unavailable');
+  assert.equal(readiness.signal, 'opening_percentage');
+  assert.equal(readiness.candidates.length, 1);
 });

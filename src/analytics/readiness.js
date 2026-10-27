@@ -3,7 +3,14 @@ const { resolveCategoryBinding } = require('./resolveBinding');
 const { analyticsEligible } = require('./categoryPolicies');
 function analyticsReadiness(store, device, policy) {
   const binding = resolveCategoryBinding({ signedPolicy: policy, controls: Object.values(device.entities || {}).map(entity => ({ ...entity.capability,
-    controlId: entity.capability?.controlId || entity.id, endpointId: entity.endpointId || entity.binding?.endpoint })) });
+    controlId: entity.capability?.controlId || entity.id, endpointId: entity.endpointId || entity.binding?.endpoint || entity.binding?.endpointId,
+    // Matter Window Covering CurrentPositionLiftPercentage is attribute 8.
+    // This only identifies the source; it does not establish freshness or
+    // enable accounting where Matter report provenance is unavailable.
+    ...(device.protocol === 'matter' && entity.binding?.adapter === 'matter'
+      && String(entity.binding?.clusterId) === '258' && String(entity.binding?.attributeId) === '8'
+      && String(entity.binding?.endpointId) === String(entity.endpointId)
+      ? { observationMeaning: 'actual_position' } : {}) })) });
   const candidates = binding.candidates.map(group => ({ groupId: group.groupId, controls: (group.controls.some(control => control.semanticRole === 'power')
     ? group.controls.filter(control => control.semanticRole === 'power') : group.controls).map(control => ({ controlId: control.controlId, label: String(control.name || control.semanticRole).slice(0, 80) })) }));
   const base = { selectedControlId: policy?.analyticsInterval?.selectedControlId ?? null, candidates,

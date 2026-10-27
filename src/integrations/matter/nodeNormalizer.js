@@ -33,7 +33,10 @@ function semanticRoleFor(clusterId, attributeId) {
   if (clusterKey === CLUSTERS.thermostat && attributeKey === "18") return "target_temperature";
   if (clusterKey === CLUSTERS.thermostat && attributeKey === "28") return "operating_mode";
   if (clusterKey === CLUSTERS.doorlock) return "security_lock";
-  if (clusterKey === CLUSTERS.windowcovering && ["8", "10"].includes(attributeKey)) return "opening_percentage";
+  // Matter Window Covering attribute 8 is CurrentPositionLiftPercentage;
+  // attribute 10 is OperationalStatus, not a position. Attribute 14 is in
+  // hundredths of a percent and must not be exposed as a percentage unscaled.
+  if (clusterKey === CLUSTERS.windowcovering && attributeKey === "8") return "opening_percentage";
   if (clusterKey === CLUSTERS.fancontrol && ["0", "2"].includes(attributeKey)) return "operating_mode";
   return "unknown";
 }
