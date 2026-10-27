@@ -195,6 +195,10 @@ function serializeDevice({ device, homeId, homeMembershipId, role, areaIds, surf
         ? { value: option.value, label: String(option.label || option.value).slice(0, 80) }
         : { value: option, label: String(option).slice(0, 80) });
       const writable = device.setup?.viewOnly !== true && capability.writable === true && bindings.length > 0 && !(valueType === 'option' && options.length === 0);
+      // The v1 contract cannot represent a writable-only capability. Do not
+      // discard the entire device or pretend the action is safe to invoke;
+      // a later explicitly negotiated contract may represent it honestly.
+      if (writable && capability.readable === false) continue;
       const interactionKind = !writable ? 'read_only' : valueType === 'boolean' ? 'toggle' : valueType === 'number' ? (nativeRole === 'target_temperature' ? 'thermostat' : 'slider') : valueType === 'option' ? 'picker' : valueType === 'invoke' ? 'momentary_action' : 'text_input';
       const stepUpPolicy = capability.stepUpPolicy === 'required' || capability.sensitive === true || ['security_lock','lock_state'].includes(nativeRole) ? 'required' : 'none';
       const revisionForControl = Number(capability.catalogRevision ?? descriptorRevision);

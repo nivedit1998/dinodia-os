@@ -72,7 +72,20 @@ function serviceBindings(expose, domain, kind, writable) {
   if (["light", "switch"].includes(domain) && (property === "state" || property.startsWith("state_") || property === "power")) {
     for (const service of ["turn_on", "turn_off", "toggle"]) bindings.push({ serviceId: `${domain}.${service}`, operation: service });
   } else if (domain === "cover") {
-    for (const service of ["open_cover", "close_cover", "stop_cover", "set_cover_position"]) bindings.push({ serviceId: `cover.${service}`, operation: service });
+    // Exposes describe individual properties, not a promise that every cover
+    // operation is supported. In particular, a writable position property
+    // does not advertise a STOP command on that property.
+    if (["position", "current_position"].includes(property) && String(expose.type || "").toLowerCase() === "numeric") {
+      const parameter = parameterFor(expose, "number", domain);
+      if (parameter) parameter.key = "position";
+      bindings.push({ serviceId: "cover.set_cover_position", operation: "set_cover_position", parameter });
+    } else if (property === "state") {
+      const advertised = new Set([...(Array.isArray(expose.values) ? expose.values : []), expose.value_on, expose.value_off]
+        .filter(value => typeof value === "string"));
+      for (const [value, operation] of [["OPEN", "open_cover"], ["CLOSE", "close_cover"], ["STOP", "stop_cover"]]) {
+        if (advertised.has(value)) bindings.push({ serviceId: `cover.${operation}`, operation });
+      }
+    }
   } else if (domain === "button" || kind === "button") {
     bindings.push({ serviceId: "button.press", operation: "press" });
   } else if (kind === "number") {
@@ -249,4 +262,4 @@ function normalizeZigbeeDevice(input = {}) {
   };
 }
 
-module.exports = { normalizeExposes, normalizeZigbeeDevice, normalizeExpose, humanize, semanticRoleFor };
+module.exports = { normalizeExposes, normalizeZigbeeDevice, normalizeExpose, humanize, semanticRoleFor, serviceBindings };
