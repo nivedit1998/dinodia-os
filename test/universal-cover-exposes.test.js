@@ -83,6 +83,11 @@ test('rediscovery replaces obsolete cover bindings without moving the existing d
     const area = await store.saveArea({name:'Test room'}, 'test-room');
     await store.upsertDevice(old);
     await store.completeDeviceSetup(old.id,{areaId:area.id,labelId:'none'});
+    const persistedBeforeInventory = Object.values(store.getDevice(device.id).entities).find(entity => entity.stateKey === 'position');
+    assert.ok(persistedBeforeInventory.capability.bindings.some(binding => binding.serviceId === 'cover.stop_cover'),
+      'fixture must model the old binding still persisted before a fresh inventory');
+    assert.throws(() => commandForBinding(persistedBeforeInventory,'cover.stop_cover'), /not supported/);
+    assert.throws(() => commandForBinding(persistedBeforeInventory,'cover.set_cover_position',{position:101}), /maximum/);
     await store.upsertDevice(normalizeZigbeeDevice(input));
     const current = store.getDevice(device.id);
     assert.equal(current.areaId,area.id);
