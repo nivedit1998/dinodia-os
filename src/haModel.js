@@ -391,6 +391,9 @@ class HomeAssistantModel {
         if (String(device.protocol || '').toLowerCase() === 'zigbee' && domain === 'cover') {
           throw Object.assign(new Error('A Zigbee cover requires an exact source binding'), { statusCode: 409, code: 'cover_binding_required' });
         }
+        if (String(device.protocol || '').toLowerCase() === 'zigbee' && domain === 'number') {
+          throw Object.assign(new Error('A Zigbee numeric control requires an exact source binding'), { statusCode: 409, code: 'number_binding_required' });
+        }
         await this.commandDevice(device.id, device.protocol, command);
       }
       // A composite surface can combine a primary on/off source with one or
@@ -429,7 +432,7 @@ class HomeAssistantModel {
       }
       return false;
     }
-    if (String(item?.device?.protocol || '').toLowerCase() === 'zigbee' && String(domain).toLowerCase() === 'cover') {
+    if (String(item?.device?.protocol || '').toLowerCase() === 'zigbee' && ['cover', 'number'].includes(String(domain).toLowerCase())) {
       // An explicitly empty Zigbee binding set is not a legacy permission to
       // dispatch generic cover commands to the physical parent.
       return false;

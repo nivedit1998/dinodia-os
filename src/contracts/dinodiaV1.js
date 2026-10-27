@@ -204,7 +204,8 @@ function serializeDevice({ device, homeId, homeMembershipId, role, areaIds, surf
       const mixedAction = stateOptions && safeValues && options.some(option => !safeValues.includes(option.value));
       const conflictingSwitchEncoding = stateOptions && ['switch', 'light'].includes(sourceDomain)
         && ((source.expose?.value_on != null && source.expose.value_on !== 'ON') || (source.expose?.value_off != null && source.expose.value_off !== 'OFF'));
-      const writable = device.setup?.viewOnly !== true && capability.writable === true && bindings.length > 0 && !(valueType === 'option' && options.length === 0) && !mixedAction && !conflictingSwitchEncoding;
+      const unverifiedNumeric = source.binding?.adapter === 'zigbee' && sourceDomain === 'number' && source.expose?.verifiedNumericAccess !== true;
+      const writable = device.setup?.viewOnly !== true && capability.writable === true && bindings.length > 0 && !(valueType === 'option' && options.length === 0) && !mixedAction && !conflictingSwitchEncoding && !unverifiedNumeric;
       // The v1 contract cannot represent a writable-only capability. Do not
       // discard the entire device or pretend the action is safe to invoke;
       // a later explicitly negotiated contract may represent it honestly.
@@ -236,7 +237,7 @@ function serializeDevice({ device, homeId, homeMembershipId, role, areaIds, surf
         semanticRole: nativeRole,
         readable: capability.readable !== false,
         writable,
-        automatable: effectiveAutomatable(capability) && stepUpPolicy !== 'required',
+        automatable: writable && effectiveAutomatable(capability) && stepUpPolicy !== 'required',
         observable: capability.observable !== false,
         idempotency: capability.idempotency === 'invoke' ? 'invoke_once' : writable ? 'set_value' : 'none',
         confirmationPolicy: stepUpPolicy === 'required' ? 'step_up' : writable ? 'matching_observation' : 'none',

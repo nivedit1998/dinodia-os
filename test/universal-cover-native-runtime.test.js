@@ -56,6 +56,15 @@ test('tenant descriptor routes explicitly advertised cover OPEN once to the exac
       definition:{exposes:[{type:'light',features:[{type:'enum',property:'state',access:7,values:['ON','OFF']}]}]}});
     await hub.store.upsertDevice({...light,areaId:area.id,managementClass:'property_device'});
     await hub.store.completeDeviceSetup(light.id,{areaId:area.id,labelId:'none'});
+    const genericNumber = normalizeZigbeeDevice({ieee_address:'0x00112233445566ab',friendly_name:'synthetic-numeric',
+      definition:{vendor:'Unknown vendor',exposes:[{type:'numeric',property:'volume',access:7,value_min:0,value_max:100,value_step:5}]}});
+    await hub.store.upsertDevice({...genericNumber,areaId:area.id,managementClass:'property_device'});
+    await hub.store.completeDeviceSetup(genericNumber.id,{areaId:area.id,labelId:'none'});
+    const legacyNumber = normalizeZigbeeDevice({ieee_address:'0x00112233445566ac',friendly_name:'synthetic-legacy-number',
+      definition:{exposes:[{type:'numeric',property:'volume_level',access:7,value_min:0,value_max:100,value_step:5}]}});
+    for (const entity of Object.values(legacyNumber.entities)) delete entity.expose.verifiedNumericAccess;
+    await hub.store.upsertDevice({...legacyNumber,areaId:area.id,managementClass:'property_device'});
+    await hub.store.completeDeviceSetup(legacyNumber.id,{areaId:area.id,labelId:'none'});
     await hub.start();
     const now = Math.floor(Date.now()/1000);
     const claims = {iss:'dinodia-platform-v2',aud:'dinodia-hub:catalog-hub',sub:'test-account',sid:'test-session',jti:'test-token',membershipId:'test-membership',trustedDeviceId:'test-phone',hubInstallationId:'catalog-hub',iat:now,exp:now+300,homeId:'test-home',householdRole:'TENANT',areaIds:['canonical-room'],policyRevision:0,scope:['tenant:device-read','tenant:device-command']};
@@ -149,5 +158,31 @@ test('tenant descriptor routes explicitly advertised cover OPEN once to the exac
     assert.equal(channelResponse.status,202);
     for (let i=0; i<20 && calls.length<5; i++) await new Promise(resolve=>setTimeout(resolve,10));
     assert.deepEqual(calls[4],{id:ordinaryChannel.id,payload:{state_l1:'ON'}},'the channel is routed to its exact advertised source');
+    const numberDto = devices.find(item=>item.id===genericNumber.id);
+    const numberControl = numberDto?.controls.find(item=>item.valueType==='number' && item.writable);
+    assert.ok(numberControl, 'the real authorized v1 catalogue must expose the writable numeric control');
+    const numberCommand = {...command,commandId:'command-number-fixture',deviceId:genericNumber.id,controlId:numberControl.controlId,
+      descriptorRevision:numberDto.descriptorRevision,value:25,idempotencyKey:'generic-number-command-123456'};
+    const numberResponse = await fetch(`${base}/api/dinodia/v1/commands`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':numberCommand.idempotencyKey},body:JSON.stringify(numberCommand)});
+    assert.equal(numberResponse.status,202);
+    for (let i=0; i<20 && calls.length<6; i++) await new Promise(resolve=>setTimeout(resolve,10));
+    assert.deepEqual(calls[5],{id:genericNumber.id,payload:{volume:25}});
+    const invalidNumber = {...numberCommand,commandId:'command-number-invalid',value:23,idempotencyKey:'generic-number-invalid-123456'};
+    const invalidNumberResponse = await fetch(`${base}/api/dinodia/v1/commands`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':invalidNumber.idempotencyKey},body:JSON.stringify(invalidNumber)});
+    assert.equal(invalidNumberResponse.status,400);
+    assert.equal(calls.length,6,'an off-step number cannot reach the adapter');
+    const legacyDto = devices.find(item=>item.id===legacyNumber.id);
+    const legacyControl = legacyDto?.controls.find(item=>item.valueType==='number');
+    assert.ok(legacyControl);
+    assert.equal(legacyControl.writable,false,'legacy metadata without raw-access provenance remains read-only');
+    assert.equal(legacyControl.automatable,false,'an unavailable command must not be advertised as automatable');
+    const rediscovered = normalizeZigbeeDevice({ieee_address:'0x00112233445566ac',friendly_name:'synthetic-legacy-number',
+      definition:{exposes:[{type:'numeric',property:'volume_level',access:7,value_min:0,value_max:100,value_step:5}]}});
+    await hub.store.upsertDevice(rediscovered);
+    const refreshed = await fetch(`${base}/api/dinodia/v1/devices`,{headers:{authorization:`Bearer ${token}`}});
+    const after = (await refreshed.json()).data.find(item=>item.id===legacyNumber.id);
+    const restored = after?.controls.find(item=>item.valueType==='number');
+    assert.equal(restored?.controlId,legacyControl.controlId,'fresh inventory preserves control identity');
+    assert.equal(restored?.writable,true,'fresh valid inventory restores the control without re-pairing');
   } finally {await hub.stop();await fs.rm(directory,{recursive:true,force:true});}
 });
