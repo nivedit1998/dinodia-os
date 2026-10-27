@@ -893,7 +893,10 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       return mqtt.command(device.id, commandForZigbeeBinding(entity, serviceId, data));
     }
     if (device.protocol === "matter" && entity.capability?.bindings?.length) {
-      return matter.command(device.id, commandForMatterBinding(entity, serviceId, data));
+      const currentDevice = hubStore.getDevice(device.id);
+      const currentEntity = currentDevice?.entities?.[entity.id];
+      if (!currentEntity) throw Object.assign(new Error('The Matter source is unavailable'), { statusCode: 409, code: 'logical_source_missing' });
+      return matter.command(currentDevice.id, commandForMatterBinding(currentEntity, serviceId, data, currentDevice), { verifiedCoverBinding: true });
     }
     if (device.protocol === "hive" && entity.capability?.bindings?.length) {
       try {
@@ -940,6 +943,9 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         await hubStore.addEvent({ type: "device_command", deviceId: device.id, protocol: "virtual" });
         return updated;
       }
+    }
+    if (device.protocol === 'matter' && String(entity.binding?.clusterId || '') === '258') {
+      throw Object.assign(new Error('A Matter cover requires an exact verified source binding'), { statusCode: 409, code: 'cover_binding_required' });
     }
     return commandDevice(device.id, device.protocol, fallbackCommand);
   }

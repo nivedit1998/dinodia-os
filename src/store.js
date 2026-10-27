@@ -27,7 +27,7 @@ const SERIALIZED_STORE_MUTATIONS = Object.freeze([
   "commit", "mutateAtomically", "persist", "fenceAreaDeletion", "progressAreaDeletion", "assignLogicalDevices", "activateLogicalDevicePolicies", "suppressLogicalDevice", "purgePrivateLogicalDevice", "acknowledgeTenantDeviceRemoval", "upsertDevice", "migrateDeviceIdentity",
   "updateDeviceState", "deleteDevice", "deleteDevicesByProtocol", "saveArea", "ensureAreaByName", "removeArea", "deleteArea",
   "saveLabel", "deleteLabel", "saveZigbee", "clearZigbee", "markZigbeeAdapterRemoved", "saveThread", "clearThread",
-  "updateDevice", "completeDeviceSetup", "clearDeviceSetup", "rebuildPresentation", "updateEntity", "removeEntity",
+  "updateDevice", "completeDeviceSetup", "clearDeviceSetup", "rebuildPresentation", "updateMatterCoverCommandList", "updateEntity", "removeEntity",
   "renameEntity", "saveIdentity", "saveSetup", "saveAuth", "saveSecurity", "prepareSyncBackupRecovery",
   "reconcileRejectedSyncBatchSize", "reconcileRejectedDescriptorSync", "reconcileRejectedCatalogOrder", "queueSyncEvent", "prepareSyncBatch", "prepareUsageClosureRecovery", "prepareSyncRequestLossRecovery",
   "prepareSyncStreamReconciliation", "ensureSyncSnapshot", "advanceSyncUsage", "ensureSyncIncidentEvents",
@@ -2568,6 +2568,33 @@ class Store {
       throw error;
     }
     return this.getDevice(resolvedId);
+  }
+
+  async updateMatterCoverCommandList(deviceId, endpointId, value) {
+    const resolvedDeviceId = this.state.aliases?.[String(deviceId)] || String(deviceId);
+    const device = this.state.devices[resolvedDeviceId];
+    if (!device || device.protocol !== 'matter') return null;
+    const entities = Object.values(device.entities || {});
+    const target = entities.find(entity => String(entity.binding?.endpointId) === String(endpointId)
+      && String(entity.binding?.clusterId) === '258' && String(entity.binding?.attributeId) === '65529');
+    if (!target) return null;
+    const before = this.snapshot();
+    const previousDevice = clone(device);
+    const valid = Array.isArray(value) && value.length <= 128 && value.every(id => Number.isSafeInteger(id) && id >= 0 && id <= 0xffffffff);
+    const allowed = { 'cover.open_cover': 0, 'cover.close_cover': 1, 'cover.stop_cover': 2, 'cover.set_cover_position': 5 };
+    target.state = clone(value);
+    target.available = true;
+    target.updatedAt = new Date().toISOString();
+    for (const cover of entities.filter(entity => String(entity.binding?.endpointId) === String(endpointId)
+      && String(entity.binding?.clusterId) === '258' && String(entity.binding?.attributeId) === '8')) {
+      const bindings = (cover.capability?.bindings || []).filter(binding => valid && Object.hasOwn(allowed, binding.serviceId) && value.includes(allowed[binding.serviceId]));
+      cover.capability = { ...cover.capability, bindings, services: bindings.map(binding => binding.serviceId), writable: bindings.length > 0 };
+    }
+    device.presentation = buildPresentation(device);
+    if (this.state.platform?.devicePolicies?.[resolvedDeviceId]) enqueueNativeDeviceSync(this.state, previousDevice, device);
+    try { await this.persist(); }
+    catch (error) { this.restoreSnapshot(before, error); throw error; }
+    return clone(device);
   }
 
   async updateEntity(deviceId, entityId, patch = {}) {
