@@ -1,14 +1,17 @@
 'use strict';
 const crypto = require('node:crypto');
-const { CATEGORY_POLICIES, analyticsEligible } = require('./categoryPolicies');
+const { CATEGORY_POLICIES, categoryBindingEligible } = require('./categoryPolicies');
 function resolveCategoryBinding({ signedPolicy, controls, selection = null }) {
-  if (!analyticsEligible(signedPolicy)) return { status: 'ineligible', reason: 'analytics_policy_ineligible', candidates: [] };
+  if (!categoryBindingEligible(signedPolicy)) return { status: 'ineligible', reason: 'analytics_policy_ineligible', candidates: [] };
   const category = signedPolicy.analyticsCategory;
   const groups = new Map();
   for (const control of controls || []) {
     if (signedPolicy.analyticsInterval?.authorizedControlIds && !signedPolicy.analyticsInterval.authorizedControlIds.includes(control.controlId)) continue;
     if (control.observable !== true || !CATEGORY_POLICIES[category].roles.includes(control.semanticRole)) continue;
-    if (category !== 'LIGHT' && control.writable === true) continue;
+    // Position roles may describe a desired target, including read-only Matter
+    // attributes. Only an explicitly identified actual source is eligible.
+    if (category === 'BLIND' && control.observationMeaning !== 'actual_position') continue;
+    if (!['LIGHT', 'SOCKET', 'TV'].includes(category) && control.writable === true) continue;
     const endpoint = String(control.endpointId ?? '');
     if (!endpoint || !control.controlId) continue;
     const groupId = endpoint;
@@ -33,7 +36,7 @@ function resolveCategoryBinding({ signedPolicy, controls, selection = null }) {
   if (category === 'LIGHT' && primary.semanticRole === 'brightness' && primary.brightnessMeaning !== 'actual_output')
     return { status: 'unsupported', reason: 'brightness_output_unverified', candidates };
   const identity = { category, groupId: selected.groupId, primaryControlId: primary.controlId,
-    semanticRole: primary.semanticRole, categoryPolicyVersion: 2,
+    semanticRole: primary.semanticRole, categoryPolicyVersion: CATEGORY_POLICIES[category].version,
     minimum: primary.constraints?.minimum ?? primary.constraints?.min ?? null,
     maximum: primary.constraints?.maximum ?? primary.constraints?.max ?? null };
   return { ...identity, status: 'resolved', reason: null, candidates,

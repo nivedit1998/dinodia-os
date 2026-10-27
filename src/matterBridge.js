@@ -4,6 +4,7 @@ const { normalizeMatterNode } = require("./integrations/matter/nodeNormalizer");
 const { matterName, isMachineName } = require("./deviceNaming");
 const { stableDeviceId } = require("./capabilities/identity");
 const { sourceVersion } = require("./integrations/matter/catalog");
+const { decodeMatterValue } = require('./integrations/matter/valueCodec');
 
 function matterAttributeParts(pathValue) {
   if (pathValue && typeof pathValue === "object") {
@@ -30,6 +31,10 @@ class MatterBridge {
     this.pending = new Map();
     this.stopped = false;
     this.allowNewNodes = false;
+    this.coverCommandProof = new Map();
+    this.coverProofEpoch = 0;
+    this.coverNodeEpochs = new Map();
+    this.coverRefreshSequence = 0;
   }
 
   start() {
@@ -47,7 +52,9 @@ class MatterBridge {
   }
 
   connect() {
-    this.socket = new WebSocket(this.url);
+    this.coverCommandProof.clear();
+    this.coverProofEpoch++;
+    this.socket = new WebSocket(this.url, { maxPayload: 1024 * 1024 });
     this.socket.on("open", () => {
       this.connected = true;
       this.lastError = null;
@@ -59,6 +66,8 @@ class MatterBridge {
     });
     this.socket.on("close", () => {
       this.connected = false;
+      this.coverCommandProof.clear();
+      this.coverProofEpoch++;
       for (const pending of this.pending.values()) pending.reject(new Error("Matter Server disconnected"));
       this.pending.clear();
       setTimeout(() => {
@@ -71,6 +80,29 @@ class MatterBridge {
   setError(error) {
     this.lastError = String(error && error.message ? error.message : error);
     this.logger.error(`[matter] ${this.lastError}`);
+  }
+
+  forgetCoverProof(nodeId) {
+    const device = this.findDevice(nodeId);
+    if (device) for (const key of this.coverCommandProof.keys()) if (key.startsWith(`${device.id}|`)) this.coverCommandProof.delete(key);
+    const key = String(nodeId ?? '');
+    this.coverNodeEpochs.set(key, (this.coverNodeEpochs.get(key) || 0) + 1);
+  }
+
+  rememberCoverProof(node) {
+    const received = normalizeMatterNode(node);
+    const device = this.findDevice(String(node.node_id ?? node.nodeId ?? node.id ?? ''));
+    if (!device) return;
+    for (const entity of Object.values(received.entities || {})) {
+      const value = entity.state;
+      const persisted = Object.values(device.entities || {}).find(item => String(item.binding?.endpointId) === String(entity.binding?.endpointId)
+        && String(item.binding?.clusterId) === '258' && String(item.binding?.attributeId) === '65529');
+      if (String(entity.binding?.clusterId) === '258' && String(entity.binding?.attributeId) === '65529'
+        && Array.isArray(value) && value.length <= 128 && value.every(id => Number.isSafeInteger(id) && id >= 0 && id <= 0xffffffff)
+        && JSON.stringify(persisted?.state) === JSON.stringify(value)) {
+        this.coverCommandProof.set(`${device.id}|${entity.binding.endpointId}`, [...value]);
+      }
+    }
   }
 
   status() {
@@ -104,9 +136,25 @@ class MatterBridge {
     }
     if (Array.isArray(message.result)) await this.ingestNodes(message.result, { allowNew: this.allowNewNodes });
     if (message.event === "node_added" || message.event === "node_updated") {
-      await this.ingestNodeEvent(message.data || {});
+      let node = message.data?.node || message.data || {};
+      const nodeId = String(node.node_id ?? node.nodeId ?? node.id ?? message.data?.node_id ?? '');
+      this.forgetCoverProof(nodeId);
+      const epoch = this.coverProofEpoch;
+      const nodeEpoch = this.coverNodeEpochs.get(nodeId);
+      const normalized = normalizeMatterNode(node);
+      const hasCommandList = Object.values(normalized.entities || {}).some(entity => String(entity.binding?.clusterId) === '258' && String(entity.binding?.attributeId) === '65529');
+      if (this.connected && !hasCommandList) {
+        // get_node reads the controller's stored NodeData; unlike
+        // read_attribute, it does not request a device measurement.
+        node = await this.request('get_node', { node_id: Number(nodeId) });
+        if (!node || typeof node !== 'object' || Array.isArray(node) || String(node.node_id ?? node.nodeId ?? node.id) !== nodeId) return;
+      }
+      if (epoch !== this.coverProofEpoch || nodeEpoch !== this.coverNodeEpochs.get(nodeId)) return;
+      await this.ingestNodeEvent({node});
+      if (this.connected && epoch === this.coverProofEpoch && nodeEpoch === this.coverNodeEpochs.get(nodeId)) this.rememberCoverProof(node);
     } else if (message.event === "node_removed") {
       const nodeId = typeof message.data === "object" ? message.data.node_id || message.data.nodeId || message.data.id : message.data;
+      this.forgetCoverProof(nodeId);
       const device = this.findDevice(nodeId);
       if (device) await this.store.deleteDevice(device.id);
     } else if (message.event === "attribute_updated" && Array.isArray(message.data)) {
@@ -114,10 +162,24 @@ class MatterBridge {
       const deviceId = this.findDevice(nodeId)?.id || stableDeviceId("matter", { nodeId, fabricId: "default" });
       const previous = this.store.getDevice(deviceId);
       const parts = matterAttributeParts(attributePath);
+      const proofKey = `${deviceId}|${parts.endpointId}`;
+      const nodeKey = String(nodeId);
+      if (parts.clusterId === '258' && parts.attributeId === '65529') {
+        this.coverCommandProof.delete(proofKey);
+        this.coverNodeEpochs.set(nodeKey, (this.coverNodeEpochs.get(nodeKey) || 0) + 1);
+      }
+      const eventProofEpoch = this.coverProofEpoch;
+      const eventNodeEpoch = this.coverNodeEpochs.get(nodeKey);
       const target = previous && Object.values(previous.entities || {}).find((entity) => String(entity.binding?.endpointId || entity.endpointId || "") === parts.endpointId && String(entity.binding?.clusterId || "") === parts.clusterId && String(entity.binding?.attributeId || "") === parts.attributeId);
       let device;
-      if (target) {
-        await this.store.updateEntity(deviceId, target.id, { state: value, available: true });
+      if (target && parts.clusterId === '258' && parts.attributeId === '65529') {
+        device = await this.store.updateMatterCoverCommandList(deviceId, parts.endpointId, value);
+        if (device && this.connected && eventProofEpoch === this.coverProofEpoch && eventNodeEpoch === this.coverNodeEpochs.get(nodeKey) && Array.isArray(value)
+          && value.length <= 128 && value.every(id => Number.isSafeInteger(id) && id >= 0 && id <= 0xffffffff)) {
+          this.coverCommandProof.set(proofKey, [...value]);
+        }
+      } else if (target) {
+        await this.store.updateEntity(deviceId, target.id, { state: decodeMatterValue(parts.clusterId, parts.attributeId, value), available: true });
         device = this.store.getDevice(deviceId);
       } else if (previous || this.allowNewNodes) {
         device = await this.store.updateDeviceState(deviceId, {
@@ -137,9 +199,10 @@ class MatterBridge {
     }
   }
 
-  async ingestNodes(nodes, { allowNew = false } = {}) {
+  async ingestNodes(nodes, { allowNew = false, isCurrent = () => true } = {}) {
     if (this.store.saveConfigEntry && Array.isArray(nodes) && nodes.length) await this.store.saveConfigEntry({ entry_id: "ce_matter", domain: "matter", title: "Matter" });
     for (const node of nodes) {
+      if (!isCurrent()) break;
       const normalized = normalizeMatterNode(node);
       if (!normalized.protocolIdentity.nodeId) continue;
       const previous = this.findDevice(normalized.protocolIdentity.nodeId) || this.store.getDevice(normalized.id);
@@ -179,22 +242,50 @@ class MatterBridge {
 
   async refreshWithOptions(options = {}) {
     if (!this.connected) return [];
+    const epoch = this.coverProofEpoch;
+    const sequence = ++this.coverRefreshSequence;
+    const nodeEpochs = new Map(this.coverNodeEpochs);
     const result = await this.request("start_listening", {});
     const nodes = Array.isArray(result) ? result : (result && Array.isArray(result.nodes) ? result.nodes : []);
-    await this.ingestNodes(nodes, options);
+    if (!this.connected || epoch !== this.coverProofEpoch || sequence !== this.coverRefreshSequence) return nodes;
+    for (const node of nodes) {
+      const nodeId = String(node.node_id ?? node.nodeId ?? node.id ?? '');
+      const current = () => this.connected && epoch === this.coverProofEpoch && sequence === this.coverRefreshSequence
+        && (nodeEpochs.get(nodeId) || 0) === (this.coverNodeEpochs.get(nodeId) || 0);
+      if (!current()) continue;
+      await this.ingestNodes([node], {...options, isCurrent: current});
+      if (current()) {
+        const device = this.findDevice(nodeId);
+        if (device) for (const key of this.coverCommandProof.keys()) if (key.startsWith(`${device.id}|`)) this.coverCommandProof.delete(key);
+        this.rememberCoverProof(node);
+      }
+    }
     return nodes;
   }
 
-  async command(deviceId, request) {
+  async command(deviceId, request, { verifiedCoverBinding = false } = {}) {
     const device = this.store.getDevice(deviceId);
+    if (request?.command) {
+      throw Object.assign(new Error('Raw Matter commands require a verified control binding'), { statusCode: 400, code: 'unsupported_service' });
+    }
+    if (Number(request?.cluster_id) === 258) {
+      const commandIds = { UpOrOpen: 0, DownOrClose: 1, StopMotion: 2, GoToLiftPercentage: 5 };
+      const id = commandIds[request?.command_name];
+      const proof = this.coverCommandProof.get(`${device?.id}|${request?.endpoint_id}`);
+      if (!verifiedCoverBinding || !this.connected || id === undefined || !proof?.includes(id)) {
+        throw Object.assign(new Error('Matter cover requires current verified command inventory'), { statusCode: 409, code: 'matter_cover_inventory_unverified' });
+      }
+    }
     const nodeId = String(device?.protocolIdentity?.nodeId || String(deviceId).replace(/^matter(?::[^:]+)?:|^matter-/, ""));
     let result;
-    if (request && request.command) {
-      result = await this.request(request.command, request.args || {});
+    if (request && Object.hasOwn(request, 'attribute_value')) {
+      if (!verifiedCoverBinding) throw Object.assign(new Error('Matter writes require a verified control binding'), {statusCode:400,code:'unsupported_service'});
+      result = await this.request('write_attribute', { node_id: Number(nodeId),
+        attribute_path: `${request.endpoint_id}/${request.cluster_id}/${request.attribute_id}`, value: request.attribute_value });
     } else {
       result = await this.request("device_command", {
-        node_id: Number(nodeId),
         ...(request || {}),
+        node_id: Number(nodeId),
       });
     }
     await this.store.addEvent({ type: "device_command", deviceId: String(deviceId), protocol: "matter" });
@@ -237,6 +328,8 @@ class MatterBridge {
   }
 
   close() {
+    this.coverCommandProof.clear();
+    this.coverProofEpoch++;
     this.stopped = true;
     if (this.socket) this.socket.close();
   }

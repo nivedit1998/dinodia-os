@@ -137,6 +137,10 @@ function normalizeCapability(input = {}, fallback = {}) {
   if (/^[A-Za-z0-9][A-Za-z0-9:_-]{0,159}$/.test(publicControlId)
     && !/^(?:internal|ha|hass|homeassistant):/i.test(publicControlId)) result.controlId = publicControlId;
   result.semanticRole = NATIVE_SEMANTIC_ROLES.has(semanticRole) ? semanticRole : "unknown";
+  if (typeof input.unsupportedReason === 'string' && input.unsupportedReason.trim())
+    result.unsupportedReason = text(input.unsupportedReason).slice(0,120);
+  if (result.semanticRole === 'opening_percentage' && result.readable && !result.writable
+    && input.observationMeaning === 'actual_position') result.observationMeaning = 'actual_position';
   const voice = input.voice || fallback.voice;
   if (voice && typeof voice === "object" && VOICE_SEMANTICS.has(String(voice.semantic || ""))) {
     result.voice = {

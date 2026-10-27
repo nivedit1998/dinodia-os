@@ -194,8 +194,8 @@ function surfaceRows(device) {
   const surfaces = window.DinodiaDevices.surfaces(device);
   return surfaces.map((surface) => `<div class="surface-row"><div class="surface-info"><strong>${escapeHtml(surface.name)}</strong><small>${escapeHtml(surface.domain || "control")} · ${escapeHtml(String(surface.state ?? "unknown"))}</small><span class="capability-pill">Shown in apps</span></div><div class="surface-controls">${entityControl(surface)}</div></div>`).join("");
 }
-const ANALYTICS_CATEGORIES = ["NONE", "LIGHT", "BOILER", "RADIATOR"];
-const ANALYTICS_CATEGORY_LABELS = { NONE: "None", LIGHT: "Light", BOILER: "Boiler", RADIATOR: "Radiator" };
+const ANALYTICS_CATEGORIES = ["NONE", "LIGHT", "BOILER", "RADIATOR", "SOCKET", "TV", "BLIND", "AC", "WASHING_MACHINE"];
+const ANALYTICS_CATEGORY_LABELS = { NONE: "None", LIGHT: "Light", BOILER: "Boiler", RADIATOR: "Radiator", SOCKET: "Socket", TV: "TV", BLIND: "Blind", AC: "Air conditioning", WASHING_MACHINE: "Washing machine" };
 function analyticsCategoryPendingKey(deviceId) { return `dinodia.os.pending-analytics-category.v1:${deviceId}`; }
 function readAnalyticsCategoryPending(deviceId) {
   try {

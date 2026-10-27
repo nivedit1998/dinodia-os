@@ -893,7 +893,10 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       return mqtt.command(device.id, commandForZigbeeBinding(entity, serviceId, data));
     }
     if (device.protocol === "matter" && entity.capability?.bindings?.length) {
-      return matter.command(device.id, commandForMatterBinding(entity, serviceId, data));
+      const currentDevice = hubStore.getDevice(device.id);
+      const currentEntity = currentDevice?.entities?.[entity.id];
+      if (!currentEntity) throw Object.assign(new Error('The Matter source is unavailable'), { statusCode: 409, code: 'logical_source_missing' });
+      return matter.command(currentDevice.id, commandForMatterBinding(currentEntity, serviceId, data, currentDevice), { verifiedCoverBinding: true });
     }
     if (device.protocol === "hive" && entity.capability?.bindings?.length) {
       try {
@@ -940,6 +943,9 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         await hubStore.addEvent({ type: "device_command", deviceId: device.id, protocol: "virtual" });
         return updated;
       }
+    }
+    if (device.protocol === 'matter' && String(entity.binding?.clusterId || '') === '258') {
+      throw Object.assign(new Error('A Matter cover requires an exact verified source binding'), { statusCode: 409, code: 'cover_binding_required' });
     }
     return commandDevice(device.id, device.protocol, fallbackCommand);
   }
@@ -1175,6 +1181,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
         // or signed deletion reconciliation.
         nativeLogicalDevicesV1: true,
         nativeDailyAnalyticsV1: true,
+        nativeUniversalStateAnalyticsV1: true,
         nativeDailyAnalyticsBuildId: runtimeConfig.buildId || null,
         ...runtimeConfig.nativeCommissioningCapabilities },
     },
@@ -1911,7 +1918,19 @@ function nativeDeviceView(principal, device) {
       return bindings.find((binding) => ["number.set_value", "climate.set_temperature", "light.turn_on", "fan.set_percentage", "cover.set_cover_position"].includes(String(binding.serviceId || "").toLowerCase())) || null;
     }
     if (control.valueType === "option") {
-      return bindings.find((binding) => ["select.select_option", "climate.set_hvac_mode", "fan.set_preset_mode"].includes(String(binding.serviceId || "").toLowerCase())) || null;
+      const direct = bindings.find((binding) => ["select.select_option", "climate.set_hvac_mode", "fan.set_preset_mode"].includes(String(binding.serviceId || "").toLowerCase()));
+      if (direct) return direct;
+      // Some Zigbee enum state exposes represent absolute operations, rather
+      // than select.select_option. Map only exact advertised protocol values
+      // to the matching existing adapter binding; never translate STOP/toggle.
+      const domain = String(entity?.domain || "").toLowerCase();
+      const values = Array.isArray(entity?.expose?.values) ? entity.expose.values : [];
+      if (entity?.binding?.adapter !== 'zigbee' || entity?.expose?.type !== 'enum' || !values.includes(control.value)) return null;
+      if (['switch', 'light'].includes(domain) && ((control.value === 'ON' && (entity.expose.value_on ?? 'ON') !== 'ON')
+        || (control.value === 'OFF' && (entity.expose.value_off ?? 'OFF') !== 'OFF'))) return null;
+      const operation = domain === 'cover' ? ({ OPEN:'cover.open_cover', CLOSE:'cover.close_cover' })[control.value]
+        : domain === 'switch' || domain === 'light' ? ({ ON:`${domain}.turn_on`, OFF:`${domain}.turn_off` })[control.value] : null;
+      return operation ? bindings.find(binding => String(binding.serviceId || '').toLowerCase() === operation) || null : null;
     }
     if (control.valueType === "text") return bindings.find((binding) => String(binding.serviceId || "").toLowerCase() === "text.set_value") || null;
     return control.valueType === "invoke" && bindings.length === 1 ? bindings[0] : null;
@@ -1921,7 +1940,7 @@ function nativeDeviceView(principal, device) {
     const service = String(serviceId || "").toLowerCase();
     if (service === "number.set_value") return { value };
     if (service === "climate.set_temperature") return { temperature: value };
-    if (service === "light.turn_on") return { brightness: value };
+    if (service === "light.turn_on") return typeof value === 'number' ? { brightness: value } : {};
     if (service === "fan.set_percentage") return { percentage: value };
     if (service === "cover.set_cover_position") return { position: value };
     if (service === "select.select_option") return { option: value };

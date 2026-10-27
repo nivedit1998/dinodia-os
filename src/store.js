@@ -20,6 +20,7 @@ const { SYNC_BATCH_MAX_EVENTS, compactUnregisteredPropertyDeviceEvents, enqueueS
 const { validateCloudConfiguration, projectCloudDevicePolicies } = require("./sync/cloudConfiguration");
 const { activityFor, advanceUsage, capUsageAtLastAlive, endUsageAssignment, endUsageDeviceAvailability, initialUsageState, observeUsage, usageClockTrusted } = require("./sync/usageBuckets");
 const dailyAnalytics = require('./sync/dailyAnalytics');
+const stateAnalytics = require('./sync/stateAnalytics');
 const { assertNoRestorePendingSync, ensureInitializedMarkerSync, hasInitializedMarkerSync, persistStoreJson, writeBytesAtomically } = require("./durableStoreFile");
 
 const STORE_MUTATION_CONTEXT = new AsyncLocalStorage();
@@ -27,7 +28,7 @@ const SERIALIZED_STORE_MUTATIONS = Object.freeze([
   "commit", "mutateAtomically", "persist", "fenceAreaDeletion", "progressAreaDeletion", "assignLogicalDevices", "activateLogicalDevicePolicies", "suppressLogicalDevice", "purgePrivateLogicalDevice", "acknowledgeTenantDeviceRemoval", "upsertDevice", "migrateDeviceIdentity",
   "updateDeviceState", "deleteDevice", "deleteDevicesByProtocol", "saveArea", "ensureAreaByName", "removeArea", "deleteArea",
   "saveLabel", "deleteLabel", "saveZigbee", "clearZigbee", "markZigbeeAdapterRemoved", "saveThread", "clearThread",
-  "updateDevice", "completeDeviceSetup", "clearDeviceSetup", "rebuildPresentation", "updateEntity", "removeEntity",
+  "updateDevice", "completeDeviceSetup", "clearDeviceSetup", "rebuildPresentation", "updateMatterCoverCommandList", "updateEntity", "removeEntity",
   "renameEntity", "saveIdentity", "saveSetup", "saveAuth", "saveSecurity", "prepareSyncBackupRecovery",
   "reconcileRejectedSyncBatchSize", "reconcileRejectedDescriptorSync", "reconcileRejectedCatalogOrder", "queueSyncEvent", "prepareSyncBatch", "prepareUsageClosureRecovery", "prepareSyncRequestLossRecovery",
   "prepareSyncStreamReconciliation", "ensureSyncSnapshot", "advanceSyncUsage", "ensureSyncIncidentEvents",
@@ -302,6 +303,39 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
   // the Store's local serial/instance identity record. It is supplied by the
   // runtime caller only after that broker has verified the current identity.
   const generation = Number(options.sourceGeneration);
+  if (!Object.hasOwn(stateAnalytics.POLICIES,String(policy?.analyticsCategory))) stateAnalytics.suspend(state.syncUsage || {},deviceId);
+  if (Object.hasOwn(stateAnalytics.POLICIES, String(policy?.analyticsCategory))) {
+    const usage = state.syncUsage = initialUsageState(state.syncUsage);
+    const daily = dailyAnalytics.initialize(usage, state.platform?.cloudConfiguration?.analyticsHistory, nowMs);
+    stateAnalytics.initialize(usage, daily);
+    const interval = policy.analyticsInterval;
+    const permitted = policy.managementClass === 'PROPERTY_DEVICE' && !policy.ownerMembershipId
+      && ['INSTALLED','VIEW_ONLY'].includes(policy.lifecycle) && policy.osAreaIds?.includes(String(device.areaId))
+      && interval?.writerEnabled === true && interval.analyticsPolicyVersion === 4 && interval.sourceGeneration === generation;
+    if (!permitted) {stateAnalytics.suspend(usage,deviceId);return false;}
+    if (device.available === false) {stateAnalytics.end(usage, deviceId, nowMs);return false;}
+    const catalog = nativeSyncControlCatalogProjection(state, device);
+    const entities = Object.values(device.entities || {});
+    const controls = (catalog?.controls || []).map(control => {
+      const entity = entities.find(e => String(e.capability?.controlId || e.controlId || e.id || e.sourceId || '') === control.controlId);
+      return {...control, endpointId:entity?.endpointId ?? entity?.binding?.endpoint,
+        observationMeaning:entity?.capability?.observationMeaning};
+    });
+    const binding = resolveCategoryBinding({signedPolicy:policy,controls});
+    const control = binding.status === 'resolved' ? controls.find(c => c.controlId === binding.primaryControlId) : null;
+    if (!control) {stateAnalytics.end(usage, deviceId, nowMs);return false;}
+    const entity = entities.find(e => String(e.capability?.controlId || e.controlId || e.id || e.sourceId || '') === control.controlId);
+    const admitted = entity?.admittedEvidence;
+    let evidence = entity && admitted?.quality === 'fresh' && admitted.observedAt === entity.sourceObservedAt
+      && admitted.sourceGeneration === generation && admitted.controlId === control.controlId
+      && admitted.sourceKey === exactSource(device,entity,control,generation).sourceKey
+      ? admitted : entity ? resolveStateEvidence({device,control,entity,records:state.observationPolicy?.records || {},
+        sourceGeneration:generation,authorityValid:true,clockTrusted:true,now:nowMs}) : null;
+    if (Number.isSafeInteger(options.ignoreThroughMs) && Date.parse(evidence?.observedAt) <= options.ignoreThroughMs) evidence = null;
+    return stateAnalytics.observe(usage,{osDeviceId:deviceId,osAreaId:String(device.areaId),analyticsCategory:policy.analyticsCategory,
+      controlId:control.controlId,sourceGeneration:generation,bindingRevision:interval.revision,analyticsIntervalId:interval.id,
+      analyticsPolicyVersion:4,assignmentEpochAt:dailyAnalytics.assignmentStart(usage,device,policy),validFrom:interval.validFrom,evidence},nowMs);
+  }
   if (!policy || policy.managementClass !== "PROPERTY_DEVICE" || policy.lifecycle === "RETIRED"
     || policy.lifecycle === "REMOVED" || policy.lifecycle === "REMOVAL_PENDING"
     || !["LIGHT", "BOILER", "RADIATOR"].includes(policy.analyticsCategory)
@@ -1296,6 +1330,7 @@ class Store {
     if (this.usageAliveThroughMs !== null) {
       this.state.syncUsage = capUsageAtLastAlive(this.state.syncUsage, this.usageAliveThroughMs);
       dailyAnalytics.capDailyAtLastAlive(this.state.syncUsage, this.usageAliveThroughMs);
+      stateAnalytics.capAtLastAlive(this.state.syncUsage, this.usageAliveThroughMs);
     }
     this.usageClockTrust = systemClockSynchronized;
     this.usageClockWasUntrusted = false;
@@ -1365,6 +1400,8 @@ class Store {
         }
         for (const source of Object.values(this.state.syncUsage.dailyAnalytics?.temperatures || {}))
           source.validUntil = new Date(Math.min(Date.parse(source.validUntil), Math.max(source.accountedThrough, this.usageAliveThroughMs || 0))).toISOString();
+        for (const source of Object.values(this.state.syncUsage.stateAnalytics?.sources || {}))
+          source.validUntil = Math.min(source.validUntil, Math.max(source.accountedThrough, this.usageAliveThroughMs || 0));
       }
       this.usageClockWasUntrusted = true; this.usageClockTrustedSinceMs = null;
     }
@@ -2570,6 +2607,33 @@ class Store {
     return this.getDevice(resolvedId);
   }
 
+  async updateMatterCoverCommandList(deviceId, endpointId, value) {
+    const resolvedDeviceId = this.state.aliases?.[String(deviceId)] || String(deviceId);
+    const device = this.state.devices[resolvedDeviceId];
+    if (!device || device.protocol !== 'matter') return null;
+    const entities = Object.values(device.entities || {});
+    const target = entities.find(entity => String(entity.binding?.endpointId) === String(endpointId)
+      && String(entity.binding?.clusterId) === '258' && String(entity.binding?.attributeId) === '65529');
+    if (!target) return null;
+    const before = this.snapshot();
+    const previousDevice = clone(device);
+    const valid = Array.isArray(value) && value.length <= 128 && value.every(id => Number.isSafeInteger(id) && id >= 0 && id <= 0xffffffff);
+    const allowed = { 'cover.open_cover': 0, 'cover.close_cover': 1, 'cover.stop_cover': 2, 'cover.set_cover_position': 5 };
+    target.state = clone(value);
+    target.available = true;
+    target.updatedAt = new Date().toISOString();
+    for (const cover of entities.filter(entity => String(entity.binding?.endpointId) === String(endpointId)
+      && String(entity.binding?.clusterId) === '258' && String(entity.binding?.attributeId) === '8')) {
+      const bindings = (cover.capability?.bindings || []).filter(binding => valid && Object.hasOwn(allowed, binding.serviceId) && value.includes(allowed[binding.serviceId]));
+      cover.capability = { ...cover.capability, bindings, services: bindings.map(binding => binding.serviceId), writable: bindings.length > 0 };
+    }
+    device.presentation = buildPresentation(device);
+    if (this.state.platform?.devicePolicies?.[resolvedDeviceId]) enqueueNativeDeviceSync(this.state, previousDevice, device);
+    try { await this.persist(); }
+    catch (error) { this.restoreSnapshot(before, error); throw error; }
+    return clone(device);
+  }
+
   async updateEntity(deviceId, entityId, patch = {}) {
     const resolvedDeviceId = this.state.aliases?.[String(deviceId)] || String(deviceId);
     const device = this.state.devices[resolvedDeviceId];
@@ -3490,6 +3554,10 @@ class Store {
         if (daily.barrierQueued) for (const event of dailyAnalytics.dailyEvents(this.state.syncUsage)) {
           const queuedEvent = enqueueSyncEventInState(this.state, 'analytics.day', event.aggregateId, event.payload, { now: nowMs });
           if (queuedEvent) { daily.queuedRevisions[event.key] = event.payload.revision; daily.queuedSequences[event.key] = queuedEvent.sequence; queued++; }
+        }
+        if (daily.barrierQueued) for (const event of stateAnalytics.events(this.state.syncUsage, nowMs)) {
+          const queuedEvent = enqueueSyncEventInState(this.state, 'analytics.state.day', event.aggregateId, event.payload, {now:nowMs});
+          if (queuedEvent) {this.state.syncUsage.stateAnalytics.queued[event.aggregateId]=event.payload.revision;queued++;}
         }
       }
       const cutoff = nowMs - 366 * 24 * 60 * 60 * 1000;

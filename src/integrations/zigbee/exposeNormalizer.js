@@ -20,6 +20,15 @@ function accessFlags(expose, parentDomain) {
   return { readable: true, writable: STANDARD_DOMAINS.has(parentDomain) || expose.type === "binary" && parentDomain === "switch", access: undefined };
 }
 
+function validStandaloneNumber(expose, property) {
+  if (!expose || expose.type !== 'numeric' || !Number.isInteger(expose.access) || expose.access < 0 || expose.access > 7
+    || !(expose.access & 2) || typeof property !== 'string' || !/^[a-z][a-z0-9_]{0,127}$/i.test(property)) return false;
+  if (!['value_min','value_max','value_step'].every(key => expose[key] === undefined
+    || typeof expose[key] === 'number' && Number.isFinite(expose[key]))) return false;
+  return !(expose.value_step !== undefined && expose.value_step <= 0)
+    && !(expose.value_min !== undefined && expose.value_max !== undefined && expose.value_min > expose.value_max);
+}
+
 function domainFor(expose, parentDomain = "") {
   const type = String(expose.type || "").toLowerCase();
   if (STANDARD_DOMAINS.has(type)) return type;
@@ -38,7 +47,16 @@ function domainFor(expose, parentDomain = "") {
 
 function kindFor(expose, domain, writable) {
   const type = String(expose.type || "").toLowerCase();
-  if (type === "numeric") return writable && /(brightness|level|position|temperature|setpoint|percentage|color|colour)/.test(String(expose.property || expose.name || "").toLowerCase()) ? "number" : "sensor";
+  if (type === "numeric") {
+    const knownControl = /(brightness|level|position|temperature|setpoint|percentage|color|colour)/.test(String(expose.property || expose.name || "").toLowerCase());
+    // For standalone numeric exposes, a concrete Zigbee access bit is the
+    // authority for an unfamiliar property's set operation. Do not infer it
+    // from a vendor name or from an absent access field.
+    const explicitlyWritableNumber = domain === "number" && validStandaloneNumber(expose, String(expose.property || expose.name || ""));
+    if (domain === "number") return writable && explicitlyWritableNumber ? "number" : "sensor";
+    return writable && (knownControl || explicitlyWritableNumber) ? "number" : "sensor";
+  }
+  if (type === "enum" && domain === "cover") return "enum";
   if (type === "binary" || ["light", "switch", "cover", "lock", "fan", "humidifier"].includes(domain)) return "binary";
   if (type === "enum") return "enum";
   if (type === "text") return writable ? "text" : "sensor";
@@ -72,7 +90,20 @@ function serviceBindings(expose, domain, kind, writable) {
   if (["light", "switch"].includes(domain) && (property === "state" || property.startsWith("state_") || property === "power")) {
     for (const service of ["turn_on", "turn_off", "toggle"]) bindings.push({ serviceId: `${domain}.${service}`, operation: service });
   } else if (domain === "cover") {
-    for (const service of ["open_cover", "close_cover", "stop_cover", "set_cover_position"]) bindings.push({ serviceId: `cover.${service}`, operation: service });
+    // Exposes describe individual properties, not a promise that every cover
+    // operation is supported. In particular, a writable position property
+    // does not advertise a STOP command on that property.
+    if (["position", "current_position"].includes(property) && String(expose.type || "").toLowerCase() === "numeric") {
+      const parameter = parameterFor(expose, "number", domain);
+      if (parameter) parameter.key = "position";
+      bindings.push({ serviceId: "cover.set_cover_position", operation: "set_cover_position", parameter });
+    } else if (property === "state") {
+      const advertised = new Set([...(Array.isArray(expose.values) ? expose.values : []), expose.value_on, expose.value_off]
+        .filter(value => typeof value === "string"));
+      for (const [value, operation] of [["OPEN", "open_cover"], ["CLOSE", "close_cover"], ["STOP", "stop_cover"]]) {
+        if (advertised.has(value)) bindings.push({ serviceId: `cover.${operation}`, operation });
+      }
+    }
   } else if (domain === "button" || kind === "button") {
     bindings.push({ serviceId: "button.press", operation: "press" });
   } else if (kind === "number") {
@@ -141,6 +172,8 @@ function normalizeExpose(expose, context, output) {
       observable: flags.readable,
       primary: ["state", "power", "position", "brightness"].includes(property.toLowerCase()) || property.toLowerCase().startsWith("state_") || property.toLowerCase().startsWith("brightness_"),
       semanticRole: semanticRoleFor(property, domain, expose, flags.readable, flags.writable),
+      ...(['current_position'].includes(property) && domain === 'cover' && flags.readable && !flags.writable
+        ? {observationMeaning:'actual_position'} : {}),
       stateKey: property,
       unit: expose.unit,
       deviceClass: expose.device_class,
@@ -162,6 +195,7 @@ function normalizeExpose(expose, context, output) {
       expose: {
         type: expose.type,
         access: flags.access,
+        ...(domain === 'number' && validStandaloneNumber(expose, property) ? { verifiedNumericAccess: true } : {}),
         unit: expose.unit,
         device_class: expose.device_class,
         values: clone(expose.values),
@@ -249,4 +283,4 @@ function normalizeZigbeeDevice(input = {}) {
   };
 }
 
-module.exports = { normalizeExposes, normalizeZigbeeDevice, normalizeExpose, humanize, semanticRoleFor };
+module.exports = { normalizeExposes, normalizeZigbeeDevice, normalizeExpose, humanize, semanticRoleFor, serviceBindings, validStandaloneNumber };

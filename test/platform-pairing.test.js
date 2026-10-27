@@ -68,6 +68,27 @@ function nativeSyncAck(request) {
   };
 }
 
+test('current analytics compatibility is signed outside the frozen outbox and bound to each fresh nonce', async () => {
+  const calls=[];
+  const pairing=new PlatformPairing({store:{getPlatform:()=>({}),getSyncOutbox:()=>({configurationAppliedRevision:12})},
+    vault:null,apiUrl:'https://platform.test',serial:'synthetic',runtime:{capabilities:{nativeUniversalStateAnalyticsV1:true}},
+    fetchImpl:async(_url,request)=>{calls.push(request);return {ok:true,status:200,json:async()=>({ok:true})};}});
+  pairing.getPublicIdentity=async()=>({generation:3});
+  pairing.signPlatformRequest=async({bodyHash})=>{assert.match(bodyHash,/^[a-f0-9]{64}$/);return 'synthetic-signature';};
+  for(let i=0;i<2;i++)await pairing.requestWithHubIdentity('/api/hub-agent/token-state',{});
+  const bodies=calls.map(r=>JSON.parse(r.body));
+  for(let i=0;i<2;i++){
+    assert.equal(bodies[i].analyticsContract.requestNonce,calls[i].headers['x-dinodia-hub-nonce']);
+    assert.equal(bodies[i].analyticsContract.appliedCloudRevision,12);
+    assert.equal(crypto.createHash('sha256').update(calls[i].body).digest('hex'),calls[i].headers['x-dinodia-body-sha256']);
+  }
+  assert.notEqual(bodies[0].analyticsContract.requestNonce,bodies[1].analyticsContract.requestNonce);
+  assert.equal(bodies[0].analyticsContract.runtimeSessionId,bodies[1].analyticsContract.runtimeSessionId);
+  pairing.runtime.capabilities.nativeUniversalStateAnalyticsV1=false;
+  await pairing.requestWithHubIdentity('/api/hub-agent/token-state',{});
+  assert.equal(JSON.parse(calls[2].body).analyticsContract,undefined);
+});
+
 test("signed sync uses its longer deadline through response-body parsing while other hub requests stay short", async () => {
   let responseDelayMs = 25;
   let bodyDelayMs = 25;

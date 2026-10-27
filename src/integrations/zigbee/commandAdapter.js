@@ -1,3 +1,5 @@
+const { serviceBindings, validStandaloneNumber } = require('./exposeNormalizer');
+
 function number(value, name) {
   const result = Number(value);
   if (!Number.isFinite(result)) throw Object.assign(new Error(`${name} must be numeric`), { statusCode: 400, code: "invalid_value" });
@@ -35,6 +37,33 @@ function commandForBinding(entity, serviceId, data = {}) {
   const capability = entity?.capability || {};
   const binding = (capability.bindings || []).find((item) => item.serviceId === serviceId);
   if (!binding) throw Object.assign(new Error(`${serviceId} is not supported for this entity`), { statusCode: 400, code: "unsupported_service" });
+  let verifiedNumericParameter = null;
+  if (serviceId === "number.set_value" && entity.domain === "number") {
+    const expose = entity.expose;
+    const stateKey = entity.stateKey;
+    if (!expose || expose.verifiedNumericAccess !== true || !validStandaloneNumber(expose, stateKey)
+      || entity.binding?.property !== stateKey || binding.operation !== 'set_value'
+      || !binding.parameter || binding.parameter.type !== 'number') {
+      throw Object.assign(new Error('Numeric operation is not supported by this expose'), { statusCode: 400, code: 'unsupported_service' });
+    }
+    const verified = serviceBindings({...expose, property:stateKey}, 'number', 'number', true)
+      .find(item => item.serviceId === serviceId && item.operation === binding.operation);
+    if (!verified?.parameter) throw Object.assign(new Error('Numeric operation is not supported by this expose'), { statusCode: 400, code: 'unsupported_service' });
+    verifiedNumericParameter = verified.parameter;
+  }
+  let verifiedCoverBinding = null;
+  if (String(serviceId).startsWith('cover.')) {
+    // Old Store entries may retain bindings created by the previous generic
+    // cover normalizer before Zigbee2MQTT republishes its inventory. Only
+    // dispatch an operation supported by this exact stored expose.
+    const expose = entity?.expose && typeof entity.expose === 'object' ? entity.expose : null;
+    const advertised = expose && serviceBindings({ ...expose, property: entity.stateKey }, 'cover', capability.kind,
+      capability.writable === true && Boolean(Number(expose.access) & 2));
+    verifiedCoverBinding = advertised?.find(item => item.serviceId === serviceId && item.operation === binding.operation) || null;
+    if (!verifiedCoverBinding) {
+      throw Object.assign(new Error(`${serviceId} is not supported by this expose`), { statusCode: 400, code: 'unsupported_service' });
+    }
+  }
   const operation = binding.operation || serviceId.split(".").pop();
   const property = entity.binding?.property || entity.stateKey || "state";
   if (["turn_on", "turn_off", "toggle"].includes(operation)) {
@@ -47,15 +76,38 @@ function commandForBinding(entity, serviceId, data = {}) {
   if (operation === "open_cover") return { [property]: "OPEN" };
   if (operation === "close_cover") return { [property]: "CLOSE" };
   if (operation === "stop_cover") return { [property]: "STOP" };
-  if (operation === "set_cover_position") return { [property]: number(data.position, "position") };
+  if (operation === "set_cover_position") {
+    if (typeof data.position !== 'number' || !Number.isFinite(data.position)) {
+      throw Object.assign(new Error('position must be numeric'), { statusCode: 400, code: 'invalid_value' });
+    }
+    const parameter = verifiedCoverBinding?.parameter;
+    const position = parameter ? validateParameter(parameter, data.position) : number(data.position, "position");
+    const step = Number(parameter?.step);
+    const origin = Number.isFinite(Number(parameter?.min)) ? Number(parameter.min) : 0;
+    if (Number.isFinite(step) && step > 0 && Math.abs((position - origin) / step - Math.round((position - origin) / step)) > 1e-8) {
+      throw Object.assign(new Error('position does not match its step'), { statusCode: 400, code: 'invalid_value' });
+    }
+    return { [property]: position };
+  }
   if (binding.parameter) {
     // Public capability surfaces use stable service parameters (for example,
     // climate.set_temperature uses `temperature` and number.set_value uses
     // `value`). Zigbee exposes can use a device-specific property name such
     // as `occupied_heating_setpoint`, so accept the normalized public value
     // as a fallback before validating and publishing the raw Zigbee field.
-    const parameterValue = resolveParameterValue(binding.parameter, data);
-    return { [property]: validateParameter(binding.parameter, parameterValue) };
+    const parameter = verifiedNumericParameter || binding.parameter;
+    const parameterValue = resolveParameterValue(parameter, data);
+    if (serviceId === "number.set_value" && parameter.type === "number") {
+      if (typeof parameterValue !== "number" || !Number.isFinite(parameterValue)) {
+        throw Object.assign(new Error(`${parameter.key} must be numeric`), { statusCode: 400, code: "invalid_value" });
+      }
+      const step = Number(parameter.step);
+      const origin = Number.isFinite(Number(parameter.min)) ? Number(parameter.min) : 0;
+      if (Number.isFinite(step) && step > 0 && Math.abs((parameterValue - origin) / step - Math.round((parameterValue - origin) / step)) > 1e-8) {
+        throw Object.assign(new Error(`${parameter.key} does not match its step`), { statusCode: 400, code: "invalid_value" });
+      }
+    }
+    return { [property]: validateParameter(parameter, parameterValue) };
   }
   const allowed = {};
   for (const [key, value] of Object.entries(data)) if (/^[a-z][a-z0-9_]*$/i.test(key)) allowed[key] = value;

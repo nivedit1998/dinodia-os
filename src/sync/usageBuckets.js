@@ -40,6 +40,7 @@ function initialUsageState(value) {
     queuedRevisions: input.queuedRevisions && typeof input.queuedRevisions === "object" ? input.queuedRevisions : {},
     temperatureQueuedKeys: Array.isArray(input.temperatureQueuedKeys) ? input.temperatureQueuedKeys.slice(-1024) : [],
     ...(input.dailyAnalytics ? { dailyAnalytics: input.dailyAnalytics } : {}),
+    ...(input.stateAnalytics ? { stateAnalytics: input.stateAnalytics } : {}),
   };
 }
 

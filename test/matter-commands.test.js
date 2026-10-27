@@ -12,7 +12,7 @@ function entity() {
 
 test("Matter adapter emits a typed endpoint command without accepting a raw target", () => {
   const result = commandForBinding(entity(), "number.set_value", { value: 200 });
-  assert.deepEqual(result, { endpoint_id: 1, cluster_id: 8, attribute_id: 0, command_name: "move_to_level", operation: "set_value", payload: { value: 200 } });
+  assert.deepEqual(result, { endpoint_id: 1, cluster_id: 8, attribute_id: 0, command_name: "MoveToLevel", operation: "set_value", payload: { level: 200, transitionTime: 0 } });
 });
 
 test("Matter adapter rejects out-of-range values and unsupported operations", () => {

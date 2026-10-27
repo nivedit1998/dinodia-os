@@ -21,6 +21,25 @@ function temporaryStore() {
   return { directory, store: new Store(path.join(directory, "store.json")) };
 }
 
+test("in-flight sync runtime remains frozen across software upgrade and downgrade", async () => {
+  for (const [before, after] of [[true, false], [false, true]]) {
+    const { directory, store } = temporaryStore();
+    try {
+      const hubId = "00000000-0000-4000-8000-000000000041";
+      const runtime = (enabled) => ({ kind: "dinodia_os", version: enabled ? "new" : "old", capabilities: { futureAnalytics: enabled } });
+      await store.queueSyncEvent("test.event", "capability-transition", { value: 1 });
+      const original = await store.prepareSyncBatch(hubId, runtime(before), Date.parse("2026-10-27T08:00:00Z"));
+      const restarted = new Store(path.join(directory, "store.json"));
+      const retried = await restarted.prepareSyncBatch(hubId, runtime(after), Date.parse("2026-10-27T08:01:00Z"));
+      assert.deepEqual(retried, original, "a durable retry must keep the entire original signed envelope");
+      assert.equal(retried.runtime.capabilities.futureAnalytics, before, "batch capabilities do not prove the currently running code");
+      assert.equal(restarted.getSyncRuntime(runtime(after)).capabilities.futureAnalytics, after, "a fresh runtime reflects the running code");
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
 test("property-device snapshot completion persists across outbox replacement and restart", async () => {
   const { directory, store } = temporaryStore();
   try {
