@@ -19,3 +19,12 @@ test("Matter adapter rejects out-of-range values and unsupported operations", ()
   assert.throws(() => commandForBinding(entity(), "number.set_value", { value: 255 }), /above its maximum/);
   assert.throws(() => commandForBinding({ ...entity(), capability: { bindings: [{ serviceId: "sensor.read" }] } }, "sensor.read"), /supported/);
 });
+
+test('Matter no-argument cluster commands include the required payload dictionary', () => {
+  const { normalizeMatterNode } = require('../src/integrations/matter/nodeNormalizer');
+  const device = normalizeMatterNode({node_id:52,fabric_id:'f',attributes:{'1/6/0':true,'2/258/8':50,'2/258/65529':[0,1,2]}});
+  for (const item of Object.values(device.entities)) for (const service of item.capability?.services || []) {
+    if (!['switch.turn_on','switch.turn_off','switch.toggle','cover.open_cover','cover.close_cover','cover.stop_cover'].includes(service)) continue;
+    assert.deepEqual(commandForBinding(item, service, {}, device).payload, {}, service);
+  }
+});

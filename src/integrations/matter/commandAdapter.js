@@ -52,12 +52,12 @@ function commandForBinding(entity, serviceId, data = {}, device = null) {
     const commands = { open_cover: 'UpOrOpen', close_cover: 'DownOrClose', stop_cover: 'StopMotion', set_cover_position: 'GoToLiftPercentage' };
     return { endpoint_id: endpointId, cluster_id: clusterId, attribute_id: attributeId,
       command_name: commands[operation], operation,
-      ...(operation === 'set_cover_position' ? { payload: { liftPercent100thsValue: Math.round((100 - bindingData.position) * 100) } } : {}) };
+      payload: operation === 'set_cover_position' ? { liftPercent100thsValue: Math.round((100 - bindingData.position) * 100) } : {} };
   }
   if (!["turn_on", "turn_off", "toggle", "lock", "unlock", "set_value", "select_option", "set_percentage", "set_preset_mode", "open_cover", "close_cover", "stop_cover", "set_cover_position", "press"].includes(operation)) throw Object.assign(new Error("Matter operation is not supported"), { statusCode: 400, code: "unsupported_service" });
   if (clusterId === 6 && attributeId === 0 && ['turn_on','turn_off','toggle'].includes(operation)) {
     if (serviceId !== `switch.${operation}` && serviceId !== `light.${operation}`) throw Object.assign(new Error('Matter power binding mismatch'),{statusCode:400,code:'unsupported_service'});
-    return {endpoint_id:endpointId,cluster_id:clusterId,attribute_id:attributeId,command_name:{turn_on:'On',turn_off:'Off',toggle:'Toggle'}[operation],operation};
+    return {endpoint_id:endpointId,cluster_id:clusterId,attribute_id:attributeId,command_name:{turn_on:'On',turn_off:'Off',toggle:'Toggle'}[operation],operation,payload:{}};
   }
   if (clusterId === 8 && attributeId === 0 && operation === 'set_value') {
     const value = bindingData.value;
@@ -67,7 +67,7 @@ function commandForBinding(entity, serviceId, data = {}, device = null) {
   }
   const commandNames = { lock: 'LockDoor', unlock: 'UnlockDoor' };
   if (clusterId !== 257 || !['lock','unlock'].includes(operation)) throw Object.assign(new Error('Matter operation requires a supported attribute or cluster command'),{statusCode:400,code:'unsupported_service'});
-  return { endpoint_id: endpointId, cluster_id: clusterId, attribute_id: attributeId, command_name: commandNames[operation] || operation, operation, ...(Object.keys(bindingData).length ? { payload: bindingData } : {}) };
+  return { endpoint_id: endpointId, cluster_id: clusterId, attribute_id: attributeId, command_name: commandNames[operation] || operation, operation, payload: bindingData };
 }
 
 module.exports = { commandForBinding };

@@ -283,6 +283,12 @@ class MatterBridge {
       result = await this.request('write_attribute', { node_id: Number(nodeId),
         attribute_path: `${request.endpoint_id}/${request.cluster_id}/${request.attribute_id}`, value: request.attribute_value });
     } else {
+      if (!request || !Number.isSafeInteger(request.endpoint_id) || request.endpoint_id < 0
+        || !Number.isSafeInteger(request.cluster_id) || request.cluster_id < 0
+        || typeof request.command_name !== 'string' || !request.command_name
+        || !request.payload || typeof request.payload !== 'object' || Array.isArray(request.payload)) {
+        throw Object.assign(new Error('Matter cluster commands require typed endpoint, cluster, command and payload'), {statusCode:400,code:'invalid_value'});
+      }
       result = await this.request("device_command", {
         ...(request || {}),
         node_id: Number(nodeId),

@@ -20,7 +20,7 @@ test("Matter endpoint and cluster data creates typed controls", () => {
   assert.equal(onoff.domain, "switch");
   assert.ok(onoff.capability.services.includes("switch.toggle"));
   assert.equal(level.domain, "number");
-  assert.deepEqual(commandForBinding(onoff, "switch.turn_on"), { endpoint_id: 1, cluster_id: 6, attribute_id: 0, command_name: "On", operation: "turn_on" });
+  assert.deepEqual(commandForBinding(onoff, "switch.turn_on"), { endpoint_id: 1, cluster_id: 6, attribute_id: 0, command_name: "On", operation: "turn_on", payload: {} });
   assert.deepEqual(commandForBinding(level, "number.set_value", { value: 200 }), { endpoint_id: 1, cluster_id: 8, attribute_id: 0, command_name: "MoveToLevel", operation: "set_value", payload: { level: 200, transitionTime: 0 } });
 });
 
@@ -62,7 +62,7 @@ test("Matter standard cover and fan clusters expose only typed controls", () => 
   assert.ok(cover.capability.services.includes("cover.open_cover"));
   assert.ok(cover.capability.services.includes("cover.set_cover_position"));
   assert.ok(fan.capability.services.includes("fan.set_percentage"));
-  assert.deepEqual(commandForBinding(cover, "cover.open_cover", {}, device), { endpoint_id: 1, cluster_id: 258, attribute_id: 8, command_name: "UpOrOpen", operation: "open_cover" });
+  assert.deepEqual(commandForBinding(cover, "cover.open_cover", {}, device), { endpoint_id: 1, cluster_id: 258, attribute_id: 8, command_name: "UpOrOpen", operation: "open_cover", payload: {} });
   assert.deepEqual(commandForBinding(fan, "fan.set_percentage", { percentage: 60 }), { endpoint_id: 2, cluster_id: 514, attribute_id: 2, attribute_value:60, operation: "set_percentage" });
 });
 
@@ -198,13 +198,14 @@ test('Matter cover dispatch is fenced until current-connection inventory is pers
     let release;
     const held = new Promise(resolve => { release = resolve; });
     bridge.request = async command => { if (command === 'start_listening') { await held; return [node]; } return { ok: true }; };
-    const command = { endpoint_id: 1, cluster_id: 258, command_name: 'UpOrOpen' };
+    const command = { endpoint_id: 1, cluster_id: 258, command_name: 'UpOrOpen', payload: {} };
     const refresh = bridge.refresh();
     await assert.rejects(bridge.command('matter:f:33', command, { verifiedCoverBinding: true }), /current verified/);
     release();
     await refresh;
     await assert.rejects(bridge.command('matter:f:33', command), /current verified/);
     await assert.rejects(bridge.command('matter:f:33', { command: 'device_command', args: command }), /verified control binding/);
+    await assert.rejects(bridge.command('matter:f:33', {...command,payload:undefined}, {verifiedCoverBinding:true}), /payload/);
     assert.deepEqual(await bridge.command('matter:f:33', command, { verifiedCoverBinding: true }), { ok: true });
     const persist = store.persist.bind(store);
     let releaseOld, enterOld;
