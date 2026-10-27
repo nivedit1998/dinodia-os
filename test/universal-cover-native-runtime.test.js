@@ -79,6 +79,13 @@ test('tenant descriptor routes explicitly advertised cover OPEN once to the exac
     const invalidResponse = await fetch(`${base}/api/dinodia/v1/commands`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':invalid.idempotencyKey},body:JSON.stringify(invalid)});
     assert.equal(invalidResponse.status,400);
     assert.equal(calls.length,1, 'an undeclared option must not reach the adapter');
+    const otherClaims = {...claims,sub:'other-account',membershipId:'other-membership',areaIds:['other-area']};
+    const otherInput = `${enc({alg:'EdDSA',typ:'DNO-APP-1',v:1})}.${enc(otherClaims)}`;
+    const otherToken = `dno-app-1.${otherInput}.${crypto.sign(null,Buffer.from(otherInput),keys.privateKey).toString('base64url')}`;
+    const unauthorized = {...command,commandId:'command-unauthorized-fixture',homeMembershipId:'other-membership',idempotencyKey:'cover-command-denied-123456'};
+    const unauthorizedResponse = await fetch(`${base}/api/dinodia/v1/commands`,{method:'POST',headers:{authorization:`Bearer ${otherToken}`,'content-type':'application/json','idempotency-key':unauthorized.idempotencyKey},body:JSON.stringify(unauthorized)});
+    assert.equal(unauthorizedResponse.status,404,'a tenant without the Area grant cannot address the device');
+    assert.equal(calls.length,1);
     const mixedDto = devices.find(item=>item.id===mixed.id);
     const mixedControl = mixedDto?.controls.find(item=>item.valueType==='option');
     assert.ok(mixedControl, 'mixed state remains visible for reading');
