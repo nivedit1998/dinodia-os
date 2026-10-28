@@ -409,6 +409,39 @@
       },
       "additionalProperties": false
     },
+    "customerAvatar": {
+      "type": "object",
+      "required": ["icon", "colour"],
+      "properties": {
+        "icon": { "type": ["string", "null"], "pattern": "^[a-z]{2,24}$" },
+        "colour": { "type": "string", "pattern": "^[a-z]{2,24}$" }
+      },
+      "additionalProperties": false
+    },
+    "customerAvatarReceipt": {
+      "type": "object",
+      "required": ["schemaVersion", "ok", "avatar"],
+      "properties": { "schemaVersion": { "const": "dinodia.v1" }, "ok": { "const": true }, "avatar": { "$ref": "#/$defs/customerAvatar" } },
+      "additionalProperties": false
+    },
+    "tenantAreaMembers": {
+      "type": "array", "maxItems": 500,
+      "items": {
+        "type": "object", "required": ["areaId", "members"],
+        "properties": {
+          "areaId": { "$ref": "#/$defs/id" },
+          "members": { "type": "array", "minItems": 1, "maxItems": 50, "items": {
+            "type": "object", "required": ["memberKey", "displayName", "avatar"],
+            "properties": {
+              "memberKey": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+              "displayName": { "type": "string", "minLength": 1, "maxLength": 40 },
+              "avatar": { "$ref": "#/$defs/customerAvatar" }
+            },
+            "additionalProperties": false } }
+        },
+        "additionalProperties": false
+      }
+    },
     "customerProfileUpdateRequest": {
       "type": "object",
       "required": ["displayName", "username", "phoneNumber", "expectedProfileRevision", "proof"],
@@ -2911,6 +2944,7 @@
         "membership": { "type": "object", "required": ["membershipId", "homeId", "role", "status", "revision"], "properties": { "membershipId": { "$ref": "#/$defs/id" }, "homeId": { "$ref": "#/$defs/id" }, "role": { "const": "tenant" }, "status": { "const": "active" }, "revision": { "type": "integer", "minimum": 1 } }, "additionalProperties": false },
         "areaAccess": { "type": "array", "uniqueItems": true, "items": { "type": "object", "required": ["areaId"], "properties": { "areaId": { "$ref": "#/$defs/id" } }, "additionalProperties": false } },
         "areaOverrides": { "type": "array", "items": { "type": "object", "required": ["areaId", "originalName", "overrideName"], "properties": { "areaId": { "$ref": "#/$defs/id" }, "originalName": { "type": "string", "minLength": 1, "maxLength": 80 }, "overrideName": { "type": ["string", "null"], "maxLength": 80 } }, "additionalProperties": false } },
+        "areaMembers": { "$ref": "#/$defs/tenantAreaMembers" },
         "areaGroups": { "type": "array", "items": { "type": "object", "required": ["name", "areaIds"], "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 80 }, "areaIds": { "type": "array", "minItems": 2, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } } }, "additionalProperties": false } },
         "deviceOverrides": { "type": "array", "items": { "$ref": "#/$defs/tenantDeviceOverride" } },
         "preferences": { "type": "object", "required": ["layoutRevision"], "properties": { "layoutRevision": { "type": "integer", "minimum": 0 } }, "additionalProperties": false },

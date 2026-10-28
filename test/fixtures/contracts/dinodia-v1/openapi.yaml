@@ -1479,6 +1479,29 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/Conflict" }
+  /api/v2/me/avatar:
+    get:
+      summary: "Read the authenticated customer's chosen shared-area icon and colour"
+      operationId: getCustomerAvatar
+      tags: [Account]
+      security: [{ CustomerSessionCookie: [] }, { MobileAccessBearer: [] }]
+      responses:
+        "200": { description: Icon key (null means initials) and colour key only., content: { application/json: { schema: { $ref: "./contract.json#/$defs/customerAvatarReceipt" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      summary: "Choose the shared-area icon and colour (cosmetic; idempotent; no fresh proof)"
+      operationId: setCustomerAvatar
+      tags: [Account]
+      security: [{ CustomerSessionCookie: [] }, { MobileAccessBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "./contract.json#/$defs/customerAvatar" }
+      responses:
+        "200": { description: Avatar stored; the profile revision is unchanged., content: { application/json: { schema: { $ref: "./contract.json#/$defs/customerAvatarReceipt" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /api/v2/me/username:
     patch:
       summary: Select the invited tenant username after email verification and mandatory password replacement
