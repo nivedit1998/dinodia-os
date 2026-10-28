@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { resolveStateEvidence, exactSource, scalarFor } = require('./observation/stateEvidence');
+const measuredTemperature = require('./observation/measuredTemperature');
 const logicalDevices = require('./capabilities/logicalDevices');
 const areaDeletion = require('./lifecycle/areaDeletion');
 const { AsyncLocalStorage } = require("node:async_hooks");
@@ -447,7 +448,24 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
         && admission.observedAt === observedAt && admission.controlId === control.controlId
         && admission.sourceKey === exactSource(device, entity, control, generation).sourceKey
         && admission.quality === 'fresh' && Number.isFinite(Date.parse(admission.validUntil));
-      const validUntil = evidencePolicy ? checked ? Date.parse(admission.validUntil) : observedMs
+      // Passive cadence history for this exact sensor. Only a genuinely new source timestamp adds a gap.
+      let measuredMs = null;
+      if (evidencePolicy) {
+        const cadenceKey = [deviceId, control.controlId, generation].join("|");
+        usage.temperatureCadence = usage.temperatureCadence || {};
+        const history = measuredTemperature.recordObservation(usage.temperatureCadence[cadenceKey], observedMs, control.maxStateValiditySeconds);
+        usage.temperatureCadence[cadenceKey] = history;
+        usage.temperatureCadence = measuredTemperature.pruneSources(usage.temperatureCadence);
+        // Without a verified reporting proof the reading counts for a bounded, measured time. Offline,
+        // untrusted-clock, replayed and unsupported evidence keep their zero validity.
+        if (!checked && admission?.quality === 'unknown' && admission.status === 'no_verified_guarantee'
+          && admission.observedAt === observedAt && admission.sourceGeneration === generation
+          && admission.controlId === control.controlId && device.available !== false) {
+          const seconds = measuredTemperature.measuredValiditySeconds(control, history);
+          if (seconds) measuredMs = observedMs + seconds * 1000;
+        }
+      }
+      const validUntil = evidencePolicy ? checked ? Date.parse(admission.validUntil) : measuredMs ?? observedMs
         : observedMs + Math.min(30 * 60 * 1000, control.maxStateValiditySeconds * 1000);
       // Current freshness expires at validUntil, but a delayed signed sync may
       // still carry legitimate historical evidence for the bounded retention
@@ -467,7 +485,7 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
       const sample = enqueueSyncEventInState(state, "temperature.sample", sourceEventKey, {
         osDeviceId: deviceId, osAreaId: String(device.areaId || ""), controlId: String(control.controlId),
         sourceGeneration: generation, sourceEventKey, temperature: Math.round(value * 100) / 100,
-        sourceObservedAt: observedAt, validUntil: new Date(validUntil).toISOString(), quality: evidencePolicy && !checked ? "unknown" : "fresh",
+        sourceObservedAt: observedAt, validUntil: new Date(validUntil).toISOString(), quality: evidencePolicy && !checked && measuredMs === null ? "unknown" : "fresh",
         ...(evidencePolicy ? { analyticsPolicyVersion: 3 } : {}),
       }, { now: nowMs });
       if (sample) {
@@ -2023,7 +2041,7 @@ class Store {
       entity.admittedEvidence = { quality: admitted.quality, value: admitted.value,
         observedAt: entity.sourceObservedAt, validUntil: admitted.validUntil, sourceGeneration: this.syncSourceGeneration,
         controlId: entity.capability?.controlId, sourceKey: admitted.lastReported?.sourceKey || null,
-        guaranteeId: admitted.evidence.guaranteeId, policyRevision: 3 };
+        guaranteeId: admitted.evidence.guaranteeId, status: admitted.evidence.status, policyRevision: 3 };
     }
     if (options.devicePolicy && typeof options.devicePolicy === "object" && !Array.isArray(options.devicePolicy)) {
       this.state.platform = this.state.platform || initialState().platform;
