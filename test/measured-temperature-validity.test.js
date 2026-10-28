@@ -97,6 +97,36 @@ test('offline or untrusted-clock readings are never given measured coverage', as
     'an untrusted clock cannot be turned into coverage');
 });
 
+test('a future-dated reading is not recorded in the cadence history', async t => {
+  const h = await radiator(t);
+  await h.report(0, 20);
+  await h.store.updateDeviceState(h.device.id, { local_temperature: 21 }, { nowMs: T0 + 60000, reportedStateKeys: ['local_temperature'],
+    requireExplicitObservation: true, sourceObservedAtByStateKey: { local_temperature: new Date(T0 + 600000).toISOString() },
+    sourceReceivedAtByStateKey: { local_temperature: new Date(T0 + 60000).toISOString() } });
+  const cadence = Object.values(h.store.snapshot().syncUsage.temperatureCadence)[0];
+  assert.equal(cadence.lastObservedMs, T0, 'the future observation never becomes the history anchor');
+  assert.deepEqual(cadence.gaps, []);
+});
+
+test('a source with any reporting proof record, or a tenant-managed device, gets no measured coverage', async t => {
+  const proof = await radiator(t);
+  const source = Object.values(proof.store.getDevice(proof.device.id).entities).find(entity => entity.capability?.semanticRole === 'ambient_temperature');
+  const { exactSource } = require('../src/observation/stateEvidence');
+  const catalogControl = proof.store.getDevice(proof.device.id).entities;
+  const controlId = source.capability.controlId;
+  const exact = exactSource(proof.store.getDevice(proof.device.id), source, { controlId, semanticRole: 'ambient_temperature' }, 1);
+  proof.store.state.observationPolicy = { version: 1, records: { invalidated: { deviceId: proof.device.id, controlId, endpoint: exact.endpoint,
+    property: exact.property, cluster: exact.cluster, attribute: exact.attribute, sourceGeneration: 1, state: 'cadence_verified', invalidatedAt: new Date(T0).toISOString() } } };
+  await proof.report(0, 20);
+  assert.ok(proof.samples().every(sample => sample.validUntil === sample.sourceObservedAt), 'an invalidated proof is not replaced by measured coverage');
+  assert.ok(catalogControl);
+  const tenant = await radiator(t);
+  const stored = tenant.store.getDevice(tenant.device.id); stored.ownerMembershipId = 'tenant-membership';
+  await tenant.store.upsertDevice(stored, { nowMs: T0 - 1000 });
+  await tenant.report(0, 20);
+  assert.ok(tenant.samples().every(sample => sample.validUntil === sample.sourceObservedAt), 'tenant-managed devices never get measured coverage');
+});
+
 test('daily temperature coverage stops at the measured window instead of the quiet hour', () => {
   const daily = require('../src/sync/dailyAnalytics');
   const { initialUsageState } = require('../src/sync/usageBuckets');

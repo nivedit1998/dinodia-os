@@ -41,7 +41,7 @@ function initialUsageState(value) {
     temperatureQueuedKeys: Array.isArray(input.temperatureQueuedKeys) ? input.temperatureQueuedKeys.slice(-1024) : [],
     // Passive per-sensor report cadence for measured temperature validity; absent in older Stores.
     ...(input.temperatureCadence && typeof input.temperatureCadence === "object" && !Array.isArray(input.temperatureCadence)
-      ? { temperatureCadence: input.temperatureCadence } : {}),
+      ? { temperatureCadence: require("../observation/measuredTemperature").pruneSources(input.temperatureCadence) } : {}),
     ...(input.dailyAnalytics ? { dailyAnalytics: input.dailyAnalytics } : {}),
     ...(input.stateAnalytics ? { stateAnalytics: input.stateAnalytics } : {}),
   };

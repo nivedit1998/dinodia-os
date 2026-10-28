@@ -448,30 +448,37 @@ function recordDeviceSyncObservations(state, device, nowMs, options = {}) {
         && admission.observedAt === observedAt && admission.controlId === control.controlId
         && admission.sourceKey === exactSource(device, entity, control, generation).sourceKey
         && admission.quality === 'fresh' && Number.isFinite(Date.parse(admission.validUntil));
-      // Passive cadence history for this exact sensor. Only a genuinely new source timestamp adds a gap.
+      // Current freshness expires at the admitted deadline, but a delayed signed sync may
+      // still carry legitimate historical evidence for the bounded retention
+      // period. Do not replace source time with queue/delivery time.
+      if (observedMs > nowMs || nowMs - observedMs > 366 * 24 * 60 * 60 * 1000) continue;
+      if (Number.isSafeInteger(options.ignoreThroughMs) && observedMs <= options.ignoreThroughMs) continue;
+      // Passive cadence history for this exact sensor, kept only for readings that passed the checks above.
+      // Only a genuinely new source timestamp adds a gap.
       let measuredMs = null;
       if (evidencePolicy) {
         const cadenceKey = [deviceId, control.controlId, generation].join("|");
-        usage.temperatureCadence = usage.temperatureCadence || {};
-        const history = measuredTemperature.recordObservation(usage.temperatureCadence[cadenceKey], observedMs, control.maxStateValiditySeconds);
-        usage.temperatureCadence[cadenceKey] = history;
-        usage.temperatureCadence = measuredTemperature.pruneSources(usage.temperatureCadence);
-        // Without a verified reporting proof the reading counts for a bounded, measured time. Offline,
-        // untrusted-clock, replayed and unsupported evidence keep their zero validity.
-        if (!checked && admission?.quality === 'unknown' && admission.status === 'no_verified_guarantee'
+        const liveUsage = state.syncUsage;
+        const history = measuredTemperature.recordObservation(liveUsage.temperatureCadence?.[cadenceKey], observedMs, control.maxStateValiditySeconds);
+        liveUsage.temperatureCadence = measuredTemperature.pruneSources({ ...(liveUsage.temperatureCadence || {}), [cadenceKey]: history });
+        // Without any reporting proof the reading counts for a bounded, measured time. Offline, untrusted-clock,
+        // replayed, unsupported, tenant/owner-managed and proof-invalidated evidence keep their zero validity.
+        const source = exactSource(device, entity, control, generation);
+        const proofExists = Object.values(state.observationPolicy?.records || {}).some(record => record
+          && record.deviceId === (device.physicalDeviceId || device.id) && record.controlId === control.controlId
+          && String(record.endpoint) === String(source.endpoint) && record.property === source.property
+          && record.cluster === source.cluster && record.attribute === source.attribute);
+        const tenantManaged = String(device.managementClass || "").toUpperCase() === "TENANT_DEVICE" || device.ownerMembershipId
+          || device.tenantOwnerMembershipId || policy.ownerMembershipId;
+        if (!checked && !proofExists && !tenantManaged && admission?.quality === 'unknown' && admission.status === 'no_verified_guarantee'
           && admission.observedAt === observedAt && admission.sourceGeneration === generation
-          && admission.controlId === control.controlId && device.available !== false) {
+          && admission.controlId === control.controlId && admission.sourceKey === source.sourceKey && device.available !== false) {
           const seconds = measuredTemperature.measuredValiditySeconds(control, history);
           if (seconds) measuredMs = observedMs + seconds * 1000;
         }
       }
       const validUntil = evidencePolicy ? checked ? Date.parse(admission.validUntil) : measuredMs ?? observedMs
         : observedMs + Math.min(30 * 60 * 1000, control.maxStateValiditySeconds * 1000);
-      // Current freshness expires at validUntil, but a delayed signed sync may
-      // still carry legitimate historical evidence for the bounded retention
-      // period. Do not replace source time with queue/delivery time.
-      if (observedMs > nowMs || nowMs - observedMs > 366 * 24 * 60 * 60 * 1000) continue;
-      if (Number.isSafeInteger(options.ignoreThroughMs) && observedMs <= options.ignoreThroughMs) continue;
       const sourceEventKey = crypto.createHash("sha256").update([deviceId, control.controlId, generation, observedAt].join("\n"), "utf8").digest("hex");
       if (!versionTwo || observedMs >= Math.max(Date.parse(interval.validFrom), Date.parse(policy.analyticsStartAt || interval.validFrom)))
         dailyAnalytics.observeTemperature(usage, { osDeviceId: deviceId, osAreaId: String(device.areaId || ''),

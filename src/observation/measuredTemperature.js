@@ -53,9 +53,9 @@ function measuredValiditySeconds(control, history) {
 }
 
 function pruneSources(map) {
-  const entries = Object.entries(map);
-  if (entries.length <= MAXIMUM_SOURCES) return map;
-  return Object.fromEntries(entries.sort((a, b) => (b[1].lastObservedMs || 0) - (a[1].lastObservedMs || 0)).slice(0, MAXIMUM_SOURCES));
+  const entries = Object.entries(map).map(([key, value]) => [key, sanitizeHistory(value)]);
+  if (entries.length <= MAXIMUM_SOURCES) return Object.fromEntries(entries);
+  return Object.fromEntries(entries.sort((a, b) => (b[1]?.lastObservedMs || 0) - (a[1]?.lastObservedMs || 0)).slice(0, MAXIMUM_SOURCES));
 }
 
 module.exports = { recordObservation, measuredValiditySeconds, sanitizeHistory, pruneSources,
