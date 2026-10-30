@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { resolveStateEvidence } = require('./observation/stateEvidence');
+const { lastReadingFrom } = require('./observation/alexaLastReading');
 const os = require("node:os");
 const net = require("node:net");
 const { EventEmitter } = require("node:events");
@@ -1500,6 +1501,20 @@ function nativeDeviceView(principal, device) {
     return { value: last.value, observedAt: last.observedAt, revision: state.revision };
   }
 
+  // The last value a read-only room temperature reported, for the Alexa state endpoint only (see observation/alexaLastReading.js).
+  function nativeLastReading(principal, device, dto, control, state) {
+    if (!device || !dto || !control || !state || state.quality === "fresh" || control.writable === true || control.semanticRole !== "ambient_temperature") return null;
+    const entity = nativeRawEntityForControl(device, control.controlId);
+    const now = Number(clock());
+    const evidence = resolveStateEvidence({ device: { ...device, managementClass: dto.managementClass,
+      ownerMembershipId: dto.ownerMembershipId }, control, entity,
+      records: hubStore.getObservationPolicyRecords?.() || {},
+      sourceGeneration: hubStore.syncSourceGeneration ?? principal?.identityGeneration,
+      authorityValid: true, clockTrusted: hubStore.getUsageHistoryClockStatus?.(now)?.trusted === true,
+      runtimeSessionId: hubStore.observationSessionId, now });
+    return lastReadingFrom({ control, state, evidence, now });
+  }
+
   function nativeControlStates(principal, devices, onlyDeviceId = null, evidenceVersion = 1) {
     const now = Number(clock());
     const states = [];
@@ -2682,7 +2697,8 @@ function nativeDeviceView(principal, device) {
           // so state reports never present it as current.
           const control = controls.find((candidate) => candidate.controlId === state.controlId);
           const lastSetting = control ? nativeLastSetting(scopedPrincipal, device, dto, control, state) : null;
-          return lastSetting ? { ...state, lastSetting } : state;
+          const lastReading = control ? nativeLastReading(scopedPrincipal, device, dto, control, state) : null;
+          return { ...state, ...(lastSetting ? { lastSetting } : {}), ...(lastReading ? { lastReading } : {}) };
         });
       return json(res, 200, { schemaVersion: "dinodia.v1", endpointId: scopedPrincipal.endpointId, homeId: scopedPrincipal.homeId,
         membershipId: scopedPrincipal.membershipId, deviceId: scopedPrincipal.deviceId, descriptorRevision: dto.descriptorRevision, states });
