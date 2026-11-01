@@ -1298,3 +1298,28 @@ test("public session projection contains no protocol identity, bearer, account, 
   for (const secret of ["private-account", "private-session", "private-token-hash", "node-private", "ieee-private", "MT:PRIVATE"]) assert.equal(text.includes(secret), false);
   assert.equal(session.candidates[0].name, "Lamp");
 });
+
+test('one joining Zigbee device is one candidate even while the hub briefly holds a placeholder and the interviewed record', async t => {
+  const f = fixture(); t.after(f.close);
+  const started = await f.service.start(f.principal, { protocol: 'zigbee' }, uuid());
+  const device = normalizeZigbeeDevice(require('./fixtures/zigbee/radiator-device.json'));
+  const ieee = device.protocolIdentity?.ieeeAddress || device.metadata?.ieee_address || '0x00124b0000000001';
+  // The bare record Zigbee2MQTT's first messages create, named only by the radio address.
+  const placeholder = { id: ieee, name: ieee, protocol: 'zigbee', state: {}, metadata: {}, available: true, protocolIdentity: { ieeeAddress: ieee },
+    setup: { status: 'needs_setup', reason: 'area_and_label_required' }, entities: {} };
+  await f.store.upsertDevice(placeholder);
+  await f.store.upsertDevice({ ...device, protocolIdentity: { ieeeAddress: ieee }, interviewStatus: 'successful' });
+  f.mqtt.pairingStatus = () => ({ active: true, found: [placeholder.id, device.id] });
+  await f.service.status(started.sessionId, f.principal);
+  const candidates = f.service.sessions()[started.sessionId].candidates;
+  assert.equal(candidates.length, 1, 'one physical device must be one candidate');
+  assert.equal(candidates[0].deviceId, device.id, 'the interviewed record wins over the placeholder');
+  // The order they arrive in must not matter.
+  const second = fixture(); t.after(second.close);
+  const again = await second.service.start(second.principal, { protocol: 'zigbee' }, uuid());
+  await second.store.upsertDevice({ ...device, protocolIdentity: { ieeeAddress: ieee }, interviewStatus: 'successful' });
+  await second.store.upsertDevice(placeholder);
+  second.mqtt.pairingStatus = () => ({ active: true, found: [device.id, placeholder.id] });
+  await second.service.status(again.sessionId, second.principal);
+  assert.deepEqual(second.service.sessions()[again.sessionId].candidates.map((row) => row.deviceId), [device.id]);
+});

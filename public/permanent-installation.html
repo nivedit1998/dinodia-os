@@ -50,13 +50,14 @@
       <p id="existing-device-hold" class="muted" hidden>Permanent-device registration is held by the current maintenance policy. No device or radio state was changed.</p>
       <div id="existing-device-list"></div>
     </section>
+    <section id="candidates" class="install-card" hidden aria-label="Discovered devices"><h2>Found nearby</h2><p class="muted">Each device appears once. Choose the one you just put in pairing mode.</p><div id="candidate-list"></div></section>
     <section id="device-result" class="install-card" hidden>
       <h2 id="review-heading">Review discovered device</h2>
-      <p id="review-instructions" class="muted">Review the device interview, select an authorized original Area, and confirm its current controls before registration.</p>
+      <p id="review-instructions" class="muted">Choose the room it is in, give it a name, then continue.</p>
       <div id="selected-controls" class="muted" role="status"></div>
       <div class="row"><label for="area">Original Area</label><select id="area"></select></div>
-      <div class="row"><label for="label">Customer label</label><input id="label" maxlength="40" autocomplete="off"></div>
-      <div class="row"><label for="name">Device name</label><input id="name" maxlength="80" autocomplete="off"></div>
+      <div class="row"><label for="label">Name (shown to the customer)</label><input id="label" maxlength="40" autocomplete="off" placeholder="For example: Room 1 Light"></div>
+      <div class="row" hidden><label for="name">Device name</label><input id="name" maxlength="80" autocomplete="off"></div>
       <div class="row"><label for="analytics-category">Analytics category (optional)</label><select id="analytics-category">
         <option value="NONE">None</option><option value="LIGHT">Light</option><option value="BOILER">Boiler</option><option value="RADIATOR">Radiator</option>
       </select></div>
@@ -69,7 +70,6 @@
         <button id="remove" type="button" hidden>Remove unsupported candidate</button>
       </div>
     </section>
-    <section id="candidates" class="install-card" hidden aria-label="Discovered devices"><h2>Discovery results</h2><p class="muted">New radio discoveries are candidates only; they are not property devices until reviewed and registered.</p><div id="candidate-list"></div></section>
     <section id="completed-devices" class="install-card" hidden aria-label="Completed devices"><h2>Completed in this installation</h2><ul id="completed-device-list"></ul></section>
     <footer class="muted"><p>This workspace is limited to the current assigned request, paired hub, and active original Areas. It does not grant homeowner or tenant ownership.</p>
       <button id="add-next" type="button" hidden>Add another device</button>

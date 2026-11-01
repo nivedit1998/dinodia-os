@@ -740,8 +740,33 @@ class NativeCommissioningService {
       ? (this.mqtt.pairingStatus?.().found || []).map((id) => this.store.getDevice(String(id))).filter(Boolean)
       : this.store.listDevices().filter((device) => device.protocol === "matter" && !this.isBaselineDevice(session, device));
     let changed = false;
+    // One physical device is one candidate. While a Zigbee device joins, the hub can briefly hold two records for the same radio
+    // address: a bare placeholder (named only by its address) and the interviewed device. Remove a placeholder that a complete
+    // record has replaced, and list only the best record per address.
+    if (session.protocol === "zigbee" && typeof this.store.discardPlaceholderDuplicates === "function") {
+      for (const device of devices) {
+        if (device?.protocolIdentity?.ieeeAddress && await this.store.discardPlaceholderDuplicates(String(device.id))) changed = true;
+      }
+    }
+    const rank = (device) => (device?.interviewStatus === "successful" ? 4 : 0) + (device?.metadata?.model || device?.metadata?.model_id ? 2 : 0)
+      + (String(device?.id || "").includes(":") ? 1 : 0);
+    const best = new Map();
+    for (const device of devices) {
+      if (!device || !this.store.getDevice(String(device.id)) || this.isBaselineDevice(session, device)) continue;
+      const hash = this.candidateIdentityHash(device);
+      const current = best.get(hash);
+      if (!current || rank(device) > rank(current)) best.set(hash, device);
+    }
+    const keptBefore = session.candidates.length;
+    session.candidates = session.candidates.filter((item) => {
+      const winner = best.get(item.identityHash);
+      return !winner || String(winner.id) === String(item.deviceId) || item.candidateRef === session.selectedCandidateRef || Boolean(item.registrationProvenance);
+    });
+    if (session.candidates.length !== keptBefore) changed = true;
     for (const device of devices) {
       if (this.isBaselineDevice(session, device)) continue;
+      const winner = best.get(this.candidateIdentityHash(device));
+      if (winner && String(winner.id) !== String(device.id) && !session.candidates.some((item) => item.deviceId === String(device.id))) continue;
       const existing = session.candidates.find((item) => item.deviceId === String(device.id));
       const current = {
         name: String(device.originalName || device.name || "New device").slice(0, 80),

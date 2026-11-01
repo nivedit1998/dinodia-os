@@ -2234,6 +2234,36 @@ class Store {
     return existed;
   }
 
+  /**
+   * While a Zigbee device joins, Zigbee2MQTT's first messages can create a bare record named only by the radio address, before the
+   * interviewed device exists under its canonical id. Once the interviewed record exists, the bare one is a duplicate of the same
+   * physical device: drop it, keep an alias to the real one. Only an untouched placeholder is ever dropped: no cloud policy, no
+   * interview, no area, no controls, and never the canonical record itself. Returns whether anything was removed.
+   */
+  async discardPlaceholderDuplicates(canonicalId) {
+    const canonical = this.state.devices[String(canonicalId)];
+    const ieee = String(canonical?.protocolIdentity?.ieeeAddress || canonical?.metadata?.ieee_address || "");
+    if (!canonical || !ieee || canonical.interviewStatus !== "successful") return false;
+    const stale = Object.entries(this.state.devices).filter(([key, device]) => key !== canonical.id
+      && String(device?.protocolIdentity?.ieeeAddress || "") === ieee
+      && String(device?.protocol || "").toLowerCase() === "zigbee"
+      && !device.interviewStatus && !device.metadata?.model && !device.areaId
+      && Object.keys(device.entities || {}).length === 0
+      && device.setup?.status === "needs_setup"
+      && !this.state.platform?.devicePolicies?.[key]).map(([key]) => key);
+    if (!stale.length) return false;
+    const before = this.snapshot();
+    for (const key of stale) {
+      delete this.state.devices[key];
+      this.state.aliases = { ...(this.state.aliases || {}), [key]: canonical.id };
+      for (const [name, session] of Object.entries(this.state.pairingSessions || {})) {
+        if (Array.isArray(session?.found)) this.state.pairingSessions[name] = { ...session, found: session.found.filter((id) => id !== key) };
+      }
+    }
+    try { await this.persist(); } catch (error) { this.restoreSnapshot(before, error); throw error; }
+    return true;
+  }
+
   removeDeviceFromState(id) {
     const resolvedId = this.state.aliases?.[String(id)] || String(id);
     const device = this.state.devices[resolvedId];

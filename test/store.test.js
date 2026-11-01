@@ -451,3 +451,21 @@ test("deleting a device purges its aliases, state, events, automations, bindings
   assert.deepEqual(store.snapshot().heatingUsage.entities["climate.other"], { deviceId: "other-device", onSeconds: 10 });
   assert.equal(await store.deleteDevice("zigbee:123"), false);
 });
+
+test("a bare Zigbee placeholder is dropped once the interviewed device for the same radio address exists, and only then", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dinodia-store-placeholder-"));
+  const store = new Store(path.join(directory, "dinodia.json"));
+  const { normalizeZigbeeDevice } = require("../src/integrations/zigbee/exposeNormalizer");
+  const device = normalizeZigbeeDevice(require("./fixtures/zigbee/radiator-device.json"));
+  const ieee = String(device.protocolIdentity?.ieeeAddress || device.metadata?.ieee_address);
+  await store.upsertDevice({ id: ieee, name: ieee, protocol: "zigbee", state: {}, metadata: {}, available: true, protocolIdentity: { ieeeAddress: ieee } });
+  assert.equal(await store.discardPlaceholderDuplicates(ieee), false, "a placeholder alone is kept: it is the only record");
+  await store.upsertDevice({ ...device, protocolIdentity: { ieeeAddress: ieee }, interviewStatus: "successful" });
+  assert.notEqual(device.id, ieee);
+  assert.ok(store.getDevice(ieee), "both records exist before the clean-up");
+  assert.equal(await store.discardPlaceholderDuplicates(device.id), true);
+  assert.equal(store.listDevices().filter((row) => row.protocolIdentity?.ieeeAddress === ieee).length, 1, "one record per radio address");
+  assert.equal(store.getDevice(ieee)?.id, device.id, "the old name still reaches the real device");
+  assert.equal(store.getDevice(device.id)?.interviewStatus, "successful", "the interviewed device is untouched");
+  assert.equal(await store.discardPlaceholderDuplicates(device.id), false, "nothing more to remove");
+});

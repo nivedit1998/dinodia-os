@@ -123,7 +123,7 @@ test("assigned Zigbee start creates a secure idempotency key on private HTTP wit
   assert.equal(JSON.parse(request.options.body).operationKind, "PAIR_NEW");
   assert.equal(JSON.parse(request.options.body).protocol, "zigbee");
   assert.match(request.options.headers["idempotency-key"], /^install-start-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
-  assert.match(page.elements.get("status").textContent, /ZIGBEE · searching/);
+  assert.match(page.elements.get("status").textContent, /Put your device in pairing mode now/);
   assert.doesNotMatch(page.elements.get("error").textContent, /randomUUID/i);
 });
 
@@ -136,8 +136,7 @@ test("assigned installation distinguishes a closed radio join window from an act
     [`dinodia-installation:${requestId}:session`]: sessionId,
   } });
   await page.flush();
-  assert.match(page.elements.get("status").textContent, /ZIGBEE · join window closed/i);
-  assert.match(page.elements.get("status").textContent, /checking devices already joining/i);
+  assert.match(page.elements.get("status").textContent, /still joining/i);
   assert.equal(page.elements.get("cancel").disabled, false, "staff can explicitly close the tracked attempt if no device is joining");
 });
 
@@ -322,7 +321,7 @@ test("discovery candidate review stays enabled after the initial busy refresh co
   await page.flush();
 
   const review = page.elements.get("candidate-list").children[0].children[2];
-  assert.equal(review.textContent, "Review candidate");
+  assert.equal(review.textContent, "Choose this device");
   assert.equal(review.disabled, false, "the candidate action must be re-enabled after protected loading finishes");
   review.listeners.get("click")();
   assert.equal(page.elements.get("device-result").hidden, false, "review opens the real device/Area/name form");

@@ -368,6 +368,12 @@ class MqttBridge {
             canonicalPropertyRestore: true,
             canonicalDescriptorRevision: Number(canonicalRestore.policy.descriptorRevision),
           } : {});
+        if (typeof this.store.discardPlaceholderDuplicates === "function") {
+          for (const device of this.store.listDevices()) {
+            if (device.id !== updated.id && String(device.protocolIdentity?.ieeeAddress || "") === String(updated.protocolIdentity?.ieeeAddress || "x")) this.pairingSession.forget(device.id);
+          }
+          await this.store.discardPlaceholderDuplicates(updated.id);
+        }
         const newForPairing = pairingActive && !canonicalRestore && this.pairingSession.isNew(updated.id, identity);
         if (!canonicalRestore) this.pairingSession.add(updated.id, {
           identity,

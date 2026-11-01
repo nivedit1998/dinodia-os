@@ -74,6 +74,30 @@
     if (error) showError(error);
     updateButtons();
   }
+  // A new device is often named only by its radio address or the generic "Automatically Generated Definition": show what it is instead.
+  function isMachineName(name) { return !name || /^0x[0-9a-f]{8,}$/i.test(String(name).trim()) || /^automatically generated definition$/i.test(String(name).trim()) || /^(zigbee:|matter-)/i.test(String(name).trim()); }
+  function friendlyDeviceName(candidate) {
+    if (!isMachineName(candidate?.name)) return candidate.name;
+    return [candidate?.manufacturer, candidate?.model].filter(Boolean).join(" ").slice(0, 40) || "New device";
+  }
+  function openCandidate(candidate) {
+    state.selected = candidate; $("device-result").hidden = false;
+    const name = friendlyDeviceName(candidate).slice(0, 40);
+    $("label").value = name; $("name").value = name;
+    $("analytics-category").value = state.session?.selectedCandidateRef === candidate.candidateRef ? (state.session.selectedAnalyticsCategory || "NONE") : "NONE";
+    // One permitted room needs no choosing.
+    if (!$("area").value && state.context?.areas?.length === 1) $("area").value = state.context.areas[0].id;
+    clearError(); updateButtons();
+  }
+  function describeStatus(session, sessionState) {
+    const found = (session.candidates || []).length;
+    if (session.operationKind === "PAIR_NEW" && session.status === "searching") {
+      return found ? `Found ${found === 1 ? "a device" : found + " devices"}. Choose it below.`
+        : session.joinWindowOpen === false ? "Checking for devices that are still joining…"
+        : "Searching. Put your device in pairing mode now, then wait a few seconds.";
+    }
+    return `${session.protocol.toUpperCase()} · ${sessionState} · updated ${new Date(session.updatedAt).toLocaleTimeString()}`;
+  }
   function setBusy(value) { state.busy = value; updateButtons(); }
   function canStart(protocol) { const entry = state.context?.protocols?.[protocol]; return state.authorityVerified && state.context?.protocols?.registrationEnabled === true && entry?.enabled === true && entry?.adapterReady === true && (!state.session || terminal.has(state.session.status)); }
   function updateButtons() {
@@ -136,7 +160,7 @@
     const sessionState = session.protocol === "zigbee" && session.operationKind === "PAIR_NEW" && session.status === "searching" && session.joinWindowOpen === false
       ? `join window closed · ${(session.candidates || []).length ? "review discovered device" : "checking devices already joining"}`
       : session.status.replaceAll("_", " ");
-    $("status").textContent = `${session.protocol.toUpperCase()} · ${sessionState} · updated ${new Date(session.updatedAt).toLocaleTimeString()}`;
+    $("status").textContent = describeStatus(session, sessionState);
     $("matter-entry").hidden = session.protocol !== "matter" || !["awaiting_payload", "interrupted"].includes(session.status);
     $("matter-entry-row").hidden = $("matter-entry").hidden;
     // Preserve an in-progress review of a newly discovered candidate across
@@ -144,7 +168,7 @@
     // separate server-side "Review this device" action succeeds.
     $("device-result").hidden = !session.selectedCandidateRef && !state.selected;
     const controls = Array.isArray(session.selectedControls) ? session.selectedControls : [];
-    $("selected-controls").textContent = controls.length ? `Detected controls: ${controls.map((control) => `${control.name}${control.readable ? " · reading" : ""}${control.writable ? " · control" : ""}`).join("; ")}`
+    $("selected-controls").textContent = controls.length ? `Detected controls: ${controls.filter((control) => String(control.name || "").toLowerCase() !== "unknown").map((control) => `${control.name}${control.readable ? " · reading" : ""}${control.writable ? " · control" : ""}`).join("; ")}`
       : session.selectedCandidateRef ? `Control/readings status: ${session.catalogueStatus === "unsupported" ? "not understood yet; no controls are being invented" : session.catalogueStatus === "no_safe_controls" ? "no safe control was detected" : "no current control descriptor is available"}` : "";
     if (session.operationKind === "REGISTER_EXISTING") {
       $("review-heading").textContent = "Review already-paired device";
@@ -169,14 +193,19 @@
     const list = $("candidate-list"); list.replaceChildren();
     for (const candidate of rows) {
       const item = document.createElement("div"); item.className = "candidate";
-      const title = document.createElement("strong"); title.textContent = candidate.name || "Unidentified device";
+      const title = document.createElement("strong"); title.textContent = friendlyDeviceName(candidate);
       const detail = document.createElement("p"); detail.className = "muted";
       const setup = candidate.stage === "needs_setup" ? "Area and label needed" : candidate.stage;
       const interview = candidate.interviewStatus === "successful" ? "Interview complete" : candidate.interviewStatus;
       detail.textContent = [candidate.manufacturer, candidate.model, interview, setup].filter(Boolean).join(" · ") || "The hub is interviewing this device";
-      const choose = document.createElement("button"); choose.type = "button"; choose.dataset.reviewCandidate = "true"; choose.textContent = state.session?.operationKind === "REGISTER_EXISTING" ? "Review existing device" : "Review candidate"; choose.disabled = state.busy || !state.authorityVerified;
-      choose.addEventListener("click", () => { state.selected = candidate; $("device-result").hidden = false; $("label").value = candidate.name || "New device"; $("name").value = candidate.name || "New device"; $("analytics-category").value = state.session?.selectedCandidateRef === candidate.candidateRef ? (state.session.selectedAnalyticsCategory || "NONE") : "NONE"; clearError(); updateButtons(); });
+      const choose = document.createElement("button"); choose.type = "button"; choose.dataset.reviewCandidate = "true"; choose.textContent = state.session?.operationKind === "REGISTER_EXISTING" ? "Review existing device" : "Choose this device"; choose.disabled = state.busy || !state.authorityVerified;
+      choose.addEventListener("click", () => openCandidate(candidate));
       item.append(title, detail, choose); list.append(item);
+    }
+    // Exactly one fully interviewed new device: open it for review straight away, once.
+    if (state.session?.operationKind === "PAIR_NEW" && rows.length === 1 && rows[0].interviewStatus === "successful" && !state.selected && !state.session.selectedCandidateRef
+        && state.autoOpenedRef !== rows[0].candidateRef) {
+      state.autoOpenedRef = rows[0].candidateRef; openCandidate(rows[0]);
     }
   }
   function renderCompleted() {
@@ -353,6 +382,7 @@
   $("cancel").addEventListener("click", () => cancel());
   $("select").addEventListener("click", () => chooseCandidate());
   $("install").addEventListener("click", () => complete("install"));
+  $("label").addEventListener("input", () => { $("name").value = $("label").value; });
   $("view-only").addEventListener("click", () => complete("view_only"));
   $("retain-unsupported").addEventListener("click", () => complete("retain_unsupported"));
   $("remove").addEventListener("click", () => complete("remove"));
