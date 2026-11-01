@@ -341,7 +341,7 @@ test("candidate review remains open across session refreshes without losing the 
 
   const candidate = page.elements.get("candidate-list").children[0];
   assert.equal(candidate.children[0].textContent, "SONOFF TRVZB");
-  assert.match(candidate.children[1].textContent, /SONOFF.*TRVZB.*Interview complete/);
+  assert.match(candidate.children[1].textContent, /SONOFF.*TRVZB.*Ready to set up/);
   candidate.children[2].listeners.get("click")();
   page.elements.get("area").value = areaId;
   page.elements.get("label").value = "Radiator";

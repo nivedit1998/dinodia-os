@@ -517,9 +517,34 @@ function renderPairingStatus(pairing = {}) {
   $("#pairing-badge").textContent = session ? joinWindowOpen ? "Pairing active" : "Join window closed" : summary.setupCount ? `${summary.setupCount} device${summary.setupCount === 1 ? "" : "s"} to set up` : "Ready when provisioned";
   $("#stop-pairing").classList.toggle("hidden", !session);
   $("#zigbee-pairing-progress").classList.toggle("hidden", !session && !summary.setupCount);
-  if (session || summary.setupCount) $("#zigbee-pairing-progress").innerHTML = `${session ? `<strong>${joinWindowOpen ? "Pairing is open" : "The Zigbee join window is closed"}</strong><span>${joinWindowOpen ? `Found ${(session.found || []).length} new device(s). Keep the device nearby while it joins.` : `Found ${(session.found || []).length} new device(s). The radio is no longer accepting new joins; any device already joining remains tracked for review.`}</span>${found ? `<div class="pairing-devices"><strong>Discovered</strong>${found}</div>` : ""}` : ""}${summary.setupCount ? `<strong>${summary.setupCount} device${summary.setupCount === 1 ? "" : "s"} ready for assignment</strong><span>Open Devices & entities below to choose one area and one label.</span>${setup ? `<div class="pairing-devices"><strong>Ready</strong>${setup}</div>` : ""}` : ""}`;
-  if (session && !pairingRefreshTimer) pairingRefreshTimer = setInterval(load, 2000);
-  if (!session && pairingRefreshTimer) { clearInterval(pairingRefreshTimer); pairingRefreshTimer = null; }
+  if (session || summary.setupCount) {
+    const progressHtml = `${session ? `<strong>${joinWindowOpen ? "Pairing is open" : "The Zigbee join window is closed"}</strong><span>${joinWindowOpen ? `Found ${(session.found || []).length} new device(s). Keep the device nearby while it joins.` : `Found ${(session.found || []).length} new device(s). The radio is no longer accepting new joins; any device already joining remains tracked for review.`}</span>${found ? `<div class="pairing-devices"><strong>Discovered</strong>${found}</div>` : ""}` : ""}${summary.setupCount ? `<strong>${summary.setupCount} device${summary.setupCount === 1 ? "" : "s"} ready for assignment</strong><span>Open Devices & entities below to choose one area and one label.</span>${setup ? `<div class="pairing-devices"><strong>Ready</strong>${setup}</div>` : ""}` : ""}`;
+    // Written only when it changed, so the panel never blinks while the hub is polled.
+    const progress = $("#zigbee-pairing-progress");
+    if (progress.dataset.html !== progressHtml) { progress.innerHTML = progressHtml; progress.dataset.html = progressHtml; }
+  }
+  if (session && !pairingRefreshTimer) pairingRefreshTimer = setInterval(pollPairing, 2000);
+  if (!session && pairingRefreshTimer) {
+    clearInterval(pairingRefreshTimer); pairingRefreshTimer = null;
+    // Pairing just ended: bring the device lists up to date once.
+    void refreshDevices(); void loadUnregisteredPropertyDevices();
+  }
+}
+// While a device is joining only the small pairing status is read every two seconds. Reloading the whole dashboard that often
+// redrew every panel and reset what the installer was typing or choosing.
+let pairingPollInFlight = false;
+async function pollPairing() {
+  if (pairingPollInFlight || operatorAuthorityPaused()) return;
+  pairingPollInFlight = true;
+  try {
+    const before = JSON.stringify(state.lastPairingFound || []);
+    const pairing = await api("/api/integrations/zigbee/pairing");
+    const found = window.DinodiaPairing.summary(pairing).session?.found || [];
+    state.lastPairingFound = found;
+    renderPairingStatus(pairing);
+    if (JSON.stringify(found) !== before) await refreshDevices();
+  } catch { /* the next poll tries again */ }
+  finally { pairingPollInFlight = false; }
 }
 function hiveErrorMessage(error) {
   const messages = {
@@ -863,11 +888,11 @@ async function loadDashboard() { try { const [status, devices, areas, labels, pr
 async function loadUnregisteredPropertyDevices() {
   const status = $("#unregistered-property-device-status"); const list = $("#unregistered-property-device-list");
   if (!status || !list) return;
-  status.textContent = "Checking eligible local devices…"; list.replaceChildren();
+  const cards = [];
   try {
     const result = await api("/api/commissioning/unregistered-devices");
     const devices = Array.isArray(result.devices) ? result.devices : [];
-    if (!devices.length) { status.textContent = "No eligible paired-but-unregistered devices were found in the current Home Areas."; return; }
+    if (!devices.length) { status.textContent = "No eligible paired-but-unregistered devices were found in the current Home Areas."; list.replaceChildren(); return; }
     status.textContent = `${devices.length} local device${devices.length === 1 ? " is" : "s are"} not registered to this property yet.`;
     for (const device of devices) {
       const card = document.createElement("article"); card.className = "candidate";
@@ -878,8 +903,9 @@ async function loadUnregisteredPropertyDevices() {
       const controls = Array.isArray(device.controls) ? device.controls : [];
       const descriptor = document.createElement("p"); descriptor.className = "muted";
       descriptor.textContent = controls.length ? `Current descriptor: ${controls.map((control) => `${control.name}${control.readable ? " · reading" : ""}${control.writable ? " · control" : " · read-only"}`).join("; ")}` : "No current safe control descriptor is available; registration review will show the truthful device capability status.";
-      card.append(title, detail, marker, descriptor); list.append(card);
+      card.append(title, detail, marker, descriptor); cards.push(card);
     }
+    list.replaceChildren(...cards);
   } catch (error) {
     status.textContent = error.status === 401 || error.status === 403
       ? "Current assigned Company Portal authority is required to view this Home’s unregistered devices."
@@ -1168,3 +1194,13 @@ $("#disconnect-cloudflare").addEventListener("click", async () => { try { await 
 load();
 startOperatorSessionStatusRefresh();
 connectDashboardSocket();
+
+// The Setup link and any link to a folded panel open the advanced group first, so the jump always lands on something visible.
+(function openAdvancedGroupForLinks() {
+  const group = document.getElementById("advanced-group");
+  if (!group) return;
+  const reveal = (hash) => { const target = hash && document.querySelector(hash); if (target && group.contains(target)) group.open = true; };
+  document.addEventListener("click", (event) => { const link = event.target.closest?.('a[href^="#"]'); if (link) reveal(link.getAttribute("href")); });
+  window.addEventListener("hashchange", () => reveal(location.hash));
+  reveal(location.hash);
+})();

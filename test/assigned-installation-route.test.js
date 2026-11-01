@@ -112,7 +112,7 @@ test("assigned commissioning route serves a current grant and denies stale ident
   const operatorHeaders = { cookie: authorityCookie, "x-dinodia-operator-session": establishedBody.sessionSelector };
   const localAssignedWorkspace = await fetch(`${setupOrigin}${establishedBody.destination}`, { headers: operatorHeaders });
   assert.equal(localAssignedWorkspace.status, 200, "the restricted LAN listener must serve the assigned-installation workspace after its authenticated handoff");
-  assert.match(await localAssignedWorkspace.text(), /Permanent device installation/);
+  assert.match(await localAssignedWorkspace.text(), /Add a device/);
   const localFullDashboard = await fetch(`${setupOrigin}/_dinodia/operator/${establishedBody.sessionSelector}`, { headers: operatorHeaders });
   assert.equal(localFullDashboard.status, 403, "the local listener must route full-dashboard selectors to OS scope enforcement, not hide them behind a 404");
   const sessionStatus = await fetch(`${setupOrigin}/_dinodia/admin/api/operator-session`, { headers: operatorHeaders });

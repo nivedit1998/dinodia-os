@@ -35,7 +35,8 @@ test("retired configuration cannot change the owner-approved 30-minute OS sessio
 });
 
 test("dashboard keeps the intended setup order and production safety boundary", () => {
-  const order = ["cloudflare-section", "provisioning-section", "areas-section", "radios-section", "devices-section"];
+  // Installer-first: add and register devices, then devices, areas and radios; hub setup and advanced tools are folded away last.
+  const order = ["pairing-section", "property-device-registration", "devices-section", "areas-section", "radios-section", "cloudflare-section", "provisioning-section"];
   assert.ok(order.every((id) => html.includes(`id="${id}"`)));
   assert.ok(order.every((id, index) => html.indexOf(`id="${id}"`) < html.indexOf(`id="${order[index + 1] || id}"`) || index === order.length - 1));
   assert.match(html, /id="area-create-form"/);

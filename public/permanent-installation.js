@@ -126,6 +126,24 @@
     $("finish-installation-help").hidden = $("finish-installation").hidden;
     $("select").textContent = needsReview ? "Review updated device" : state.session?.operationKind === "REGISTER_EXISTING" ? "Review device and Area" : "Review this device";
     $("install").textContent = state.session?.operationKind === "REGISTER_EXISTING" ? "Register as permanent device" : "Install and sync";
+    renderSteps();
+  }
+  // Where the installer is in the job: search, choose, name and room, done.
+  function currentStep() {
+    const session = state.session;
+    if (session?.status === "completed") return 4;
+    if (!$("device-result").hidden || state.selected) return 3;
+    if (session && !terminal.has(session.status) && (session.candidates || []).length) return 2;
+    return 1;
+  }
+  function renderSteps() {
+    const step = currentStep();
+    for (let index = 1; index <= 4; index += 1) {
+      const item = $(`step-${index}`);
+      if (item) item.className = index < step ? "done" : index === step ? "current" : "";
+    }
+    const searching = state.session?.status === "searching" && !(state.session.candidates || []).length && state.session.joinWindowOpen !== false;
+    $("status").className = searching ? "banner waiting" : "banner";
   }
   function renderSessionDeadline(context) {
     if (!context?.sessionExpiresAt || !context?.serverNow || !window.performance?.now) return;
@@ -148,9 +166,11 @@
   }
   function render(session) {
     state.session = session;
-    if (session.selectedCandidateRef && ["NONE", "LIGHT", "BOILER", "RADIATOR"].includes(String(session.selectedAnalyticsCategory || "NONE"))) {
-      $("analytics-category").value = session.selectedAnalyticsCategory || "NONE";
+    if (session.selectedCandidateRef && state.appliedCategoryRef !== session.selectedCandidateRef
+        && ["NONE", "LIGHT", "BOILER", "RADIATOR"].includes(String(session.selectedAnalyticsCategory || "NONE"))) {
+      $("analytics-category").value = session.selectedAnalyticsCategory || "NONE"; state.appliedCategoryRef = session.selectedCandidateRef;
     }
+    if (!session.selectedCandidateRef) state.appliedCategoryRef = null;
     if (session.selectedCandidateRef) {
       state.selected = (session.candidates || []).find((candidate) => candidate.candidateRef === session.selectedCandidateRef) || state.selected;
     } else if (terminal.has(session.status)) state.selected = null;
@@ -190,19 +210,26 @@
   function renderCandidates() {
     const rows = state.session?.candidates || [];
     $("candidates").hidden = rows.length === 0;
-    const list = $("candidate-list"); list.replaceChildren();
+    const signature = JSON.stringify([state.session?.operationKind, rows.map((row) => [row.candidateRef, row.name, row.manufacturer, row.model, row.stage, row.interviewStatus])]);
+    const list = $("candidate-list");
+    if (list.dataset.signature === signature) { autoOpenSingleCandidate(rows); return; }
+    list.dataset.signature = signature; list.replaceChildren();
     for (const candidate of rows) {
       const item = document.createElement("div"); item.className = "candidate";
       const title = document.createElement("strong"); title.textContent = friendlyDeviceName(candidate);
       const detail = document.createElement("p"); detail.className = "muted";
-      const setup = candidate.stage === "needs_setup" ? "Area and label needed" : candidate.stage;
-      const interview = candidate.interviewStatus === "successful" ? "Interview complete" : candidate.interviewStatus;
-      detail.textContent = [candidate.manufacturer, candidate.model, interview, setup].filter(Boolean).join(" · ") || "The hub is interviewing this device";
+      // Plain words: either it is ready to be named and placed, or it is still connecting.
+      const ready = candidate.interviewStatus === "successful";
+      const progress = ready ? (candidate.stage === "needs_setup" ? "Ready to set up" : candidate.stage) : "Still connecting. Keep it close to the hub.";
+      detail.textContent = [candidate.manufacturer, candidate.model, progress].filter(Boolean).join(" · ") || "The hub is connecting to this device";
       const choose = document.createElement("button"); choose.type = "button"; choose.dataset.reviewCandidate = "true"; choose.textContent = state.session?.operationKind === "REGISTER_EXISTING" ? "Review existing device" : "Choose this device"; choose.disabled = state.busy || !state.authorityVerified;
       choose.addEventListener("click", () => openCandidate(candidate));
       item.append(title, detail, choose); list.append(item);
     }
-    // Exactly one fully interviewed new device: open it for review straight away, once.
+    autoOpenSingleCandidate(rows);
+  }
+  // Exactly one fully interviewed new device: open it for review straight away, once.
+  function autoOpenSingleCandidate(rows) {
     if (state.session?.operationKind === "PAIR_NEW" && rows.length === 1 && rows[0].interviewStatus === "successful" && !state.selected && !state.session.selectedCandidateRef
         && state.autoOpenedRef !== rows[0].candidateRef) {
       state.autoOpenedRef = rows[0].candidateRef; openCandidate(rows[0]);
@@ -237,7 +264,10 @@
     const section = $("existing-devices"); const list = $("existing-device-list"); const held = state.context?.protocols?.registrationEnabled !== true;
     section.hidden = false;
     $("existing-device-hold").hidden = !held;
-    list.replaceChildren();
+    // Redrawn only when the list changes, so a background refresh never makes it blink.
+    const signature = JSON.stringify([held, (held ? [] : state.existingDevices).map((device) => [device.candidateRef || device.id, device.name, device.model, device.originalAreaName])]);
+    if (list.dataset.signature === signature) { $("existing-device-empty").hidden = held || state.existingDevices.length > 0; return; }
+    list.dataset.signature = signature; list.replaceChildren();
     for (const device of held ? [] : state.existingDevices) {
       const item = document.createElement("article"); item.className = "candidate";
       const title = document.createElement("strong"); title.textContent = device.name || "Unidentified local device";
@@ -305,9 +335,14 @@
     state.context = await get("/_dinodia/installer/commissioning");
     renderSessionDeadline(state.context);
     $("summary").textContent = `Assigned installation work · ${state.context.areas.length} permitted original Area${state.context.areas.length === 1 ? "" : "s"}`;
-    const select = $("area"); const previous = select.value; select.replaceChildren(new Option("Choose an Area", ""));
-    for (const area of state.context.areas) select.add(new Option(area.name, area.id));
-    if (state.context.areas.some((area) => area.id === previous)) select.value = previous;
+    // Rebuilt only when the rooms actually change, so an open dropdown or a chosen room is never disturbed by a background refresh.
+    const select = $("area"); const areaSignature = state.context.areas.map((area) => `${area.id}:${area.name}`).join("|");
+    if (select.dataset.signature !== areaSignature) {
+      const previous = select.value; select.replaceChildren(new Option("Choose a room", ""));
+      for (const area of state.context.areas) select.add(new Option(area.name, area.id));
+      if (state.context.areas.some((area) => area.id === previous)) select.value = previous;
+      select.dataset.signature = areaSignature;
+    }
     for (const protocol of ["zigbee", "matter"]) {
       const entry = state.context.protocols?.[protocol];
       const title = protocol === "zigbee" ? "Zigbee coordinator" : "Matter controller";

@@ -4,64 +4,121 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>Permanent device installation · Dinodia OS</title>
+  <title>Add devices · Dinodia OS</title>
   <link rel="stylesheet" href="/styles.css">
   <style>
-    body { min-height:100vh; background:var(--background,#f4f2ee); color:var(--text,#20211f); }
-    main { max-width:900px; margin:0 auto; padding:32px 20px 64px; }
-    .install-card { background:var(--surface,#fff); border:1px solid var(--border,#ddd); border-radius:18px; padding:24px; margin:18px 0; }
-    .row { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-top:14px; }
+    :root { --ink:#1d2421; --muted:#64706a; --line:#e3e8e5; --card:#fff; --bg:#f3f6f4; --brand:#1f6f5c; --brand-ink:#fff; --brand-soft:#e4f2ed; --warn:#8a5a00; --warn-soft:#fff4dc; --bad:#a32020; --bad-soft:#fde9e9; --ok:#17734f; }
+    * { box-sizing:border-box; }
+    body { min-height:100vh; margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; -webkit-font-smoothing:antialiased; }
+    main { max-width:760px; margin:0 auto; padding:28px 18px 72px; }
+    h1 { font-size:30px; line-height:1.15; margin:2px 0 6px; letter-spacing:-.02em; }
+    h2 { font-size:19px; margin:0 0 4px; letter-spacing:-.01em; }
+    .muted { color:var(--muted); } .small { font-size:14px; }
+    .eyebrow { margin:0; font-size:13px; letter-spacing:.08em; text-transform:uppercase; color:var(--brand); font-weight:600; }
+    .topline { display:flex; flex-wrap:wrap; justify-content:space-between; gap:6px 16px; margin-bottom:6px; }
+    #operator-session-status { margin:0; font-size:13px; color:var(--muted); }
+    #summary { margin:2px 0 18px; }
+
+    /* Steps */
+    .steps { list-style:none; display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin:0 0 20px; padding:0; counter-reset:step; }
+    .steps li { position:relative; padding-top:30px; text-align:center; font-size:13px; color:var(--muted); font-weight:500; }
+    .steps li::before { counter-increment:step; content:counter(step); position:absolute; top:0; left:50%; transform:translateX(-50%); width:24px; height:24px; border-radius:50%; background:#e5eae7; color:#5b6862; font-size:13px; display:grid; place-items:center; font-weight:600; transition:background .2s,color .2s; }
+    .steps li::after { content:""; position:absolute; top:11px; left:calc(50% + 18px); right:calc(-50% + 18px); height:2px; background:#e0e6e3; }
+    .steps li:last-child::after { display:none; }
+    .steps li.done { color:var(--ink); } .steps li.done::before { background:var(--brand); color:#fff; content:"✓"; }
+    .steps li.current { color:var(--ink); font-weight:600; } .steps li.current::before { background:var(--brand); color:#fff; box-shadow:0 0 0 4px var(--brand-soft); }
+
+    /* Cards */
+    .install-card { background:var(--card); border:1px solid var(--line); border-radius:18px; padding:22px; margin:14px 0; box-shadow:0 1px 2px rgba(20,35,30,.04),0 6px 20px rgba(20,35,30,.04); }
+    .install-card[hidden], [hidden] { display:none !important; }
+    .install-card:not([hidden]) { animation:rise .22s ease-out; }
+    @keyframes rise { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+    @media (prefers-reduced-motion:reduce) { .install-card:not([hidden]) { animation:none; } .steps li::before { transition:none; } }
+    .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:14px; }
     .row[hidden] { display:none; }
-    button,select,input { font:inherit; border:1px solid var(--border,#ccc); border-radius:10px; padding:10px 12px; background:#fff; color:inherit; }
-    button.primary { background:#273c35; color:#fff; border-color:#273c35; }
+    .field { display:grid; gap:6px; margin-top:16px; }
+    .field label { font-weight:600; font-size:15px; }
+    .hint { margin:0; font-size:13px; color:var(--muted); }
+
+    /* Controls */
+    button,select,input { font:inherit; color:inherit; }
+    button { min-height:46px; padding:10px 18px; border-radius:12px; border:1px solid #cfd8d4; background:#fff; cursor:pointer; font-weight:600; transition:background .15s,border-color .15s,transform .05s; }
+    button:hover:not(:disabled) { background:#f4f8f6; border-color:#b9c6c0; }
+    button:active:not(:disabled) { transform:scale(.985); }
+    button.primary { background:var(--brand); border-color:var(--brand); color:var(--brand-ink); }
+    button.primary:hover:not(:disabled) { background:#195c4c; border-color:#195c4c; }
+    button.quiet { border-color:transparent; background:transparent; color:var(--muted); font-weight:500; min-height:40px; padding:8px 10px; }
+    button.quiet:hover:not(:disabled) { background:#eef2f0; }
     button:disabled { opacity:.45; cursor:not-allowed; }
-    .muted { color:#62655f; } .error { color:#9b1c1c; } .candidate { border-top:1px solid #e7e5df; padding:16px 0; }
+    input,select { width:100%; min-height:48px; padding:11px 14px; border:1px solid #cfd8d4; border-radius:12px; background:#fff; }
+    input:focus,select:focus,button:focus-visible { outline:3px solid var(--brand-soft); border-color:var(--brand); }
+    input[type=password] { letter-spacing:.04em; }
+
+    /* Messages */
+    .banner { margin:14px 0 0; padding:12px 14px; border-radius:12px; background:var(--brand-soft); color:#164c3f; font-weight:500; }
+    .banner.waiting::before { content:""; display:inline-block; width:10px; height:10px; margin-right:10px; border-radius:50%; background:var(--brand); animation:pulse 1.2s ease-in-out infinite; vertical-align:middle; }
+    @keyframes pulse { 0%,100% { opacity:.25; transform:scale(.8); } 50% { opacity:1; transform:scale(1); } }
+    .error { margin:12px 0 0; padding:12px 14px; border-radius:12px; background:var(--bad-soft); color:var(--bad); font-weight:500; }
+    #zigbee-readiness,#matter-readiness { margin:10px 0 0; font-size:14px; }
+
+    /* Candidates and lists */
+    .candidate { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px 16px; padding:14px 0; border-top:1px solid var(--line); }
+    .candidate:first-child { border-top:0; }
+    .candidate strong { display:block; font-size:17px; } .candidate p { margin:2px 0 0; font-size:14px; }
+    #completed-device-list { margin:10px 0 0; padding:0; list-style:none; } #completed-device-list li { padding:10px 0; border-top:1px solid var(--line); }
+    #completed-device-list li:first-child { border-top:0; }
+    #selected-controls { margin-top:14px; padding:10px 12px; border-radius:10px; background:#f5f8f6; font-size:14px; }
+    #selected-controls:empty { display:none; }
+    details.install-card > summary { cursor:pointer; font-weight:600; list-style:none; }
+    details.install-card > summary::-webkit-details-marker { display:none; }
+    details.install-card > summary::after { content:"+"; float:right; color:var(--muted); font-size:20px; line-height:1; }
+    details.install-card[open] > summary::after { content:"–"; }
+    footer { margin-top:26px; } footer .row { margin-top:10px; }
     .safe-code { font-family:ui-monospace,monospace; overflow-wrap:anywhere; }
+    @media (max-width:560px) { main { padding:20px 14px 56px; } h1 { font-size:26px; } .install-card { padding:18px; } .row > button { flex:1 1 100%; } .steps li { font-size:12px; } }
   </style>
 </head>
 <body>
   <main>
-    <p class="muted">Dinodia Smart Living · Assigned Company Portal work</p>
-    <h1>Permanent device installation</h1>
-    <p id="operator-session-status" class="muted" role="status" aria-live="polite">Checking this OS session’s expiry…</p>
-    <p id="summary" class="muted">Checking this assigned installation and the paired hub…</p>
+    <div class="topline"><p class="eyebrow">Dinodia Smart Living · Installer</p><p id="operator-session-status" class="muted" role="status" aria-live="polite">Checking this session…</p></div>
+    <h1>Add a device</h1>
+    <p id="summary" class="muted">Checking this installation and the paired hub…</p>
+
+    <ol id="steps" class="steps" aria-label="Progress">
+      <li id="step-1" class="current">Search</li><li id="step-2">Choose</li><li id="step-3">Name &amp; room</li><li id="step-4">Done</li>
+    </ol>
+
     <section class="install-card" aria-labelledby="protocol-heading">
-      <h2 id="protocol-heading">Add a Zigbee or Matter device</h2>
-      <p class="muted">Dinodia discovers devices from the enrolled radio controller; there is no brand/model allowlist. A device is registered only after its interview and the current Area and descriptor are confirmed. Unsupported devices remain visible with no invented controls or readings.</p>
+      <h2 id="protocol-heading">1 · Search for a new device</h2>
+      <p class="muted small">Press the button, then put the device in pairing mode. It appears below by itself.</p>
       <div class="row">
-        <button id="start-zigbee" class="primary" type="button" disabled>Start Zigbee search</button>
-        <button id="start-matter" class="primary" type="button" disabled>Start Matter setup</button>
-        <button id="refresh" type="button">Refresh status</button>
-        <button id="cancel" type="button" disabled>Cancel session</button>
+        <button id="start-zigbee" class="primary" type="button" disabled>Search for a Zigbee device</button>
+        <button id="start-matter" type="button" disabled>Set up a Matter device</button>
       </div>
       <p id="zigbee-readiness" role="status" class="muted"></p>
       <p id="matter-readiness" role="status" class="muted"></p>
-      <label id="matter-entry" hidden for="matter-payload">Matter QR setup code (only sent over verified secure Dinodia OS)</label>
+      <label id="matter-entry" hidden for="matter-payload" class="small"><strong>Matter setup code</strong> (sent only over the secure Dinodia OS connection)</label>
       <div id="matter-entry-row" class="row" hidden>
         <input id="matter-payload" type="password" autocomplete="off" spellcheck="false" maxlength="512" placeholder="Matter setup code">
         <button id="submit-matter" class="primary" type="button">Submit code securely</button>
       </div>
-      <p id="status" role="status" aria-live="polite" class="muted">Waiting for the paired hub.</p>
+      <p id="status" role="status" aria-live="polite" class="banner">Waiting for the paired hub.</p>
       <p id="error" role="alert" class="error" hidden></p>
+      <div class="row"><button id="refresh" class="quiet" type="button">Refresh</button><button id="cancel" class="quiet" type="button" disabled>Stop searching</button></div>
     </section>
-    <section id="existing-devices" class="install-card" aria-labelledby="existing-heading" hidden>
-      <div class="row"><div><h2 id="existing-heading">Already paired on this hub</h2><p class="muted">These devices have a completed local interview but are not yet registered to this property. Nothing is adopted automatically.</p></div><button id="refresh-existing" type="button">Refresh local devices</button></div>
-      <p id="existing-device-empty" class="muted" hidden>No eligible unregistered local devices were found for this assigned Home and its authorized Areas.</p>
-      <p id="existing-device-hold" class="muted" hidden>Permanent-device registration is held by the current maintenance policy. No device or radio state was changed.</p>
-      <div id="existing-device-list"></div>
-    </section>
-    <section id="candidates" class="install-card" hidden aria-label="Discovered devices"><h2>Found nearby</h2><p class="muted">Each device appears once. Choose the one you just put in pairing mode.</p><div id="candidate-list"></div></section>
+
+    <section id="candidates" class="install-card" hidden aria-label="Discovered devices"><h2>2 · Found nearby</h2><p class="muted small">Each device appears once. Choose the one you just put in pairing mode.</p><div id="candidate-list"></div></section>
+
     <section id="device-result" class="install-card" hidden>
-      <h2 id="review-heading">Review discovered device</h2>
-      <p id="review-instructions" class="muted">Choose the room it is in, give it a name, then continue.</p>
-      <div id="selected-controls" class="muted" role="status"></div>
-      <div class="row"><label for="area">Original Area</label><select id="area"></select></div>
-      <div class="row"><label for="label">Name (shown to the customer)</label><input id="label" maxlength="40" autocomplete="off" placeholder="For example: Room 1 Light"></div>
-      <div class="row" hidden><label for="name">Device name</label><input id="name" maxlength="80" autocomplete="off"></div>
-      <div class="row"><label for="analytics-category">Analytics category (optional)</label><select id="analytics-category">
+      <h2 id="review-heading">3 · Name it and choose its room</h2>
+      <p id="review-instructions" class="muted small">Choose the room it is in, give it a name, then continue.</p>
+      <div id="selected-controls" role="status"></div>
+      <div class="field"><label for="area">Room</label><select id="area"></select></div>
+      <div class="field"><label for="label">Name</label><input id="label" maxlength="40" autocomplete="off" placeholder="For example: Room 1 Light"><p class="hint">This is the name the customer sees in the app.</p></div>
+      <div class="field" hidden><label for="name">Device name</label><input id="name" maxlength="80" autocomplete="off"></div>
+      <div class="field"><label for="analytics-category">Show in analytics as</label><select id="analytics-category">
         <option value="NONE">None</option><option value="LIGHT">Light</option><option value="BOILER">Boiler</option><option value="RADIATOR">Radiator</option>
-      </select></div>
-      <p class="muted">A category only classifies this permanent device. Analytics needs suitable live readings or controls; Radiator Usage is observed heating activity, not measured gas consumption or cost.</p>
+      </select><p class="hint">Optional. Only choose this if the device should appear in usage charts.</p></div>
       <div class="row">
         <button id="select" class="primary" type="button">Review this device</button>
         <button id="install" class="primary" type="button" hidden>Install and sync</button>
@@ -70,12 +127,25 @@
         <button id="remove" type="button" hidden>Remove unsupported candidate</button>
       </div>
     </section>
-    <section id="completed-devices" class="install-card" hidden aria-label="Completed devices"><h2>Completed in this installation</h2><ul id="completed-device-list"></ul></section>
-    <footer class="muted"><p>This workspace is limited to the current assigned request, paired hub, and active original Areas. It does not grant homeowner or tenant ownership.</p>
-      <button id="add-next" type="button" hidden>Add another device</button>
-      <p id="finish-installation-help" class="muted">When all devices are recorded, this returns to Company Portal. Review current sync status there and use its authorized completion action.</p>
-      <button id="finish-installation" type="button" hidden>Finish installation</button>
-      <button id="end-session" type="button">End this session</button></footer>
+
+    <section id="existing-devices" class="install-card" aria-labelledby="existing-heading" hidden>
+      <div class="row" style="margin-top:0"><div style="flex:1 1 280px"><h2 id="existing-heading">Already paired on this hub</h2><p class="muted small">Paired devices that are not registered to this property yet. Nothing is adopted automatically.</p></div><button id="refresh-existing" class="quiet" type="button">Refresh list</button></div>
+      <p id="existing-device-empty" class="muted small" hidden>No eligible unregistered local devices were found for this Home and its rooms.</p>
+      <p id="existing-device-hold" class="muted small" hidden>Device registration is paused by the current maintenance policy. Nothing was changed.</p>
+      <div id="existing-device-list"></div>
+    </section>
+
+    <section id="completed-devices" class="install-card" hidden aria-label="Completed devices"><h2>4 · Added in this visit</h2><ul id="completed-device-list"></ul></section>
+
+    <footer class="muted">
+      <div class="row">
+        <button id="add-next" class="primary" type="button" hidden>Add another device</button>
+        <button id="finish-installation" type="button" hidden>Finish installation</button>
+        <button id="end-session" class="quiet" type="button">End this session</button>
+      </div>
+      <p id="finish-installation-help" class="hint">When all devices are added, finish here to return to Company Portal and complete the installation there.</p>
+      <p class="hint">This page is limited to the assigned installation, its hub and its rooms. It does not give homeowner or tenant ownership.</p>
+    </footer>
   </main>
   <script src="/permanent-installation.js" defer></script>
 </body>

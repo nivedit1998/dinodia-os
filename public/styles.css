@@ -565,3 +565,16 @@ body.operator-authority-ended .sidebar .nav { pointer-events: none; opacity: .45
 .area-deletion-dialog :focus-visible{outline:3px solid #2563eb;outline-offset:3px}
 @media(prefers-color-scheme:dark){.area-deletion-dialog{color-scheme:dark;background:#20242b;color:#f5f7fa}.area-deletion-dialog .subtle{color:#b9c3cf}.area-deletion-dialog input{background:#11151a;color:#f5f7fa;border-color:#657386}}
 .error-text{color:#c0392b}
+
+/* Installer-first layout: day-to-day panels first, hub setup and advanced tools folded away until asked for. */
+.advanced-group { margin: 0 0 32px; border: 1px solid var(--line); border-radius: 17px; background: #fff; padding: 4px 18px; }
+.advanced-group > summary { cursor: pointer; list-style: none; padding: 16px 0; font-weight: 700; font-size: 1.05rem; }
+.advanced-group > summary::-webkit-details-marker { display: none; }
+.advanced-group > summary::after { content: "+"; float: right; color: var(--muted, #6a7480); font-size: 1.3rem; line-height: 1; }
+.advanced-group[open] > summary::after { content: "–"; }
+.advanced-group > summary small { display: block; margin-top: 2px; font-weight: 400; color: var(--muted, #6a7480); font-size: .85rem; }
+.advanced-group[open] { padding-bottom: 18px; }
+.advanced-group > .panel { margin-top: 14px; box-shadow: none; }
+@keyframes dinodia-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.advanced-group[open] > .panel, .device-card .device-editor { animation: dinodia-rise .18s ease-out; }
+@media (prefers-reduced-motion: reduce) { .advanced-group[open] > .panel, .device-card .device-editor { animation: none; } }
