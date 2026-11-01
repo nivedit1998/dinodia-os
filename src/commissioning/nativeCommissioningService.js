@@ -811,11 +811,12 @@ class NativeCommissioningService {
     });
   }
 
-  // A bare record named only by its radio address (never interviewed, no model, no room, no controls) is a leftover of an earlier
+  // A bare record named only by its radio address (never interviewed, no model, no room) is a leftover of an earlier
   // join or removal, not a device the hub already knows. It must not stop the same radio from being found when it is paired again.
   isBarePlaceholder(device) {
-    return String(device?.protocol || "").toLowerCase() === "zigbee" && !device.interviewStatus && !device.metadata?.model && !device.metadata?.model_id
-      && !device.areaId && Object.keys(device.entities || {}).length === 0 && device.setup?.status === "needs_setup" && !this.store.getPlatform?.()?.devicePolicies?.[String(device.id)];
+    // Discovery messages can give a leftover record controls (entities) without it ever having been interviewed, so controls do not count.
+    return String(device?.protocol || "").toLowerCase() === "zigbee" && device.interviewStatus !== "successful" && !device.metadata?.model && !device.metadata?.model_id
+      && !device.areaId && device.setup?.status === "needs_setup" && !this.store.getPlatform?.()?.devicePolicies?.[String(device.id)];
   }
 
   baselineDevices() { return this.store.listDevices().filter((device) => !this.isBarePlaceholder(device)); }

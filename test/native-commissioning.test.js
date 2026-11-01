@@ -1329,7 +1329,7 @@ test('a leftover bare placeholder from an earlier join does not hide the same ra
   const device = normalizeZigbeeDevice(require('./fixtures/zigbee/radiator-device.json'));
   const ieee = device.protocolIdentity?.ieeeAddress || device.metadata?.ieee_address || '0x00124b0000000001';
   const ghost = { id: ieee, name: ieee, protocol: 'zigbee', state: {}, metadata: {}, available: true, protocolIdentity: { ieeeAddress: ieee },
-    setup: { status: 'needs_setup', reason: 'area_and_label_required' }, entities: {} };
+    setup: { status: 'needs_setup', reason: 'area_and_label_required' }, entities: { 'sensor.linkquality': { id: 'sensor.linkquality', state: '90' } } };
   await f.store.upsertDevice(ghost);
   const started = await f.service.start(f.principal, { protocol: 'zigbee' }, uuid());
   await f.store.upsertDevice({ ...device, protocolIdentity: { ieeeAddress: ieee }, interviewStatus: 'successful' });
