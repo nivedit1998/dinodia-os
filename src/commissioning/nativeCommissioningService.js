@@ -620,8 +620,8 @@ class NativeCommissioningService {
         identityGeneration: actor.identityGeneration, allowedAreaIds: actor.areaIds,
         status: "creating", createdAt: new Date(now).toISOString(), expiresAt: new Date(now + SESSION_MS).toISOString(),
         revision: 1, expectedPlatformRevision: 1, idempotencyHash: keyHash, requestHash: bodyHash, platformRequestHash: digest(JSON.stringify(platformRequest)), platformCreatePending: true,
-        baselineDeviceIds: this.store.listDevices().map((device) => String(device.id)),
-        baselineIdentityHashes: this.store.listDevices().map((device) => digest(String(device.protocolIdentity?.ieeeAddress || device.protocolIdentity?.nodeId || device.metadata?.ieee_address || device.id))),
+        baselineDeviceIds: this.baselineDevices().map((device) => String(device.id)),
+        baselineIdentityHashes: this.baselineDevices().map((device) => digest(String(device.protocolIdentity?.ieeeAddress || device.protocolIdentity?.nodeId || device.metadata?.ieee_address || device.id))),
         ...(adoption ? { targetCandidateRef: candidateRef, targetDeviceId: adoption.deviceId, targetIdentityHash: adoption.protocolIdentityHash,
           targetDescriptorRevision: Number(existingDevice?.presentation?.descriptorRevision || 0), targetDescriptorDigest: digest(JSON.stringify(existingDevice?.entities || {})),
           targetOriginalAreaId: adoption.originalAreaId, targetSetupEventAt: adoption.setupEventAt } : {}),
@@ -810,6 +810,15 @@ class NativeCommissioningService {
         || (device && String(device.protocol || "").toLowerCase() === session.protocol && !this.isBaselineDevice(session, device)));
     });
   }
+
+  // A bare record named only by its radio address (never interviewed, no model, no room, no controls) is a leftover of an earlier
+  // join or removal, not a device the hub already knows. It must not stop the same radio from being found when it is paired again.
+  isBarePlaceholder(device) {
+    return String(device?.protocol || "").toLowerCase() === "zigbee" && !device.interviewStatus && !device.metadata?.model && !device.metadata?.model_id
+      && !device.areaId && Object.keys(device.entities || {}).length === 0 && device.setup?.status === "needs_setup" && !this.store.getPlatform?.()?.devicePolicies?.[String(device.id)];
+  }
+
+  baselineDevices() { return this.store.listDevices().filter((device) => !this.isBarePlaceholder(device)); }
 
   isBaselineDevice(session, device) {
     const id = String(device?.id || "");

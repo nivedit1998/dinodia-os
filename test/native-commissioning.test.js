@@ -1323,3 +1323,17 @@ test('one joining Zigbee device is one candidate even while the hub briefly hold
   await second.service.status(again.sessionId, second.principal);
   assert.deepEqual(second.service.sessions()[again.sessionId].candidates.map((row) => row.deviceId), [device.id]);
 });
+
+test('a leftover bare placeholder from an earlier join does not hide the same radio when it is paired again', async t => {
+  const f = fixture(); t.after(f.close);
+  const device = normalizeZigbeeDevice(require('./fixtures/zigbee/radiator-device.json'));
+  const ieee = device.protocolIdentity?.ieeeAddress || device.metadata?.ieee_address || '0x00124b0000000001';
+  const ghost = { id: ieee, name: ieee, protocol: 'zigbee', state: {}, metadata: {}, available: true, protocolIdentity: { ieeeAddress: ieee },
+    setup: { status: 'needs_setup', reason: 'area_and_label_required' }, entities: {} };
+  await f.store.upsertDevice(ghost);
+  const started = await f.service.start(f.principal, { protocol: 'zigbee' }, uuid());
+  await f.store.upsertDevice({ ...device, protocolIdentity: { ieeeAddress: ieee }, interviewStatus: 'successful' });
+  f.mqtt.pairingStatus = () => ({ active: true, found: [device.id] });
+  await f.service.status(started.sessionId, f.principal);
+  assert.deepEqual(f.service.sessions()[started.sessionId].candidates.map((row) => row.deviceId), [device.id], 'the radio is found even though a bare record of it existed before the search');
+});
