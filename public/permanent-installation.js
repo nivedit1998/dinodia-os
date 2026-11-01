@@ -1,7 +1,11 @@
 (() => {
   "use strict";
   const $ = (id) => document.getElementById(id);
-  const state = { context: null, session: null, selected: null, existingDevices: [], completedDevices: [], authorityVerified: false, busy: false, poll: null, sessionDeadlineMono: null, sessionClockTimer: null, lastAuthorityVerifiedAt: null, reviewStale: false };
+  const state = { context: null, session: null, selected: null, existingDevices: [], completedDevices: [], authorityVerified: false, busy: false, poll: null, sessionDeadlineMono: null, sessionClockTimer: null, lastAuthorityVerifiedAt: null, reviewStale: false, editing: false };
+  // Only touch the page when something actually changed, so a background refresh never moves, blinks or interrupts anything.
+  const setText = (element, text) => { if (element && element.textContent !== text) element.textContent = text; };
+  const setHidden = (element, value) => { if (element && element.hidden !== value) element.hidden = value; };
+  const setDisabled = (element, value) => { if (element && element.disabled !== value) element.disabled = value; };
   const key = (suffix) => `dinodia-installation:${state.context?.requestId || "unknown"}:${suffix}`;
   const operatorSessionHeaders = () => {
     const selector = sessionStorage.getItem("dinodia.operatorSessionSelector") || String(location.pathname || "").match(/^\/_dinodia\/operator\/([A-Za-z0-9_-]{24,64})/)?.[1] || "";
@@ -87,14 +91,57 @@
     $("analytics-category").value = state.session?.selectedCandidateRef === candidate.candidateRef ? (state.session.selectedAnalyticsCategory || "NONE") : "NONE";
     // One permitted room needs no choosing.
     if (!$("area").value && state.context?.areas?.length === 1) $("area").value = state.context.areas[0].id;
-    clearError(); updateButtons();
+    state.editing = false; renderSuggestions(); clearError(); updateButtons();
+  }
+  // Tap a name instead of typing it: "<room> Light", "<room> Radiator" and so on. Rebuilt only when the room changes.
+  function renderSuggestions() {
+    const box = $("name-suggestions"); if (!box) return;
+    const area = (state.context?.areas || []).find((row) => row.id === $("area").value);
+    const signature = area ? `${area.id}:${area.name}` : "";
+    if (box.dataset.signature === signature) return;
+    box.dataset.signature = signature; box.replaceChildren();
+    if (!area) return;
+    for (const [word, category] of [["Light", "LIGHT"], ["Radiator", "RADIATOR"], ["Switch", "NONE"], ["Plug", "NONE"]]) {
+      const chip = document.createElement("button"); chip.type = "button"; chip.textContent = `${area.name} ${word}`;
+      chip.addEventListener("click", () => { $("label").value = chip.textContent; $("name").value = chip.textContent; if (category !== "NONE") $("analytics-category").value = category; updateButtons(); });
+      box.append(chip);
+    }
+  }
+  // The "are you sure" step: say back exactly what will be added, in plain words.
+  function renderReviewSummary() {
+    const box = $("review-summary"); if (!box) return;
+    const selected = state.session?.status === "selected" && !state.reviewStale && !state.editing;
+    if (!selected) { setHidden(box, true); return; }
+    const area = (state.context?.areas || []).find((row) => row.id === $("area").value);
+    const category = $("analytics-category").value || "NONE";
+    const rows = [["Name", $("label").value.trim()], ["Room", area?.name || "—"], ["Usage charts", category === "NONE" ? "Not shown" : category.charAt(0) + category.slice(1).toLowerCase()]];
+    const signature = JSON.stringify(rows);
+    if (box.dataset.signature !== signature) {
+      box.dataset.signature = signature; box.replaceChildren();
+      const heading = document.createElement("h3"); heading.textContent = "Is this right?";
+      const list = document.createElement("dl");
+      for (const [term, value] of rows) { const dt = document.createElement("dt"); dt.textContent = term; const dd = document.createElement("dd"); dd.textContent = value; list.append(dt, dd); }
+      const note = document.createElement("p"); note.className = "hint"; note.textContent = "Check the name and room carefully. If anything is wrong, change it before adding.";
+      box.append(heading, list, note);
+    }
+    const wasHidden = box.hidden; setHidden(box, false);
+    // Bring the question into view once, so the installer sees what they are confirming without hunting for it.
+    if (wasHidden && typeof box.scrollIntoView === "function") box.scrollIntoView({ block: "center", behavior: "auto" });
   }
   function describeStatus(session, sessionState) {
     const found = (session.candidates || []).length;
+    if (session.status === "completed") return session.localSyncState === "acknowledged" ? "Done. The device was added and the Home has confirmed it."
+      : session.localSyncState === "pending" ? "Done. The device was added. Home sync is still pending acknowledgement, so it may take a minute to appear in the app."
+      : "Done. The device was added. Home sync acknowledgement is not verified yet.";
+    if (session.status === "completed_cleanup_pending") return "The device was recorded. The hub is still tidying up; this takes a moment.";
+    if (session.status === "cancelled") return "Search stopped. Press a search button to start again.";
+    if (session.status === "expired") return "The search timed out. Press a search button to try again.";
+    if (session.status === "failed") return "That did not work. Press a search button to try again.";
+    if (session.operationKind === "PAIR_NEW" && session.status === "searching" && found && state.selected) return "Found your device. Now choose its room and name.";
     if (session.operationKind === "PAIR_NEW" && session.status === "searching") {
       return found ? `Found ${found === 1 ? "a device" : found + " devices"}. Choose it below.`
         : session.joinWindowOpen === false ? "Checking for devices that are still joining…"
-        : "Searching. Put your device in pairing mode now, then wait a few seconds.";
+        : "Searching now. Put your device in pairing mode, then wait a few seconds.";
     }
     return `${session.protocol.toUpperCase()} · ${sessionState} · updated ${new Date(session.updatedAt).toLocaleTimeString()}`;
   }
@@ -107,15 +154,20 @@
     $("refresh").disabled = state.busy;
     $("refresh-existing").disabled = state.busy || !authorized;
     $("cancel").disabled = state.busy || !authorized || !state.session || ["completed", "cancelled", "expired", "failed"].includes(state.session.status);
-    for (const id of ["submit-matter", "select", "install", "view-only", "retain-unsupported", "remove", "add-next", "finish-installation", "end-session"]) if ($(id)) $(id).disabled = state.busy || !authorized;
-    $("area").disabled = !authorized;
-    for (const id of ["label", "name"]) if ($(id)) $(id).disabled = !authorized;
+    for (const id of ["submit-matter", "select", "install", "view-only", "retain-unsupported", "remove", "add-next", "finish-installation", "change-details"]) setDisabled($(id), state.busy || !authorized);
+    setDisabled($("end-session"), state.busy);
+    // The details are locked once checked (so what you confirm is what is added) and open again with "Change name or room".
+    // They never switch off during a refresh, so typing is never interrupted.
+    const locked = state.session?.status === "selected" && !state.reviewStale && !state.editing;
+    const fieldsOff = !state.context || locked || (state.session ? terminal.has(state.session.status) : false);
+    for (const id of ["area", "label", "analytics-category"]) setDisabled($(id), fieldsOff);
     for (const button of document.querySelectorAll("[data-review-candidate]")) button.disabled = state.busy || !authorized;
     for (const button of document.querySelectorAll("[data-review-existing]")) button.disabled = state.busy || !authorized || Boolean(state.session && !terminal.has(state.session.status));
     const selected = state.session?.status === "selected";
     const needsReview = selected && state.reviewStale;
-    $("select").hidden = !state.selected || selected && !needsReview;
-    $("install").hidden = !selected || needsReview || state.session?.catalogueStatus !== "ready";
+    setHidden($("select"), !state.selected || (selected && !needsReview && !state.editing));
+    setHidden($("change-details"), !(selected && !needsReview && !state.editing));
+    setHidden($("install"), !selected || needsReview || state.editing || state.session?.catalogueStatus !== "ready");
     $("view-only").hidden = !selected || needsReview || state.session?.catalogueStatus !== "no_safe_controls" || state.session?.catalogueUsefulReadings !== true;
     $("retain-unsupported").hidden = !selected || needsReview || state.session?.catalogueStatus !== "unsupported";
     $("remove").hidden = state.session?.operationKind === "REGISTER_EXISTING" || !selected || needsReview || !["unsupported", "no_safe_controls"].includes(state.session?.catalogueStatus);
@@ -124,8 +176,9 @@
     $("add-next").hidden = !state.session || !terminal.has(state.session.status) || (state.session.cleanup?.pendingCount || 0) > 0;
     $("finish-installation").hidden = !state.session || !terminal.has(state.session.status) || (state.session.cleanup?.pendingCount || 0) > 0;
     $("finish-installation-help").hidden = $("finish-installation").hidden;
-    $("select").textContent = needsReview ? "Review updated device" : state.session?.operationKind === "REGISTER_EXISTING" ? "Review device and Area" : "Review this device";
-    $("install").textContent = state.session?.operationKind === "REGISTER_EXISTING" ? "Register as permanent device" : "Install and sync";
+    setText($("select"), needsReview ? "Check the updated device" : state.editing ? "Check these changes" : state.session?.operationKind === "REGISTER_EXISTING" ? "Check device and room" : "Check details");
+    setText($("install"), state.session?.operationKind === "REGISTER_EXISTING" ? "Yes, register this device" : "Yes, add this device");
+    renderReviewSummary();
     renderSteps();
   }
   // Where the installer is in the job: search, choose, name and room, done.
@@ -138,12 +191,24 @@
   }
   function renderSteps() {
     const step = currentStep();
+    const root = $("installer");
+    if (root) {
+      const searchingNow = Boolean(state.session && !terminal.has(state.session.status) && state.session.operationKind === "PAIR_NEW");
+      if (root.dataset.step !== String(step) || state.wasSearching !== searchingNow) {
+        state.wasSearching = searchingNow;
+        root.dataset.step = String(step);
+        // A new step starts at the top, once; refreshes never scroll the page.
+        if (state.stepShown !== undefined && typeof window.scrollTo === "function") window.scrollTo(0, 0);
+      }
+      state.stepShown = step;
+    }
     for (let index = 1; index <= 4; index += 1) {
       const item = $(`step-${index}`);
       if (item) item.className = index < step ? "done" : index === step ? "current" : "";
     }
     const searching = state.session?.status === "searching" && !(state.session.candidates || []).length && state.session.joinWindowOpen !== false;
-    $("status").className = searching ? "banner waiting" : "banner";
+    if ($("status").className !== (searching ? "banner waiting" : "banner")) $("status").className = searching ? "banner waiting" : "banner";
+    if ($("installer")) $("installer").dataset.searching = String(Boolean(state.session && !terminal.has(state.session.status) && state.session.operationKind === "PAIR_NEW"));
   }
   function renderSessionDeadline(context) {
     if (!context?.sessionExpiresAt || !context?.serverNow || !window.performance?.now) return;
@@ -180,13 +245,13 @@
     const sessionState = session.protocol === "zigbee" && session.operationKind === "PAIR_NEW" && session.status === "searching" && session.joinWindowOpen === false
       ? `join window closed · ${(session.candidates || []).length ? "review discovered device" : "checking devices already joining"}`
       : session.status.replaceAll("_", " ");
-    $("status").textContent = describeStatus(session, sessionState);
+    setText($("status"), describeStatus(session, sessionState));
     $("matter-entry").hidden = session.protocol !== "matter" || !["awaiting_payload", "interrupted"].includes(session.status);
     $("matter-entry-row").hidden = $("matter-entry").hidden;
     // Preserve an in-progress review of a newly discovered candidate across
     // status polls. The selection is only a local review draft until the
     // separate server-side "Review this device" action succeeds.
-    $("device-result").hidden = !session.selectedCandidateRef && !state.selected;
+    setHidden($("device-result"), !session.selectedCandidateRef && !state.selected);
     const controls = Array.isArray(session.selectedControls) ? session.selectedControls : [];
     $("selected-controls").textContent = controls.length ? `Detected controls: ${controls.filter((control) => String(control.name || "").toLowerCase() !== "unknown").map((control) => `${control.name}${control.readable ? " · reading" : ""}${control.writable ? " · control" : ""}`).join("; ")}`
       : session.selectedCandidateRef ? `Control/readings status: ${session.catalogueStatus === "unsupported" ? "not understood yet; no controls are being invented" : session.catalogueStatus === "no_safe_controls" ? "no safe control was detected" : "no current control descriptor is available"}` : "";
@@ -237,14 +302,17 @@
   }
   function renderCompleted() {
     const rows = state.completedDevices; const section = $("completed-devices"); const list = $("completed-device-list");
-    section.hidden = rows.length === 0; list.replaceChildren();
-    for (const row of rows) {
-      const item = document.createElement("li");
-      const sync = row.sync === "pending" ? "Home sync pending" : row.sync === "acknowledged" ? "Home sync acknowledged" : "Home sync not verified";
-      item.textContent = `${row.name}${row.model ? ` · ${row.model}` : ""} · ${row.protocol || "device"} · ${row.areaName || "Area unavailable"} · ${row.lifecycle === "VIEW_ONLY" ? "view-only" : "permanent"} · ${row.analyticsCategory && row.analyticsCategory !== "NONE" ? `${row.analyticsCategory} analytics · ` : ""}${sync}`;
-      if (row.analyticsReadiness) item.textContent += ` · Analytics ${row.analyticsReadiness.state}${row.analyticsReadiness.reason ? `: ${row.analyticsReadiness.reason.replaceAll('_', ' ')}` : ''}`;
-      list.append(item);
-    }
+    setHidden(section, rows.length === 0);
+    const lines = rows.map((row) => {
+      const sync = row.sync === "pending" ? "syncing to the Home" : row.sync === "acknowledged" ? "synced to the Home" : "sync not confirmed yet";
+      let line = `${row.name}${row.model ? ` · ${row.model}` : ""} · ${row.areaName || "room unavailable"} · ${row.lifecycle === "VIEW_ONLY" ? "view-only" : "added"} · ${row.analyticsCategory && row.analyticsCategory !== "NONE" ? `${String(row.analyticsCategory).toLowerCase()} usage charts · ` : ""}${sync}`;
+      if (row.analyticsReadiness) line += ` · Analytics ${row.analyticsReadiness.state}${row.analyticsReadiness.reason ? `: ${row.analyticsReadiness.reason.replaceAll("_", " ")}` : ""}`;
+      return line;
+    });
+    const signature = JSON.stringify(lines);
+    if (list.dataset.signature === signature) return;
+    list.dataset.signature = signature; list.replaceChildren();
+    for (const line of lines) { const item = document.createElement("li"); item.textContent = line; list.append(item); }
   }
   function scheduleSessionRefresh(delayMs) {
     if (state.poll) clearTimeout(state.poll);
@@ -262,8 +330,8 @@
   }
   function renderExistingDevices() {
     const section = $("existing-devices"); const list = $("existing-device-list"); const held = state.context?.protocols?.registrationEnabled !== true;
-    section.hidden = false;
-    $("existing-device-hold").hidden = !held;
+    setHidden(section, false);
+    setHidden($("existing-device-hold"), !held);
     // Redrawn only when the list changes, so a background refresh never makes it blink.
     const signature = JSON.stringify([held, (held ? [] : state.existingDevices).map((device) => [device.candidateRef || device.id, device.name, device.model, device.originalAreaName])]);
     if (list.dataset.signature === signature) { $("existing-device-empty").hidden = held || state.existingDevices.length > 0; return; }
@@ -334,7 +402,7 @@
     updateButtons();
     state.context = await get("/_dinodia/installer/commissioning");
     renderSessionDeadline(state.context);
-    $("summary").textContent = `Assigned installation work · ${state.context.areas.length} permitted original Area${state.context.areas.length === 1 ? "" : "s"}`;
+    setText($("summary"), `Assigned installation work · ${state.context.areas.length} room${state.context.areas.length === 1 ? "" : "s"} you can add devices to`);
     // Rebuilt only when the rooms actually change, so an open dropdown or a chosen room is never disturbed by a background refresh.
     const select = $("area"); const areaSignature = state.context.areas.map((area) => `${area.id}:${area.name}`).join("|");
     if (select.dataset.signature !== areaSignature) {
@@ -351,14 +419,16 @@
         : !entry?.adapterReady ? entry?.readinessMessage || `The ${title.toLowerCase()} is not ready; no commissioning action can start.`
           : protocol === "matter" ? (entry.readinessMessage || `${title} is connected.`)
             : `${title} is ready for a user-started device search/setup.`;
-      $(`${protocol}-readiness`).textContent = reason;
+      setText($(`${protocol}-readiness`), reason);
     }
-    if (!state.session) $("status").textContent = "No active commissioning session. Start a search only when the relevant radio is ready.";
+    if (!state.session) setText($("status"), "Ready. Press a search button above, then put your device in pairing mode.");
   }
   async function chooseCandidate() {
     if (!state.authorityVerified || !state.session || !state.selected) return;
     const areaId = $("area").value; const customerLabel = $("label").value.trim(); const name = $("name").value.trim();
-    if (!areaId || !customerLabel || !name) { showError(new Error("Choose an active original Area and enter a device name and customer label.")); return; }
+    if (!areaId) { showError(new Error("Choose which room this device is in.")); return; }
+    if (customerLabel.length < 2) { showError(new Error("Give the device a name, for example “Room 2 Light”.")); return; }
+    if (isMachineName(customerLabel)) { showError(new Error("That name is a technical code. Give it a name the customer will recognise, for example “Room 2 Light”.")); return; }
     setBusy(true); clearError();
     try {
       const path = `/_dinodia/installer/commissioning/sessions/${encodeURIComponent(state.session.sessionId)}`;
@@ -379,7 +449,7 @@
         render(refreshed); renderCandidates();
         result = await post(`${path}/select`, { ...body, expectedRevision: refreshed.revision });
       }
-      state.reviewStale = false;
+      state.reviewStale = false; state.editing = false;
       render(result);
     } catch (error) { showError(error); }
     finally { setBusy(false); updateButtons(); }
@@ -418,12 +488,15 @@
   $("select").addEventListener("click", () => chooseCandidate());
   $("install").addEventListener("click", () => complete("install"));
   $("label").addEventListener("input", () => { $("name").value = $("label").value; });
+  $("area").addEventListener("change", () => { renderSuggestions(); clearError(); updateButtons(); });
+  $("change-details").addEventListener("click", () => { state.editing = true; clearError(); updateButtons(); });
   $("view-only").addEventListener("click", () => complete("view_only"));
   $("retain-unsupported").addEventListener("click", () => complete("retain_unsupported"));
   $("remove").addEventListener("click", () => complete("remove"));
   $("add-next").addEventListener("click", async () => {
     if (!state.session || !terminal.has(state.session.status) || (state.session.cleanup?.pendingCount || 0) > 0) return;
-    sessionStorage.removeItem(key("session")); state.session = null; state.selected = null;
+    sessionStorage.removeItem(key("session")); state.session = null; state.selected = null; state.editing = false; state.autoOpenedRef = null;
+    $("label").value = ""; $("name").value = ""; $("analytics-category").value = "NONE";
     $("device-result").hidden = true; $("candidates").hidden = true;
     $("review-heading").textContent = "Review discovered device";
     $("review-instructions").textContent = "Review the device interview, select an authorized original Area, and confirm its current controls before registration.";
@@ -447,6 +520,7 @@
     finally { setBusy(false); updateButtons(); }
   });
   $("end-session").addEventListener("click", async () => {
+    if (typeof window.confirm === "function" && !window.confirm("End this installation session? You will need to open it again from Company Portal to add more devices.")) return;
     if (state.session && !["completed", "cancelled", "expired", "failed"].includes(state.session.status)) await cancel();
     await fetch("/_dinodia/operator-session/end", { method: "POST", credentials: "same-origin", headers: { "x-dinodia-setup-csrf": cookie("dinodia_setup_csrf"), ...operatorSessionHeaders() } }).catch(() => {});
     location.replace("/support-access");

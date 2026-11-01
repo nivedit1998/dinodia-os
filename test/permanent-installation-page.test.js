@@ -123,7 +123,7 @@ test("assigned Zigbee start creates a secure idempotency key on private HTTP wit
   assert.equal(JSON.parse(request.options.body).operationKind, "PAIR_NEW");
   assert.equal(JSON.parse(request.options.body).protocol, "zigbee");
   assert.match(request.options.headers["idempotency-key"], /^install-start-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
-  assert.match(page.elements.get("status").textContent, /Put your device in pairing mode now/);
+  assert.match(page.elements.get("status").textContent, /Put your device in pairing mode, then wait/);
   assert.doesNotMatch(page.elements.get("error").textContent, /randomUUID/i);
 });
 
@@ -393,7 +393,7 @@ test("descriptor conflict returns the device to explicit re-review instead of tr
   assert.equal(completeCalls, 1, "a descriptor conflict must never auto-submit registration again");
   assert.equal(page.elements.get("install").hidden, true, "stale reviewed controls cannot be installed");
   assert.equal(page.elements.get("select").hidden, false, "the user is given a direct re-review action");
-  assert.equal(page.elements.get("select").textContent, "Review updated device");
+  assert.equal(page.elements.get("select").textContent, "Check the updated device");
   assert.match(page.elements.get("error").textContent, /changed after review/i);
 
   await page.elements.get("select").listeners.get("click")();

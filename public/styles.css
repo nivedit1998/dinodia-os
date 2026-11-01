@@ -578,3 +578,66 @@ body.operator-authority-ended .sidebar .nav { pointer-events: none; opacity: .45
 @keyframes dinodia-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 .advanced-group[open] > .panel, .device-card .device-editor { animation: dinodia-rise .18s ease-out; }
 @media (prefers-reduced-motion: reduce) { .advanced-group[open] > .panel, .device-card .device-editor { animation: none; } }
+
+/* ───────── Calm, touch-first layout (phone, iPad and desktop) ─────────
+   One job per screen, nothing that slides or fades, nothing that moves under a finger. */
+html { scroll-behavior: auto; }
+body { overflow-anchor: none; -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent; }
+body[data-view="add"] [data-view]:not([data-view="add"]),
+body[data-view="devices"] [data-view]:not([data-view="devices"]),
+body[data-view="rooms"] [data-view]:not([data-view="rooms"]),
+body[data-view="hub"] [data-view]:not([data-view="hub"]) { display: none !important; }
+button, select, input, textarea { touch-action: manipulation; }
+button, .button, select { min-height: 46px; }
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea { min-height: 48px; font-size: 16px; }
+.nav a { display: flex; align-items: center; gap: 10px; min-height: 48px; }
+.nav .nav-icon { width: 22px; text-align: center; }
+.nav a.active { font-weight: 800; }
+
+/* No sliding, flipping or lifting: open and closed are simply shown and hidden. */
+.device-tile { min-height: 0; padding: 16px 18px; }
+.device-tile:hover { transform: none; }
+.device-card.expanded .device-tile { animation: none; }
+.device-editor, .radio-tile-details { display: none; max-height: none; padding: 0; opacity: 1; transform: none; visibility: visible; transition: none; animation: none; overflow: visible; }
+.device-card.expanded .device-editor, .radio-tile.expanded .radio-tile-details { display: block; padding: 16px; transform: none; animation: none; }
+.device-tile-chevron, .radio-tile-chevron { transition: none; }
+.advanced-group[open] > .panel, .device-card .device-editor { animation: none; }
+.device-grid { align-items: start; }
+#devices, #areas-dashboard, #radio-tiles { overflow-anchor: none; }
+
+/* Messages never push the page around: they float at the bottom of the screen. */
+.notice { position: fixed; left: 50%; bottom: max(76px, calc(env(safe-area-inset-bottom) + 70px)); z-index: 40; transform: translateX(-50%); width: min(560px, calc(100vw - 32px)); margin: 0; box-shadow: 0 10px 30px rgba(20, 35, 30, .22); }
+.notice.hidden { display: none; }
+.operator-session-status { min-height: 0; }
+
+/* Phones and iPads held upright: a bottom tab bar the thumb can reach. */
+@media (max-width: 900px) {
+  .app-shell { display: block; }
+  .sidebar { position: fixed; inset: auto 0 0 0; z-index: 50; display: block; min-height: 0; height: auto; padding: 0 0 env(safe-area-inset-bottom); border: 0; border-top: 1px solid var(--line); background: #fff; box-shadow: 0 -6px 20px rgba(20, 35, 30, .08); }
+  .sidebar .brand, .sidebar-footer { display: none; }
+  .nav { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; margin: 0; padding: 4px 6px; }
+  .nav a { flex-direction: column; justify-content: center; gap: 2px; min-height: 58px; padding: 6px 4px; border-radius: 12px; font-size: .74rem; text-align: center; }
+  .sidebar .nav a .nav-label { display: block !important; font-size: .74rem; line-height: 1.15; font-weight: 700; }
+  .sidebar .nav a .nav-icon { display: block; }
+  .nav .nav-icon { width: auto; font-size: 1.25rem; line-height: 1; }
+  .nav a.active { background: var(--green-soft, #e3f1ec); color: var(--green, #1f6f5c); }
+  .main-content { padding: 18px 16px calc(96px + env(safe-area-inset-bottom)); }
+  .topbar { display: flex; gap: 12px; align-items: center; justify-content: space-between; }
+  .topbar h1 { font-size: 1.35rem; margin: 2px 0 0; }
+  .topbar .subtle { display: none; }
+  .nav-extra { display: none; }
+  .top-actions { margin-top: 0; }
+  .summary-grid { grid-template-columns: repeat(2, 1fr); }
+  .device-tile { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .section-actions select { width: 100%; }
+}
+@media (max-width: 520px) {
+  h1 { font-size: 1.6rem; }
+  .device-edit, .entity-row { grid-template-columns: 1fr; }
+  .device-editor button, .device-setup-form button, .section-actions button { width: 100%; }
+}
+@media print { .sidebar, .notice { display: none; } }
+@media (max-width: 600px) {
+  #area-create-form, .section-actions { display: grid; grid-template-columns: 1fr; gap: 10px; }
+  #area-create-form label { display: grid; gap: 6px; }
+}

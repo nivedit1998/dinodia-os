@@ -12,7 +12,10 @@
       const old = previous.get(fresh.dataset.deviceCard);
       const editing = old && (old.dataset.setupDirty === 'true' || old.dataset.busy === 'true'
         || old.contains(container.ownerDocument.activeElement));
-      const node = editing && old.dataset.refreshAfterSave !== 'true' ? old : fresh;
+      // A card nobody is using is updated in place (no flash, no jump); a card being edited is left as it is.
+      const inPlace = old && !editing && old.dataset.refreshAfterSave !== 'true' && container.ownerDocument.defaultView?.DinodiaMorph;
+      if (inPlace) container.ownerDocument.defaultView.DinodiaMorph.patch(old, fresh);
+      const node = inPlace || editing && old.dataset.refreshAfterSave !== 'true' ? old : fresh;
       if (node === old) {
         // Analytics acknowledgements must still reconcile while a separate
         // name/room draft keeps the surrounding form mounted.

@@ -3,6 +3,8 @@ const state = { token: "", areas: [], labels: [], devices: [], provisioning: nul
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
 
+const setMarkup = (element, markup) => (window.DinodiaMorph ? window.DinodiaMorph.html(element, markup) : void (element.innerHTML = markup));
+const bindOnce = (selector, root = document) => (window.DinodiaDeviceEditors ? window.DinodiaDeviceEditors.unbound(root, selector) : Array.from(root.querySelectorAll(selector)));
 function showNotice(message, kind = "info") { const notice = $("#notice"); notice.textContent = message || ""; notice.dataset.kind = kind; notice.classList.toggle("hidden", !message); }
 function operatorAuthorityPaused() { return document.body.classList.contains("operator-authority-unavailable") || document.body.classList.contains("operator-authority-ended"); }
 function api(route, options = {}) { return window.DinodiaApi.request(route, options, state.token); }
@@ -37,11 +39,11 @@ function selectedLabelIds(select) {
 
 function renderAreasDashboard() {
   const groups = [...state.areas.map((area) => ({ ...area, devices: state.devices.filter((device) => deviceAreaIds(device).includes(String(area.id))) })), { id: "", name: "Unassigned", devices: state.devices.filter((device) => deviceAreaIds(device).length === 0) }];
-  $("#areas-dashboard").innerHTML = state.areas.length || state.devices.length ? groups.map((area) => `<button class="area-card ${state.selectedArea === area.id ? "selected" : ""}" data-filter-area="${escapeHtml(area.id)}"><span class="area-icon">${area.id ? "⌂" : "＋"}</span><span class="area-copy"><strong>${escapeHtml(area.name)}</strong><small>${area.devices.length} device${area.devices.length === 1 ? "" : "s"}</small></span><span class="area-online">${area.devices.filter((device) => device.available !== false).length} online</span><span class="area-arrow">→</span></button>`).join("") : `<div class="empty-state">No provisioned areas yet.</div>`;
-  document.querySelectorAll("[data-filter-area]").forEach((button) => button.addEventListener("click", () => { state.selectedArea = button.dataset.filterArea; $("#device-filter").value = state.selectedArea || "unassigned"; renderAreasDashboard(); renderDevices(); $("#devices-section").scrollIntoView({ behavior: "smooth", block: "start" }); }));
+  setMarkup($("#areas-dashboard"), state.areas.length || state.devices.length ? groups.map((area) => `<button class="area-card ${state.selectedArea === area.id ? "selected" : ""}" data-filter-area="${escapeHtml(area.id)}"><span class="area-icon">${area.id ? "⌂" : "＋"}</span><span class="area-copy"><strong>${escapeHtml(area.name)}</strong><small>${area.devices.length} device${area.devices.length === 1 ? "" : "s"}</small></span><span class="area-online">${area.devices.filter((device) => device.available !== false).length} online</span><span class="area-arrow">→</span></button>`).join("") : `<div class="empty-state">No provisioned areas yet.</div>`);
+  bindOnce("[data-filter-area]").forEach((button) => button.addEventListener("click", () => { state.selectedArea = button.dataset.filterArea; $("#device-filter").value = state.selectedArea || "unassigned"; renderAreasDashboard(); renderDevices(); window.DinodiaViews?.show("devices"); }));
 }
-function renderAreaControls() { const filter = $("#device-filter"); const current = filter.value; filter.innerHTML = `<option value="all">All devices</option>${state.areas.map((area) => `<option value="${escapeHtml(area.id)}">${escapeHtml(area.name)}</option>`).join("")}<option value="unassigned">Unassigned</option>`; filter.value = [...state.areas.map((area) => area.id), "unassigned", "all"].includes(current) ? current : "all"; state.selectedArea = filter.value === "unassigned" ? "" : filter.value; filter.onchange = () => { state.selectedArea = filter.value === "unassigned" ? "" : filter.value; renderAreasDashboard(); renderDevices(); }; }
-function renderAreas() { $("#areas").innerHTML = state.areas.length ? state.areas.map((area) => `<span class="chip">${escapeHtml(area.name)}${state.status?.features?.areaDeletion ? `<button type="button" class="chip-delete" data-delete-area="${escapeHtml(area.id)}" aria-label="Delete room ${escapeHtml(area.name)}">✕</button>` : ""}</span>`).join("") : `<p class="subtle small">No areas have been provisioned yet.</p>`; document.querySelectorAll("[data-delete-area]").forEach((button) => button.addEventListener("click", () => openAreaDeletion(button.dataset.deleteArea))); renderPendingAreaDeletions(); }
+function renderAreaControls() { const filter = $("#device-filter"); const current = filter.value; const optionsHtml = `<option value="all">All devices</option>${state.areas.map((area) => `<option value="${escapeHtml(area.id)}">${escapeHtml(area.name)}</option>`).join("")}<option value="unassigned">Unassigned</option>`; if (filter.dataset.optionsHtml !== optionsHtml) { filter.innerHTML = optionsHtml; filter.dataset.optionsHtml = optionsHtml; } filter.value = [...state.areas.map((area) => area.id), "unassigned", "all"].includes(current) ? current : "all"; state.selectedArea = filter.value === "unassigned" ? "" : filter.value; filter.onchange = () => { state.selectedArea = filter.value === "unassigned" ? "" : filter.value; renderAreasDashboard(); renderDevices(); }; }
+function renderAreas() { setMarkup($("#areas"), state.areas.length ? state.areas.map((area) => `<span class="chip">${escapeHtml(area.name)}${state.status?.features?.areaDeletion ? `<button type="button" class="chip-delete" data-delete-area="${escapeHtml(area.id)}" aria-label="Delete room ${escapeHtml(area.name)}">✕</button>` : ""}</span>`).join("") : `<p class="subtle small">No areas have been provisioned yet.</p>`); bindOnce("[data-delete-area]").forEach((button) => button.addEventListener("click", () => openAreaDeletion(button.dataset.deleteArea))); renderPendingAreaDeletions(); }
 function areaDeletionDialog() { let dialog = $("#area-deletion-dialog"); if (!dialog) { dialog = document.createElement("dialog"); dialog.id = "area-deletion-dialog"; dialog.className = "area-deletion-dialog"; document.body.append(dialog); } return dialog; }
 async function openAreaDeletion(areaId) {
   const area = state.areas.find((row) => String(row.id) === String(areaId)); if (!area) return;
@@ -63,11 +65,13 @@ async function openAreaDeletion(areaId) {
 
 async function renderPendingAreaDeletions() {
   if (!state.status?.features?.areaDeletion && !state.status?.features?.areaDeletionRecovery) return;
+  document.querySelectorAll("#areas [data-pending-op]").forEach((node) => node.remove());
   try {
     const response = await api("/api/areas/deletion-operations");
     const pending = response.operations || [];
     for (const operation of pending) {
       const button = document.createElement("button");
+      button.dataset.pendingOp = "true";
       button.type = "button";
       button.textContent = `Resume room cleanup · ${operation.areaName || "Deleted room"}`;
       button.onclick = async () => {
@@ -85,6 +89,7 @@ async function renderPendingAreaDeletions() {
     const conversions = await api("/api/devices/logical-conversion-operations");
     for (const operation of conversions.operations || []) {
       const button = document.createElement("button");
+      button.dataset.pendingOp = "true";
       button.type = "button"; button.textContent = "Resume channel conversion";
       button.onclick = () => openLogicalConversion(operation.physicalId, { ...operation,
         warning: "This previously confirmed conversion is fenced and not yet complete. Retry resumes the same operation; it never pairs or switches hardware." });
@@ -391,7 +396,7 @@ function renderRadioTiles() {
     ? window.DinodiaRadios.connectionStatus(adapter, zigbeePath, zigbeeIntegration).online
     : window.DinodiaRadios.threadConnectionStatus(adapter, threadPath, threadIntegration).online)).length;
   $("#radio-status-badge").textContent = onlineCount === 2 ? "2 radios online" : onlineCount === 1 ? "1 radio online" : entries.length ? "Setup required" : "No dongles";
-  $("#radio-tiles").innerHTML = entries.length ? entries.map(({ adapter, kind, selected }) => {
+  setMarkup($("#radio-tiles"), entries.length ? entries.map(({ adapter, kind, selected }) => {
     const key = window.DinodiaRadios.adapterKey(adapter);
     const detailsId = `radio-details-${encodeURIComponent(key)}`;
     const expanded = state.expandedRadios.has(key);
@@ -411,8 +416,8 @@ function renderRadioTiles() {
     const removeWarning = kind === "zigbee" ? "Zigbee2MQTT will stop and the coordinator selection will be cleared." : "OpenThread Border Router and Matter-over-Thread will stop and the Thread selection will be cleared.";
     const removeAction = selected ? `<button class="danger" data-remove-radio="${escapeHtml(key)}" data-radio-kind="${kind}" data-radio-name="${escapeHtml(adapter.name || title)}" data-remove-warning="${escapeHtml(removeWarning)}" type="button">Remove dongle</button>` : `<span class="radio-unassigned-note">Assign this dongle above</span>`;
     return `<article class="radio-tile ${expanded ? "expanded" : ""}" data-radio-tile="${escapeHtml(key)}"><button class="radio-tile-summary" data-toggle-radio="${escapeHtml(key)}" type="button" aria-expanded="${expanded}" aria-controls="${escapeHtml(detailsId)}"><span class="radio-tile-icon ${status.online ? "radio-tile-icon-online" : ""}">${marker}</span><span class="radio-tile-copy"><span class="radio-tile-type">${protocolName}${selected ? " · selected" : " · available"}</span><strong>${escapeHtml(adapter.name || title)}</strong><span class="radio-tile-meta"><span class="radio-status ${status.online ? "radio-status-online" : "radio-status-offline"}">${escapeHtml(status.label)}</span><span>${selected ? `${networkDevices.length || devices.length} ${protocolName} device${(networkDevices.length || devices.length) === 1 ? "" : "s"}` : "Ready to assign"}</span></span></span><span class="radio-tile-action"><span>${expanded ? "Close" : "Details"}</span><span class="radio-tile-chevron" aria-hidden="true">⌄</span></span></button><div class="radio-tile-details" id="${escapeHtml(detailsId)}" ${expanded ? "" : "inert"}><div class="radio-detail-head"><div><strong>${escapeHtml(title)}</strong><span>${escapeHtml(status.detail)}</span></div><div class="radio-detail-actions">${removeAction}<button class="text-button" data-collapse-radio title="Close the dongle details; this does not remove or change the dongle" type="button">Close details</button></div></div><div class="radio-detail-grid"><div><span>USB path</span><strong>${escapeHtml(adapter.path || "—")}</strong></div><div><span>Connection</span><strong>${adapter.connected ? "Connected" : "Disconnected"}</strong></div><div><span>Role</span><strong>${protocolName}</strong></div><div><span>Network devices</span><strong>${selected ? devices.length : "—"}</strong></div></div><div class="network-diagram-heading"><div><strong>${protocolName} network</strong><span>The ${protocolName} radio sits at the centre of this local device network.</span></div><span class="network-health ${status.online ? "network-health-online" : "network-health-offline"}">${status.online ? "Network online" : "Network offline"}</span></div><div class="network-map" aria-label="${escapeHtml(adapter.name || title)} ${protocolName} network diagram">${networkContent}</div></div></article>`;
-  }).join("") : `<div class="empty-state">No USB radios detected. Connect a dongle, then scan again.</div>`;
-  document.querySelectorAll("[data-toggle-radio]").forEach((button) => button.addEventListener("click", () => {
+  }).join("") : `<div class="empty-state">No USB radios detected. Connect a dongle, then scan again.</div>`);
+  bindOnce("[data-toggle-radio]").forEach((button) => button.addEventListener("click", () => {
     const tile = button.closest("[data-radio-tile]");
     const details = tile.querySelector(".radio-tile-details");
     const expanded = !tile.classList.contains("expanded");
@@ -422,8 +427,8 @@ function renderRadioTiles() {
     details.inert = !expanded;
     if (expanded) state.expandedRadios.add(tile.dataset.radioTile); else state.expandedRadios.delete(tile.dataset.radioTile);
   }));
-  document.querySelectorAll("[data-collapse-radio]").forEach((button) => button.addEventListener("click", () => button.closest("[data-radio-tile]").querySelector("[data-toggle-radio]").click()));
-  document.querySelectorAll("[data-remove-radio]").forEach((button) => button.addEventListener("click", async () => {
+  bindOnce("[data-collapse-radio]").forEach((button) => button.addEventListener("click", () => button.closest("[data-radio-tile]").querySelector("[data-toggle-radio]").click()));
+  bindOnce("[data-remove-radio]").forEach((button) => button.addEventListener("click", async () => {
     const kind = button.dataset.radioKind || "zigbee";
     const name = button.dataset.radioName || "this dongle";
     if (!confirm(`Remove ${name} from Dinodia OS? ${button.dataset.removeWarning || "Household devices and assignments will be kept."} Household devices and assignments will be kept.`)) return;
@@ -467,13 +472,13 @@ function renderActivity(records = state.activity.records) {
   const rows = $("#activity-rows");
   if (!rows) return;
   const visibleRecords = state.activity.expanded ? records : records.slice(0, 10);
-  rows.innerHTML = visibleRecords.length ? visibleRecords.map((record) => {
+  setMarkup(rows, visibleRecords.length ? visibleRecords.map((record) => {
     const severity = escapeHtml(record.severity || "info");
     const status = escapeHtml(record.statusLabel || record.severity || "info");
     const protocol = record.device?.protocol ? ` · ${record.device.protocol}` : "";
     const friendly = friendlyActivityRecord(record);
     return `<tr data-severity="${severity}"><td class="activity-time">${escapeHtml(activityTime(record.occurredAt || record.timestamp))}</td><td><span class="activity-status activity-status-${severity}">${status}</span></td><td class="activity-device"><strong>${escapeHtml(activityDevice(record))}</strong><small>${escapeHtml(protocol.replace(/^ · /, ""))}</small></td><td class="activity-area">${escapeHtml(activityArea(record))}</td><td class="activity-summary"><strong>${escapeHtml(friendly.summary)}</strong><small>${escapeHtml(friendly.detail)}</small></td><td class="activity-change" title="${escapeHtml(activityChange(record))}">${escapeHtml(activityChange(record))}</td></tr>`;
-  }).join("") : `<tr><td colspan="6" class="activity-empty">Your hub activity will appear here.</td></tr>`;
+  }).join("") : `<tr><td colspan="6" class="activity-empty">Your hub activity will appear here.</td></tr>`);
   $("#activity-count").textContent = state.activity.expanded ? `${records.length} record${records.length === 1 ? "" : "s"}` : `${visibleRecords.length}${records.length > visibleRecords.length ? ` of ${records.length}` : ""} record${visibleRecords.length === 1 ? "" : "s"}`;
   $("#activity-expand").classList.toggle("hidden", !state.activity.expanded && !state.activity.hasMore && records.length <= 10);
   $("#activity-expand").textContent = state.activity.expanded ? "Show latest 10" : "Show all activity";

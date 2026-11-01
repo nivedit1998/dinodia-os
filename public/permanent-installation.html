@@ -2,142 +2,195 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#1f6f5c">
   <title>Add devices · Dinodia OS</title>
   <link rel="stylesheet" href="/styles.css">
   <style>
-    :root { --ink:#1d2421; --muted:#64706a; --line:#e3e8e5; --card:#fff; --bg:#f3f6f4; --brand:#1f6f5c; --brand-ink:#fff; --brand-soft:#e4f2ed; --warn:#8a5a00; --warn-soft:#fff4dc; --bad:#a32020; --bad-soft:#fde9e9; --ok:#17734f; }
+    /* One calm page: the same card stays put, only the current step is shown. Nothing slides, fades or smooth-scrolls, so nothing jumps. */
+    :root { --ink:#1b2420; --muted:#5d6b64; --line:#dfe6e2; --card:#fff; --bg:#f2f5f3; --brand:#1f6f5c; --brand-dark:#175646; --brand-ink:#fff; --brand-soft:#e3f1ec; --warn:#7a5200; --warn-soft:#fff3d6; --bad:#a32020; --bad-soft:#fde9e9; --ok:#17734f; --tap:52px; }
     * { box-sizing:border-box; }
-    body { min-height:100vh; margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; -webkit-font-smoothing:antialiased; }
-    main { max-width:760px; margin:0 auto; padding:28px 18px 72px; }
-    h1 { font-size:30px; line-height:1.15; margin:2px 0 6px; letter-spacing:-.02em; }
-    h2 { font-size:19px; margin:0 0 4px; letter-spacing:-.01em; }
-    .muted { color:var(--muted); } .small { font-size:14px; }
-    .eyebrow { margin:0; font-size:13px; letter-spacing:.08em; text-transform:uppercase; color:var(--brand); font-weight:600; }
-    .topline { display:flex; flex-wrap:wrap; justify-content:space-between; gap:6px 16px; margin-bottom:6px; }
-    #operator-session-status { margin:0; font-size:13px; color:var(--muted); }
-    #summary { margin:2px 0 18px; }
+    html { scroll-behavior:auto; -webkit-text-size-adjust:100%; }
+    body { min-height:100vh; margin:0; background:var(--bg); color:var(--ink); font:17px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; -webkit-font-smoothing:antialiased; overflow-anchor:none; -webkit-tap-highlight-color:transparent; }
+    main { max-width:720px; margin:0 auto; padding:max(18px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(64px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left)); }
+    h1 { font-size:30px; line-height:1.15; margin:4px 0 6px; letter-spacing:-.02em; }
+    h2 { font-size:21px; line-height:1.25; margin:0 0 6px; letter-spacing:-.01em; }
+    p { margin:0; }
+    .muted { color:var(--muted); } .small { font-size:15px; }
+    .eyebrow { margin:0; font-size:13px; letter-spacing:.08em; text-transform:uppercase; color:var(--brand); font-weight:700; }
+    .topline { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:baseline; gap:4px 16px; }
+    #operator-session-status { font-size:14px; color:var(--muted); min-height:21px; }
+    #summary { margin:0 0 16px; min-height:26px; }
 
-    /* Steps */
-    .steps { list-style:none; display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin:0 0 20px; padding:0; counter-reset:step; }
-    .steps li { position:relative; padding-top:30px; text-align:center; font-size:13px; color:var(--muted); font-weight:500; }
-    .steps li::before { counter-increment:step; content:counter(step); position:absolute; top:0; left:50%; transform:translateX(-50%); width:24px; height:24px; border-radius:50%; background:#e5eae7; color:#5b6862; font-size:13px; display:grid; place-items:center; font-weight:600; transition:background .2s,color .2s; }
-    .steps li::after { content:""; position:absolute; top:11px; left:calc(50% + 18px); right:calc(-50% + 18px); height:2px; background:#e0e6e3; }
+    /* Progress */
+    .steps { list-style:none; display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:0 0 16px; padding:0; counter-reset:step; }
+    .steps li { position:relative; padding-top:34px; text-align:center; font-size:14px; color:var(--muted); font-weight:600; }
+    .steps li::before { counter-increment:step; content:counter(step); position:absolute; top:0; left:50%; transform:translateX(-50%); width:28px; height:28px; border-radius:50%; background:#e3e9e6; color:#55645d; font-size:14px; display:grid; place-items:center; font-weight:700; }
+    .steps li::after { content:""; position:absolute; top:13px; left:calc(50% + 20px); right:calc(-50% + 20px); height:2px; background:#dde4e0; }
     .steps li:last-child::after { display:none; }
     .steps li.done { color:var(--ink); } .steps li.done::before { background:var(--brand); color:#fff; content:"✓"; }
-    .steps li.current { color:var(--ink); font-weight:600; } .steps li.current::before { background:var(--brand); color:#fff; box-shadow:0 0 0 4px var(--brand-soft); }
+    .steps li.current { color:var(--ink); } .steps li.current::before { background:var(--brand); color:#fff; box-shadow:0 0 0 4px var(--brand-soft); }
 
-    /* Cards */
-    .install-card { background:var(--card); border:1px solid var(--line); border-radius:18px; padding:22px; margin:14px 0; box-shadow:0 1px 2px rgba(20,35,30,.04),0 6px 20px rgba(20,35,30,.04); }
+    /* Cards. A hidden card takes no room; nothing animates in. */
+    .install-card { background:var(--card); border:1px solid var(--line); border-radius:20px; padding:22px; margin:14px 0; box-shadow:0 1px 2px rgba(20,35,30,.04); }
     .install-card[hidden], [hidden] { display:none !important; }
-    .install-card:not([hidden]) { animation:rise .22s ease-out; }
-    @keyframes rise { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
-    @media (prefers-reduced-motion:reduce) { .install-card:not([hidden]) { animation:none; } .steps li::before { transition:none; } }
-    .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:14px; }
+    .row { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-top:16px; }
     .row[hidden] { display:none; }
-    .field { display:grid; gap:6px; margin-top:16px; }
-    .field label { font-weight:600; font-size:15px; }
-    .hint { margin:0; font-size:13px; color:var(--muted); }
+    .field { display:grid; gap:8px; margin-top:20px; }
+    .field label, .field .label { font-weight:700; font-size:16px; }
+    .hint { font-size:14px; color:var(--muted); }
 
-    /* Controls */
-    button,select,input { font:inherit; color:inherit; }
-    button { min-height:46px; padding:10px 18px; border-radius:12px; border:1px solid #cfd8d4; background:#fff; cursor:pointer; font-weight:600; transition:background .15s,border-color .15s,transform .05s; }
-    button:hover:not(:disabled) { background:#f4f8f6; border-color:#b9c6c0; }
-    button:active:not(:disabled) { transform:scale(.985); }
+    /* Controls: big enough for a thumb on a phone or an iPad */
+    button, select, input { font:inherit; color:inherit; }
+    button { min-height:var(--tap); padding:12px 22px; border-radius:14px; border:1.5px solid #c6d1cc; background:#fff; cursor:pointer; font-weight:700; touch-action:manipulation; }
+    button:hover:not(:disabled) { background:#f3f7f5; }
+    button:active:not(:disabled) { background:#e9f0ed; }
     button.primary { background:var(--brand); border-color:var(--brand); color:var(--brand-ink); }
-    button.primary:hover:not(:disabled) { background:#195c4c; border-color:#195c4c; }
-    button.quiet { border-color:transparent; background:transparent; color:var(--muted); font-weight:500; min-height:40px; padding:8px 10px; }
-    button.quiet:hover:not(:disabled) { background:#eef2f0; }
+    button.primary:hover:not(:disabled) { background:var(--brand-dark); border-color:var(--brand-dark); }
+    button.quiet { border-color:transparent; background:transparent; color:var(--muted); font-weight:600; min-height:46px; }
+    button.quiet:hover:not(:disabled) { background:#e8eeeb; }
+    button.danger { color:var(--bad); border-color:#e8b9b9; }
     button:disabled { opacity:.45; cursor:not-allowed; }
-    input,select { width:100%; min-height:48px; padding:11px 14px; border:1px solid #cfd8d4; border-radius:12px; background:#fff; }
-    input:focus,select:focus,button:focus-visible { outline:3px solid var(--brand-soft); border-color:var(--brand); }
+    input, select { width:100%; min-height:var(--tap); padding:12px 14px; border:1.5px solid #c6d1cc; border-radius:14px; background:#fff; font-size:17px; }
+    input:focus, select:focus, button:focus-visible, summary:focus-visible { outline:3px solid #8cc9b6; outline-offset:1px; border-color:var(--brand); }
+    input:disabled, select:disabled { background:#f1f4f2; color:#55645d; }
     input[type=password] { letter-spacing:.04em; }
 
-    /* Messages */
-    .banner { margin:14px 0 0; padding:12px 14px; border-radius:12px; background:var(--brand-soft); color:#164c3f; font-weight:500; }
-    .banner.waiting::before { content:""; display:inline-block; width:10px; height:10px; margin-right:10px; border-radius:50%; background:var(--brand); animation:pulse 1.2s ease-in-out infinite; vertical-align:middle; }
-    @keyframes pulse { 0%,100% { opacity:.25; transform:scale(.8); } 50% { opacity:1; transform:scale(1); } }
-    .error { margin:12px 0 0; padding:12px 14px; border-radius:12px; background:var(--bad-soft); color:var(--bad); font-weight:500; }
-    #zigbee-readiness,#matter-readiness { margin:10px 0 0; font-size:14px; }
+    /* What to press first: two large tiles */
+    .start-tiles { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:16px; }
+    .start-tiles button { display:grid; gap:4px; text-align:left; padding:16px 18px; min-height:96px; align-content:center; }
+    .start-tiles small { font-weight:500; font-size:14px; color:var(--muted); }
+    .start-tiles button.primary small { color:#d4ebe3; }
+    #installer[data-searching="true"] .start-tiles, #installer[data-searching="true"] .how-to { display:none; }
+    .how-to { margin:14px 0 0; padding:0; list-style:none; display:grid; gap:10px; counter-reset:how; }
+    .how-to li { display:grid; grid-template-columns:30px 1fr; gap:10px; align-items:start; counter-increment:how; }
+    .how-to li::before { content:counter(how); width:28px; height:28px; border-radius:50%; background:var(--brand-soft); color:var(--brand-dark); display:grid; place-items:center; font-weight:700; font-size:14px; }
+    #zigbee-readiness,#matter-readiness { margin:10px 0 0; font-size:14px; color:var(--muted); }
+    #zigbee-readiness:empty, #matter-readiness:empty { display:none; }
 
-    /* Candidates and lists */
-    .candidate { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px 16px; padding:14px 0; border-top:1px solid var(--line); }
-    .candidate:first-child { border-top:0; }
-    .candidate strong { display:block; font-size:17px; } .candidate p { margin:2px 0 0; font-size:14px; }
-    #completed-device-list { margin:10px 0 0; padding:0; list-style:none; } #completed-device-list li { padding:10px 0; border-top:1px solid var(--line); }
+    /* Live message: keeps its height so nothing below it moves */
+    .banner { margin:0; padding:14px 16px; min-height:56px; border-radius:14px; background:var(--brand-soft); color:#164c3f; font-weight:600; display:flex; align-items:center; gap:12px; }
+    .banner.waiting::before { content:""; flex:none; width:14px; height:14px; border-radius:50%; border:3px solid #8cc9b6; border-top-color:var(--brand); animation:spin 1s linear infinite; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    @media (prefers-reduced-motion:reduce) { .banner.waiting::before { animation:none; border-top-color:#8cc9b6; } }
+    .error { margin:12px 0 0; padding:14px 16px; border-radius:14px; background:var(--bad-soft); color:var(--bad); font-weight:600; }
+
+    /* Found devices and lists */
+    .candidate { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px 16px; padding:16px 0; border-top:1px solid var(--line); }
+    .candidate:first-child { border-top:0; padding-top:4px; }
+    .candidate > div { flex:1 1 220px; min-width:0; }
+    .candidate strong { display:block; font-size:19px; overflow-wrap:anywhere; } .candidate p { margin:2px 0 0; font-size:15px; }
+    .candidate button { flex:0 0 auto; }
+    #completed-device-list { margin:10px 0 0; padding:0; list-style:none; } #completed-device-list li { padding:12px 0; border-top:1px solid var(--line); overflow-wrap:anywhere; }
     #completed-device-list li:first-child { border-top:0; }
-    #selected-controls { margin-top:14px; padding:10px 12px; border-radius:10px; background:#f5f8f6; font-size:14px; }
+    #selected-controls { margin-top:14px; padding:12px 14px; border-radius:12px; background:#f4f8f6; font-size:15px; }
     #selected-controls:empty { display:none; }
-    details.install-card > summary { cursor:pointer; font-weight:600; list-style:none; }
+
+    /* Name suggestions: tap instead of type */
+    #name-suggestions { display:flex; flex-wrap:wrap; gap:8px; }
+    #name-suggestions:empty { display:none; }
+    #name-suggestions button { min-height:44px; padding:8px 16px; border-radius:999px; background:var(--brand-soft); border-color:#b9dccf; color:var(--brand-dark); }
+
+    /* The "are you sure" summary */
+    #review-summary { margin-top:18px; padding:16px 18px; border-radius:16px; background:var(--warn-soft); border:1.5px solid #f0d58f; color:#4d3500; }
+    #review-summary[hidden] { display:none; }
+    #review-summary h3 { margin:0 0 10px; font-size:18px; }
+    #review-summary dl { margin:0; display:grid; grid-template-columns:auto 1fr; gap:6px 14px; font-size:16px; }
+    #review-summary dt { color:#7a5a12; } #review-summary dd { margin:0; font-weight:700; overflow-wrap:anywhere; }
+
+    details.install-card > summary { cursor:pointer; font-weight:700; list-style:none; min-height:var(--tap); display:flex; align-items:center; justify-content:space-between; gap:12px; }
     details.install-card > summary::-webkit-details-marker { display:none; }
-    details.install-card > summary::after { content:"+"; float:right; color:var(--muted); font-size:20px; line-height:1; }
+    details.install-card > summary::after { content:"+"; color:var(--muted); font-size:26px; line-height:1; }
     details.install-card[open] > summary::after { content:"–"; }
-    footer { margin-top:26px; } footer .row { margin-top:10px; }
-    .safe-code { font-family:ui-monospace,monospace; overflow-wrap:anywhere; }
-    @media (max-width:560px) { main { padding:20px 14px 56px; } h1 { font-size:26px; } .install-card { padding:18px; } .row > button { flex:1 1 100%; } .steps li { font-size:12px; } }
+    details.install-card > .details-body { margin-top:6px; }
+
+    /* Only what belongs to this step is on screen */
+    #installer[data-step="3"] #protocol-card, #installer[data-step="3"] #candidates, #installer[data-step="3"] #existing-devices { display:none; }
+    #installer[data-step="4"] #protocol-card, #installer[data-step="4"] #candidates, #installer[data-step="4"] #existing-devices, #installer[data-step="4"] #device-result { display:none; }
+
+    footer.page-foot { display:block; margin:24px 0 0; padding:0; border:0; background:none; } footer.page-foot .row { margin-top:10px; } footer.page-foot p { margin-top:10px; }
+    @media (max-width:560px) {
+      main { padding-top:max(14px,env(safe-area-inset-top)); }
+      h1 { font-size:27px; } .install-card { padding:18px; border-radius:18px; }
+      .row > button, .candidate > button { flex:1 1 100%; }
+      .start-tiles { grid-template-columns:1fr; } .start-tiles button { min-height:84px; }
+      .steps li { font-size:13px; }
+    }
   </style>
 </head>
 <body>
-  <main>
+  <main id="installer" data-step="1" data-searching="false">
     <div class="topline"><p class="eyebrow">Dinodia Smart Living · Installer</p><p id="operator-session-status" class="muted" role="status" aria-live="polite">Checking this session…</p></div>
     <h1>Add a device</h1>
     <p id="summary" class="muted">Checking this installation and the paired hub…</p>
 
     <ol id="steps" class="steps" aria-label="Progress">
-      <li id="step-1" class="current">Search</li><li id="step-2">Choose</li><li id="step-3">Name &amp; room</li><li id="step-4">Done</li>
+      <li id="step-1" class="current">Find it</li><li id="step-2">Pick it</li><li id="step-3">Name &amp; room</li><li id="step-4">Done</li>
     </ol>
 
-    <section class="install-card" aria-labelledby="protocol-heading">
-      <h2 id="protocol-heading">1 · Search for a new device</h2>
-      <p class="muted small">Press the button, then put the device in pairing mode. It appears below by itself.</p>
-      <div class="row">
-        <button id="start-zigbee" class="primary" type="button" disabled>Search for a Zigbee device</button>
-        <button id="start-matter" type="button" disabled>Set up a Matter device</button>
+    <p id="status" role="status" aria-live="polite" class="banner">Waiting for the paired hub.</p>
+    <p id="error" role="alert" class="error" hidden></p>
+
+    <section id="protocol-card" class="install-card" aria-labelledby="protocol-heading">
+      <h2 id="protocol-heading">What are you adding?</h2>
+      <p class="muted small">Lights, switches, plugs and radiator valves are usually Zigbee. Choose one, then follow the three steps.</p>
+      <div class="start-tiles">
+        <button id="start-zigbee" class="primary" type="button" disabled><span>Search for a Zigbee device</span><small>Lights, switches, plugs, radiators</small></button>
+        <button id="start-matter" type="button" disabled><span>Set up a Matter device</span><small>Needs the device’s setup code</small></button>
       </div>
-      <p id="zigbee-readiness" role="status" class="muted"></p>
-      <p id="matter-readiness" role="status" class="muted"></p>
+      <ol class="how-to">
+        <li><span><strong>Press the search button above.</strong> The hub starts listening for new devices.</span></li>
+        <li><span><strong>Put the device in pairing mode.</strong> Usually hold its button for about 5 seconds until its light blinks.</span></li>
+        <li><span><strong>Wait a few seconds.</strong> The device appears here by itself. You do not need to refresh.</span></li>
+      </ol>
+      <p id="zigbee-readiness" role="status"></p>
+      <p id="matter-readiness" role="status"></p>
       <label id="matter-entry" hidden for="matter-payload" class="small"><strong>Matter setup code</strong> (sent only over the secure Dinodia OS connection)</label>
       <div id="matter-entry-row" class="row" hidden>
         <input id="matter-payload" type="password" autocomplete="off" spellcheck="false" maxlength="512" placeholder="Matter setup code">
         <button id="submit-matter" class="primary" type="button">Submit code securely</button>
       </div>
-      <p id="status" role="status" aria-live="polite" class="banner">Waiting for the paired hub.</p>
-      <p id="error" role="alert" class="error" hidden></p>
-      <div class="row"><button id="refresh" class="quiet" type="button">Refresh</button><button id="cancel" class="quiet" type="button" disabled>Stop searching</button></div>
+      <div class="row"><button id="cancel" class="quiet" type="button" disabled>Stop searching</button><button id="refresh" class="quiet" type="button">Check again</button></div>
     </section>
 
-    <section id="candidates" class="install-card" hidden aria-label="Discovered devices"><h2>2 · Found nearby</h2><p class="muted small">Each device appears once. Choose the one you just put in pairing mode.</p><div id="candidate-list"></div></section>
+    <section id="candidates" class="install-card" hidden aria-label="Discovered devices"><h2>Found nearby</h2><p class="muted small">Each device appears once. Choose the one you just put in pairing mode.</p><div id="candidate-list"></div></section>
 
     <section id="device-result" class="install-card" hidden>
-      <h2 id="review-heading">3 · Name it and choose its room</h2>
-      <p id="review-instructions" class="muted small">Choose the room it is in, give it a name, then continue.</p>
+      <h2 id="review-heading">Name it and choose its room</h2>
+      <p id="review-instructions" class="muted small">Pick the room it is in and give it a name the customer will recognise.</p>
       <div id="selected-controls" role="status"></div>
-      <div class="field"><label for="area">Room</label><select id="area"></select></div>
-      <div class="field"><label for="label">Name</label><input id="label" maxlength="40" autocomplete="off" placeholder="For example: Room 1 Light"><p class="hint">This is the name the customer sees in the app.</p></div>
+      <div class="field"><label for="area">Which room is it in?</label><select id="area"></select></div>
+      <div class="field"><label for="label">What should it be called?</label><div id="name-suggestions" aria-label="Name suggestions"></div><input id="label" maxlength="40" autocomplete="off" autocapitalize="words" enterkeyhint="done" placeholder="For example: Room 1 Light"><p class="hint">This is the name the customer sees in the app.</p></div>
       <div class="field" hidden><label for="name">Device name</label><input id="name" maxlength="80" autocomplete="off"></div>
-      <div class="field"><label for="analytics-category">Show in analytics as</label><select id="analytics-category">
+      <div class="field"><label for="analytics-category">Show in usage charts as</label><select id="analytics-category">
         <option value="NONE">None</option><option value="LIGHT">Light</option><option value="BOILER">Boiler</option><option value="RADIATOR">Radiator</option>
       </select><p class="hint">Optional. Only choose this if the device should appear in usage charts.</p></div>
+      <div id="review-summary" hidden role="status" aria-live="polite"></div>
       <div class="row">
-        <button id="select" class="primary" type="button">Review this device</button>
-        <button id="install" class="primary" type="button" hidden>Install and sync</button>
+        <button id="select" class="primary" type="button">Check details</button>
+        <button id="install" class="primary" type="button" hidden>Yes, add this device</button>
+        <button id="change-details" type="button" hidden>Change name or room</button>
         <button id="view-only" type="button" hidden>Keep as view-only</button>
         <button id="retain-unsupported" type="button" hidden>Keep visible without controls</button>
-        <button id="remove" type="button" hidden>Remove unsupported candidate</button>
+        <button id="remove" class="danger" type="button" hidden>Remove unsupported candidate</button>
       </div>
     </section>
 
-    <section id="existing-devices" class="install-card" aria-labelledby="existing-heading" hidden>
-      <div class="row" style="margin-top:0"><div style="flex:1 1 280px"><h2 id="existing-heading">Already paired on this hub</h2><p class="muted small">Paired devices that are not registered to this property yet. Nothing is adopted automatically.</p></div><button id="refresh-existing" class="quiet" type="button">Refresh list</button></div>
-      <p id="existing-device-empty" class="muted small" hidden>No eligible unregistered local devices were found for this Home and its rooms.</p>
-      <p id="existing-device-hold" class="muted small" hidden>Device registration is paused by the current maintenance policy. Nothing was changed.</p>
-      <div id="existing-device-list"></div>
-    </section>
+    <section id="completed-devices" class="install-card" hidden aria-label="Completed devices"><h2>Added in this visit</h2><ul id="completed-device-list"></ul></section>
 
-    <section id="completed-devices" class="install-card" hidden aria-label="Completed devices"><h2>4 · Added in this visit</h2><ul id="completed-device-list"></ul></section>
+    <details id="existing-devices" class="install-card" aria-labelledby="existing-heading" hidden>
+      <summary id="existing-heading">Device already paired to this hub?</summary>
+      <div class="details-body">
+        <p class="muted small">Devices already on the hub that are not registered to this property yet. Nothing is added automatically. If yours is not here, use the search above.</p>
+        <div class="row" style="margin-top:12px"><button id="refresh-existing" class="quiet" type="button">Refresh this list</button></div>
+        <p id="existing-device-empty" class="muted small" hidden>No eligible unregistered local devices were found for this Home and its rooms.</p>
+        <p id="existing-device-hold" class="muted small" hidden>Device registration is paused by the current maintenance policy. Nothing was changed.</p>
+        <div id="existing-device-list"></div>
+      </div>
+    </details>
 
-    <footer class="muted">
+    <footer class="page-foot muted">
       <div class="row">
         <button id="add-next" class="primary" type="button" hidden>Add another device</button>
         <button id="finish-installation" type="button" hidden>Finish installation</button>
