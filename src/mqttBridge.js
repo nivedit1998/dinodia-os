@@ -1,4 +1,5 @@
 const mqtt = require("mqtt");
+const { isBarePlaceholder } = require("./commissioning/barePlaceholder");
 const crypto = require("node:crypto");
 const path = require("node:path");
 const { normalizeZigbeeDevice } = require("./integrations/zigbee/exposeNormalizer");
@@ -391,6 +392,13 @@ class MqttBridge {
           // rolls failed mutations back; reconciliation sees only registered devices.
           this.lastError = String(error?.code || "inventory_projection_failed");
           this.logger?.error?.(`[mqtt] inventory projection deferred (${this.lastError})`);
+        }
+      }
+      // A radio that was removed does not come back by itself: with no pairing search running, any leftover blank record of one is
+      // dropped, so only a deliberate search can add a device again.
+      if (!this.pairingSession.status().active && typeof this.store.deleteDevice === "function") {
+        for (const device of this.store.listDevices()) {
+          if (isBarePlaceholder(device, this.store.getPlatform?.())) { try { await this.store.deleteDevice(device.id); this.pairingSession.forget(device.id); } catch { /* retried on the next inventory */ } }
         }
       }
       await this.notifyObservationPolicy("onInventory", value);

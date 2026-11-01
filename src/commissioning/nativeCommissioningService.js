@@ -1,4 +1,5 @@
 const crypto = require("node:crypto");
+const { isBarePlaceholder } = require("./barePlaceholder");
 const { isDeepStrictEqual } = require('node:util');
 const { QrPairingCodeCodec, isValidPasscode, MATTER_QR_CODE_SINGLE_PAYLOAD_MAX_LENGTH } = require("@matter/types");
 const { buildPublicCommissioningCatalogue } = require("./publicDeviceCatalogue");
@@ -811,13 +812,8 @@ class NativeCommissioningService {
     });
   }
 
-  // A bare record named only by its radio address (never interviewed, no model, no room) is a leftover of an earlier
-  // join or removal, not a device the hub already knows. It must not stop the same radio from being found when it is paired again.
-  isBarePlaceholder(device) {
-    // Discovery messages can give a leftover record controls (entities) without it ever having been interviewed, so controls do not count.
-    return String(device?.protocol || "").toLowerCase() === "zigbee" && device.interviewStatus !== "successful" && !device.metadata?.model && !device.metadata?.model_id
-      && !device.areaId && device.setup?.status === "needs_setup" && !this.store.getPlatform?.()?.devicePolicies?.[String(device.id)];
-  }
+  // See barePlaceholder.js: a leftover record must not stop the same radio from being found when it is paired again.
+  isBarePlaceholder(device) { return isBarePlaceholder(device, this.store.getPlatform?.()); }
 
   baselineDevices() { return this.store.listDevices().filter((device) => !this.isBarePlaceholder(device)); }
 
