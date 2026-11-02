@@ -33,10 +33,32 @@ test("an urgent event wakes the scheduled sync immediately", async () => {
   }
 });
 
-test("the idle cadence still syncs routine telemetry once two minutes have passed", async () => {
-  const pairing = pairingWith({ events: [{ sequence: 11, type: "usage.bucket" }], lastSuccessAgoMs: 121000 });
+test("the idle cadence still syncs routine telemetry once four minutes have passed, and not before", async () => {
+  const early = pairingWith({ events: [{ sequence: 11, type: "usage.bucket" }], lastSuccessAgoMs: 200000 });
+  await early.scheduledSync();
+  assert.equal(early.calls, 0, "three minutes of quiet telemetry never wakes the hub");
+  const pairing = pairingWith({ events: [{ sequence: 11, type: "usage.bucket" }], lastSuccessAgoMs: 241000 });
   await pairing.scheduledSync();
   assert.equal(pairing.calls, 1);
+});
+
+test("a device.upsert that only moves the last-seen time is routine; any real change still wakes the hub", async () => {
+  const shape = { osDeviceId: "d1", name: "Radiator", areaId: "a1", protocol: "zigbee", descriptorRevision: 3, descriptorDigest: "x", available: true };
+  const sent = { aggregateId: "d1", payload: { ...shape, observedAt: "2026-10-19T20:00:00.000Z" } };
+  const only = pairingWith({ events: [{ sequence: 11, type: "device.upsert", aggregateId: "d1", payload: { ...shape, observedAt: "2026-10-19T20:59:00.000Z" } }] });
+  only.lastSentUpsertShape = new Map([["d1", JSON.stringify(shape)]]);
+  await only.scheduledSync();
+  assert.equal(only.calls, 0, "last seen alone is not news");
+  for (const change of [{ available: false }, { name: "Renamed" }, { descriptorRevision: 4 }, { areaId: "a2" }]) {
+    const real = pairingWith({ events: [{ sequence: 11, type: "device.upsert", aggregateId: "d1", payload: { ...shape, ...change, observedAt: "2026-10-19T20:59:00.000Z" } }] });
+    real.lastSentUpsertShape = new Map([["d1", JSON.stringify(shape)]]);
+    await real.scheduledSync();
+    assert.equal(real.calls, 1, JSON.stringify(change));
+  }
+  const fresh = pairingWith({ events: [{ sequence: 11, type: "device.upsert", aggregateId: "d1", payload: sent.payload }] });
+  fresh.lastSentUpsertShape = new Map();
+  await fresh.scheduledSync();
+  assert.equal(fresh.calls, 1, "the first upsert after a restart is always sent");
 });
 
 test("pending incidents, endpoint reports or no prior success always sync", async () => {

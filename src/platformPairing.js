@@ -59,8 +59,17 @@ function validateLanEndpointObservation(value, serial, expectedPort = 80) {
 // Event types that may wait for the next scheduled sync instead of forcing an
 // immediate follow-up round trip to Platform.
 const ROUTINE_SYNC_EVENT_TYPES = new Set(["usage.bucket", "temperature.sample", "analytics.day"]);
-// With nothing to send, an idle hub contacts Platform at most this often.
-const IDLE_SYNC_INTERVAL_MS = 120000;
+// With nothing urgent to send, a hub contacts Platform at most this often. Routine telemetry is "latest absolute totals", so waiting
+// loses nothing: many updates to the same total collapse into one, which keeps the Platform's database work (and its egress allowance)
+// proportional to this interval rather than to how often a device happens to report.
+// Four minutes, not more: the Platform treats a hub as online for 7 minutes after its last heartbeat, which rides on this sync.
+const IDLE_SYNC_INTERVAL_MS = 240000;
+
+// A device.upsert that differs from the last one sent only by its "last seen" time says nothing new about the device: it is routine.
+function upsertShapeKey(event) {
+  const { observedAt, ...rest } = event?.payload && typeof event.payload === "object" ? event.payload : {};
+  return JSON.stringify(rest);
+}
 
 class PlatformPairing {
   constructor({ store, vault, identityBroker = null, apiUrl = "", serial, nativeApiPort = 8123, intervalMs = 120000, heartbeatIntervalMs = 120000, requestTimeoutMs = 15000, syncRequestTimeoutMs = 70000, runtime, getLanEndpoint = null, getLanTlsIdentity = null, acknowledgeLanTlsIdentity = null, getUpdaterStatus = null, getCloudflareStatus = null, reconcileTenantDeviceRemoval = null, reconcileAuthorizedPropertyInventory = null, getAreaSnapshot, getHeatingUsage, getHeatingUsageResetAck, getElectricUsage, getElectricUsageResetAck, getActivityIncidents, getAlexaCatalog, acceptOfflineAuthorisations, onSyncResult, onOperatorCredentialStateChange, onBackupRecoveryComplete, logger = console, fetchImpl = fetch, clock = () => Date.now() } = {}) {
@@ -101,6 +110,7 @@ class PlatformPairing {
     this.onBackupRecoveryComplete = onBackupRecoveryComplete || (async () => false);
     this.pendingEndpointHeartbeat = false;
     this.queuedImmediateSync = false;
+    this.lastSentUpsertShape = new Map(); // aggregateId -> shape of the last device.upsert sent
     this.runtime = {
       kind: String(runtime?.kind || "dinodia_os"),
       version: String(runtime?.version || "0.0.0"),
@@ -602,12 +612,18 @@ class PlatformPairing {
    * event queued, no incident or endpoint report pending, a recent success)
    * skips the Platform round trip until IDLE_SYNC_INTERVAL_MS has passed.
    */
+  /// Routine events never wake an idle hub: telemetry, and a device.upsert that only moves the device's last-seen time.
+  isRoutineEvent(event) {
+    if (ROUTINE_SYNC_EVENT_TYPES.has(event?.type)) return true;
+    return event?.type === "device.upsert" && this.lastSentUpsertShape?.get(String(event.aggregateId)) === upsertShapeKey(event);
+  }
+
   scheduledSync() {
     const outbox = this.store.getSyncOutbox?.();
     const ack = Number(outbox?.acknowledgedSequence || 0);
     // Routine telemetry alone does not wake an idle hub; it rides on the next
     // idle-cadence sync with its latest absolute totals.
-    const pending = (outbox?.events || []).some((event) => event.sequence > ack && !ROUTINE_SYNC_EVENT_TYPES.has(event.type));
+    const pending = (outbox?.events || []).some((event) => event.sequence > ack && !this.isRoutineEvent(event));
     const incidents = this.store.listPendingIncidentEnvelopes?.().length || 0;
     const lastSuccessMs = Date.parse(this.lastSuccess || "");
     const idle = !pending && !incidents && !this.pendingEndpointHeartbeat && Number.isFinite(lastSuccessMs)
@@ -1001,6 +1017,7 @@ class PlatformPairing {
           await this.store.acknowledgeTenantDeviceRemoval?.(removal.osDeviceId);
         }
         if (syncBatch) {
+          for (const event of syncBatch.events || []) if (event?.type === "device.upsert") this.lastSentUpsertShape?.set(String(event.aggregateId), upsertShapeKey(event));
           await this.store.acknowledgeSyncBatch({
             streamId: syncResult.streamId,
             acceptedThroughSequence: Number(syncResult.acceptedThroughSequence),
@@ -1043,7 +1060,7 @@ class PlatformPairing {
       const nextPending = pendingAfterSync[0];
       // Routine telemetry waits for the next scheduled sync; only events that
       // change what tenants, owners or Platform can do are sent straight away.
-      const nextUrgent = pendingAfterSync.find((event) => !ROUTINE_SYNC_EVENT_TYPES.has(event.type));
+      const nextUrgent = pendingAfterSync.find((event) => !this.isRoutineEvent(event));
       if (!this.stopped && ((nextUrgent && installationSyncMode === "ACTIVE") || (syncResult && nextPending?.type === "area.upsert"))) {
         setImmediate(() => this.syncNow().catch(() => {}));
       }
