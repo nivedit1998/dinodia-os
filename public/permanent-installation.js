@@ -91,12 +91,25 @@
     $("analytics-category").value = state.session?.selectedCandidateRef === candidate.candidateRef ? (state.session.selectedAnalyticsCategory || "NONE") : "NONE";
     // One permitted room needs no choosing.
     if (!$("area").value && state.context?.areas?.length === 1) $("area").value = state.context.areas[0].id;
-    state.editing = false; $("device-type").value = ""; state.lastSuggestion = ""; $("type-choices").dataset.signature = ""; renderSuggestions(); clearError(); updateButtons();
+    state.editing = false; $("device-type").value = ""; state.lastSuggestion = ""; $("type-choices").dataset.signature = ""; applySuggestedKind(); renderSuggestions(); clearError(); updateButtons();
   }
   // What kind of device it is decides its heading in the app (all Lights together) and its usage charts, so it is chosen, never typed.
-  const TYPES = [["Light", "LIGHT", "💡"], ["Radiator", "RADIATOR", "♨"], ["Boiler", "BOILER", "🔥"], ["Other", "NONE", "•"]];
+  // The last column is the usage-chart category. Any on/off device records its on/off time ("Plug or switch"), so a plain switch, plug,
+  // fan or anything else that turns on and off is counted too; a device with no on/off at all is simply not charted.
+  const TYPES = [["Light", "LIGHT", "💡"], ["Radiator", "RADIATOR", "♨"], ["Boiler", "BOILER", "🔥"], ["Plug or switch", "SOCKET", "🔌"], ["Other", "ONOFF_IF_ANY", "•"]];
+  function categoryFor(label, category) { return category === "ONOFF_IF_ANY" ? (state.selected?.onOff === true ? "SOCKET" : "NONE") : category; }
   // A name the installer has not written themselves: empty, the device's own default, a code, or the last suggestion we filled in.
   function nameIsAutomatic(value, lastSuggestion) { const text = String(value || "").trim(); return !text || text === state.defaultName || text === lastSuggestion || isMachineName(text); }
+  function applySuggestedKind() {
+    // Only an unambiguous signal from the device itself is pre-selected (a dimmable bulb is a Light); the installer can always change it.
+    const kind = state.selected?.suggestedKind; const hint = $("kind-hint");
+    if (kind && TYPES.some((row) => row[0] === kind) && !$("device-type").value) {
+      const row = TYPES.find((item) => item[0] === kind);
+      $("device-type").value = kind; $("analytics-category").value = categoryFor(kind, row[1]);
+      if (nameIsAutomatic($("label").value, state.lastSuggestion) && suggestedName()) { $("label").value = suggestedName(); $("name").value = $("label").value; state.lastSuggestion = suggestedName(); }
+    }
+    if (hint) setText(hint, kind ? `The device itself looks like a ${kind}. Change it if that is wrong.` : "This groups it with similar devices in the app, for example all Lights together.");
+  }
   function suggestedName() {
     const area = (state.context?.areas || []).find((row) => row.id === $("area").value);
     const type = $("device-type").value;
@@ -110,9 +123,10 @@
     box.dataset.signature = signature; box.replaceChildren();
     for (const [label, category, icon] of TYPES) {
       const button = document.createElement("button"); button.type = "button"; button.textContent = `${icon} ${label === "Other" ? "Something else" : label}`;
+      if (state.selected?.suggestedKind === label) button.textContent += " ✓";
       button.setAttribute?.("role", "radio"); button.setAttribute?.("aria-checked", String(label === chosen));
       button.addEventListener("click", () => {
-        const previousSuggestion = suggestedName(); $("device-type").value = label; $("analytics-category").value = category;
+        const previousSuggestion = suggestedName(); $("device-type").value = label; $("analytics-category").value = categoryFor(label, category);
         // Fill the name for them unless they have written their own.
         if (nameIsAutomatic($("label").value, previousSuggestion)) { $("label").value = suggestedName(); $("name").value = $("label").value; }
         state.lastSuggestion = suggestedName(); box.dataset.signature = ""; renderSuggestions(); clearError(); updateButtons();
@@ -245,7 +259,7 @@
   function render(session) {
     state.session = session;
     if (session.selectedCandidateRef && state.appliedCategoryRef !== session.selectedCandidateRef
-        && ["NONE", "LIGHT", "BOILER", "RADIATOR"].includes(String(session.selectedAnalyticsCategory || "NONE"))) {
+        && ["NONE", "LIGHT", "BOILER", "RADIATOR", "SOCKET"].includes(String(session.selectedAnalyticsCategory || "NONE"))) {
       $("analytics-category").value = session.selectedAnalyticsCategory || "NONE"; state.appliedCategoryRef = session.selectedCandidateRef;
     }
     if (!session.selectedCandidateRef) state.appliedCategoryRef = null;
@@ -313,13 +327,23 @@
       state.autoOpenedRef = rows[0].candidateRef; openCandidate(rows[0]);
     }
   }
+  // Plain words for whether usage is being recorded: working, still being checked, or limited and why.
+  function usageTrackingText(readiness) {
+    const reason = String(readiness.reason || "");
+    if (readiness.state === "ready") return "usage tracking is working";
+    if (readiness.state === "verifying" || ["state_evidence_verification_pending", "periodic_collection_not_verified"].includes(reason)) return "checking it reports regularly (a few minutes); usage tracking starts then";
+    if (readiness.state === "paused") return "usage tracking is paused while the device is unreachable";
+    if (reason === "compatible_analytics_writer_unavailable") return "usage tracking is not available for this kind of device yet";
+    if (readiness.state === "ineligible" || reason === "analytics_policy_ineligible") return "not tracked for usage";
+    return `usage tracking is limited${reason ? ` (${reason.replaceAll("_", " ")})` : ""}`;
+  }
   function renderCompleted() {
     const rows = state.completedDevices; const section = $("completed-devices"); const list = $("completed-device-list");
     setHidden(section, rows.length === 0);
     const lines = rows.map((row) => {
       const sync = row.sync === "pending" ? "syncing to the Home" : row.sync === "acknowledged" ? "synced to the Home" : "sync not confirmed yet";
       let line = `${row.name}${row.model ? ` · ${row.model}` : ""} · ${row.areaName || "room unavailable"} · ${row.lifecycle === "VIEW_ONLY" ? "view-only" : "added"} · ${row.analyticsCategory && row.analyticsCategory !== "NONE" ? `${String(row.analyticsCategory).toLowerCase()} usage charts · ` : ""}${sync}`;
-      if (row.analyticsReadiness) line += ` · Analytics ${row.analyticsReadiness.state}${row.analyticsReadiness.reason ? `: ${row.analyticsReadiness.reason.replaceAll("_", " ")}` : ""}`;
+      if (row.analyticsReadiness) line += ` · ${usageTrackingText(row.analyticsReadiness)}`;
       return line;
     });
     const signature = JSON.stringify(lines);
@@ -448,7 +472,7 @@
       const path = `/_dinodia/installer/commissioning/sessions/${encodeURIComponent(state.session.sessionId)}`;
       const candidateRef = state.selected.candidateRef;
     const analyticsCategory = $("analytics-category").value || "NONE";
-    if (!["NONE", "LIGHT", "BOILER", "RADIATOR"].includes(analyticsCategory)) { showError(new Error("Choose a valid optional analytics category.")); return; }
+    if (!["NONE", "LIGHT", "BOILER", "RADIATOR", "SOCKET"].includes(analyticsCategory)) { showError(new Error("Choose a valid optional analytics category.")); return; }
     const body = { schemaVersion: "dinodia.v1", expectedRevision: state.session.revision, candidateRef, areaId, name, customerLabel, analyticsCategory };
       let result;
       try { result = await post(`${path}/select`, body); }

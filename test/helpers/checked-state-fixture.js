@@ -7,10 +7,10 @@ const { ObservationReconciler } = require('../../src/observation/reconciler');
 const { normalizeZigbeeDevice } = require('../../src/integrations/zigbee/exposeNormalizer');
 
 async function checkedStateFixture({ store, directory, generation = 3, now = Date.now(), onDeviceChanged,
-  registryDeviceId, areaId = 'fixture-area', controlId, reportingIntervalSeconds = 300 }) {
+  registryDeviceId, areaId = 'fixture-area', controlId, reportingIntervalSeconds = 300, powerSource = 'Mains (single phase)' }) {
   let clock = now - reportingIntervalSeconds * 5000;
   const raw = { ieee_address: '0x00124b00aabbccdd', friendly_name: 'synthetic-checked-light', type: 'Router', supported: true,
-    power_source: 'Mains (single phase)', endpoints: { 1: { clusters: { input: ['genOnOff'] }, configured_reportings: [] } },
+    power_source: powerSource, endpoints: { 1: { clusters: { input: ['genOnOff'] }, configured_reportings: [] } },
     definition: { vendor: 'Previously unseen', model: 'synthetic-only', exposes: [{ type: 'light', endpoint: 1,
       features: [{ type: 'binary', property: 'state', name: 'state', access: 7, value_on: 'ON', value_off: 'OFF' }] }] } };
   const device = { ...normalizeZigbeeDevice(raw), areaId, setup: { status: 'ready' } };

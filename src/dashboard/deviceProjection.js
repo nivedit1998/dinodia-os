@@ -1,4 +1,5 @@
 const { analyticsReadiness } = require('../analytics/readiness');
+const { PROPERTY_ANALYTICS_CATEGORIES } = require("../analytics/categoryPolicies");
 const { channelManifest } = require('../capabilities/logicalDevices');
 function dashboardDevice(device, platform = null, store = null) {
   if (!device || typeof device !== "object") return device;
@@ -23,7 +24,7 @@ function dashboardDevice(device, platform = null, store = null) {
   const managementRevision = Number(platform?.cloudRevision);
   if (policy?.managementClass === "PROPERTY_DEVICE" && policy.ownerMembershipId == null
     && ["INSTALLED", "VIEW_ONLY"].includes(String(policy.lifecycle || ""))
-    && ["NONE", "LIGHT", "BOILER", "RADIATOR"].includes(String(policy.analyticsCategory || ""))
+    && PROPERTY_ANALYTICS_CATEGORIES.includes(String(policy.analyticsCategory || ""))
     && Number.isSafeInteger(managementRevision) && managementRevision >= 1) {
     result.analyticsCategory = String(policy.analyticsCategory);
     result.analyticsManagementRevision = managementRevision;

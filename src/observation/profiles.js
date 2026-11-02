@@ -21,10 +21,17 @@ function boundedReadLifetime(intervalSeconds) {
   return intervalSeconds * (1 + MISSED_REPORTS_TOLERATED) + DELIVERY_GRACE_SECONDS;
 }
 
-// Exact models the owner has approved for each model-gated profile. Adding a model is a deliberate, reviewed change here.
-const APPROVED_MODELS = Object.freeze([
-  Object.freeze({ profileId: "zigbee.generic.mains_light.on_off", manufacturer: "SONOFF", model: "ZBM5-1C-80/86" }),
-]);
+// Exact models the owner has approved for each model-gated profile (none at present: the mains on/off profile below is class-based).
+// Adding a model is a deliberate, reviewed change here.
+const APPROVED_MODELS = Object.freeze([]);
+
+// A device is "mains powered" when its radio says so. Battery and unknown power sources are never configured automatically:
+// a wrong reporting setting can drain a battery, so those need their own exact, owner-approved profile (like the TRVZB).
+const MAINS_POWER_SOURCE = /mains|dc source|single.phase|three.phase/i;
+function isMainsPowered(device) {
+  return MAINS_POWER_SOURCE.test(String(device?.metadata?.power_source || ""))
+    && !/battery/i.test(String(device?.metadata?.power_source || ""));
+}
 
 const PROFILES = Object.freeze([
   Object.freeze({
@@ -47,25 +54,30 @@ const PROFILES = Object.freeze([
     approvedForAutomaticConfiguration: true,
   }),
   Object.freeze({
+    // The id keeps its old name so the record of an already-configured light carries over; it now covers every mains device with
+    // a standard on/off state (lights, dimmers, plugs, relays, wall switches) of any brand.
     id: "zigbee.generic.mains_light.on_off",
-    version: 1,
+    version: 2,
     integration: "zigbee",
     manufacturer: null,
     model: null,
     endpoint: null, // the control's own endpoint
     cluster: "genOnOff",
     attribute: "onOff",
-    property: "state",
+    property: null,
+    propertyPattern: /^state(_[a-z0-9]+)?$/i, // "state", or one channel of a multi-gang device ("state_l1")
     semanticRole: "power",
     power: "mains",
+    requiresMainsPower: true,
     strategy: "report_on_change_plus_periodic",
     desired: Object.freeze({ minimumReportInterval: 0, maximumReportInterval: 300, reportableChange: 0 }),
     lifetimeSeconds: periodicLifetime(300),
-    // Owner-approved 2 Nov 2026 ("same as the radiators") for the models listed in APPROVED_MODELS below: the hub asks the light to
-    // report its on/off state on change and at least every 5 minutes, reads the setting back, and verifies the cadence at runtime.
-    // A model not listed there never matches, so no other device is configured.
+    // Owner-approved 2 Nov 2026 ("same as the radiators", then "automatic for all mains on/off and dimmer devices, keep battery
+    // devices gated"): the hub asks a mains-powered device to report its on/off state on change and at least every 5 minutes, reads
+    // the setting back, verifies the cadence from real reports, and is bound by the reconciler's daily write budget, one-request-at-a-time
+    // spacing and silence detection. The exact endpoint must carry the genOnOff cluster; otherwise there is no match.
     approvedForAutomaticConfiguration: true,
-    requiresModelApproval: true,
+    requiresModelApproval: false,
   }),
   Object.freeze({
     id: "zigbee.generic.mains_device.bounded_read",
@@ -130,7 +142,8 @@ function matchObservationProfile(device, entity, { approvedModels = APPROVED_MOD
     if (profile.manufacturer && normalized(profile.manufacturer) !== manufacturer) return false;
     if (profile.model && normalized(profile.model) !== model) return false;
     if (profile.endpoint !== null && profile.endpoint !== resolvedEndpoint(device, entity, profile.cluster)) return false;
-    if (profile.property && profile.property !== property) return false;
+    if (profile.propertyPattern ? !profile.propertyPattern.test(property) : profile.property && profile.property !== property) return false;
+    if (profile.requiresMainsPower && !isMainsPowered(device)) return false;
     if (profile.semanticRole && profile.semanticRole !== role) return false;
     if (profile.requiresModelApproval && !approvedModels.some((entry) => entry.profileId === profile.id
       && normalized(entry.manufacturer) === manufacturer && normalized(entry.model) === model)) return false;
@@ -167,6 +180,7 @@ function reportingMatches(actual, desired) {
 
 module.exports = {
   APPROVED_MODELS,
+  isMainsPowered,
   DELIVERY_GRACE_SECONDS,
   MISSED_REPORTS_TOLERATED,
   PROFILES,

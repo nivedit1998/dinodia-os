@@ -88,10 +88,10 @@
     #selected-controls:empty { display:none; }
 
     /* Name suggestions: tap instead of type */
-    .type-choices { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
+    .type-choices { display:grid; grid-template-columns:repeat(5,1fr); gap:10px; }
     .type-choices button { min-height:64px; padding:10px 8px; border-radius:14px; }
     .type-choices button[aria-checked="true"] { background:var(--brand); border-color:var(--brand); color:#fff; }
-    @media (max-width:560px) { .type-choices { grid-template-columns:1fr 1fr; } }
+    @media (max-width:760px) { .type-choices { grid-template-columns:1fr 1fr; } }
 
     /* The "are you sure" summary */
     #review-summary { margin-top:18px; padding:16px 18px; border-radius:16px; background:var(--warn-soft); border:1.5px solid #f0d58f; color:#4d3500; }
@@ -164,12 +164,12 @@
       <div class="field"><label for="area">Which room is it in?</label><select id="area"></select></div>
       <div class="field"><span class="label" id="type-label">What kind of device is it?</span>
         <div id="type-choices" class="type-choices" role="radiogroup" aria-labelledby="type-label"></div>
-        <select id="device-type" hidden aria-hidden="true" tabindex="-1"><option value="">Choose…</option><option value="Light">Light</option><option value="Radiator">Radiator</option><option value="Boiler">Boiler</option><option value="Other">Something else</option></select>
-        <p class="hint">This groups it with similar devices in the app, for example all Lights together.</p></div>
+        <select id="device-type" hidden aria-hidden="true" tabindex="-1"><option value="">Choose…</option><option value="Light">Light</option><option value="Radiator">Radiator</option><option value="Boiler">Boiler</option><option value="Plug or switch">Plug or switch</option><option value="Other">Something else</option></select>
+        <p id="kind-hint" class="hint">This groups it with similar devices in the app, for example all Lights together.</p></div>
       <div class="field"><label for="label">What should it be called?</label><input id="label" maxlength="40" autocomplete="off" autocapitalize="words" enterkeyhint="done" placeholder="For example: Room 2 Light"><p class="hint">This is the name the customer sees on the device. It is filled in for you from the room and kind; change it if you like.</p></div>
       <div class="field" hidden><label for="name">Device name</label><input id="name" maxlength="80" autocomplete="off"></div>
       <div class="field"><label for="analytics-category">Show in usage charts as</label><select id="analytics-category">
-        <option value="NONE">None</option><option value="LIGHT">Light</option><option value="BOILER">Boiler</option><option value="RADIATOR">Radiator</option>
+        <option value="NONE">None</option><option value="LIGHT">Light</option><option value="BOILER">Boiler</option><option value="RADIATOR">Radiator</option><option value="SOCKET">Plug, switch or other on/off</option>
       </select><p class="hint">Optional. Only choose this if the device should appear in usage charts.</p></div>
       <div id="review-summary" hidden role="status" aria-live="polite"></div>
       <div class="row">

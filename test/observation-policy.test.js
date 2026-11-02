@@ -83,23 +83,34 @@ test("profiles match the exact integration, model, endpoint, property and role",
   assert.equal(matchObservationProfile({ ...device, metadata: { ...device.metadata, model: "TRVZB-2" } }, running), null, "a different model never matches");
   assert.equal(matchObservationProfile({ ...device, protocol: "matter" }, running), null);
   const light = normalizeZigbeeDevice(JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures/zigbee/dimmable-light.json"), "utf8")));
-  for (const entity of Object.values(light.entities)) {
-    assert.equal(matchObservationProfile(light, entity), null, "generic light profiles need an explicit model approval");
+  const mains = { ...light, metadata: { ...light.metadata, power_source: "Mains (single phase)" } };
+  const powerOf = (device) => Object.values(device.entities).find((entity) => entity.capability?.semanticRole === "power");
+  assert.equal(matchObservationProfile(light, powerOf(light)), null, "a light whose power source is unknown is never configured automatically");
+  assert.equal(matchObservationProfile(mains, powerOf(mains))?.id, "zigbee.generic.mains_light.on_off", "a mains on/off device of any brand is profiled");
+  for (const entity of Object.values(mains.entities).filter((item) => item !== powerOf(mains))) {
+    assert.equal(matchObservationProfile(mains, entity), null, "only the on/off state is profiled, never brightness or settings");
   }
-  const approved = matchObservationProfile(light, Object.values(light.entities).find((entity) => entity.capability?.semanticRole === "power"),
-    { approvedModels: [{ profileId: "zigbee.generic.mains_light.on_off", manufacturer: light.metadata.manufacturer, model: light.metadata.model }] });
-  assert.equal(approved?.id, "zigbee.generic.mains_light.on_off");
 });
 
-test("the owner-approved SONOFF ZBM5 light reports on/off like the radiators; an unlisted light is never configured", () => {
+test("mains on/off reporting is automatic for any brand and never for battery or unknown power", () => {
   const light = normalizeZigbeeDevice(JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures/zigbee/dimmable-light.json"), "utf8")));
-  const zbm5 = { ...light, metadata: { ...light.metadata, manufacturer: "SONOFF", model: "ZBM5-1C-80/86" } };
-  const power = (device) => Object.values(device.entities).find((entity) => entity.capability?.semanticRole === "power");
-  const profile = matchObservationProfile(zbm5, power(zbm5));
-  assert.equal(profile?.id, "zigbee.generic.mains_light.on_off", "approved by name and model");
-  assert.equal(profile.approvedForAutomaticConfiguration, true);
-  assert.equal(profile.desired.maximumReportInterval, 300, "at least every five minutes");
-  assert.equal(matchObservationProfile(light, power(light)), null, "any other light stays unconfigured");
+  const powerOf = (device) => Object.values(device.entities).find((entity) => entity.capability?.semanticRole === "power");
+  const asDevice = (overrides) => ({ ...light, metadata: { ...light.metadata, ...overrides } });
+  for (const brand of [["SONOFF", "ZBM5-1C-80/86"], ["IKEA", "TRADFRI bulb"], ["Aqara", "Wall switch"]]) {
+    const device = asDevice({ manufacturer: brand[0], model: brand[1], power_source: "Mains (single phase)" });
+    const profile = matchObservationProfile(device, powerOf(device));
+    assert.equal(profile?.id, "zigbee.generic.mains_light.on_off", `${brand[0]} is configured automatically`);
+    assert.equal(profile.approvedForAutomaticConfiguration, true);
+    assert.equal(profile.desired.maximumReportInterval, 300, "at least every five minutes");
+  }
+  for (const power of ["Battery", "battery", "", undefined, "Unknown"]) {
+    const device = asDevice({ power_source: power });
+    assert.equal(matchObservationProfile(device, powerOf(device)), null, `power source ${JSON.stringify(power)} is never configured automatically`);
+  }
+  const gang = asDevice({ power_source: "Mains (single phase)" });
+  const channel = { ...powerOf(gang), stateKey: "state_l2" };
+  assert.equal(matchObservationProfile(gang, channel)?.id, "zigbee.generic.mains_light.on_off", "one channel of a multi-gang switch is profiled");
+  assert.equal(matchObservationProfile(gang, { ...powerOf(gang), stateKey: "child_lock" }), null);
 });
 
 test("a multi-endpoint device never borrows another endpoint's reporting guarantee", () => {

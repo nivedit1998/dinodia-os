@@ -206,15 +206,29 @@ test('a real provider Store path retains typed private values without inventing 
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('an actual hourly reporting read-back and cadence are not replaced with a desired 5-minute fiction', async () => {
+test('a device the hub may not configure keeps its actual hourly reporting read-back and cadence, never a desired 5-minute fiction', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dinodia-hourly-bridge-'));
   try {
     const store = new Store(path.join(directory, 'store.json'));
-    const fixture = await checkedStateFixture({ store, directory, reportingIntervalSeconds: 3600 });
+    // Mains devices are configured automatically (see the next test); a battery device is not, so its real hourly cadence is trusted as it is.
+    const fixture = await checkedStateFixture({ store, directory, reportingIntervalSeconds: 3600, powerSource: 'Battery' });
     const entity = Object.values(store.getDevice(fixture.deviceId).entities).find(item => item.stateKey === 'state');
     assert.equal(entity.admittedEvidence.quality, 'fresh');
     assert.equal(Date.parse(entity.admittedEvidence.validUntil) - Date.parse(entity.sourceObservedAt), 3660000);
     assert.equal(fixture.requests.some(item => item.topic.includes('/configure')), false);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('a mains device reporting only hourly is asked to report at least every 5 minutes', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dinodia-hourly-mains-'));
+  try {
+    const store = new Store(path.join(directory, 'store.json'));
+    const fixture = await checkedStateFixture({ store, directory, reportingIntervalSeconds: 3600 });
+    const record = Object.values(store.getObservationPolicyRecords()).find((item) => item.profileId === 'zigbee.generic.mains_light.on_off');
+    assert.ok(record, 'the mains device is profiled whatever its brand');
+    assert.equal(record.desired.maximumReportInterval, 300, 'the wanted cadence is five minutes, not the hourly it reports today');
+    assert.equal(record.approvedForAutomaticConfiguration, true);
+    assert.equal(fixture.deviceId, record.deviceId);
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 

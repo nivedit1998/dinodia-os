@@ -1,5 +1,7 @@
 const crypto = require("node:crypto");
 const { isBarePlaceholder } = require("./barePlaceholder");
+const { describeKind } = require("./deviceKind");
+const { PROPERTY_ANALYTICS_CATEGORIES } = require("../analytics/categoryPolicies");
 const { isDeepStrictEqual } = require('node:util');
 const { QrPairingCodeCodec, isValidPasscode, MATTER_QR_CODE_SINGLE_PAYLOAD_MAX_LENGTH } = require("@matter/types");
 const { buildPublicCommissioningCatalogue } = require("./publicDeviceCatalogue");
@@ -39,7 +41,8 @@ function fixedSession(session, afterCandidateRef = null) {
     status: statuses.has(String(session.status)) || String(session.status).endsWith("_cleanup_pending") ? session.status : "failed",
     createdAt: String(session.createdAt), updatedAt: String(session.updatedAt || session.createdAt), expiresAt: String(session.expiresAt),
     revision: Number(session.revision) || 1,
-    candidates: page.map(({ candidateRef, name, manufacturer, model, stage, interviewStatus, observedAt }) => ({ candidateRef, name, manufacturer, model, stage, interviewStatus, observedAt })),
+    candidates: page.map(({ candidateRef, name, manufacturer, model, stage, interviewStatus, observedAt, suggestedKind, onOff }) => ({ candidateRef, name, manufacturer, model, stage, interviewStatus, observedAt,
+      suggestedKind: ["Light", "Radiator", "Boiler"].includes(suggestedKind) ? suggestedKind : null, onOff: onOff === true })),
     nextCandidateCursor: start + page.length < candidates.length ? page.at(-1)?.candidateRef || null : null,
     selectedCandidateRef: session.selectedCandidateRef || null, selectedAreaId: session.selectedAreaId || null,
     selectedName: session.selectedName || null, selectedCustomerLabel: session.selectedCustomerLabel || null,
@@ -427,8 +430,8 @@ class NativeCommissioningService {
       || Number(principal.identityGeneration) !== identity.generation || String(platform.homeId || "") !== String(principal.homeId)
       || !platform.hubInstallId || String(principal.verifiedHubInstallationId || "") !== String(platform.hubInstallId)
       || !/^[A-Za-z0-9:_-]{1,160}$/.test(osDeviceId)
-      || !new Set(["NONE", "LIGHT", "BOILER", "RADIATOR"]).has(analyticsCategory)
-      || !new Set(["NONE", "LIGHT", "BOILER", "RADIATOR"]).has(expectedAnalyticsCategory)
+      || !new Set(PROPERTY_ANALYTICS_CATEGORIES).has(analyticsCategory)
+      || !new Set(PROPERTY_ANALYTICS_CATEGORIES).has(expectedAnalyticsCategory)
       || !Number.isSafeInteger(expectedManagementRevision) || expectedManagementRevision < 1
       || !Number.isSafeInteger(Number(platform.cloudRevision))
       || ![expectedManagementRevision, expectedManagementRevision + 1].includes(Number(platform.cloudRevision))
@@ -775,6 +778,7 @@ class NativeCommissioningService {
         model: String(device.metadata?.model || device.metadata?.model_id || "").slice(0, 80),
         stage: String(device.setup?.status || "interviewing").slice(0, 40),
         interviewStatus: String(device.interviewStatus || "").slice(0, 40),
+        ...(() => { const { suggestedKind, onOff } = describeKind(device); return { suggestedKind, onOff }; })(),
       };
       if (existing) {
         for (const [key, value] of Object.entries(current)) {
@@ -930,7 +934,7 @@ class NativeCommissioningService {
       const name = String(input.name || "").normalize("NFC").trim();
       const label = input.customerLabel == null || input.customerLabel === "" ? null : String(input.customerLabel).normalize("NFC").trim();
       const analyticsCategory = input.analyticsCategory === undefined ? "NONE" : String(input.analyticsCategory);
-      if (!new Set(["NONE", "LIGHT", "BOILER", "RADIATOR"]).has(analyticsCategory)
+      if (!new Set(PROPERTY_ANALYTICS_CATEGORIES).has(analyticsCategory)
         || actor.actorType !== "STAFF_INSTALLER" && analyticsCategory !== "NONE") fail(SAFE_ERROR.invalid, 400, "Choose an optional analytics category for a permanent property device");
       if (!text(name, 80) || label === null || !text(label, 40) || !label) fail(SAFE_ERROR.invalid, 400, "Enter a customer label between 1 and 40 characters");
       const device = this.store.getDevice(candidate.deviceId);
