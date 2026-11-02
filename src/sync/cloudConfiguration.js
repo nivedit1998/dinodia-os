@@ -1,3 +1,4 @@
+const {validDeviceTrigger}=require('../automations/conditions');
 const crypto = require("node:crypto");
 const { validBinding } = require('../capabilities/logicalDevices');
 
@@ -42,7 +43,7 @@ const UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 function validTenantAutomationProjection(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)
     || Object.keys(value).sort().join("\n") !== ["version", "executionEnabled", "propertyTimeZone", "automations"].sort().join("\n")
-    || value.version !== 1 || typeof value.executionEnabled !== "boolean"
+    || ![1,2].includes(value.version) || typeof value.executionEnabled !== "boolean"
     || !(value.propertyTimeZone === null || validText(value.propertyTimeZone, 64))
     || !Array.isArray(value.automations) || value.automations.length > 100) return false;
   if (new Set(value.automations.map((item) => item?.id)).size !== value.automations.length) return false;
@@ -59,7 +60,7 @@ function validTenantAutomationProjection(value) {
       || !(automation.retiredAt === null || UTC.test(String(automation.retiredAt)) && Number.isFinite(Date.parse(automation.retiredAt)))
       || !UTC.test(String(automation.createdAt || "")) || !Number.isFinite(Date.parse(automation.createdAt))
       || !UTC.test(String(automation.updatedAt || "")) || !Number.isFinite(Date.parse(automation.updatedAt))
-      || !(automation.trigger === null || automation.trigger && typeof automation.trigger === "object" && !Array.isArray(automation.trigger)
+      || !(automation.trigger === null || value.version===2 && automation.trigger?.kind==='DEVICE_STATE' && UUID.test(String(automation.trigger.id)) && Number.isInteger(automation.trigger.revision) && automation.trigger.revision>=1 && automation.trigger.configuration?.kind==='device_state' && Buffer.byteLength(JSON.stringify(automation.trigger.configuration),'utf8')<=16384 || automation.trigger && typeof automation.trigger === "object" && !Array.isArray(automation.trigger)
         && Object.keys(automation.trigger).sort().join("\n") === ["id", "kind", "minuteOfDay", "weekdays", "revision"].sort().join("\n")
         && UUID.test(String(automation.trigger.id || "")) && automation.trigger.kind === "SCHEDULE"
         && Number.isSafeInteger(automation.trigger.minuteOfDay) && automation.trigger.minuteOfDay >= 0 && automation.trigger.minuteOfDay <= 1439
@@ -229,7 +230,7 @@ async function applyCloudConfiguration(store, value) {
     const catalogue = buildControlCatalog({ devices: store.listManagedDevices?.() || store.listDevices(), getArea: (id) => areas.get(String(id)), getLabel: (id) => labels.get(String(id)) });
     const localHomeId = String(store.getIdentity?.()?.instanceId || store.getIdentity?.()?.serial || "local-home");
     for (const definition of activeDefinitions) {
-      if (definition.triggers.length !== 1 || !["SCHEDULE", "schedule"].includes(definition.triggers[0]?.kind)
+      if (definition.triggers.length !== 1 || !["SCHEDULE", "schedule", "DEVICE_STATE"].includes(definition.triggers[0]?.kind)
         || definition.actions.length === 0 || definition.actions.some((action) => action.needsAttention)) {
         throw Object.assign(new Error("An active Platform automation is not executable by the current native OS schema"), { code: "sync_automation_invalid" });
       }
@@ -243,13 +244,15 @@ async function applyCloudConfiguration(store, value) {
         return !device || Number(device.presentation?.descriptorRevision || 0) !== Number(action.descriptorRevision)
           || String(device.areaId || "") !== String(action.osAreaId);
       });
-      if (staleTarget) continue;
+      const readSources= require('../automations/conditions').sources(definition.triggers[0]?.configuration);
+      const staleSource=readSources.some(source=> {const device=store.getDevice(source.osDeviceId);return !device || Number(device.presentation?.descriptorRevision)!==source.descriptorRevision || String(device.areaId)!==source.osAreaId;});
+      if (staleTarget || staleSource) continue;
       const existing = store.getNativeAutomation(definition.id)?.automation || null;
       const normalized = normalizeDefinition({
         input: {
           id: definition.id, name: definition.name, enabled: true,
           trigger: {
-            id: definition.triggers[0].id, type: "schedule",
+            id: definition.triggers[0].id, type: definition.triggers[0].kind === "DEVICE_STATE" ? "device_state" : "schedule",
             payload: { ...definition.triggers[0].configuration, timeZoneIdentifier: definition.timezone },
           },
           actions: definition.actions.map((action) => ({ id: action.id, deviceId: action.osDeviceId,
@@ -261,6 +264,7 @@ async function applyCloudConfiguration(store, value) {
       if (issues.length) throw Object.assign(new Error("An active Platform automation no longer matches the current native OS catalogue"), { code: "sync_automation_descriptor_invalid" });
       normalized.automation.revision = Number(definition.revision);
       normalized.automation.source = "platform_sync";
+      normalized.automation.creatorMembershipId = value.tenantAutomationProjection?.automations?.find(row=>row.id===definition.id)?.creatorMembershipId || null;
       normalized.automation.platformDefinitionChecksum = String(definition.definitionChecksum);
       normalized.automation.platformStatus = String(definition.status);
       runtimeAutomations.push(normalized);

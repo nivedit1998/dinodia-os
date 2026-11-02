@@ -1,3 +1,4 @@
+const {validDeviceTrigger}=require('./conditions');
 const {
   LIMITS,
   NATIVE_AUTOMATION_SCHEMA_VERSION,
@@ -52,8 +53,9 @@ function structuralValidate({ input, homeId, owner, existing = null } = {}) {
   if (!name) errors.push(issue("invalid_name", "Automation name is required."));
   if (hasControlCharacters(String(source.name || ""))) errors.push(issue("invalid_name", "Automation name contains a control character."));
   const schedule = normalizeTriggerInput(source.trigger || source.triggers?.[0] || {});
-  if (schedule.type !== "schedule") errors.push(issue("unsupported_trigger", "Native V1 automations support one schedule trigger."));
-  errors.push(...validateSchedule(schedule.payload));
+  if (schedule.type === "device_state") { if (!validDeviceTrigger(schedule.payload)) errors.push(issue("unsupported_trigger", "The device trigger definition is invalid.")); }
+  else if (schedule.type === "schedule") errors.push(...validateSchedule(schedule.payload));
+  else errors.push(issue("unsupported_trigger", "The trigger type is not supported."));
   const actions = Array.isArray(source.actions) ? source.actions : [];
   if (actions.length === 0) errors.push(issue("missing_actions", "Add at least one device action."));
   if (actions.length > LIMITS.maxActionsPerAutomation) errors.push(issue("too_many_actions", `An automation can contain at most ${LIMITS.maxActionsPerAutomation} actions.`));
@@ -89,7 +91,7 @@ function structuralValidate({ input, homeId, owner, existing = null } = {}) {
     trigger: {
       schemaVersion: NATIVE_AUTOMATION_SCHEMA_VERSION,
       id: String(source.trigger?.id || source.triggers?.[0]?.id || "").trim() || makeTriggerId(),
-      type: "schedule",
+      type: schedule.type,
       payload: schedule.payload,
     },
     actions: normalizedActions,

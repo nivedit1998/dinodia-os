@@ -23,7 +23,7 @@ function comparableOccurrencesOverlap(left, right) {
 }
 
 function findBundleConflict(automations, catalogue) {
-  const active = (automations || []).filter((automation) => automation?.automation?.enabled === true);
+  const active = (automations || []).filter((automation) => automation?.automation?.enabled === true && automation?.trigger?.type === "schedule");
   const byDevice = new Map((catalogue || []).map((device) => [String(device.deviceId), device]));
   for (let leftIndex = 0; leftIndex < active.length; leftIndex += 1) {
     const left = active[leftIndex];

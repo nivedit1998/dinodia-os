@@ -1,0 +1,45 @@
+{
+  "definition": {
+    "name": "Warm when needed",
+    "trigger": {
+      "kind": "device_state",
+      "deviceId": "00000000-0000-4000-8000-000000000004",
+      "areaId": "00000000-0000-4000-8000-000000000003",
+      "controlId": "ambient",
+      "operator": "falls_below",
+      "value": {
+        "type": "number",
+        "number": 18
+      },
+      "resetMargin": 1,
+      "conditions": {
+        "mode": "all",
+        "items": [
+          {
+            "kind": "time_window",
+            "startMinute": 420,
+            "endMinute": 1320,
+            "weekdays": [
+              1,
+              2,
+              3,
+              4,
+              5
+            ]
+          }
+        ]
+      }
+    },
+    "actions": [
+      {
+        "deviceId": "00000000-0000-4000-8000-000000000005",
+        "areaId": "00000000-0000-4000-8000-000000000003",
+        "controlId": "target",
+        "targetValue": {
+          "type": "number",
+          "number": 21
+        }
+      }
+    ]
+  }
+}

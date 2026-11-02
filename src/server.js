@@ -1,3 +1,4 @@
+const { DeviceTriggerCoordinator } = require('./automations/deviceTriggerCoordinator');
 const http = require("node:http");
 const https = require("node:https");
 const WebSocket = require("ws");
@@ -37,7 +38,7 @@ const { removePhysical } = require('./lifecycle/physicalRemoval');
 const { LogicalDeviceConversion } = require('./commissioning/logicalDeviceConversion');
 const { publicCapability } = require("./capabilities/schema");
 const { allProjectedSurfaces } = require("./capabilities/controlSurfaceProjection");
-const { rawEntityById } = require("./capabilities/devicePresentation");
+const { rawEntityById, getSurfaces } = require("./capabilities/devicePresentation");
 const { ZigbeeService } = require("./zigbeeService");
 const { ThreadService } = require("./threadService");
 const { ActivityService } = require("./activity/activityService");
@@ -597,6 +598,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
   let nativeAutomationService;
   let nativeAutomationExecutor;
   let nativeAutomationScheduler;
+  let nativeDeviceTriggers;
   let heatingDemandController;
   let alexaIntegration;
   let haModel;
@@ -645,6 +647,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       logger.error(`[activity] Could not record device activity: ${error.message}`);
     }
     eventBus.emit("dinodia_dashboard_updated", { kind: "device", deviceId: device?.id || null, at: new Date().toISOString() });
+    if (nativeDeviceTriggers) nativeDeviceTriggers.onDeviceChanged(device.id);
     if (alexaIntegration) alexaIntegration.handleDeviceChanged().catch((error) => logger.error(`[alexa] ${error.message}`));
     if (haModel) {
       const items = haModel.entities().filter((item) => item.device.id === device.id || item.device.physicalDeviceId === device.id);
@@ -1013,21 +1016,13 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
     store: hubStore,
     activity,
     logger,
-    executeControl: async ({ automation, action }) => hubStore.withAutomationPolicyLock(async () => {
-      const current = hubStore.getNativeAutomation(automation.id)?.automation;
-      if (!current || current.enabled !== true || Number(current.revision) !== Number(automation.revision)) {
-        throw Object.assign(new Error("The automation policy changed before this action could be dispatched"), { code: "automation_policy_changed" });
-      }
-      const device = hubStore.getDevice(action.deviceId);
-      if (!device) throw Object.assign(new Error("The automation device is no longer available"), { code: "missing_device" });
-      const match = findControl(nativeAutomationService.internalCatalogue(), action.deviceId, action.controlId);
-      if (!match) throw Object.assign(new Error("The automation control is no longer available"), { code: "missing_control" });
-      const compiled = compileTarget(match.control, action.targetValue);
-      const route = resolveExecutionRoute(device, match.control, compiled);
-      return commandEntity(device, route.entity, route.serviceId, route.data, {});
-    }),
+    executeControl: executeAutomationControl,
+
   });
   nativeAutomationScheduler = new AutomationScheduler({ store: hubStore, service: nativeAutomationService, executor: nativeAutomationExecutor, logger });
+
+  nativeDeviceTriggers = new DeviceTriggerCoordinator({store:hubStore,service:nativeAutomationService,scheduler:nativeAutomationScheduler,executor:nativeAutomationExecutor,
+    readSource: automationSourceReading, authorize: stored => automationAuthorityCurrent(stored.automation), now:clock, logger});
 
   heatingDemandController = new HeatingDemandController({
     store: hubStore,
@@ -1092,7 +1087,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
           })
           .catch((error) => logger.error(`[thread] automatic startup failed: ${error.message}`));
       }
-      if (runtimeConfig.nativeAutomationsMode === "enabled") await nativeAutomationScheduler.start();
+      if (runtimeConfig.nativeAutomationsMode === "enabled") { await nativeAutomationScheduler.start(); nativeDeviceTriggers.start(); }
       alexaIntegration.start();
       hive.start().catch((error) => logger.error(`[hive] automatic startup failed: ${error.message}`));
       googleNest.start().catch((error) => logger.error(`[google-nest] automatic startup failed: ${error.message}`));
@@ -1177,7 +1172,7 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       nodeEnv: runtimeConfig.nodeEnv,
       kind: "dinodia_os",
       version: VERSION,
-      capabilities: { managedAreaProvisioningV1: true, managedDevicePresentationV1: true, activityIncidentReportingV1: true, alexaNativeProjectionV1: true, alexaNativeDirectiveV1: true, nativeTenantAutomationProjectionV1: true, nativeUniversalAnalyticsV2: true, nativeStateEvidenceV2: true,
+      capabilities: { managedAreaProvisioningV1: true, managedDevicePresentationV1: true, activityIncidentReportingV1: true, alexaNativeProjectionV1: true, alexaNativeDirectiveV1: true, nativeTenantAutomationProjectionV1: true, nativeDeviceTriggersV2: runtimeConfig.nativeAutomationsMode === "enabled", nativeUniversalAnalyticsV2: true, nativeStateEvidenceV2: true,
         // Disabling new commissioning must never disable existing channel fences
         // or signed deletion reconciliation.
         nativeLogicalDevicesV1: true,
@@ -1667,6 +1662,82 @@ function nativeDeviceView(principal, device) {
       ? entity.sourceObservedAt || ""
       : entity.sourceObservedAt || entity.lastChanged || entity.last_changed || entity.updatedAt || ""));
     return { entity, value, observedAtMs: timestamp, revision: Math.max(0, Number(entity.stateRevision || entity.revision || 0)) };
+  }
+
+  async function executeAutomationControl({automation,action,occurrence}) {
+    const custom=hubStore.getNativeAutomation(automation.id)?.trigger?.type==='device_state';
+    let reference=null, before=null, sentAt=0;
+    await hubStore.withAutomationPolicyLock(async()=>{
+      const current=hubStore.getNativeAutomation(automation.id)?.automation;
+      if(!current?.enabled || Number(current.revision)!==Number(automation.revision) || automation.creatorMembershipId && !automationAuthorityCurrent(automation))
+        throw Object.assign(new Error('Automation policy or authority changed'),{code:'automation_policy_changed'});
+      if(custom && Number(clock())-Date.parse(occurrence.scheduledFor)>30000) throw Object.assign(new Error('The trigger event expired before dispatch'),{code:'trigger_event_expired'});
+      const device=hubStore.getDevice(action.deviceId), match=findControl(nativeAutomationService.internalCatalogue(),action.deviceId,action.controlId);
+      if(!device || !match)throw Object.assign(new Error('The automation control is no longer available'),{code:'missing_control'});
+      const policy=hubStore.getPlatform()?.devicePolicies?.[action.deviceId];
+      const signed=hubStore.getPlatform()?.cloudConfiguration?.tenantAutomationProjection?.automations?.find(row=>row.id===automation.id)?.actions?.find(row=>row.id===action.id);
+      if(custom && signed && policy) {
+        reference={deviceId:signed.deviceId,areaId:signed.areaId,controlId:signed.controlId,osDeviceId:signed.osDeviceId,osAreaId:signed.osAreaId,descriptorRevision:signed.descriptorRevision,managementClass:policy.managementClass,ownerMembershipId:policy.ownerMembershipId};
+        before=automationSourceReading(reference,automation);
+      }
+      const compiled=compileTarget(match.control,action.targetValue), route=resolveExecutionRoute(device,match.control,compiled);
+      sentAt=Number(clock());
+      await commandEntity(device,route.entity,route.serviceId,route.data,{});
+    });
+    if(!custom)return;
+    // Store-only confirmation checks, outside the policy lock. No radio read or resend.
+    const deadline=Date.now()+12000;
+    while(reference && Date.now()<deadline) {
+      if(!automationAuthorityCurrent(automation))break;
+      const report=automationSourceReading(reference,automation);
+      const expected=require('./automations/conditions').scalar(action.targetValue);
+      if(report?.point && report.observationId!==before?.observationId && Date.parse(report.observedAt)>=sentAt && Object.is(report.value,expected))return {confirmedByObservation:true};
+      await new Promise(resolve=>setTimeout(resolve,200));
+    }
+    return {confirmedByObservation:false};
+  }
+
+  // Only signed, still-authorized source bindings may reach the trigger coordinator.
+  function automationAuthorityCurrent(automation) {
+    const configuration=hubStore.getPlatform()?.cloudConfiguration;
+    const rule=configuration?.tenantAutomationProjection?.automations?.find(row=>row.id===automation.id);
+    const member=configuration?.memberships?.find(row=>row.id===automation.creatorMembershipId && row.role==='TENANT');
+    if(!member || !rule || rule.status!=='ACTIVE' || Number(rule.revision)!==Number(automation.revision))return false;
+    const stored=hubStore.getNativeAutomation(automation.id);
+    const refs=require('./automations/conditions').sources(stored?.trigger?.payload);
+    if(!refs.every(source=>automationSourcePolicy(source,automation)))return false;
+    return rule.actions.every(action=> {
+      const device=hubStore.getDevice(action.osDeviceId), policy=hubStore.getPlatform()?.devicePolicies?.[action.osDeviceId];
+      return device && policy?.lifecycle==='INSTALLED' && Number(device.presentation?.descriptorRevision)===Number(action.descriptorRevision)
+        && Number(policy.descriptorRevision)===Number(action.descriptorRevision) && member.areaIds.includes(action.areaId)
+        && String(device.areaId)===String(action.osAreaId) && policy.osAreaIds.includes(action.osAreaId)
+        && (policy.managementClass==='PROPERTY_DEVICE' && policy.ownerMembershipId===null || policy.managementClass==='TENANT_DEVICE' && policy.ownerMembershipId===member.id);
+    });
+  }
+  function automationSourcePolicy(source,automation) {
+    const configuration=hubStore.getPlatform()?.cloudConfiguration;
+    const member=configuration?.memberships?.find(row=>row.id===automation.creatorMembershipId && row.role==='TENANT');
+    const device=hubStore.getDevice(source.osDeviceId), policy=hubStore.getPlatform()?.devicePolicies?.[source.osDeviceId];
+    const area=configuration?.areas?.find(row=>row.id===source.areaId && row.osAreaId===source.osAreaId);
+    return !!(member && area && device && device.available!==false && policy?.lifecycle==='INSTALLED'
+      && member.areaIds.includes(source.areaId) && policy.osAreaIds.includes(source.osAreaId) && String(device.areaId)===source.osAreaId
+      && Number(device.presentation?.descriptorRevision)===source.descriptorRevision && Number(policy.descriptorRevision)===source.descriptorRevision
+      && policy.managementClass===source.managementClass && policy.ownerMembershipId===source.ownerMembershipId
+      && (policy.managementClass==='PROPERTY_DEVICE' && policy.ownerMembershipId===null || policy.managementClass==='TENANT_DEVICE' && policy.ownerMembershipId===member.id));
+  }
+  function automationSourceReading(source,automation) {
+    if(!automationSourcePolicy(source,automation))return null;
+    const device=hubStore.getDevice(source.osDeviceId);
+    const dto=serializeNativeDevice({device,homeId:automation.homeId,homeMembershipId:automation.creatorMembershipId,role:'TENANT',areaIds:[device.areaId],surfaces:getSurfaces(device)});
+    const control=dto?.controls?.find(item=>item.controlId===source.controlId), entity=nativeRawEntityForControl(device,source.controlId);
+    if(!control?.readable || !control.observable || !entity || control.stepUpPolicy==='required' || ['sensitive','critical'].includes(control.riskLevel))return null;
+    const trusted=hubStore.getUsageHistoryClockStatus?.(Number(clock()))?.trusted===true;
+    const evidence=resolveStateEvidence({device:{...device,managementClass:source.managementClass,ownerMembershipId:source.ownerMembershipId},control,entity,
+      records:hubStore.getObservationPolicyRecords?.()||{},sourceGeneration:hubStore.syncSourceGeneration,authorityValid:true,clockTrusted:trusted,runtimeSessionId:hubStore.observationSessionId,now:Number(clock())});
+    const report=evidence.lastReported;
+    const point=trusted && report?.provenance==='device_report' && !!report.observedAt && !!report.receivedAt && Date.parse(report.receivedAt)<=Number(clock()) && Date.parse(report.observedAt)<=Number(clock())
+      && !['device_offline','clock_untrusted'].includes(evidence.evidence.status);
+    return {value:report?.value??null,quality:evidence.quality,point,observationId:report?.observationId,sourceKey:report?.sourceKey,observedAt:report?.observedAt,receivedAt:report?.receivedAt};
   }
 
   function nativeRawEntityForControl(device, controlId) {
@@ -2293,7 +2364,8 @@ function nativeDeviceView(principal, device) {
           delete: ["operation", "idempotencyKey", "automationId", "expectedRevision"],
         };
         const fields = operationFields[operation];
-        if (!fields || Object.keys(input).sort().join("\n") !== [...common, "schemaVersion", ...fields].sort().join("\n")) {
+        const versionFields = input.automationContractVersion === 2 ? ["automationContractVersion"] : [];
+        if (!fields || Object.keys(input).sort().join("\n") !== [...common, "schemaVersion", ...fields, ...versionFields].sort().join("\n")) {
           return nativeContractError(res, 400, "VALIDATION_FAILED", "The tenant automation operation contains unsupported fields");
         }
         if (operation !== "list" && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(input.idempotencyKey || ""))) {
@@ -2314,6 +2386,7 @@ function nativeDeviceView(principal, device) {
         path = "/api/hub-agent/v2/tenant-automations";
         forwarded = {
           schemaVersion: "dinodia.v1", homeId, membershipId, accountAccessToken, operation,
+          ...(input.automationContractVersion === 2 ? {automationContractVersion:2} : {}),
           ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
           ...(input.automationId ? { automationId: input.automationId } : {}),
           ...(Object.hasOwn(input, "expectedRevision") ? { expectedRevision: input.expectedRevision } : {}),
@@ -2362,7 +2435,7 @@ function nativeDeviceView(principal, device) {
       if (pathname === "/api/dinodia/v1/tenant-automations" && input.operation === "list"
         && scopedPrincipal?.principalType === "app") {
         const { buildTenantAutomationSnapshot } = require("./tenantAutomationProjection");
-        const snapshot = buildTenantAutomationSnapshot({ store: hubStore, principal: scopedPrincipal });
+        const snapshot = buildTenantAutomationSnapshot({ store: hubStore, principal: scopedPrincipal, contractVersion: input.automationContractVersion === 2 ? 2 : 1 });
         if (snapshot) return json(res, 200, snapshot, { "Cache-Control": "no-store, private", "Pragma": "no-cache" });
       }
       try {
@@ -5286,6 +5359,7 @@ function nativeDeviceView(principal, device) {
     await heatingDemandController.stop();
     await hive.close();
     await googleNest.close();
+    if (nativeDeviceTriggers) await nativeDeviceTriggers.stop();
     if (nativeAutomationScheduler) await nativeAutomationScheduler.stop();
     await cloudflare.stop();
     pairing.stop();
@@ -5316,7 +5390,7 @@ function nativeDeviceView(principal, device) {
     await closeListeningServer(server);
   }
 
-  return { server, start, stop, setupServer, getLanHttpsServer: () => httpsServer, store: hubStore, mqtt, matter, hive, googleNest, alexa: alexaIntegration, heatingDemandController, cloudflare, pairing, activity, electric, model: haModel, vault, eventBus, config: runtimeConfig, syncOperatorBrowserSessions, nativeAutomationService, nativeAutomationScheduler, nativeCommissioningService };
+  return { server, start, stop, setupServer, getLanHttpsServer: () => httpsServer, store: hubStore, mqtt, matter, hive, googleNest, alexa: alexaIntegration, heatingDemandController, cloudflare, pairing, activity, electric, model: haModel, vault, eventBus, config: runtimeConfig, syncOperatorBrowserSessions, nativeAutomationService, nativeAutomationScheduler, nativeDeviceTriggers, nativeCommissioningService };
 }
 
 if (require.main === module) {

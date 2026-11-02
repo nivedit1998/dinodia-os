@@ -25,7 +25,7 @@ function safeLastOutcome(value) {
   return result;
 }
 
-function buildTenantAutomationSnapshot({ store, principal }) {
+function buildTenantAutomationSnapshot({ store, principal, contractVersion = 1 }) {
   if (!store || !principal || principal.principalType !== "app" || principal.householdRole !== "TENANT"
     || !principal.scope?.includes("tenant:device-command") || !principal.homeId || !principal.membershipId) return null;
 
@@ -57,7 +57,17 @@ function buildTenantAutomationSnapshot({ store, principal }) {
 
   const automations = ownedRows.flatMap((automation) => {
     if (automation.status === "RETIRED" && deliveryApplied) return [];
-    let needsAttention = automation.status === "NEEDS_ATTENTION";
+    const definition=configuration.automations.find(row=>row.id===automation.id);
+    const sourceReferences=require('./automations/conditions').sources(definition?.triggers?.[0]?.configuration);
+    if(!sourceReferences.every(source=> {
+      const policy=devicePolicies.get(source.osDeviceId), device=store.getDevice?.(source.osDeviceId);
+      return tokenAreas.includes(source.areaId) && areaByCanonicalId.get(source.areaId)?.osAreaId===source.osAreaId
+        && policy?.lifecycle==='INSTALLED' && policy.osAreaIds.includes(source.osAreaId) && device
+        && policy.managementClass===source.managementClass && policy.ownerMembershipId===source.ownerMembershipId
+        && (policy.managementClass==='PROPERTY_DEVICE' && policy.ownerMembershipId===null || policy.managementClass==='TENANT_DEVICE' && policy.ownerMembershipId===membership.id);
+    }))return [];
+    const runtimeGuard=store.state?.automationRuntime?.deviceTriggers?.rules?.[`${automation.id}:${automation.revision}`];
+    let needsAttention = automation.status === "NEEDS_ATTENTION" || runtimeGuard?.suspended===true;
     const actions = automation.status === "RETIRED" ? [] : automation.actions.flatMap((action) => {
       const area = areaByCanonicalId.get(String(action.areaId));
       const osArea = areaByOsId.get(String(action.osAreaId));
@@ -98,8 +108,12 @@ function buildTenantAutomationSnapshot({ store, principal }) {
     return [{
       id: String(automation.id), name: String(automation.name), status,
       revision: Number(automation.revision), definitionChecksum: String(automation.definitionChecksum),
-      timeZone: String(automation.timeZone), trigger: automation.trigger,
-      actions, lastOutcome: safeLastOutcome(automation.lastOutcome),
+      timeZone: String(automation.timeZone), trigger: automation.trigger?.kind === "DEVICE_STATE" && contractVersion !== 2 ? null : automation.trigger,
+      actions, lastOutcome: (()=> {
+        const local=(store.state?.automationExecutions||[]).find(row=>row.automationId===automation.id && row.revision===automation.revision);
+        if(!local)return safeLastOutcome(automation.lastOutcome);
+        return {...safeLastOutcome(local), ...(contractVersion===2 ? {...(local.reason?{reason:local.reason}:{}),conditionResults:local.conditionResults||[],triggerObservedAt:local.triggerObservedAt||null} : {})};
+      })(),
       createdAt: String(automation.createdAt), updatedAt: String(automation.updatedAt),
     }];
   });
@@ -115,6 +129,7 @@ function buildTenantAutomationSnapshot({ store, principal }) {
       cloudRevision: Number(configuration.revision), appliedRevision,
       lastSuccessfulSyncAt: typeof outbox.lastSuccessfulSyncAt === "string" ? outbox.lastSuccessfulSyncAt : null,
     },
+    ...(contractVersion===2 ? {customTriggersAvailable:tenantProjection.version===2} : {}),
     automations,
   };
 }
