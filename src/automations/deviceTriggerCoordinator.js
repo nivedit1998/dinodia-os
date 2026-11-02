@@ -34,7 +34,8 @@ class DeviceTriggerCoordinator {
     const samples=new Map((this.index.get(deviceId)||[]).map(id=>{
       const stored=this.store.getNativeAutomation(id);
       const value=stored?.trigger?.type==='device_state'?this.readSource(stored.trigger.payload.source,stored.automation):null;
-      return [id,value?{...value}:null];
+      const evaluated=value?.point ? evaluateConditions(stored.trigger.payload.conditions,source=>this.readSource(source,stored.automation),new Date(this.now()),stored.trigger.payload.timeZoneIdentifier) : {result:null,results:[]};
+      return [id,{sample:value?{...value}:null,evaluated}];
     }));
     this.pending+=1;
     // Serialize occurrences and shared budgets, never overlapping physical dispatches.
@@ -60,9 +61,9 @@ class DeviceTriggerCoordinator {
       if(!baseline || baseline.revision!==stored.automation.revision){this.rebuild();continue;}
       const p=stored.trigger.payload;
       if(!this.service.projected(id,{homeId:stored.automation.homeId})?.health?.executable || !this.authorize(stored)){baseline.sample=null;baseline.seeded=false;baseline.barrier=this.now();continue;}
-      const sample=samples?.get(id) ?? null;
+      const captured=samples?.get(id), sample=captured?.sample ?? null;
       if(!sample?.point || !sample.observationId || sample.value==null){baseline.sample=null;baseline.seeded=false;baseline.barrier=this.now();continue;}
-      if(Date.parse(sample.receivedAt)<=baseline.barrier)continue;
+      if(!Number.isFinite(Date.parse(sample.receivedAt)) || Date.parse(sample.receivedAt)>this.now() || Date.parse(sample.receivedAt)<=baseline.barrier)continue;
       const previous=baseline.sample;
       if(previous?.observationId===sample.observationId)continue;
       if(previous && previous.sourceKey===sample.sourceKey && Date.parse(sample.observedAt)<=Date.parse(previous.observedAt))continue;
@@ -76,9 +77,9 @@ class DeviceTriggerCoordinator {
       if(!edge.fire)continue;
       if(this.now()-Date.parse(sample.receivedAt)>BUDGETS.eventDeadlineMs)continue;
       const hash=crypto.createHash('sha256').update(sample.sourceKey+':'+sample.observationId).digest('hex');
-      const occurrence={id:`${id}:${stored.automation.revision}:event:${hash}`,automationId:id,revision:stored.automation.revision,scheduledFor:new Date(this.now()).toISOString(),source:'platform_sync'};
+      const occurrence={id:`${id}:${stored.automation.revision}:event:${hash}`,automationId:id,revision:stored.automation.revision,scheduledFor:new Date(sample.receivedAt).toISOString(),source:'platform_sync'};
       if(!await this.scheduler.claim(occurrence,stored.automation,stored.actions))continue;
-      const evaluated=evaluateConditions(p.conditions,source=>this.readSource(source,stored.automation),new Date(this.now()),p.timeZoneIdentifier);
+      const evaluated=captured.evaluated;
       let reason=evaluated.result===null?'condition_unknown':evaluated.result===false?'condition_not_met':null;
       const budgetKey=`${id}:${stored.automation.revision}`;
       if(!reason) await this.store.mutateNativeAutomation(state=>{

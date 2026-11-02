@@ -34,7 +34,8 @@ test('crossing hysteresis re-arms only after the reset margin',()=>{
 });
 async function fixture(t,conditions={mode:'all',items:[]},options={}){
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dinodia-device-trigger-'));
- t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+ let coordinator;
+ t.after(async()=>{await coordinator?.stop();await fs.rm(dir,{recursive:true,force:true});});
  const store=new Store(path.join(dir,'store.json'));
  let time=Date.parse('2026-11-02T10:00:00Z'),seq=0;
  let sample={value:20,quality:'fresh',point:true,observationId:'old',sourceKey:'source1',observedAt:new Date(time).toISOString(),receivedAt:new Date(time).toISOString()};
@@ -46,11 +47,11 @@ async function fixture(t,conditions={mode:'all',items:[]},options={}){
  state.automationActions.action={...action,automationId:'rule'};
  });
  const service={projected:()=>({health:{executable:true}})};
- const executor=new AutomationExecutor({store,executeControl:async input=>{sent.push(input);return {confirmedByObservation:options.confirmed!==false};},now:()=>new Date(time),logger:{error(){}}});
+ const executor=new AutomationExecutor({store,executeControl:async input=>{sent.push(input);if(options.executeControl)await options.executeControl(input);return {confirmedByObservation:options.confirmed!==false};},now:()=>new Date(time),logger:{error(){}}});
  const scheduler=new AutomationScheduler({store,service,executor,now:()=>new Date(time)});
- const coordinator=new DeviceTriggerCoordinator({store,service,scheduler,executor,readSource:()=>sample,authorize:()=>allowed,now:()=>time,logger:{error(){}}});
+ coordinator=new DeviceTriggerCoordinator({store,service,scheduler,executor,readSource:source=>source.controlId==='condition'&&options.condition?options.condition():sample,authorize:()=>allowed,now:()=>time,logger:{error(){}}});
  coordinator.start();
- t.after(async()=>{await coordinator.stop();await fs.rm(dir,{recursive:true,force:true});});
+
  const report=async(value,extra={})=>{time+=1000;sample={...sample,value,observationId:`event${++seq}`,observedAt:new Date(time).toISOString(),receivedAt:new Date(time).toISOString(),...extra};await coordinator.onDeviceChanged('sensor');};
  return {store,sent,coordinator,scheduler,report,setAllowed:x=>{allowed=x;},advance:n=>{time+=n;},restart:()=>{coordinator.stop();coordinator.start();}};
 }
@@ -119,4 +120,20 @@ test('a logical reading is indexed by its physical pairing without changing its 
  f.store.getDevice=id=>id==='sensor'?{physicalDeviceId:'paired-hardware'}:original(id);
  f.coordinator.rebuild();await f.report(20);await f.coordinator.onDeviceChanged('paired-hardware');
  await f.report(17);await f.coordinator.onDeviceChanged('paired-hardware');assert.equal(f.sent.length,1);
+});
+
+test('queued conditions are frozen at the admitted event, never resurrected by a later matching reading',async t=>{
+ let condition=20,release;const gate=new Promise(r=>{release=r;});t.after(()=>release());
+ const f=await fixture(t,{mode:'all',items:[{kind:'device_state',source:{...source,controlId:'condition'},operator:'above',value:{type:'number',number:10}}]},
+  {condition:()=>({quality:'fresh',value:condition}),executeControl:async()=>gate});
+ await f.report(20);const first=f.report(17);
+ for(let i=0;i<1000&&f.sent.length===0;i++)await new Promise(r=>setTimeout(r,2));assert.equal(f.sent.length,1);
+ f.advance(31000);condition=0;const rearm=f.report(20),second=f.report(17);condition=20;
+ release();await Promise.all([first,rearm,second]);assert.equal(f.sent.length,1,'a later condition match must not dispatch the queued false event');
+ assert.equal(f.store.state.automationExecutions[0].reason,'condition_not_met');
+});
+test('queue delay never renews the original event deadline for subsequent actions',async t=>{
+ const f=await fixture(t);await f.report(20);let release;f.coordinator.queue=new Promise(r=>{release=r;});
+ const event=f.report(17);f.advance(25000);release();await event;
+ assert.equal(f.sent.length,1);assert.equal(f.sent[0].occurrence.scheduledFor,'2026-11-02T10:00:02.000Z','all actions share the original Hub receipt time');
 });
