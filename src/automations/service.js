@@ -13,6 +13,21 @@ function serviceError(message, statusCode, code) {
 function platformTenantRule(automation) {
   return automation?.source === "platform_sync" || automation?.owner?.type === "platform" || !!automation?.creatorMembershipId;
 }
+function assertRecordIdsAvailable(state, definition, creating) {
+  const id = definition.automation.id;
+  const conflict = () => { throw serviceError("An automation record identifier is already in use", 409, "id_conflict"); };
+  // Include inherited reserved names: assigning __proto__ must never alter a map.
+  if (creating && (id in state.automations || [
+    ...Object.values(state.automationTriggers || {}), ...Object.values(state.automationActions || {}),
+    ...Object.values(state.automationOccurrences || {}), ...(state.automationExecutions || []),
+  ].some(record => record?.automationId === id))) conflict();
+  const triggerId = definition.trigger.id;
+  if (triggerId in state.automationTriggers && (creating || state.automationTriggers[triggerId]?.automationId !== id)) conflict();
+  for (const action of definition.actions) {
+    if (action.id in state.automationActions && (creating || state.automationActions[action.id]?.automationId !== id)) conflict();
+  }
+}
+
 function requestContext(context = {}) {
   return {
     homeId: String(context.homeId || "local-home"),
@@ -105,6 +120,12 @@ class AutomationService {
     if (capabilityErrors.length) throw validationError(capabilityErrors[0].message, capabilityErrors[0].code, capabilityErrors);
     if (this.store.listNativeAutomations().length >= LIMITS.maxAutomations) throw serviceError(`A home can contain at most ${LIMITS.maxAutomations} native automations`, 400, "too_many_automations");
     const response = await this.store.mutateNativeAutomation((state) => {
+      const cached = idempotencyId && state.automationIdempotency?.[idempotencyId];
+      if (cached) {
+        if (cached.requestChecksum !== requestChecksum) throw serviceError("This idempotency key was already used for another automation",409,"idempotency_conflict");
+        return clone({...(cached.body || {}),idempotent:true});
+      }
+      assertRecordIdsAvailable(state,normalized,true);
       const id = normalized.automation.id || makeAutomationId();
       normalized.automation.id = id;
       normalized.trigger.automationId = id;
@@ -146,7 +167,9 @@ class AutomationService {
       return { ...action, id: old?.id || action.id, automationId: normalized.automation.id, sortOrder: index };
     });
     const response = await this.store.mutateNativeAutomation((state) => {
+      if (platformTenantRule(state.automations[id])) throw serviceError("Automation not found",404,"not_found");
       if (state.automations[id]?.revision !== current.automation.revision) throw serviceError("The automation changed; reload it before saving", 409, "revision_conflict");
+      assertRecordIdsAvailable(state,normalized,false);
       for (const trigger of Object.values(state.automationTriggers)) if (trigger.automationId === id) delete state.automationTriggers[trigger.id];
       for (const action of Object.values(state.automationActions)) if (action.automationId === id) delete state.automationActions[action.id];
       state.automations[id] = normalized.automation;
@@ -185,6 +208,7 @@ class AutomationService {
     if (expectedRevision === undefined || expectedRevision === null || expectedRevision === "") throw serviceError("An expected revision is required", 428, "revision_required");
     if (Number(expectedRevision) !== Number(current.automation.revision)) throw serviceError("The automation changed; reload it before deleting", 409, "revision_conflict");
     await this.store.mutateNativeAutomation((state) => {
+      if (platformTenantRule(state.automations[id])) throw serviceError("Automation not found",404,"not_found");
       if (state.automations[id]?.revision !== current.automation.revision) throw serviceError("The automation changed; reload it before deleting", 409, "revision_conflict");
       for (const execution of state.automationExecutions || []) if (execution.automationId === id && !execution.definitionSnapshot) execution.definitionSnapshot = { id, name: current.automation.name, revision: current.automation.revision };
       delete state.automations[id];

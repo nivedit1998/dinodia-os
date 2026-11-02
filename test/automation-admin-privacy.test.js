@@ -25,6 +25,22 @@ for(const distinct of [false,true])for(const privateWhen of [false,true])test(`l
  for(const [suffix,method,data] of [['/rule','GET'],['/rule/executions','GET'],['/rule/duplicate','POST',{}],['/rule/enabled','PATCH',{enabled:false,expectedRevision:1}],['/rule','PUT',{enabled:false,expectedRevision:1}],['/rule','DELETE',{expectedRevision:1}]]) {
   const response=await fetch(base+suffix,{method,headers,...(data?{body:JSON.stringify(data)}:{})});assert.equal(response.status,404,`${method}${suffix}`);assert(!(await response.text()).includes('private-sensor'));
  }
+ const protectedBefore=JSON.stringify(store.getNativeAutomation('rule'));
+ const definition=(id,triggerId,actionId,deviceId='target')=>({id,name:'Local rule',enabled:false,trigger:{id:triggerId,type:'schedule',payload:{minuteOfDay:600,weekdays:[1,2,3,4,5,6,7],timeZoneIdentifier:'UTC'}},actions:[{id:actionId,deviceId,controlId:'power',targetValue:{type:'boolean',boolean:true}}]});
+ for(const data of [definition('rule','new-trigger','new-action'),definition('new-rule','trigger','new-action'),definition('new-rule','new-trigger','action')]) {
+  const collision=await fetch(base,{method:'POST',headers,body:JSON.stringify(data)});assert.equal(collision.status,409,'create must not overwrite a protected automation/trigger/action ID');
+  assert.equal(JSON.stringify(store.getNativeAutomation('rule')),protectedBefore);
+ }
+ const catalogue=hub.nativeAutomationService.internalCatalogue();hub.nativeAutomationService.internalCatalogue=()=>[...catalogue,{...catalogue[0],deviceId:'other-target',controls:catalogue[0].controls.map(c=>({...c,deviceId:'other-target'}))}];
+ const local=definition('local-rule','local-trigger','local-action');
+ const localHeaders={...headers,'idempotency-key':'same-local-create'};
+ for(let n=0;n<2;n++){const response=await fetch(base,{method:'POST',headers:localHeaders,body:JSON.stringify(local)});assert.equal(response.status,201);assert.equal((await response.json()).id,'local-rule');}
+ for(const patch of [{trigger:definition('x','trigger','unused').trigger},{actions:definition('x','unused','action','other-target').actions}]){
+  const collision=await fetch(base+'/local-rule',{method:'PUT',headers,body:JSON.stringify({...patch,expectedRevision:1})});assert.equal(collision.status,409,'local update must not steal protected child IDs');
+  assert.equal(JSON.stringify(store.getNativeAutomation('rule')),protectedBefore);
+ }
+ assert.equal(store.listNativeAutomations().length,2,'exact create replay produces one local definition');
+ assert.equal(store.getNativeAutomation('local-rule').automation.revision,1);
  assert.equal(store.getNativeAutomation('rule').automation.revision,1);
  const runtime=hub.nativeAutomationService.projected('rule',{homeId,runtimeAccess:true});assert(runtime);assert.equal(runtime.health.executable,true);assert.equal(runtime.trigger.payload.conditions.items.length,privateWhen?0:1);
 });
