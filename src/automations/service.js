@@ -9,11 +9,31 @@ function serviceError(message, statusCode, code) {
   return Object.assign(new Error(message), { statusCode, code });
 }
 
+// Trusted engine access is explicit. Never derive it from an HTTP body.
+function platformTenantRule(automation) {
+  return automation?.source === "platform_sync" || automation?.owner?.type === "platform" || !!automation?.creatorMembershipId;
+}
+function assertRecordIdsAvailable(state, definition, creating) {
+  const id = definition.automation.id;
+  const conflict = () => { throw serviceError("An automation record identifier is already in use", 409, "id_conflict"); };
+  // Include inherited reserved names: assigning __proto__ must never alter a map.
+  if (creating && (id in state.automations || [
+    ...Object.values(state.automationTriggers || {}), ...Object.values(state.automationActions || {}),
+    ...Object.values(state.automationOccurrences || {}), ...(state.automationExecutions || []),
+  ].some(record => record?.automationId === id))) conflict();
+  const triggerId = definition.trigger.id;
+  if (triggerId in state.automationTriggers && (creating || state.automationTriggers[triggerId]?.automationId !== id)) conflict();
+  for (const action of definition.actions) {
+    if (action.id in state.automationActions && (creating || state.automationActions[action.id]?.automationId !== id)) conflict();
+  }
+}
+
 function requestContext(context = {}) {
   return {
     homeId: String(context.homeId || "local-home"),
     owner: normalizeOwner(context.owner, { type: "local_admin", subjectId: "local-admin" }),
     canManageAutomations: context.canManageAutomations !== false,
+    runtimeAccess: context.runtimeAccess === true,
     authorizedDeviceIds: context.authorizedDeviceIds ? new Set([...context.authorizedDeviceIds].map(String)) : null,
   };
 }
@@ -57,6 +77,7 @@ class AutomationService {
     if (!value) return null;
     const ctx = this.context(context);
     if (value.automation.homeId && value.automation.homeId !== ctx.homeId) return null;
+    if (platformTenantRule(value.automation) && !ctx.runtimeAccess) return null;
     const next = value.automation.enabled ? nextRunAt(value.automation, value.trigger, this.now()) : null;
     const projection = projectAutomation({ ...value, catalogue: this.internalCatalogue(ctx), authorizedDeviceIds: ctx.authorizedDeviceIds, nextRunAt: next });
     const lastExecution = (this.store.state.automationExecutions || []).find((execution) => execution.automationId === value.automation.id);
@@ -99,6 +120,12 @@ class AutomationService {
     if (capabilityErrors.length) throw validationError(capabilityErrors[0].message, capabilityErrors[0].code, capabilityErrors);
     if (this.store.listNativeAutomations().length >= LIMITS.maxAutomations) throw serviceError(`A home can contain at most ${LIMITS.maxAutomations} native automations`, 400, "too_many_automations");
     const response = await this.store.mutateNativeAutomation((state) => {
+      const cached = idempotencyId && state.automationIdempotency?.[idempotencyId];
+      if (cached) {
+        if (cached.requestChecksum !== requestChecksum) throw serviceError("This idempotency key was already used for another automation",409,"idempotency_conflict");
+        return clone({...(cached.body || {}),idempotent:true});
+      }
+      assertRecordIdsAvailable(state,normalized,true);
       const id = normalized.automation.id || makeAutomationId();
       normalized.automation.id = id;
       normalized.trigger.automationId = id;
@@ -124,6 +151,7 @@ class AutomationService {
     this.assertCanManage(ctx);
     const current = this.stored(id);
     if (!current) throw serviceError("Automation not found", 404, "not_found");
+    if (platformTenantRule(current.automation)) throw serviceError("Automation not found", 404, "not_found");
     const expected = expectedRevision === undefined || expectedRevision === null || expectedRevision === "" ? null : Number(expectedRevision);
     if (expected === null) throw serviceError("An expected revision is required", 428, "revision_required");
     if (!Number.isInteger(expected) || expected < 1) throw serviceError("An expected revision is invalid", 400, "invalid_revision");
@@ -139,7 +167,9 @@ class AutomationService {
       return { ...action, id: old?.id || action.id, automationId: normalized.automation.id, sortOrder: index };
     });
     const response = await this.store.mutateNativeAutomation((state) => {
+      if (platformTenantRule(state.automations[id])) throw serviceError("Automation not found",404,"not_found");
       if (state.automations[id]?.revision !== current.automation.revision) throw serviceError("The automation changed; reload it before saving", 409, "revision_conflict");
+      assertRecordIdsAvailable(state,normalized,false);
       for (const trigger of Object.values(state.automationTriggers)) if (trigger.automationId === id) delete state.automationTriggers[trigger.id];
       for (const action of Object.values(state.automationActions)) if (action.automationId === id) delete state.automationActions[action.id];
       state.automations[id] = normalized.automation;
@@ -162,6 +192,7 @@ class AutomationService {
   async duplicate(id, context = {}, { name } = {}) {
     const current = this.stored(id);
     if (!current) throw serviceError("Automation not found", 404, "not_found");
+    if (platformTenantRule(current.automation)) throw serviceError("Automation not found", 404, "not_found");
     const ctx = this.context(context);
     if (current.automation.homeId !== ctx.homeId) throw serviceError("The automation belongs to another home", 404, "not_found");
     return this.create({ name: normalizeName(name) || `${current.automation.name} copy`, enabled: false, trigger: { type: current.trigger.type, payload: current.trigger.payload }, actions: current.actions.map((action) => ({ deviceId: action.deviceId, controlId: action.controlId, targetValue: action.targetValue })) }, ctx);
@@ -172,10 +203,12 @@ class AutomationService {
     this.assertCanManage(ctx);
     const current = this.stored(id);
     if (!current) return false;
+    if (platformTenantRule(current.automation)) throw serviceError("Automation not found", 404, "not_found");
     if (current.automation.homeId !== ctx.homeId) throw serviceError("The automation belongs to another home", 403, "forbidden");
     if (expectedRevision === undefined || expectedRevision === null || expectedRevision === "") throw serviceError("An expected revision is required", 428, "revision_required");
     if (Number(expectedRevision) !== Number(current.automation.revision)) throw serviceError("The automation changed; reload it before deleting", 409, "revision_conflict");
     await this.store.mutateNativeAutomation((state) => {
+      if (platformTenantRule(state.automations[id])) throw serviceError("Automation not found",404,"not_found");
       if (state.automations[id]?.revision !== current.automation.revision) throw serviceError("The automation changed; reload it before deleting", 409, "revision_conflict");
       for (const execution of state.automationExecutions || []) if (execution.automationId === id && !execution.definitionSnapshot) execution.definitionSnapshot = { id, name: current.automation.name, revision: current.automation.revision };
       delete state.automations[id];
@@ -189,6 +222,7 @@ class AutomationService {
   history(id, context = {}) {
     const current = this.stored(id);
     if (!current) throw serviceError("Automation not found", 404, "not_found");
+    if (platformTenantRule(current.automation)) throw serviceError("Automation not found", 404, "not_found");
     const ctx = this.context(context);
     if (current.automation.homeId !== ctx.homeId) throw serviceError("Automation not found", 404, "not_found");
     const executions = (this.store.state.automationExecutions || []).filter((item) => item.automationId === id).map(clone);

@@ -31,6 +31,7 @@ function scheduleMatches(payload, date = new Date()) {
 }
 
 function scheduledOccurrence(automation, trigger, date = new Date()) {
+  if (trigger?.type && trigger.type !== "schedule") return null;
   const payload = trigger?.payload || {};
   const parts = dateParts(date, payload.timeZoneIdentifier);
   if (!scheduleMatches(payload, date) || isSecondOccurrenceOfRepeatedMinute(date, payload.timeZoneIdentifier)) return null;
@@ -39,6 +40,7 @@ function scheduledOccurrence(automation, trigger, date = new Date()) {
 }
 
 function nextRunAt(automation, trigger, from = new Date(), horizonDays = 8) {
+  if (trigger?.type && trigger.type !== "schedule") return null;
   const payload = trigger?.payload || {};
   const base = from instanceof Date ? new Date(from) : new Date(from);
   if (!Number.isFinite(base.getTime())) return null;

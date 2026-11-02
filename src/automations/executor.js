@@ -35,12 +35,15 @@ class AutomationExecutor {
     await this.markOccurrence(occurrenceId, { status: "running", startedAt, actionOutcomes: outcomes });
     await this.activity?.record?.({ type: "automation_execution_started", detail: `${automation.name} started.`, change: { automationId: automation.id, revision: automation.revision, occurrenceId, actionCount: actions.length } }).catch((error) => this.logger.error(`[activity] ${error.message}`));
     let failed = 0;
+    let uncertain = 0;
     for (let index = 0; index < actions.length; index += 1) {
       const action = actions[index];
       await this.markOccurrence(occurrenceId, { actionOutcomes: outcomes.map((item, itemIndex) => itemIndex === index ? { ...item, status: "running", startedAt: this.now().toISOString() } : item) });
       try {
-        await this.executeControl({ automation: clone(automation), trigger: clone(trigger), action: clone(action), occurrence: clone(occurrence) });
-        outcomes[index] = { ...outcomes[index], status: "applied", completedAt: this.now().toISOString() };
+        const result = await this.executeControl({ automation: clone(automation), trigger: clone(trigger), action: clone(action), occurrence: clone(occurrence) });
+        const confirmed=trigger?.type!=='device_state' || result?.confirmedByObservation===true;
+        if(!confirmed)uncertain+=1;
+        outcomes[index] = { ...outcomes[index], status: confirmed?"applied":"uncertain", completedAt: this.now().toISOString(), ...(confirmed?{}:{errorCode:'observation_not_confirmed'}) };
       } catch (error) {
         failed += 1;
         const details = resultError(error);
@@ -49,9 +52,9 @@ class AutomationExecutor {
       }
       await this.markOccurrence(occurrenceId, { actionOutcomes: outcomes });
     }
-    const status = failed === 0 ? "succeeded" : failed === actions.length ? "failed" : "partial";
+    const status = failed === 0 && uncertain === 0 ? "succeeded" : failed === actions.length ? "failed" : "partial";
     const completedAt = this.now().toISOString();
-    const execution = { occurrenceId, automationId: automation.id, revision: automation.revision, source: automation.source || occurrence.source || "native_v2", status, startedAt, completedAt, actionOutcomes: clone(outcomes) };
+    const execution = { occurrenceId, automationId: automation.id, revision: automation.revision, source: automation.source || occurrence.source || "native_v2", status, startedAt, completedAt, ...(trigger?.type==='device_state'?{conditionResults:this.store.state.automationOccurrences[occurrenceId]?.conditionResults||[],triggerObservedAt:this.store.state.automationOccurrences[occurrenceId]?.triggerObservedAt||null}:{}), actionOutcomes: clone(outcomes) };
     await this.store.mutateNativeAutomation((state) => {
       const current = state.automationOccurrences[occurrenceId];
       if (current) Object.assign(current, { status, completedAt, actionOutcomes: clone(outcomes) });
