@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://dinodiasmartliving.com/contracts/dinodia-v1/automations-v2.schema.json",
+  "$id": "https://dinodiasmartliving.com/contracts/dinodia-automations-v2/schema.json",
   "description": "Opt in with x-dinodia-automations: 2, or automationContractVersion: 2 through the authenticated Hub proxy. V1 remains unchanged.",
   "$defs": {
     "definition": {
