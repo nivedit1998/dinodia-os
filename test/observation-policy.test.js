@@ -91,6 +91,17 @@ test("profiles match the exact integration, model, endpoint, property and role",
   assert.equal(approved?.id, "zigbee.generic.mains_light.on_off");
 });
 
+test("the owner-approved SONOFF ZBM5 light reports on/off like the radiators; an unlisted light is never configured", () => {
+  const light = normalizeZigbeeDevice(JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures/zigbee/dimmable-light.json"), "utf8")));
+  const zbm5 = { ...light, metadata: { ...light.metadata, manufacturer: "SONOFF", model: "ZBM5-1C-80/86" } };
+  const power = (device) => Object.values(device.entities).find((entity) => entity.capability?.semanticRole === "power");
+  const profile = matchObservationProfile(zbm5, power(zbm5));
+  assert.equal(profile?.id, "zigbee.generic.mains_light.on_off", "approved by name and model");
+  assert.equal(profile.approvedForAutomaticConfiguration, true);
+  assert.equal(profile.desired.maximumReportInterval, 300, "at least every five minutes");
+  assert.equal(matchObservationProfile(light, power(light)), null, "any other light stays unconfigured");
+});
+
 test("a multi-endpoint device never borrows another endpoint's reporting guarantee", () => {
   const profile = PROFILES.find((item) => item.id === "zigbee.generic.mains_light.on_off");
   const raw = { endpoints: {

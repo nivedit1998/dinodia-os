@@ -21,6 +21,11 @@ function boundedReadLifetime(intervalSeconds) {
   return intervalSeconds * (1 + MISSED_REPORTS_TOLERATED) + DELIVERY_GRACE_SECONDS;
 }
 
+// Exact models the owner has approved for each model-gated profile. Adding a model is a deliberate, reviewed change here.
+const APPROVED_MODELS = Object.freeze([
+  Object.freeze({ profileId: "zigbee.generic.mains_light.on_off", manufacturer: "SONOFF", model: "ZBM5-1C-80/86" }),
+]);
+
 const PROFILES = Object.freeze([
   Object.freeze({
     id: "zigbee.sonoff.trvzb.running_state",
@@ -56,8 +61,10 @@ const PROFILES = Object.freeze([
     strategy: "report_on_change_plus_periodic",
     desired: Object.freeze({ minimumReportInterval: 0, maximumReportInterval: 300, reportableChange: 0 }),
     lifetimeSeconds: periodicLifetime(300),
-    // Framework only: no light is paired and no model has been verified.
-    approvedForAutomaticConfiguration: false,
+    // Owner-approved 2 Nov 2026 ("same as the radiators") for the models listed in APPROVED_MODELS below: the hub asks the light to
+    // report its on/off state on change and at least every 5 minutes, reads the setting back, and verifies the cadence at runtime.
+    // A model not listed there never matches, so no other device is configured.
+    approvedForAutomaticConfiguration: true,
     requiresModelApproval: true,
   }),
   Object.freeze({
@@ -109,7 +116,7 @@ function entityProperty(entity) {
 
 /// The single profile that matches this exact control, or null. Generic profiles that require a
 /// model approval match only once that model is listed in `approvedModels`.
-function matchObservationProfile(device, entity, { approvedModels = [] } = {}) {
+function matchObservationProfile(device, entity, { approvedModels = APPROVED_MODELS } = {}) {
   if (!device || !entity) return null;
   const integration = normalized(device.protocol);
   const manufacturer = normalized(device.metadata?.manufacturer || device.metadata?.vendor);
@@ -159,6 +166,7 @@ function reportingMatches(actual, desired) {
 }
 
 module.exports = {
+  APPROVED_MODELS,
   DELIVERY_GRACE_SECONDS,
   MISSED_REPORTS_TOLERATED,
   PROFILES,
