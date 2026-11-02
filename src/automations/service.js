@@ -9,11 +9,16 @@ function serviceError(message, statusCode, code) {
   return Object.assign(new Error(message), { statusCode, code });
 }
 
+// Trusted engine access is explicit. Never derive it from an HTTP body.
+function platformTenantRule(automation) {
+  return automation?.source === "platform_sync" || automation?.owner?.type === "platform" || !!automation?.creatorMembershipId;
+}
 function requestContext(context = {}) {
   return {
     homeId: String(context.homeId || "local-home"),
     owner: normalizeOwner(context.owner, { type: "local_admin", subjectId: "local-admin" }),
     canManageAutomations: context.canManageAutomations !== false,
+    runtimeAccess: context.runtimeAccess === true,
     authorizedDeviceIds: context.authorizedDeviceIds ? new Set([...context.authorizedDeviceIds].map(String)) : null,
   };
 }
@@ -57,6 +62,7 @@ class AutomationService {
     if (!value) return null;
     const ctx = this.context(context);
     if (value.automation.homeId && value.automation.homeId !== ctx.homeId) return null;
+    if (platformTenantRule(value.automation) && !ctx.runtimeAccess) return null;
     const next = value.automation.enabled ? nextRunAt(value.automation, value.trigger, this.now()) : null;
     const projection = projectAutomation({ ...value, catalogue: this.internalCatalogue(ctx), authorizedDeviceIds: ctx.authorizedDeviceIds, nextRunAt: next });
     const lastExecution = (this.store.state.automationExecutions || []).find((execution) => execution.automationId === value.automation.id);
@@ -124,6 +130,7 @@ class AutomationService {
     this.assertCanManage(ctx);
     const current = this.stored(id);
     if (!current) throw serviceError("Automation not found", 404, "not_found");
+    if (platformTenantRule(current.automation)) throw serviceError("Automation not found", 404, "not_found");
     const expected = expectedRevision === undefined || expectedRevision === null || expectedRevision === "" ? null : Number(expectedRevision);
     if (expected === null) throw serviceError("An expected revision is required", 428, "revision_required");
     if (!Number.isInteger(expected) || expected < 1) throw serviceError("An expected revision is invalid", 400, "invalid_revision");
@@ -162,6 +169,7 @@ class AutomationService {
   async duplicate(id, context = {}, { name } = {}) {
     const current = this.stored(id);
     if (!current) throw serviceError("Automation not found", 404, "not_found");
+    if (platformTenantRule(current.automation)) throw serviceError("Automation not found", 404, "not_found");
     const ctx = this.context(context);
     if (current.automation.homeId !== ctx.homeId) throw serviceError("The automation belongs to another home", 404, "not_found");
     return this.create({ name: normalizeName(name) || `${current.automation.name} copy`, enabled: false, trigger: { type: current.trigger.type, payload: current.trigger.payload }, actions: current.actions.map((action) => ({ deviceId: action.deviceId, controlId: action.controlId, targetValue: action.targetValue })) }, ctx);
@@ -172,6 +180,7 @@ class AutomationService {
     this.assertCanManage(ctx);
     const current = this.stored(id);
     if (!current) return false;
+    if (platformTenantRule(current.automation)) throw serviceError("Automation not found", 404, "not_found");
     if (current.automation.homeId !== ctx.homeId) throw serviceError("The automation belongs to another home", 403, "forbidden");
     if (expectedRevision === undefined || expectedRevision === null || expectedRevision === "") throw serviceError("An expected revision is required", 428, "revision_required");
     if (Number(expectedRevision) !== Number(current.automation.revision)) throw serviceError("The automation changed; reload it before deleting", 409, "revision_conflict");
@@ -189,6 +198,7 @@ class AutomationService {
   history(id, context = {}) {
     const current = this.stored(id);
     if (!current) throw serviceError("Automation not found", 404, "not_found");
+    if (platformTenantRule(current.automation)) throw serviceError("Automation not found", 404, "not_found");
     const ctx = this.context(context);
     if (current.automation.homeId !== ctx.homeId) throw serviceError("Automation not found", 404, "not_found");
     const executions = (this.store.state.automationExecutions || []).filter((item) => item.automationId === id).map(clone);

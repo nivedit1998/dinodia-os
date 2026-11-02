@@ -38,7 +38,7 @@ test('real Hub evidence admission and dispatch: retained cache never triggers; a
    state.automationTriggers.trigger={id:'trigger',automationId:'rule',type:'device_state',payload:{kind:'device_state',source,operator:'becomes',value:{type:'boolean',boolean:false},resetMargin:0,cooldownSeconds:30,conditions:{mode:'all',items:[]},timeZoneIdentifier:'UTC'}};
    state.automationActions.action={id:'action',automationId:'rule',deviceId:targetId,controlId:compiled.controlId,targetValue:{type:'number',number:21},sortOrder:0};
  });
- assert.equal(hub.nativeAutomationService.projected('rule',{homeId:'home'}).health.executable,true);
+ assert.equal(hub.nativeAutomationService.projected('rule',{homeId:'home',runtimeAccess:true}).health.executable,true);
  hub.nativeDeviceTriggers.start();
  const report=async(value,retain=false)=>{await fixture.report(value,{retain,advance:1000});now=fixture.clock();await hub.nativeDeviceTriggers.onDeviceChanged(fixture.deviceId);};
  await report('ON');await report('OFF',true);assert.equal(commands,0);

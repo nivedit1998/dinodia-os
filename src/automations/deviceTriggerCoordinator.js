@@ -60,7 +60,7 @@ class DeviceTriggerCoordinator {
       if(!stored?.automation.enabled || stored.trigger?.type!=='device_state')continue;
       if(!baseline || baseline.revision!==stored.automation.revision){this.rebuild();continue;}
       const p=stored.trigger.payload;
-      if(!this.service.projected(id,{homeId:stored.automation.homeId})?.health?.executable || !this.authorize(stored)){baseline.sample=null;baseline.seeded=false;baseline.barrier=this.now();continue;}
+      if(!this.service.projected(id,{homeId:stored.automation.homeId,runtimeAccess:true})?.health?.executable || !this.authorize(stored)){baseline.sample=null;baseline.seeded=false;baseline.barrier=this.now();continue;}
       const captured=samples?.get(id), sample=captured?.sample ?? null;
       if(!sample?.point || !sample.observationId || sample.value==null){baseline.sample=null;baseline.seeded=false;baseline.barrier=this.now();continue;}
       if(!Number.isFinite(Date.parse(sample.receivedAt)) || Date.parse(sample.receivedAt)>this.now() || Date.parse(sample.receivedAt)<=baseline.barrier)continue;
