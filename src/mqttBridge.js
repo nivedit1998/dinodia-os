@@ -541,6 +541,11 @@ class MqttBridge {
       const lastSeenAt = sourceObservedAt && observationContract.ok
         && (!previousLastSeenAt || Date.parse(sourceObservedAt) > Date.parse(previousLastSeenAt))
         ? sourceObservedAt : null;
+      // A battery reading from a device the hub changed the reporting of: the drain watch needs every one, whatever else the report holds.
+      // Only a genuine live report counts (never a retained replay), stamped with the device's own time.
+      if (existing && sourceObservedAt && Number.isFinite(Number(value?.battery)) && value.battery !== null && value.battery !== "") {
+        await this.notifyObservationPolicy("onBatteryReading", id, Number(value.battery), sourceObservedAt);
+      }
       // Invalidate a missed promise before Store duration admission. Updating
       // cadence afterward could admit the first post-gap sample under old proof.
       for (const [property, observedAt] of Object.entries(sourceObservedAtByStateKey)) {

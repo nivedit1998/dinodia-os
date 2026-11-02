@@ -80,10 +80,11 @@ test("profiles match the exact integration, model, endpoint, property and role",
   assert.equal(matchObservationProfile(device, running)?.id, "zigbee.sonoff.trvzb.running_state");
   assert.equal(matchObservationProfile(device, temperature), null, "no profile for room temperature yet");
   assert.equal(matchObservationProfile(device, { ...running, endpointId: "2" }), null, "a different endpoint never matches");
-  assert.equal(matchObservationProfile({ ...device, metadata: { ...device.metadata, model: "TRVZB-2" } }, running), null, "a different model never matches");
+  assert.notEqual(matchObservationProfile({ ...device, metadata: { ...device.metadata, model: "TRVZB-2" } }, running)?.id, "zigbee.sonoff.trvzb.running_state",
+    "a different model never gets the TRVZB profile (it is only ever a generic, drain-watched battery profile)");
   assert.equal(matchObservationProfile({ ...device, protocol: "matter" }, running), null);
   const light = normalizeZigbeeDevice(JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures/zigbee/dimmable-light.json"), "utf8")));
-  const mains = { ...light, metadata: { ...light.metadata, power_source: "Mains (single phase)" } };
+  const mains = { ...light, metadata: { ...light.metadata, power_source: "Mains (single phase)", endpoints: { 1: { clusters: { input: ["genOnOff"], output: [] } } } } };
   const powerOf = (device) => Object.values(device.entities).find((entity) => entity.capability?.semanticRole === "power");
   assert.equal(matchObservationProfile(light, powerOf(light)), null, "a light whose power source is unknown is never configured automatically");
   assert.equal(matchObservationProfile(mains, powerOf(mains))?.id, "zigbee.generic.mains_light.on_off", "a mains on/off device of any brand is profiled");
@@ -95,7 +96,7 @@ test("profiles match the exact integration, model, endpoint, property and role",
 test("mains on/off reporting is automatic for any brand and never for battery or unknown power", () => {
   const light = normalizeZigbeeDevice(JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures/zigbee/dimmable-light.json"), "utf8")));
   const powerOf = (device) => Object.values(device.entities).find((entity) => entity.capability?.semanticRole === "power");
-  const asDevice = (overrides) => ({ ...light, metadata: { ...light.metadata, ...overrides } });
+  const asDevice = (overrides) => ({ ...light, metadata: { ...light.metadata, endpoints: { 1: { clusters: { input: ["genOnOff"], output: [] } } }, ...overrides } });
   for (const brand of [["SONOFF", "ZBM5-1C-80/86"], ["IKEA", "TRADFRI bulb"], ["Aqara", "Wall switch"]]) {
     const device = asDevice({ manufacturer: brand[0], model: brand[1], power_source: "Mains (single phase)" });
     const profile = matchObservationProfile(device, powerOf(device));

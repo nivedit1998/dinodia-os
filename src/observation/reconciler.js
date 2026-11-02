@@ -46,6 +46,15 @@ const DEFAULTS = Object.freeze({
   cadenceReportsToVerify: 4, // 3 consecutive on-time gaps
   silenceFactor: 3, // no report for 3 x max interval while reachable -> read back (detects resets)
   maxReportTimes: 12,
+  // Battery drain watch (battery devices configured automatically). A device whose battery falls faster than this, or runs low,
+  // has its original reporting setting restored and is never configured again without a person approving it.
+  batteryMaxPercentPerDay: 1.0, // about a 100 day life; a normal radiator valve loses roughly 0.1 to 0.3 per day
+  batteryMinWindowMs: 48 * 3_600_000, // never judge a rate from less than two days of readings
+  batteryWindowMs: 14 * 24 * 3_600_000, // the rate is measured over the last two weeks
+  batteryMinDropPoints: 2, // battery levels are whole numbers; one point is noise
+  batteryLowPercent: 10,
+  batteryReplacedJump: 15, // a rise this large is a new battery: start the watch again
+  batteryMaxSamples: 120,
 });
 
 function recordKey(deviceId, profileId, endpoint) {
@@ -86,7 +95,7 @@ class ObservationReconciler {
     // Serialize policy transitions so an older awaited Store write cannot replace
     // a newer response or publish a duplicate request.
     this.operationQueue = Promise.resolve();
-    for (const name of ["onInventory", "onAvailability", "onValueObserved", "onBridgeResponse", "tick"]) {
+    for (const name of ["onInventory", "onAvailability", "onValueObserved", "onBridgeResponse", "onBatteryReading", "tick"]) {
       const method = this[name];
       this[name] = (...args) => {
         const operation = this.operationQueue.then(() => method.apply(this, args));
@@ -101,6 +110,7 @@ class ObservationReconciler {
       deviceId: record.deviceId, profileId: record.profileId, endpoint: record.endpoint, state: record.state,
       readBack: record.readBack || null, cadence: record.cadence || null, attempts: record.attempts || 0,
       nextAttemptAt: record.nextAttemptAt || null, lastError: record.lastError || null,
+      batteryWatch: record.batteryWatch ? { status: record.batteryWatch.status, reason: record.batteryWatch.reason || null } : null,
     }));
   }
 
@@ -205,7 +215,11 @@ class ObservationReconciler {
           await this.save({ key, deviceId, deviceLifecycleId: device.stateEvidenceLifecycleId, ieee: fingerprint.ieee, friendlyName: String(raw.friendly_name || raw.ieee_address),
             profileId: profile.id, profileVersion: profile.version, endpoint, cluster: profile.cluster, attribute: profile.attribute,
             desired: profile.desired, ...binding,
-            approvedForAutomaticConfiguration: profile.approvedForAutomaticConfiguration === true,
+            approvedForAutomaticConfiguration: existing?.revertedForBattery ? false : profile.approvedForAutomaticConfiguration === true,
+            requiresBatteryWatch: profile.requiresBatteryWatch === true,
+            // A device that was restored for its battery stays restored: a new firmware or profile never re-enables it on its own.
+            ...(existing?.revertedForBattery ? { revertedForBattery: existing.revertedForBattery, originalReporting: existing.originalReporting,
+              batteryWatch: existing.batteryWatch, desired: existing.desired } : {}),
             fingerprint, cached, readBack: null, cadence: null, state: STATES.UNKNOWN,
             attempts: 0, attemptsWindowStartAt: now, nextAttemptAt: now, lastError: null, updatedAt: now });
           continue;
@@ -364,18 +378,89 @@ class ObservationReconciler {
     }
     if (now - this.lastCommandAt < this.options.commandSpacingMs) return null;
     if ([...this.pending.values()].length) return null; // one outstanding request at a time
+    const wantsConfigure = (record) => record.state === STATES.DRIFTED || (record.state === STATES.PENDING_DELIVERY && record.retryKind === "configure");
+    // The first due record that is allowed to act: one that may not be configured yet (budget used, or a battery device still waiting for
+    // its original setting or battery level) must not hold up the others.
     const due = [...this.records.values()]
       .filter((record) => [STATES.UNKNOWN, STATES.DRIFTED, STATES.CADENCE_FAILED, STATES.PENDING_DELIVERY].includes(record.state))
       .filter((record) => !record.suspended && (record.nextAttemptAt || 0) <= now && this.isAvailable(record.deviceId))
-      .sort((a, b) => (a.nextAttemptAt || 0) - (b.nextAttemptAt || 0))[0];
+      .sort((a, b) => (a.nextAttemptAt || 0) - (b.nextAttemptAt || 0))
+      .find((record) => !wantsConfigure(record) || this.mayConfigure(record, now));
     if (!due) return null;
-    const configure = due.state === STATES.DRIFTED || (due.state === STATES.PENDING_DELIVERY && due.retryKind === "configure");
-    if (configure && !this.mayConfigure(due, now)) return null;
-    return this.send(due, configure ? "configure" : "read", now);
+    return this.send(due, wantsConfigure(due) ? "configure" : "read", now);
+  }
+
+  /// The device's last known battery level (whole percent), or null.
+  batteryLevel(deviceId) {
+    const device = this.store.getDevice?.(String(deviceId));
+    const entity = Object.values(device?.entities || {}).find((item) => item && String(item.stateKey || "") === "battery");
+    const value = entity?.state;
+    const level = typeof value === "object" && value !== null && Object.hasOwn(value, "state") ? value.state : value;
+    return Number.isFinite(Number(level)) && level !== null && level !== "" ? Number(level) : null;
+  }
+
+  /// Judges a watched battery device from its readings. Returns why it must be restored, or null.
+  evaluateBattery(watch) {
+    const samples = Array.isArray(watch?.samples) ? watch.samples : [];
+    const last = samples.at(-1);
+    if (!last) return null;
+    if (last.level <= this.options.batteryLowPercent) return { reason: "battery_low", level: last.level };
+    const floor = last.at - this.options.batteryWindowMs;
+    const reference = samples.find((sample) => sample.at >= floor) || samples[0];
+    const windowMs = last.at - reference.at;
+    const drop = reference.level - last.level;
+    if (windowMs >= this.options.batteryMinWindowMs && drop >= this.options.batteryMinDropPoints) {
+      const perDay = drop / (windowMs / 86_400_000);
+      if (perDay > this.options.batteryMaxPercentPerDay) return { reason: "battery_drain_high", level: last.level, perDay: Math.round(perDay * 100) / 100 };
+    }
+    return null;
+  }
+
+  /// A genuine battery reading from a device whose reporting the hub changed. Watches the drain; restores the original setting if needed.
+  async onBatteryReading(deviceId, level, observedAtIso) {
+    const at = Date.parse(String(observedAtIso || ""));
+    if (!Number.isFinite(at) || !Number.isFinite(Number(level)) || Number(level) < 0 || Number(level) > 100) return;
+    for (const record of this.records.values()) {
+      const watch = record.batteryWatch;
+      if (record.deviceId !== String(deviceId) || !record.requiresBatteryWatch || !watch || watch.status === "reverted") continue;
+      const samples = Array.isArray(watch.samples) ? watch.samples : [];
+      const previous = samples.at(-1);
+      if (previous && at <= previous.at) continue;
+      let next = [...samples, { at, level: Number(level) }].slice(-this.options.batteryMaxSamples);
+      if (previous && Number(level) - previous.level >= this.options.batteryReplacedJump) next = [{ at, level: Number(level) }]; // new battery
+      const updated = { ...record, batteryWatch: { ...watch, samples: next, status: "watching" } };
+      const verdict = this.evaluateBattery(updated.batteryWatch);
+      if (verdict) { await this.restoreOriginal(updated, verdict); continue; }
+      this.records.set(record.key, updated); // readings are frequent: persisted with the next ordinary save
+      if (!previous || at - previous.at >= 6 * 3_600_000) await this.save(updated);
+    }
+  }
+
+  /// Puts a battery device's reporting back to exactly what it was before the hub changed it, and stops managing it.
+  async restoreOriginal(record, verdict) {
+    const original = record.originalReporting;
+    if (!original) return;
+    const now = this.clock();
+    this.reportTimes.delete(record.key);
+    for (const [transaction, pending] of this.pending) if (pending.key === record.key) this.pending.delete(transaction);
+    await this.save({ ...record,
+      batteryWatch: { ...record.batteryWatch, status: "reverted", reason: verdict.reason, revertedAt: new Date(now).toISOString() },
+      revertedForBattery: { at: new Date(now).toISOString(), reason: verdict.reason, level: verdict.level ?? null, perDay: verdict.perDay ?? null },
+      desired: { minimumReportInterval: original.minimumReportInterval, maximumReportInterval: original.maximumReportInterval,
+        reportableChange: original.reportableChange ?? 0 },
+      approvedForAutomaticConfiguration: true, // only to put the original back
+      state: STATES.DRIFTED, attempts: 0, attemptsWindowStartAt: now, nextAttemptAt: now, pendingRequest: null,
+      cadence: null, cadenceEvidence: [], evidenceVerifiedAt: null, lastError: "restoring_for_battery", updatedAt: now });
   }
 
   mayConfigure(record, now) {
     if (record.approvedForAutomaticConfiguration === false) return false;
+    // Never change a battery device unless the change can be undone and watched: its original setting must have been read back, and
+    // its battery level must be known right now. Restoring the original setting (revertedForBattery) is always allowed.
+    if (record.requiresBatteryWatch && !record.revertedForBattery) {
+      const level = this.batteryLevel(record.deviceId);
+      if (!record.originalReporting || level === null || level <= this.options.batteryLowPercent) return false; // never start on a weak battery
+    }
     const windowStart = Number(record.attemptsWindowStartAt || 0);
     const attempts = now - windowStart > 24 * 3_600_000 ? 0 : Number(record.attempts || 0);
     return attempts < this.options.maxConfigureAttemptsPerDay;
@@ -450,7 +535,7 @@ class ObservationReconciler {
     // A late reply (after the request timed out into pending delivery) still counts.
     const key = pending?.key || [...this.records.values()].find((record) => record.lastTransaction === transaction)?.key;
     this.pending.delete(transaction);
-    const record = key ? this.records.get(key) : null;
+    let record = key ? this.records.get(key) : null;
     if (!record) return;
     if (record.lastTransaction !== transaction || record.lastRequestKind && record.lastRequestKind !== kind) return;
     this.interrupted.delete(record.key);
@@ -467,8 +552,11 @@ class ObservationReconciler {
       return this.deliveryFailed(record, 'bridge_request_rejected');
     }
     if (kind === "configure") {
-      // Accepted is not proof: read the device back next.
-      return this.save({ ...record, state: STATES.UNKNOWN, pendingRequest: null, nextAttemptAt: now, lastError: null, updatedAt: now });
+      // Accepted is not proof: read the device back next. A battery device starts its drain watch from the level it has right now.
+      const level = record.requiresBatteryWatch && !record.revertedForBattery && !record.batteryWatch ? this.batteryLevel(record.deviceId) : null;
+      const watch = level === null ? {} : { configuredOnce: true,
+        batteryWatch: { status: "watching", startedAt: new Date(now).toISOString(), samples: [{ at: now, level }] } };
+      return this.save({ ...record, ...watch, state: STATES.UNKNOWN, pendingRequest: null, nextAttemptAt: now, lastError: null, updatedAt: now });
     }
     const config = Array.isArray(message?.data?.configs) && message.data.configs.length === 1 ? message.data.configs[0] : null;
     const attributeId = { runningState: 41, onOff: 0, currentLevel: 0 }[record.attribute];
@@ -492,6 +580,19 @@ class ObservationReconciler {
       || !Number.isInteger(readBack.maximumReportInterval) || readBack.minimumReportInterval < 0
       || readBack.maximumReportInterval < 0 || readBack.minimumReportInterval > 65535 || readBack.maximumReportInterval > 65535)) {
       return this.deliveryFailed(record, "invalid_reporting_reply");
+    }
+    // A battery device's setting is read once, before the hub ever changes it, so it can always be put back exactly.
+    if (record.requiresBatteryWatch && !record.originalReporting && !record.configuredOnce && !record.revertedForBattery) {
+      const original = status === ZCL_SUCCESS ? { minimumReportInterval: readBack.minimumReportInterval, maximumReportInterval: readBack.maximumReportInterval,
+        reportableChange: readBack.reportableChange ?? 0 }
+        : status === ZCL_NOT_FOUND ? { minimumReportInterval: 0, maximumReportInterval: 65535, reportableChange: 0, wasAbsent: true } : null; // 65535 = no periodic reporting
+      if (original) record = { ...record, originalReporting: original };
+    }
+    // The original setting is back after a battery restore: stop managing this device and say why.
+    if (record.revertedForBattery && status === ZCL_SUCCESS && reportingMatches(readBack, record.desired)) {
+      this.reportTimes.delete(record.key);
+      return this.save({ ...record, state: STATES.UNSUPPORTED, readBack, pendingRequest: null, approvedForAutomaticConfiguration: false,
+        cadence: null, cadenceEvidence: [], evidenceVerifiedAt: null, lastError: "reverted_for_battery", updatedAt: now });
     }
     const genericGuarantee = record.profileId.startsWith('generic.') && status === ZCL_SUCCESS && readBack.maximumReportInterval > 0
       && readBack.maximumReportInterval < 65535 && readBack.minimumReportInterval <= readBack.maximumReportInterval;

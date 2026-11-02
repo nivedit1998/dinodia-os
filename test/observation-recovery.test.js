@@ -131,6 +131,8 @@ test('a larger policy lifetime applies only to a genuinely newer observation', a
     assert.ok(deadline);
     const updated = store.getDevice(device.id);
     updated.metadata.model = 'unknown-model'; updated.metadata.model_id = 'unknown-model';
+    // A valve whose endpoint does not carry the thermostat cluster matches no profile (an endpoint is never guessed), so the fallback applies.
+    updated.metadata.endpoints = { 1: { clusters: { input: ['genBasic'] } } };
     await store.upsertDevice(updated);
     assert.equal(heat().sourceValidUntil, deadline, 'fallback 1800 s cannot extend the existing 660 s observation');
     const at = new Date(t + 300_000).toISOString();

@@ -28,6 +28,12 @@ const APPROVED_MODELS = Object.freeze([]);
 // A device is "mains powered" when its radio says so. Battery and unknown power sources are never configured automatically:
 // a wrong reporting setting can drain a battery, so those need their own exact, owner-approved profile (like the TRVZB).
 const MAINS_POWER_SOURCE = /mains|dc source|single.phase|three.phase/i;
+function isBatteryPowered(device) { return /battery/i.test(String(device?.metadata?.power_source || "")); }
+// A battery device is only configured when its battery level is readable, because the drain watch needs it.
+function batteryEntity(device) {
+  return Object.values(device?.entities || {}).find((entity) => entity && String(entity.stateKey || "") === "battery"
+    && entity.capability?.readable === true) || null;
+}
 function isMainsPowered(device) {
   return MAINS_POWER_SOURCE.test(String(device?.metadata?.power_source || ""))
     && !/battery/i.test(String(device?.metadata?.power_source || ""));
@@ -76,6 +82,52 @@ const PROFILES = Object.freeze([
     // devices gated"): the hub asks a mains-powered device to report its on/off state on change and at least every 5 minutes, reads
     // the setting back, verifies the cadence from real reports, and is bound by the reconciler's daily write budget, one-request-at-a-time
     // spacing and silence detection. The exact endpoint must carry the genOnOff cluster; otherwise there is no match.
+    approvedForAutomaticConfiguration: true,
+    requiresModelApproval: false,
+  }),
+  Object.freeze({
+    // Mains-powered heating devices with a standard thermostat (boiler receivers, wall thermostats, mains radiator controllers): any brand.
+    id: "zigbee.generic.mains_thermostat.heat_demand",
+    version: 1,
+    integration: "zigbee",
+    manufacturer: null,
+    model: null,
+    endpoint: null,
+    cluster: "hvacThermostat",
+    attribute: "runningState",
+    property: "running_state",
+    semanticRole: "active_heat_demand",
+    power: "mains",
+    requiresMainsPower: true,
+    strategy: "report_on_change_plus_periodic",
+    desired: Object.freeze({ minimumReportInterval: 0, maximumReportInterval: 300, reportableChange: 0 }),
+    lifetimeSeconds: periodicLifetime(300),
+    // Owner-approved 2 Nov 2026, same rails as the mains on/off profile.
+    approvedForAutomaticConfiguration: true,
+    requiresModelApproval: false,
+  }),
+  Object.freeze({
+    // Battery radiator valves and thermostats of any brand. The exact TRVZB profile above wins for that model. A battery device is
+    // configured only when (a) its original reporting setting was read back first so it can be restored, (b) its battery level is
+    // readable, and (c) the reconciler's battery drain watch stays on: if the battery drains faster than the limit, or runs low, the
+    // original setting is restored automatically and the device is never configured again without a person approving it.
+    id: "zigbee.generic.battery_thermostat.heat_demand",
+    version: 1,
+    integration: "zigbee",
+    manufacturer: null,
+    model: null,
+    endpoint: null,
+    cluster: "hvacThermostat",
+    attribute: "runningState",
+    property: "running_state",
+    semanticRole: "active_heat_demand",
+    power: "battery",
+    requiresBatteryPower: true,
+    requiresBatteryReading: true,
+    requiresBatteryWatch: true,
+    strategy: "report_on_change_plus_periodic",
+    desired: Object.freeze({ minimumReportInterval: 0, maximumReportInterval: 600, reportableChange: 0 }),
+    lifetimeSeconds: periodicLifetime(600),
     approvedForAutomaticConfiguration: true,
     requiresModelApproval: false,
   }),
@@ -142,8 +194,16 @@ function matchObservationProfile(device, entity, { approvedModels = APPROVED_MOD
     if (profile.manufacturer && normalized(profile.manufacturer) !== manufacturer) return false;
     if (profile.model && normalized(profile.model) !== model) return false;
     if (profile.endpoint !== null && profile.endpoint !== resolvedEndpoint(device, entity, profile.cluster)) return false;
+    // A generic profile names no endpoint, so the control's own endpoint must be one that really carries the cluster: never a guess.
+    if (profile.endpoint === null && profile.cluster) {
+      const endpoint = resolvedEndpoint(device, entity, profile.cluster);
+      const input = device?.metadata?.endpoints?.[endpoint]?.clusters?.input;
+      if (!endpoint || !Array.isArray(input) || !input.includes(profile.cluster)) return false;
+    }
     if (profile.propertyPattern ? !profile.propertyPattern.test(property) : profile.property && profile.property !== property) return false;
     if (profile.requiresMainsPower && !isMainsPowered(device)) return false;
+    if (profile.requiresBatteryPower && !isBatteryPowered(device)) return false;
+    if (profile.requiresBatteryReading && !batteryEntity(device)) return false;
     if (profile.semanticRole && profile.semanticRole !== role) return false;
     if (profile.requiresModelApproval && !approvedModels.some((entry) => entry.profileId === profile.id
       && normalized(entry.manufacturer) === manufacturer && normalized(entry.model) === model)) return false;
@@ -180,6 +240,8 @@ function reportingMatches(actual, desired) {
 
 module.exports = {
   APPROVED_MODELS,
+  batteryEntity,
+  isBatteryPowered,
   isMainsPowered,
   DELIVERY_GRACE_SECONDS,
   MISSED_REPORTS_TOLERATED,

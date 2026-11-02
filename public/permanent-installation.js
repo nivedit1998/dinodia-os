@@ -97,7 +97,13 @@
   // The last column is the usage-chart category. Any on/off device records its on/off time ("Plug or switch"), so a plain switch, plug,
   // fan or anything else that turns on and off is counted too; a device with no on/off at all is simply not charted.
   const TYPES = [["Light", "LIGHT", "💡"], ["Radiator", "RADIATOR", "♨"], ["Boiler", "BOILER", "🔥"], ["Plug or switch", "SOCKET", "🔌"], ["Other", "ONOFF_IF_ANY", "•"]];
-  function categoryFor(label, category) { return category === "ONOFF_IF_ANY" ? (state.selected?.onOff === true ? "SOCKET" : "NONE") : category; }
+  // A boiler wired through a plain on/off relay says nothing about heat itself, so its on/off time is recorded as on/off time
+  // (the relay being on is the boiler being called). A device that reports heat production keeps the Boiler category.
+  function categoryFor(label, category) {
+    if (category === "ONOFF_IF_ANY") return state.selected?.onOff === true ? "SOCKET" : "NONE";
+    if (category === "BOILER" && state.selected?.suggestedKind !== "Boiler" && state.selected?.onOff === true) return "SOCKET";
+    return category;
+  }
   // A name the installer has not written themselves: empty, the device's own default, a code, or the last suggestion we filled in.
   function nameIsAutomatic(value, lastSuggestion) { const text = String(value || "").trim(); return !text || text === state.defaultName || text === lastSuggestion || isMachineName(text); }
   function applySuggestedKind() {

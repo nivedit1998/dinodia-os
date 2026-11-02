@@ -33,7 +33,11 @@ test('next policy: discovery of an existing exact reporting capability is not ma
   assert.equal(discovered.strategy, 'verify_existing_reporting');
   assert.equal(discovered.approvedForAutomaticConfiguration, false);
   assert.equal(discovered.lifetimeSeconds, undefined, 'discovery alone grants no lifetime');
-  assert.equal(matchObservationProfile(generic, control(generic)), null, 'legacy write approval must not broaden');
+  // Owner decision 2 Nov 2026: any-brand battery valves are configured, but only through the generic profile that keeps a battery drain
+  // watch; the exact TRVZB approval itself is not broadened to other models.
+  const generalMatch = matchObservationProfile(generic, control(generic));
+  assert.ok(!generalMatch || generalMatch.id === 'zigbee.generic.battery_thermostat.heat_demand', 'only the drain-watched generic profile may apply');
+  assert.notEqual(generalMatch?.id, 'zigbee.sonoff.trvzb.running_state');
 });
 test('writable thermostat mode is not measured heat demand (existing safety guard)', () => {
   const d = device('SONOFF', 'TRVZB');
