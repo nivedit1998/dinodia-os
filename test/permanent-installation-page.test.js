@@ -161,7 +161,7 @@ test("permanent-device review offers an optional analytics category and sends th
   assert.match(markup, /value="NONE"[^>]*>None/);
   page.elements.get("candidate-list").children[0].children[2].listeners.get("click")();
   page.elements.get("area").value = areaId;
-  page.elements.get("label").value = "Radiator";
+  page.elements.get("label").value = "Radiator"; page.elements.get("device-type").value = "Radiator";
   page.elements.get("name").value = "Room 1 Radiator";
   page.elements.get("analytics-category").value = "RADIATOR";
   await page.elements.get("select").listeners.get("click")();
@@ -292,7 +292,7 @@ test("normal background status polls keep the reviewed Area and action controls 
   } });
   await page.flush();
   page.elements.get("area").value = areaId;
-  page.elements.get("label").value = "Radiator";
+  page.elements.get("label").value = "Radiator"; page.elements.get("device-type").value = "Radiator";
   page.elements.get("name").value = "Room 1 Radiator";
 
   const poll = [...page.timers].find((timer) => timer.delay === 3000);
@@ -344,7 +344,7 @@ test("candidate review remains open across session refreshes without losing the 
   assert.match(candidate.children[1].textContent, /SONOFF.*TRVZB.*Ready to set up/);
   candidate.children[2].listeners.get("click")();
   page.elements.get("area").value = areaId;
-  page.elements.get("label").value = "Radiator";
+  page.elements.get("label").value = "Radiator"; page.elements.get("device-type").value = "Radiator";
   page.elements.get("name").value = "Room 1 Radiator";
   assert.equal(page.elements.get("device-result").hidden, false);
 
@@ -385,7 +385,7 @@ test("descriptor conflict returns the device to explicit re-review instead of tr
   } });
   await page.flush();
   page.elements.get("area").value = areaId;
-  page.elements.get("label").value = "Radiator";
+  page.elements.get("label").value = "Radiator"; page.elements.get("device-type").value = "Radiator";
   page.elements.get("name").value = "Room 1 Radiator";
 
   await page.elements.get("install").listeners.get("click")();
@@ -422,6 +422,8 @@ test("stale discovery revision is refreshed and retried once for the same review
     const body = JSON.parse(options.body);
     assert.equal(body.expectedRevision, 5, "the one retry must use the refreshed revision");
     assert.equal(body.candidateRef, candidateRef, "retry must target the same candidate, never a different device");
+    assert.equal(body.customerLabel, "Radiator", "the label is the kind of device, so the app groups it with its kind");
+    assert.equal(body.name, "Room 1 Radiator", "the name is its own field");
     return response(200, { ...session, status: "selected", revision: 6, selectedCandidateRef: candidateRef, selectedAreaId: areaId,
       selectedName: body.name, selectedCustomerLabel: body.customerLabel, catalogueStatus: "ready",
       selectedControls: [{ name: "Target temperature", semanticRole: "target_temperature", kind: "number", readable: true, writable: true }] });
@@ -429,7 +431,7 @@ test("stale discovery revision is refreshed and retried once for the same review
   await page.flush();
   page.elements.get("candidate-list").children[0].children[2].listeners.get("click")();
   page.elements.get("area").value = areaId;
-  page.elements.get("label").value = "Radiator";
+  page.elements.get("label").value = "Radiator"; page.elements.get("device-type").value = "Radiator";
   page.elements.get("name").value = "Room 1 Radiator";
 
   await page.elements.get("select").listeners.get("click")();
@@ -453,7 +455,7 @@ test('background polling preserves actionable review errors instead of erasing t
   page.elements.get('candidate-list').children[0].children[2].listeners.get('click')();
   page.elements.get('area').value = areaId;
   page.elements.get('name').value = 'Room 2 device';
-  page.elements.get('label').value = 'Radiator';
+  page.elements.get('label').value = 'Radiator'; page.elements.get("device-type").value = "Radiator";
   await page.elements.get('select').listeners.get('click')();
   assert.match(page.elements.get('error').textContent, /Cloud review rejected/);
   const poll = [...page.timers].find(timer => timer.delay === 3000);

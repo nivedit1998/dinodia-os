@@ -87,24 +87,37 @@
   function openCandidate(candidate) {
     state.selected = candidate; $("device-result").hidden = false;
     const name = friendlyDeviceName(candidate).slice(0, 40);
-    $("label").value = name; $("name").value = name;
+    $("label").value = name; $("name").value = name; state.defaultName = name;
     $("analytics-category").value = state.session?.selectedCandidateRef === candidate.candidateRef ? (state.session.selectedAnalyticsCategory || "NONE") : "NONE";
     // One permitted room needs no choosing.
     if (!$("area").value && state.context?.areas?.length === 1) $("area").value = state.context.areas[0].id;
-    state.editing = false; renderSuggestions(); clearError(); updateButtons();
+    state.editing = false; $("device-type").value = ""; state.lastSuggestion = ""; $("type-choices").dataset.signature = ""; renderSuggestions(); clearError(); updateButtons();
   }
-  // Tap a name instead of typing it: "<room> Light", "<room> Radiator" and so on. Rebuilt only when the room changes.
-  function renderSuggestions() {
-    const box = $("name-suggestions"); if (!box) return;
+  // What kind of device it is decides its heading in the app (all Lights together) and its usage charts, so it is chosen, never typed.
+  const TYPES = [["Light", "LIGHT", "💡"], ["Radiator", "RADIATOR", "♨"], ["Boiler", "BOILER", "🔥"], ["Other", "NONE", "•"]];
+  // A name the installer has not written themselves: empty, the device's own default, a code, or the last suggestion we filled in.
+  function nameIsAutomatic(value, lastSuggestion) { const text = String(value || "").trim(); return !text || text === state.defaultName || text === lastSuggestion || isMachineName(text); }
+  function suggestedName() {
     const area = (state.context?.areas || []).find((row) => row.id === $("area").value);
-    const signature = area ? `${area.id}:${area.name}` : "";
+    const type = $("device-type").value;
+    return area && type ? `${area.name} ${type === "Other" ? "Device" : type}`.slice(0, 40) : "";
+  }
+  function renderSuggestions() {
+    const box = $("type-choices"); if (!box || typeof box.replaceChildren !== "function") return;
+    const chosen = $("device-type").value;
+    const signature = `built:${chosen}`;
     if (box.dataset.signature === signature) return;
     box.dataset.signature = signature; box.replaceChildren();
-    if (!area) return;
-    for (const [word, category] of [["Light", "LIGHT"], ["Radiator", "RADIATOR"], ["Switch", "NONE"], ["Plug", "NONE"]]) {
-      const chip = document.createElement("button"); chip.type = "button"; chip.textContent = `${area.name} ${word}`;
-      chip.addEventListener("click", () => { $("label").value = chip.textContent; $("name").value = chip.textContent; if (category !== "NONE") $("analytics-category").value = category; updateButtons(); });
-      box.append(chip);
+    for (const [label, category, icon] of TYPES) {
+      const button = document.createElement("button"); button.type = "button"; button.textContent = `${icon} ${label === "Other" ? "Something else" : label}`;
+      button.setAttribute?.("role", "radio"); button.setAttribute?.("aria-checked", String(label === chosen));
+      button.addEventListener("click", () => {
+        const previousSuggestion = suggestedName(); $("device-type").value = label; $("analytics-category").value = category;
+        // Fill the name for them unless they have written their own.
+        if (nameIsAutomatic($("label").value, previousSuggestion)) { $("label").value = suggestedName(); $("name").value = $("label").value; }
+        state.lastSuggestion = suggestedName(); box.dataset.signature = ""; renderSuggestions(); clearError(); updateButtons();
+      });
+      box.append(button);
     }
   }
   // The "are you sure" step: say back exactly what will be added, in plain words.
@@ -425,10 +438,11 @@
   }
   async function chooseCandidate() {
     if (!state.authorityVerified || !state.session || !state.selected) return;
-    const areaId = $("area").value; const customerLabel = $("label").value.trim(); const name = $("name").value.trim();
+    const areaId = $("area").value; const typeLabel = $("device-type").value; const name = ($("name").value.trim() || $("label").value.trim()); const customerLabel = typeLabel;
     if (!areaId) { showError(new Error("Choose which room this device is in.")); return; }
-    if (customerLabel.length < 2) { showError(new Error("Give the device a name, for example “Room 2 Light”.")); return; }
-    if (isMachineName(customerLabel)) { showError(new Error("That name is a technical code. Give it a name the customer will recognise, for example “Room 2 Light”.")); return; }
+    if (!typeLabel) { showError(new Error("Choose what kind of device it is.")); return; }
+    if (name.length < 2) { showError(new Error("Give the device a name, for example “Room 2 Light”.")); return; }
+    if (isMachineName(name)) { showError(new Error("That name is a technical code. Give it a name the customer will recognise, for example “Room 2 Light”.")); return; }
     setBusy(true); clearError();
     try {
       const path = `/_dinodia/installer/commissioning/sessions/${encodeURIComponent(state.session.sessionId)}`;
@@ -488,7 +502,11 @@
   $("select").addEventListener("click", () => chooseCandidate());
   $("install").addEventListener("click", () => complete("install"));
   $("label").addEventListener("input", () => { $("name").value = $("label").value; });
-  $("area").addEventListener("change", () => { renderSuggestions(); clearError(); updateButtons(); });
+  $("area").addEventListener("change", () => {
+    const old = $("label").value; const typeNow = $("device-type").value;
+    if (typeNow && nameIsAutomatic(old, state.lastSuggestion)) { $("label").value = suggestedName(); $("name").value = $("label").value; }
+    state.lastSuggestion = suggestedName(); renderSuggestions(); clearError(); updateButtons();
+  });
   $("change-details").addEventListener("click", () => { state.editing = true; clearError(); updateButtons(); });
   $("view-only").addEventListener("click", () => complete("view_only"));
   $("retain-unsupported").addEventListener("click", () => complete("retain_unsupported"));

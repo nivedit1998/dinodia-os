@@ -806,7 +806,10 @@ class NativeCommissioningService {
       if (session.cleanup?.state === "PRESERVED_FOR_REVIEW" && isExactCandidate) return !hasCurrentCanonicalDevicePolicy(policy);
       // A settled (cancelled, expired or failed) session never hides a device that already has current canonical
       // ownership: its registration was finished by a later session, so the old attempt is only history.
-      if (["cancelled", "expired", "failed"].includes(session.status) && !isPending && hasCurrentCanonicalDevicePolicy(policy)) return false;
+      // An old attempt that is finished, or whose cleanup is complete although its status still reads "cleanup pending", is only history.
+      const settled = ["cancelled", "expired", "failed"].includes(session.status)
+        || (String(session.status).endsWith("_cleanup_pending") && session.cleanup?.state === "COMPLETE");
+      if (settled && !isPending && hasCurrentCanonicalDevicePolicy(policy)) return false;
       return session.status !== "completed" && (isExactCandidate || isPending
         || (device && String(device.protocol || "").toLowerCase() === session.protocol && !this.isBaselineDevice(session, device)));
     });
