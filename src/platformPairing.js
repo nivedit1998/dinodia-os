@@ -110,6 +110,9 @@ class PlatformPairing {
     this.onBackupRecoveryComplete = onBackupRecoveryComplete || (async () => false);
     this.pendingEndpointHeartbeat = false;
     this.queuedImmediateSync = false;
+    this.queuedExplicitSync = false;
+    this.immediateSync = null;
+    this.endpointHeartbeatRequestRevision = 0;
     this.lastSentUpsertShape = new Map(); // aggregateId -> shape of the last device.upsert sent
     this.runtime = {
       kind: String(runtime?.kind || "dinodia_os"),
@@ -406,7 +409,11 @@ class PlatformPairing {
     return observation;
   }
 
-  async requestImmediateHeartbeat() {
+  async requestImmediateHeartbeat({ periodic = false } = {}) {
+    // Unchanged transport samples use the existing bounded idle gate. A real
+    // endpoint/recovery-state change still forces fresh policy and heartbeat.
+    if (periodic) return this.scheduledSync();
+    this.endpointHeartbeatRequestRevision += 1;
     this.pendingEndpointHeartbeat = true;
     if (this.syncing) {
       this.queuedImmediateSync = true;
@@ -486,6 +493,7 @@ class PlatformPairing {
 
   async publishSignedHeartbeat(nativeIdentity) {
     return this.withLanEndpointReport(async () => {
+      const requestRevision = this.endpointHeartbeatRequestRevision;
       const lanEndpoint = await this.buildLanEndpointObservation(nativeIdentity.generation);
       const lanTlsIdentity = this.getLanTlsIdentity();
       const heartbeat = await this.requestWithHubIdentity("/api/hub-agent/v2/heartbeat", {
@@ -502,7 +510,10 @@ class PlatformPairing {
         throw Object.assign(new Error("Platform acknowledged an unknown customer LAN certificate generation"), { code: "lan_tls_ack_mismatch" });
       }
       this.lastHeartbeatAt = this.clock();
-      this.pendingEndpointHeartbeat = this.queuedImmediateSync;
+      this.pendingEndpointHeartbeat = this.endpointHeartbeatRequestRevision !== requestRevision;
+      // Requests already represented by this report need no second policy round.
+      // A newer endpoint request remains pending, including during the HTTP await.
+      this.queuedImmediateSync = this.pendingEndpointHeartbeat;
       return heartbeat;
     });
   }
@@ -619,6 +630,7 @@ class PlatformPairing {
   }
 
   scheduledSync() {
+    if (this.stopped || this.syncing) return Promise.resolve(null);
     const outbox = this.store.getSyncOutbox?.();
     const ack = Number(outbox?.acknowledgedSequence || 0);
     // Routine telemetry alone does not wake an idle hub; it rides on the next
@@ -632,9 +644,22 @@ class PlatformPairing {
     return this.syncNow();
   }
 
+  queueImmediateSync() {
+    if (this.stopped || this.immediateSync) return;
+    this.immediateSync = setImmediate(() => {
+      this.immediateSync = null;
+      this.syncNow().catch(() => {});
+    });
+  }
+
   async syncNow() {
     if (this.stopped) return null;
-    if (this.syncing) return null;
+    if (this.syncing) {
+      // Explicit security/installer/registry wakeups arriving late in a cycle
+      // must not disappear. Scheduler ticks are filtered before this method.
+      this.queuedExplicitSync = true;
+      return null;
+    }
     if (this.nextRetryAt && Date.now() < this.nextRetryAt) return null;
     this.syncing = true;
     let heartbeatIdentity = null;
@@ -1053,7 +1078,7 @@ class PlatformPairing {
       await this.onSyncResult(result, undefined, undefined, undefined, undefined);
       // Alexa has a dedicated bounded synchroniser. Keeping it outside this
       // heartbeat prevents a catalogue update from delaying token/state sync.
-      if (syncResult) this.lastSuccess = new Date().toISOString();
+      if (syncResult) this.lastSuccess = new Date(this.clock()).toISOString();
       this.lastError = null;
       const outboxAfterSync = this.store.getSyncOutbox?.();
       const pendingAfterSync = (outboxAfterSync?.events || []).filter((event) => event.sequence > Number(outboxAfterSync?.acknowledgedSequence || 0));
@@ -1062,7 +1087,7 @@ class PlatformPairing {
       // change what tenants, owners or Platform can do are sent straight away.
       const nextUrgent = pendingAfterSync.find((event) => !this.isRoutineEvent(event));
       if (!this.stopped && ((nextUrgent && installationSyncMode === "ACTIVE") || (syncResult && nextPending?.type === "area.upsert"))) {
-        setImmediate(() => this.syncNow().catch(() => {}));
+        this.queueImmediateSync();
       }
       this.retryAttempt = 0;
       this.nextRetryAt = 0;
@@ -1071,7 +1096,7 @@ class PlatformPairing {
       if (Number(result.publishedVersion || 0) >= nextVersion) this.publishAttempts = 0;
       else if (!this.stopped && nextVersion > 0 && this.publishAttempts < 3) {
         this.publishAttempts += 1;
-        setImmediate(() => this.syncNow().catch(() => {}));
+        this.queueImmediateSync();
       }
       return result;
     } catch (error) {
@@ -1116,9 +1141,10 @@ class PlatformPairing {
       return null;
     } finally {
       this.syncing = false;
-      if (this.queuedImmediateSync && !this.stopped) {
+      if ((this.queuedImmediateSync || this.queuedExplicitSync) && !this.stopped) {
         this.queuedImmediateSync = false;
-        setImmediate(() => this.syncNow().catch(() => {}));
+        this.queuedExplicitSync = false;
+        this.queueImmediateSync();
       }
     }
   }
@@ -1142,6 +1168,10 @@ class PlatformPairing {
 
   stop() {
     this.stopped = true;
+    if (this.immediateSync) clearImmediate(this.immediateSync);
+    this.immediateSync = null;
+    this.queuedImmediateSync = false;
+    this.queuedExplicitSync = false;
     if (this.timer) clearInterval(this.timer);
     if (this.retryTimer) clearTimeout(this.retryTimer);
     if (this.recoveryEndpointTimer) clearInterval(this.recoveryEndpointTimer);
