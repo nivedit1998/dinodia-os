@@ -1212,11 +1212,12 @@ function createHub({ config = {}, store, mqttBridge, matterBridge, hiveBridge, g
       configured: status.configured === true, recoveryState: status.recoveryState, connected: status.connected === true,
       secureAccessVerified: status.secureAccessVerified === true, transport: status.transport,
     }, at: new Date().toISOString() });
-    const now = Date.now();
-    if (cloudflareHeartbeatRecoveryState !== status.recoveryState || now - cloudflareHeartbeatRequestedAt >= 120_000) {
+    const now = Number(clock());
+    const recoveryStateChanged = cloudflareHeartbeatRecoveryState !== status.recoveryState;
+    if (recoveryStateChanged || now - cloudflareHeartbeatRequestedAt >= 120_000) {
       cloudflareHeartbeatRecoveryState = status.recoveryState;
       cloudflareHeartbeatRequestedAt = now;
-      pairing.requestImmediateHeartbeat?.();
+      pairing.requestImmediateHeartbeat?.({ periodic: !recoveryStateChanged });
     }
     if (!shouldAttemptCloudflareVerification(status, { inFlight: cloudflareVerificationInFlight, retryAt: cloudflareVerificationRetryAt, now })) return;
     cloudflareVerificationInFlight = true;
